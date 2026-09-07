@@ -17,7 +17,7 @@
 //! # Self-host token file
 //!
 //! `TIDEBREAK_AUTH_TOKENS_FILE` points at a plain-text file, one mapping per
-//! line — `<user-id> <token> [admin]`, whitespace-separated. Blank lines and
+//! line — `<user-id> <token> [admin|service]`, whitespace-separated. Blank lines and
 //! lines starting with `#` are ignored. A user may hold several tokens
 //! (rotation); a token may name only one user, and duplicates fail the load.
 //! Tokens are opaque secrets matched exactly (no hashing scheme to
@@ -89,7 +89,7 @@ use futures::StreamExt as _;
 use tidebreak_core::{AgentError, Profile, Result};
 
 use crate::error::ServerError;
-use crate::principal::{AuthContext, ClientExecutor, Principal, Role, UserId};
+use crate::principal::{AuthContext, ClientExecutor, Principal, PrincipalKind, Role, UserId};
 use crate::state::AppState;
 
 /// Handshake subprotocol the server selects when the client offered it.
@@ -357,9 +357,17 @@ pub async fn handoff(State(state): State<AppState>, Query(query): Query<HandoffQ
     // on the root, where the sign-in screen words it.
     let return_route = handoff_return_route(query.return_to.as_deref());
     match gateway.redeem_handoff(code).await {
-        HandoffOutcome::Granted(bearer) => {
-            handoff_redirect(&landing, "handoff", &bearer, Some(return_route))
-        }
+        HandoffOutcome::Granted(bearer) => match gateway.resolve(&bearer).await {
+            Ok(Some(principal)) if principal.is_service() => {
+                (StatusCode::FORBIDDEN, "service principals do not sign in").into_response()
+            }
+            Ok(Some(_)) => handoff_redirect(&landing, "handoff", &bearer, Some(return_route)),
+            Ok(None) => handoff_redirect(&landing, "handoff-failed", "expired", None),
+            Err(error) => {
+                tracing::warn!(%error, "gateway principal read failed after handoff");
+                handoff_redirect(&landing, "handoff-failed", "unavailable", None)
+            }
+        },
         HandoffOutcome::Refused => handoff_redirect(&landing, "handoff-failed", "expired", None),
         HandoffOutcome::Unavailable => {
             handoff_redirect(&landing, "handoff-failed", "unavailable", None)
@@ -598,7 +606,7 @@ impl PrincipalAuthenticator {
             Self::None => Ok(None),
             Self::Static(tokens) => Ok(tokens
                 .resolve(presented)
-                .map(|(id, role)| Principal::User { id, role })),
+                .map(|(id, kind, role)| Principal::User { id, kind, role })),
             Self::Oidc(oidc) => Ok(oidc.resolve(presented)),
             Self::Gateway(gateway) => gateway.resolve(presented).await,
         }
@@ -765,12 +773,12 @@ impl OidcAuthenticator {
     /// Anything else names nobody, which is how an OIDC machine refuses a
     /// static token it was never given: there is no roster to find it in.
     fn resolve(&self, presented: &str) -> Option<Principal> {
-        if let Some((id, role)) = self
+        if let Some((id, kind, role)) = self
             .bootstrap
             .as_ref()
             .and_then(|tokens| tokens.resolve(presented))
         {
-            return Some(Principal::User { id, role });
+            return Some(Principal::User { id, kind, role });
         }
         if !presented.starts_with(OIDC_BEARER_PREFIX) {
             return None;
@@ -1159,6 +1167,7 @@ fn validate_oidc_id_token(
         .filter(|value| !value.is_empty())?;
     Some(Principal::User {
         id: UserId::new(login).ok()?,
+        kind: PrincipalKind::Person,
         role: Role::Member,
     })
 }
@@ -1191,7 +1200,19 @@ struct HandoffGrant {
 #[derive(serde::Deserialize)]
 struct GatewayPrincipal {
     user_id: uuid::Uuid,
+    #[serde(default)]
+    kind: GatewayPrincipalKind,
+    #[serde(default)]
+    username: Option<String>,
     is_admin: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GatewayPrincipalKind {
+    #[default]
+    Person,
+    Service,
 }
 
 impl GatewayAuthenticator {
@@ -1350,13 +1371,22 @@ impl GatewayAuthenticator {
         let principal: GatewayPrincipal = serde_json::from_slice(&bytes).map_err(|error| {
             AgentError::msg(format!("gateway auth response was invalid: {error}"))
         })?;
-        let id = UserId::new(&principal.user_id.to_string())?;
-        let role = if principal.is_admin {
+        let id = UserId::new(
+            principal
+                .username
+                .as_deref()
+                .unwrap_or(&principal.user_id.to_string()),
+        )?;
+        let kind = match principal.kind {
+            GatewayPrincipalKind::Person => PrincipalKind::Person,
+            GatewayPrincipalKind::Service => PrincipalKind::Service,
+        };
+        let role = if principal.is_admin && kind == PrincipalKind::Person {
             Role::Admin
         } else {
             Role::Member
         };
-        Ok(Some(Principal::User { id, role }))
+        Ok(Some(Principal::User { id, kind, role }))
     }
 }
 
@@ -1400,9 +1430,8 @@ pub fn canonical_public_url(raw: &str) -> Result<String> {
 /// same principal-authenticator seam used by live Gateway identity.
 #[derive(Debug, Default)]
 pub struct TokenMap {
-    /// `(token, user, role)` triples; tokens are unique, users may repeat —
-    /// and every line a user holds agrees about their role.
-    entries: Vec<(Box<str>, UserId, Role)>,
+    /// `(token, user, kind, role)` entries; tokens are unique, users may repeat.
+    entries: Vec<(Box<str>, UserId, PrincipalKind, Role)>,
 }
 
 /// Tokens shorter than this are refused at load: a guessable credential names
@@ -1413,6 +1442,7 @@ const MIN_TOKEN_LEN: usize = 32;
 /// The third field that marks a line's user as an administrator of the
 /// deployment. Any other value is a parse error rather than a silent member.
 const ADMIN_FIELD: &str = "admin";
+const SERVICE_FIELD: &str = "service";
 
 impl TokenMap {
     /// Load and validate the token file at `path`.
@@ -1432,8 +1462,8 @@ impl TokenMap {
     /// names no administrator — an authenticator that admits nobody, and a
     /// deployment nobody can configure, must both fail loudly at boot.
     pub fn parse(text: &str) -> Result<Self> {
-        let mut entries: Vec<(Box<str>, UserId, Role)> = Vec::new();
-        let mut roles: HashMap<UserId, Role> = HashMap::new();
+        let mut entries: Vec<(Box<str>, UserId, PrincipalKind, Role)> = Vec::new();
+        let mut identities: HashMap<UserId, (PrincipalKind, Role)> = HashMap::new();
         for (index, raw) in text.lines().enumerate() {
             let line_no = index + 1;
             let line = raw.trim();
@@ -1445,16 +1475,16 @@ impl TokenMap {
                 (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 return Err(AgentError::config(format!(
-                    "auth tokens file line {line_no}: expected `<user-id> <token> [admin]`"
+                    "auth tokens file line {line_no}: expected `<user-id> <token> [admin|service]`"
                 )));
             };
-            let role = match marker {
-                None => Role::Member,
-                Some(ADMIN_FIELD) => Role::Admin,
+            let (kind, role) = match marker {
+                None => (PrincipalKind::Person, Role::Member),
+                Some(ADMIN_FIELD) => (PrincipalKind::Person, Role::Admin),
+                Some(SERVICE_FIELD) => (PrincipalKind::Service, Role::Member),
                 Some(other) => {
                     return Err(AgentError::config(format!(
-                        "auth tokens file line {line_no}: unknown role field {other:?}: the \
-                         optional third field is `admin` or nothing"
+                        "auth tokens file line {line_no}: unknown principal field {other:?}: the optional third field is `admin`, `service`, or nothing"
                     )))
                 }
             };
@@ -1473,7 +1503,7 @@ impl TokenMap {
             }
             if entries
                 .iter()
-                .any(|(existing, _, _)| existing.as_ref() == token)
+                .any(|(existing, _, _, _)| existing.as_ref() == token)
             {
                 return Err(AgentError::config(format!(
                     "auth tokens file line {line_no}: duplicate token"
@@ -1483,18 +1513,18 @@ impl TokenMap {
             // a rotation that silently changed someone's authority — in
             // whichever direction the last line happened to win — is exactly
             // the failure this file must not have.
-            match roles.get(&user) {
-                Some(known) if *known != role => {
+            match identities.get(&user) {
+                Some(known) if *known != (kind, role) => {
                     return Err(AgentError::config(format!(
                         "auth tokens file line {line_no}: user {user} is listed with conflicting \
                          roles; every line for a user must agree"
                     )))
                 }
                 _ => {
-                    roles.insert(user.clone(), role);
+                    identities.insert(user.clone(), (kind, role));
                 }
             }
-            entries.push((token.into(), user, role));
+            entries.push((token.into(), user, kind, role));
         }
         if entries.is_empty() {
             return Err(AgentError::config(
@@ -1502,7 +1532,10 @@ impl TokenMap {
                  authenticate to must not start",
             ));
         }
-        if !entries.iter().any(|(_, _, role)| *role == Role::Admin) {
+        if !entries
+            .iter()
+            .any(|(_, _, kind, role)| *kind == PrincipalKind::Person && *role == Role::Admin)
+        {
             return Err(AgentError::config(
                 "auth tokens file names no administrator; a self-host server nobody can \
                  configure must not start — mark at least one user's lines `admin` \
@@ -1515,11 +1548,11 @@ impl TokenMap {
     /// The user the presented credential names and the role they hold, if
     /// any. Exact match; every entry is compared in constant time regardless
     /// of where a match lands.
-    pub fn resolve(&self, presented: &str) -> Option<(UserId, Role)> {
+    pub fn resolve(&self, presented: &str) -> Option<(UserId, PrincipalKind, Role)> {
         let mut resolved = None;
-        for (token, user, role) in &self.entries {
+        for (token, user, kind, role) in &self.entries {
             if constant_time_eq(token.as_bytes(), presented.as_bytes()) && resolved.is_none() {
-                resolved = Some((user.clone(), *role));
+                resolved = Some((user.clone(), *kind, *role));
             }
         }
         resolved
@@ -1544,6 +1577,8 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
     };
     if auth.principal.is_admin() {
         next.run(request).await
+    } else if auth.principal.is_service() {
+        ServerError::forbidden("service principals do not sign in").into_response()
     } else {
         StatusCode::FORBIDDEN.into_response()
     }
@@ -1983,6 +2018,46 @@ mod tests {
     }
 
     #[test]
+    fn a_service_token_names_a_member_service() {
+        let tokens = TokenMap::parse(&format!(
+            "alice {ALICE_FIRST} admin\nchannel {BOB_TOKEN} service\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            tokens.resolve(BOB_TOKEN),
+            Some((
+                UserId::new("channel").unwrap(),
+                PrincipalKind::Service,
+                Role::Member,
+            ))
+        );
+    }
+
+    #[test]
+    fn a_service_token_cannot_also_be_admin() {
+        let refusal = TokenMap::parse(&format!(
+            "alice {ALICE_FIRST} admin\nchannel {BOB_TOKEN} admin service\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refusal.contains("expected"),
+            "unexpected refusal: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_service_does_not_satisfy_the_admin_boot_check() {
+        let refusal = TokenMap::parse(&format!("channel {BOB_TOKEN} service\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("names no administrator"),
+            "unexpected refusal: {refusal}"
+        );
+    }
+
+    #[test]
     fn extracts_bearer_authorization() {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
@@ -2325,6 +2400,7 @@ mod tests {
             verify(&oidc_test_token(serde_json::json!({}))),
             Some(Principal::User {
                 id: UserId::new("oidc-user").unwrap(),
+                kind: PrincipalKind::Person,
                 // OIDC names a member; the token file names administrators.
                 role: Role::Member,
             }),
@@ -2401,6 +2477,7 @@ mod tests {
             ),
             Some(Principal::User {
                 id: UserId::new("person@example.test").unwrap(),
+                kind: PrincipalKind::Person,
                 role: Role::Member,
             })
         );
@@ -2435,6 +2512,7 @@ mod tests {
         let oidc = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None);
         let principal = Principal::User {
             id: UserId::new("oidc-user").unwrap(),
+            kind: PrincipalKind::Person,
             role: Role::Member,
         };
         let bearer = oidc
@@ -2470,6 +2548,7 @@ mod tests {
             oidc.resolve(ALICE_FIRST).await,
             Some(Principal::User {
                 id: UserId::new("alice").unwrap(),
+                kind: PrincipalKind::Person,
                 role: Role::Admin,
             })
         );
@@ -2488,6 +2567,7 @@ mod tests {
             .mint_bearer(
                 Principal::User {
                     id: UserId::new("oidc-user").unwrap(),
+                    kind: PrincipalKind::Person,
                     role: Role::Member,
                 },
                 OIDC_BEARER_LIFETIME,

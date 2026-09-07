@@ -1536,6 +1536,8 @@ pub mod session {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub owner: String,
+        /// `Some("service")` for a deployment service; `None` means person.
+        pub owner_kind: Option<String>,
         /// `None` for a session with no repo-backed workspace: one the
         /// in-process engine hosts (decision 0048 step 5).
         pub workspace_id: Option<Uuid>,

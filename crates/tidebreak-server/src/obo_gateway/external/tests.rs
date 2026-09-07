@@ -122,6 +122,7 @@ fn approval_lease() -> crate::auth::GatewayAuthLease {
     crate::auth::GatewayAuthLease::for_test(
         crate::principal::Principal::User {
             id: crate::principal::UserId::new(USER).unwrap(),
+            kind: crate::principal::PrincipalKind::Person,
             role: crate::principal::Role::Member,
         },
         "browser-owner".into(),
@@ -332,6 +333,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
     let session = Session {
         id: SessionId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         workspace_id: None,
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
@@ -392,6 +394,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
     let restarted = HarnessLlmRelay::new(obo(&base)).with_external_delegations(db.clone());
     let key = restarted.issue(HarnessLlmSubject {
         owner: owner.clone(),
+        owner_kind: None,
         session: session.id,
     });
     let mut headers = HeaderMap::new();
@@ -462,6 +465,7 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
     let repo = CodeRepo {
         id: RepoId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         root_path: repo_root.display().to_string(),
         display_name: "Source".into(),
         default_base_ref: "main".into(),
@@ -531,6 +535,7 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
 async fn bind_runtime_session(
     db: &DbStore,
     owner: &OwnerId,
+    owner_kind: None,
     grant: CodeGrantId,
     workspace: Option<tidebreak_core::WorkspaceId>,
 ) -> SessionId {
@@ -541,6 +546,7 @@ async fn bind_runtime_session(
     let session = Session {
         id: SessionId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         workspace_id: workspace,
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
@@ -742,6 +748,7 @@ async fn remote_workspace_status_keeps_the_original_grant_after_restart_and_revo
     let repo = CodeRepo {
         id: RepoId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         root_path: String::new(),
         display_name: "Tools".into(),
         default_base_ref: "main".into(),
@@ -763,6 +770,7 @@ async fn remote_workspace_status_keeps_the_original_grant_after_restart_and_revo
     let workspace = CodeWorkspace {
         id,
         owner: owner.clone(),
+        owner_kind: None,
         repo_id: repo.id,
         title: "Slack work".into(),
         worktree_path: CodeWorkspace::remote_worktree_marker(id),

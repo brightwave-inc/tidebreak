@@ -1488,6 +1488,9 @@ pub struct Session {
     pub id: SessionId,
     /// Principal this session belongs to.
     pub owner: crate::OwnerId,
+    /// `Some("service")` for a deployment service; `None` means person.
+    #[serde(default)]
+    pub owner_kind: Option<String>,
     /// Owning workspace, or `None` for a conversation with no repo-backed
     /// workspace: one the in-process engine hosts (decision 0048 step 5).
     pub workspace_id: Option<WorkspaceId>,
