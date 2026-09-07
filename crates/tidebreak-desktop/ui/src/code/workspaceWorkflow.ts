@@ -43,7 +43,9 @@ export type WorkspaceWorkflowTone =
   | "merged";
 
 export type WorkspaceWorkflowModel = {
+  remote?: boolean;
   stage:
+    | "remote"
     | "detached"
     | "sync_needed"
     | "diverged"
@@ -229,6 +231,28 @@ export function workspaceWorkflowModel(
       detail: "Reading local changes and pull request status.",
       secondary: pr?.url ? ["open_pr", "open_source"] : ["open_source"],
     };
+  if (snapshot.remote) {
+    return hosted
+      ? {
+          ...hosted,
+          ...common,
+          remote: true,
+          detail:
+            "This checkout runs in a sandbox. Review its pull request on GitHub or continue the task in chat.",
+          primary: pr?.url ? "open_pr" : undefined,
+          secondary: [],
+        }
+      : {
+          remote: true,
+          stage: "remote",
+          tone: "neutral",
+          summary: "Sandbox workspace",
+          title: "Checkout runs in a sandbox",
+          detail:
+            "Continue the task in chat to commit, push, or create a pull request. Its status appears here once published.",
+          secondary: [],
+        };
+  }
   const git = snapshot.git;
   const localSummary = git?.changed_files
     ? `${git.changed_files} changed ${git.changed_files === 1 ? "file" : "files"}`
@@ -558,6 +582,18 @@ export function resolveWorkflowShortcut(
   model: WorkspaceWorkflowModel,
   watching: boolean,
 ): WorkflowShortcutResolution {
+  if (model.remote) {
+    if (
+      ["view_pr", "pull_request", "next"].includes(shortcut) &&
+      model.pr?.url
+    ) {
+      return { run: "open_pr" };
+    }
+    return {
+      blocked:
+        "This checkout runs in a sandbox. Continue the task in chat or open its pull request on GitHub.",
+    };
+  }
   // The review rail is chrome, not a Git operation: it opens whatever else is
   // going on, including while the status is still loading.
   if (shortcut === "source_control") return { run: "open_source" };

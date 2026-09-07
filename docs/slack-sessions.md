@@ -398,6 +398,50 @@ Changing the repository means a new thread. The first status message
 carries the recovery inline: "Wrong repo? Reply `stop`, then start a new
 thread with `repo:owner/name`."
 
+## Packaged sandbox runtime
+
+The `supervised-agent` target in `deploy/self-host/Dockerfile` shares the
+server image's verified tools and packages Tidebreak's pinned Claude Code
+engine. The release workflow publishes `tidebreak-supervised-agent` beside
+`tidebreak-server` for both Linux architectures. It includes the existing
+Rust and Python bundles, git, and the GitHub CLI. The supervised image carries
+no server, renderer, or machine authentication store.
+
+Gateway starts the image through its BYO contract at
+`/usr/local/bin/sandbox-agent`. The workload runs as UID 65532 and receives
+only the public `mg-sandbox-placeholder` value. Gateway's sidecar holds the
+execution credentials under a different UID and process namespace. Tidebreak
+reuses its existing certificate wait, trust bundle, harness adapter, and
+`assistant_record` journal ingestion. The browser and desktop therefore
+render the same session without a separate Slack transcript UI.
+
+The machine declares its endpoint and profile through
+`TIDEBREAK_RUNTIME_ENDPOINT` and `TIDEBREAK_RUNTIME_PROFILE`, plus
+`TIDEBREAK_RUNTIME_ENGINE=claude_code` for this image. The configured engine
+uses Allow permissions inside Gateway's confinement. Unsupported engine,
+permission, or fast-mode settings are refused before a remote turn starts.
+The custom-harness contract does not transport tool approvals.
+Choose the model and reasoning level when you create the session. This
+profile cannot change either setting between messages.
+
+The Gateway deployment declaration attaches the existing general GitHub app
+to a dedicated Direct endpoint and grants only the
+`runtime:tidebreak` audience and resource with `runtime:execute`. Git and
+PR API requests use that app's existing identity and policy. A DM does not
+change installation-only credentials into a personal GitHub identity.
+Channel contribution remains owner-only until explicit sharing is enabled.
+
+A custom harness uses Gateway's generic client identity. Anthropic and OpenAI
+consumer subscriptions cannot fund it; a permitted API-funded route must be
+available. The profile uses one pod incarnation because the image does not
+restore the harness conversation across pod replacement.
+
+The profile pins a supervised-agent digest; it does not track server releases.
+For an upgrade, publish both images from the same release, update the profile
+first, and then update the server. The supervised image must accept the prior
+task format during this transition. If the server tracks releases, coordinate
+its update or pin it until the matching supervised image is ready.
+
 ## Execution
 
 The session's engine runs in a per-session confined sandbox driven by

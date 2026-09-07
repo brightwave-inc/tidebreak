@@ -48,6 +48,7 @@ impl CodeRuntime {
         base_ref: Option<String>,
         lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
     ) -> Result<CodeWorkspace, ServerError> {
+        self.require_machine_execution()?;
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
         let explicit_title = title
@@ -293,6 +294,9 @@ impl CodeRuntime {
         terminals: &crate::code::terminal::TerminalHub,
     ) -> Result<CodeWorkspace, ServerError> {
         let mut workspace = self.get_workspace(owner, id).await?;
+        if !workspace.is_remote() {
+            self.require_machine_execution()?;
+        }
         if workspace.status == CodeWorkspaceStatus::Archived {
             return Ok(workspace);
         }
@@ -395,6 +399,9 @@ impl CodeRuntime {
         force: bool,
         terminals: &crate::code::terminal::TerminalHub,
     ) -> Result<CodeWorkspace, ServerError> {
+        if !workspace.is_remote() {
+            self.require_machine_execution()?;
+        }
         if !terminals.close_workspace_and_wait(workspace.id).await {
             return Err(ServerError::conflict_kind(
                 "terminal_shutdown_timeout",
@@ -669,8 +676,17 @@ impl CodeRuntime {
         let lifecycle = self.workspace_lifecycle_lock(id);
         let _lifecycle_guard = lifecycle.lock().await;
         let mut workspace = self.get_workspace(owner, id).await?;
+        if !workspace.is_remote() {
+            self.require_machine_execution()?;
+        }
         if workspace.status == CodeWorkspaceStatus::Active {
             return Ok(workspace);
+        }
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace runs in a remote sandbox; there is no host checkout to restore",
+            ));
         }
         let released = workspace.status == CodeWorkspaceStatus::Released;
         if !released && workspace.status != CodeWorkspaceStatus::Archived {
@@ -793,8 +809,17 @@ impl CodeRuntime {
         let lifecycle = self.workspace_lifecycle_lock(id);
         let _lifecycle_guard = lifecycle.lock().await;
         let mut workspace = self.get_workspace(owner, id).await?;
+        if !workspace.is_remote() {
+            self.require_machine_execution()?;
+        }
         if workspace.status == CodeWorkspaceStatus::Active {
             return Ok(workspace);
+        }
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace runs in a remote sandbox; there is no host checkout to restore",
+            ));
         }
         if workspace.status != CodeWorkspaceStatus::SetupFailed {
             return Err(ServerError::conflict_kind(

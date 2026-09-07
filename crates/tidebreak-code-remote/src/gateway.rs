@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::OwnerId;
+use tidebreak_core::{OwnerId, SessionId};
 
 use super::wire::{
     EventCursor, MessageReceipt, RuntimeErrorBody, SandboxEvents, SandboxLease, SandboxMessage,
@@ -80,8 +80,9 @@ impl GatewayProvisioner {
         operation: &'static str,
         request: reqwest::RequestBuilder,
         owner: &OwnerId,
+        session: SessionId,
     ) -> Result<reqwest::Response, RemoteSandboxError> {
-        let token = self.tokens.runtime_token(owner).await?;
+        let token = self.tokens.runtime_token(owner, session).await?;
         let response = request
             .bearer_auth(&token.secret)
             .send()
@@ -141,6 +142,7 @@ impl SandboxProvisioner for GatewayProvisioner {
     async fn spawn(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         arguments: &SpawnArguments,
     ) -> Result<SandboxLease, RemoteSandboxError> {
         let url = self.endpoint(&format!(
@@ -152,24 +154,26 @@ impl SandboxProvisioner for GatewayProvisioner {
             .post(url)
             .timeout(SPAWN_TIMEOUT)
             .json(&serde_json::json!({ "arguments": arguments }));
-        let response = self.dispatch("spawn", request, owner).await?;
+        let response = self.dispatch("spawn", request, owner, session).await?;
         Self::decode("spawn", response).await
     }
 
     async fn status(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
     ) -> Result<SandboxStatus, RemoteSandboxError> {
         let url = self.endpoint(&format!("api/v1/runtime/sandboxes/{sandbox_id}"))?;
         let request = self.http.get(url).timeout(CALL_TIMEOUT);
-        let response = self.dispatch("status", request, owner).await?;
+        let response = self.dispatch("status", request, owner, session).await?;
         Self::decode("status", response).await
     }
 
     async fn events(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
         cursor: EventCursor,
     ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -186,13 +190,14 @@ impl SandboxProvisioner for GatewayProvisioner {
                 wait_seconds: (wait > 0).then_some(wait),
                 ..cursor
             });
-        let response = self.dispatch("events", request, owner).await?;
+        let response = self.dispatch("events", request, owner, session).await?;
         Self::decode("events", response).await
     }
 
     async fn send(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
         message: &SandboxMessage,
     ) -> Result<MessageReceipt, RemoteSandboxError> {
@@ -201,14 +206,19 @@ impl SandboxProvisioner for GatewayProvisioner {
             .map_err(RemoteSandboxError::InvalidRequest)?;
         let url = self.endpoint(&format!("api/v1/runtime/sandboxes/{sandbox_id}/messages"))?;
         let request = self.http.post(url).timeout(CALL_TIMEOUT).json(message);
-        let response = self.dispatch("send", request, owner).await?;
+        let response = self.dispatch("send", request, owner, session).await?;
         Self::decode("send", response).await
     }
 
-    async fn cancel(&self, owner: &OwnerId, sandbox_id: &str) -> Result<(), RemoteSandboxError> {
+    async fn cancel(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+        sandbox_id: &str,
+    ) -> Result<(), RemoteSandboxError> {
         let url = self.endpoint(&format!("api/v1/runtime/sandboxes/{sandbox_id}/cancel"))?;
         let request = self.http.post(url).timeout(CALL_TIMEOUT);
-        self.dispatch("cancel", request, owner).await?;
+        self.dispatch("cancel", request, owner, session).await?;
         Ok(())
     }
 }
@@ -406,7 +416,11 @@ mod tests {
 
     #[async_trait]
     impl RuntimeTokenSource for StaticTokens {
-        async fn runtime_token(&self, _: &OwnerId) -> Result<RuntimeToken, RemoteSandboxError> {
+        async fn runtime_token(
+            &self,
+            _: &OwnerId,
+            _: SessionId,
+        ) -> Result<RuntimeToken, RemoteSandboxError> {
             Ok(RuntimeToken {
                 secret: "mg_at_test".to_owned(),
             })
@@ -429,6 +443,7 @@ mod tests {
         let lease = provisioner
             .spawn(
                 &owner(),
+                SessionId::new(),
                 &SpawnArguments {
                     profile: "default".to_owned(),
                     harness: "claude_code".to_owned(),
@@ -459,7 +474,11 @@ mod tests {
         let runtime = Arc::new(FakeRuntime::default());
         let provisioner = client(runtime).await;
         let status = provisioner
-            .status(&owner(), "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f")
+            .status(
+                &owner(),
+                SessionId::new(),
+                "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
+            )
             .await
             .unwrap();
         assert_eq!(status.sandbox_id, "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f");
@@ -493,6 +512,7 @@ mod tests {
         let error = provisioner
             .spawn(
                 &owner(),
+                SessionId::new(),
                 &SpawnArguments {
                     profile: "default".to_owned(),
                     harness: "claude_code".to_owned(),
@@ -526,7 +546,11 @@ mod tests {
         });
         let provisioner = client(runtime).await;
         let error = provisioner
-            .status(&owner(), "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f")
+            .status(
+                &owner(),
+                SessionId::new(),
+                "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
+            )
             .await
             .unwrap_err();
         assert!(matches!(error, RemoteSandboxError::SignInRequired(_)));
@@ -540,7 +564,11 @@ mod tests {
         });
         let provisioner = client(runtime).await;
         let error = provisioner
-            .status(&owner(), "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f")
+            .status(
+                &owner(),
+                SessionId::new(),
+                "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
+            )
             .await
             .unwrap_err();
         assert!(error.is_retryable());
@@ -553,6 +581,7 @@ mod tests {
         let events = provisioner
             .events(
                 &owner(),
+                SessionId::new(),
                 "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
                 EventCursor {
                     after_seq: Some(2),
@@ -590,6 +619,7 @@ mod tests {
         let error = provisioner
             .send(
                 &owner(),
+                SessionId::new(),
                 "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
                 &SandboxMessage {
                     body: "  ".to_owned(),
@@ -610,6 +640,7 @@ mod tests {
         let receipt = provisioner
             .send(
                 &owner(),
+                SessionId::new(),
                 sandbox,
                 &SandboxMessage {
                     body: "also check the retry path".to_owned(),
@@ -621,7 +652,10 @@ mod tests {
         assert_eq!(receipt.seq, 7);
         assert!(!receipt.interrupt);
         assert_eq!(receipt.pending_messages, 0);
-        provisioner.cancel(&owner(), sandbox).await.unwrap();
+        provisioner
+            .cancel(&owner(), SessionId::new(), sandbox)
+            .await
+            .unwrap();
         let captured = runtime.captured.lock().unwrap();
         assert_eq!(captured.len(), 2);
         assert!(captured[0].body.get("interrupt").is_none());
@@ -633,5 +667,49 @@ mod tests {
             secret: "mg_at_secret".to_owned(),
         };
         assert!(!format!("{token:?}").contains("mg_at_secret"));
+    }
+    #[tokio::test]
+    async fn every_operation_uses_the_original_session_authority() {
+        struct RecordingTokens(Mutex<Vec<(OwnerId, SessionId)>>);
+        #[async_trait]
+        impl RuntimeTokenSource for RecordingTokens {
+            async fn runtime_token(
+                &self,
+                owner: &OwnerId,
+                session: SessionId,
+            ) -> Result<RuntimeToken, RemoteSandboxError> {
+                self.0.lock().unwrap().push((owner.clone(), session));
+                Ok(RuntimeToken {
+                    secret: "fixture-token".into(),
+                })
+            }
+        }
+        let runtime = Arc::new(FakeRuntime::default());
+        let base = serve(runtime).await;
+        let tokens = Arc::new(RecordingTokens(Mutex::new(Vec::new())));
+        let provisioner = GatewayProvisioner::new(&base, "primary", tokens.clone()).unwrap();
+        let session = SessionId::new();
+        let owner = owner();
+        let sandbox = "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f";
+        let _ = provisioner
+            .spawn(&owner, session, &SpawnArguments::default())
+            .await;
+        let _ = provisioner.status(&owner, session, sandbox).await;
+        let _ = provisioner
+            .events(&owner, session, sandbox, EventCursor::default())
+            .await;
+        let _ = provisioner
+            .send(
+                &owner,
+                session,
+                sandbox,
+                &SandboxMessage {
+                    body: "continue".into(),
+                    interrupt: false,
+                },
+            )
+            .await;
+        let _ = provisioner.cancel(&owner, session, sandbox).await;
+        assert_eq!(*tokens.0.lock().unwrap(), vec![(owner, session); 5]);
     }
 }

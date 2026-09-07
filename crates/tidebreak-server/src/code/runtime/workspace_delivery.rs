@@ -290,6 +290,161 @@ impl CodeRuntime {
         Ok(Some((target, credential)))
     }
 
+    /// Resolve the connection that created this workspace before borrowing authority.
+    /// An external workspace never falls back to a browser caller after revocation.
+    async fn workspace_git_lender(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+    ) -> Result<
+        (
+            Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+            bool,
+        ),
+        ServerError,
+    > {
+        let sessions = list_sessions_for_workspace(&self.db, owner, workspace.id).await?;
+        let ids: Vec<_> = sessions.iter().map(|session| session.id).collect();
+        let bindings =
+            tidebreak_core::db::code::list_external_bindings_for_sessions(&self.db, owner, &ids)
+                .await?;
+        let Some(first) = bindings.first() else {
+            return Ok((self.git_credentials().cloned(), false));
+        };
+        if bindings
+            .iter()
+            .any(|binding| binding.grant_id != first.grant_id)
+        {
+            return Err(ServerError::conflict_kind(
+                "external_connection_conflict",
+                "This workspace has conflicting external connections.",
+            ));
+        }
+        let external = self
+            .harness_llm
+            .as_ref()
+            .and_then(|relay| relay.external_delegations())
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "external_reconnect_required",
+                    "The connection that created this workspace is unavailable.",
+                )
+            })?;
+        let gateway = external
+            .for_session(owner, first.session_id)
+            .await?
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "external_reconnect_required",
+                    "The connection that created this workspace is unavailable.",
+                )
+            })?;
+        Ok((Some(gateway), true))
+    }
+
+    /// A remote checkout has no host path. Its registered origin and original
+    /// session connection provide the same repository-scoped REST authority.
+    async fn workspace_forge_rest_context(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+        lender: Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+    ) -> Result<
+        Option<(
+            CodeGitHubRepositoryTarget,
+            crate::obo_gateway::GitCredential,
+        )>,
+        ServerError,
+    > {
+        let Some(lender) = lender else {
+            return Ok(None);
+        };
+        let target = if workspace.is_remote() {
+            self.workspace_repository_target(owner, workspace).await
+        } else {
+            forge_lending_target(std::path::Path::new(&workspace.worktree_path)).await
+        };
+        let Some(target) = target.filter(|target| {
+            target
+                .host
+                .eq_ignore_ascii_case(gh::GIT_CREDENTIAL_FORGE_HOST)
+        }) else {
+            return Err(ServerError::unprocessable_kind(
+                "git_forge_refused",
+                "This workspace has no supported forge repository.",
+            ));
+        };
+        if let Some(pr) = workspace.pr.as_ref() {
+            if let Some((host, repo_owner, repo_name, number)) = pr
+                .url
+                .as_deref()
+                .and_then(crate::code::pr_facts::pull_request_identity_from_url)
+            {
+                let identity = CodeGitHubRepositoryTarget {
+                    host,
+                    owner: repo_owner,
+                    name: repo_name,
+                };
+                if !same_repository(&target, &identity) || number != pr.number {
+                    return Err(ServerError::conflict_kind(
+                        "workspace_pr_target_changed",
+                        "The pull request does not match this workspace repository.",
+                    ));
+                }
+            }
+        }
+        let credential = lender
+            .git_credential(owner, &format!("{}/{}", target.owner, target.name))
+            .await
+            .map_err(|error| {
+                ServerError::unprocessable_kind(
+                    "git_forge_refused",
+                    crate::code::clone::git_forge_refusal_message(&error),
+                )
+            })?;
+        Ok(Some((target, credential)))
+    }
+
+    async fn remote_workspace_pr(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let (lender, _) = self.workspace_git_lender(owner, workspace).await?;
+        let identity = match lender {
+            Some(lender) => lender.git_forge_identity(owner).await.ok(),
+            None => None,
+        };
+        let (pushes_as, pushes_as_self) = match identity {
+            Some(identity) => match identity.attribution {
+                crate::obo_gateway::GitForgeAttribution::Person { login, .. } => {
+                    (Some(login), Some(true))
+                }
+                crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
+                    (Some(bot_login.unwrap_or(identity.app_name)), Some(false))
+                }
+            },
+            None => (None, None),
+        };
+        Ok(WorkspaceGitStatus {
+            remote: true,
+            git: None,
+            dirty: false,
+            unpushed: false,
+            ahead: 0,
+            has_upstream: false,
+            suggested_commit_message: String::new(),
+            pr: workspace.pr.clone(),
+            gh_found: false,
+            gh_authenticated: None,
+            remediation:
+                "Git changes run in the remote runtime. Pull request status comes from GitHub."
+                    .into(),
+            pushes_as,
+            pushes_as_self,
+        })
+    }
+
     pub async fn workspace_pr(
         &self,
         owner: &OwnerId,
@@ -300,6 +455,9 @@ impl CodeRuntime {
         // path reads local git plus the stored row, and the hot refresher
         // this mark feeds is what keeps the row current while anyone reads.
         self.mark_workspace_pr_hot(owner, workspace.id);
+        if workspace.is_remote() {
+            return self.remote_workspace_pr(owner, &workspace).await;
+        }
         let gh_path = self.gh_search_path_owned();
         let mut status = gh::workspace_git_status(
             std::path::Path::new(&workspace.worktree_path),
@@ -389,7 +547,16 @@ impl CodeRuntime {
         }
         let gh_path = self.gh_search_path_owned();
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
-        let digest = match gh::authenticated_gh_binary(gh_path.as_deref()).await {
+        let (lender, external) = self
+            .workspace_git_lender(owner, &workspace)
+            .await
+            .map_err(|error| error.message().to_owned())?;
+        let binary = if workspace.is_remote() || external {
+            None
+        } else {
+            gh::authenticated_gh_binary(gh_path.as_deref()).await
+        };
+        let digest = match binary {
             Some(binary) => {
                 let transport = crate::code::pr_fetch::FetchTransport::Gh {
                     cwd: &worktree,
@@ -400,7 +567,7 @@ impl CodeRuntime {
             }
             None => {
                 let (target, credential) = self
-                    .forge_rest_context(owner, &worktree)
+                    .workspace_forge_rest_context(owner, &workspace, lender.as_ref())
                     .await
                     .map_err(|error| error.message().to_owned())?
                     .ok_or_else(|| {
@@ -411,8 +578,22 @@ impl CodeRuntime {
                     api_base: &api_base,
                     credential: &credential,
                 };
-                self.fetched_workspace_digest(owner, &workspace, transport)
-                    .await
+                let digest = self
+                    .fetched_workspace_digest(owner, &workspace, transport)
+                    .await?;
+                if workspace.is_remote() {
+                    if let Some(digest) = digest.as_ref() {
+                        self.record_remote_workspace_pr(
+                            owner,
+                            &workspace,
+                            &target,
+                            &credential,
+                            digest,
+                        )
+                        .await?;
+                    }
+                }
+                Ok(digest)
             }
         };
         let Some(digest) = digest? else {
@@ -435,6 +616,85 @@ impl CodeRuntime {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Attribute a remote PR only after GitHub confirms the assigned workspace branch.
+    async fn record_remote_workspace_pr(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+        target: &CodeGitHubRepositoryTarget,
+        credential: &crate::obo_gateway::GitCredential,
+        digest: &PullRequestDigest,
+    ) -> Result<(), String> {
+        if digest.head_branch.as_deref() != Some(workspace.branch_name.as_str()) {
+            return Ok(());
+        }
+        let attributed = self
+            .workspace_pull_requests(owner, workspace.id)
+            .await
+            .map_err(|error| error.message().to_owned())?;
+        if attributed.iter().any(|(fact, _)| {
+            fact.number == digest.number
+                && fact.host.eq_ignore_ascii_case(&target.host)
+                && fact.repo_owner.eq_ignore_ascii_case(&target.owner)
+                && fact.repo_name.eq_ignore_ascii_case(&target.name)
+        }) {
+            return Ok(());
+        }
+        let endpoint = format!(
+            "repos/{}/{}/pulls/{}",
+            target.owner, target.name, digest.number
+        );
+        let raw = crate::code::forge_rest::api_get(
+            &self.forge_api_base_for(&target.host),
+            credential,
+            &endpoint,
+        )
+        .await?;
+        let value = crate::code::forge_rest::fact_value(&raw);
+        if value["number"].as_u64() != Some(digest.number)
+            || value["headRefName"].as_str() != Some(workspace.branch_name.as_str())
+            || value["headRefOid"].as_str() != digest.head_sha.as_deref()
+        {
+            return Err("The pull request changed during refresh. Retry the refresh.".into());
+        }
+        let Some((host, repo_owner, repo_name, number)) = value["url"]
+            .as_str()
+            .and_then(crate::code::pr_facts::pull_request_identity_from_url)
+        else {
+            return Err("The pull request response has no repository identity.".into());
+        };
+        if number != digest.number
+            || !same_repository(
+                target,
+                &CodeGitHubRepositoryTarget {
+                    host,
+                    owner: repo_owner,
+                    name: repo_name,
+                },
+            )
+        {
+            return Err(
+                "The pull request response does not match the workspace repository.".into(),
+            );
+        }
+        crate::code::pr_facts::record_confirmed_fact(
+            &self.db,
+            owner,
+            workspace.id,
+            None,
+            None,
+            target,
+            &value,
+            tidebreak_core::CodePullRequestRelation::Contributed,
+            tidebreak_core::CodePullRequestDiscovery::Reconcile,
+        )
+        .await
+        .ok_or_else(|| "The confirmed pull request could not be saved.".to_owned())?;
+        self.record_pull_request_live_state(owner, Some(workspace.id), digest)
+            .await;
         Ok(())
     }
 
@@ -490,6 +750,9 @@ impl CodeRuntime {
                 owner: repo_owner,
                 name,
             });
+        }
+        if workspace.is_remote() {
+            return None;
         }
         crate::code::delivery::repository_target_from_local(&repo)
             .await
@@ -618,7 +881,7 @@ impl CodeRuntime {
                 false,
             ),
             Ok(EndpointRead::Missing) => {
-                return Err("The pull request is unavailable on GitHub.".to_owned())
+                return Err("The pull request is unavailable on GitHub.".to_owned());
             }
             Err(failure) => {
                 tracing::debug!(error = %failure, "code-mode: pull-request read skipped");
@@ -986,13 +1249,66 @@ impl CodeRuntime {
         id: WorkspaceId,
     ) -> Result<gh::PrComments, ServerError> {
         let workspace = self.get_workspace(owner, id).await?;
-        let gh_path = self.gh_search_path_owned();
-        gh::load_pr_comments(
-            std::path::Path::new(&workspace.worktree_path),
-            gh_path.as_deref(),
+        let (lender, external) = self.workspace_git_lender(owner, &workspace).await?;
+        if !workspace.is_remote() && !external && lender.is_none() {
+            let gh_path = self.gh_search_path_owned();
+            return gh::load_pr_comments(
+                std::path::Path::new(&workspace.worktree_path),
+                gh_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh);
+        }
+        let (target, credential) = self
+            .workspace_forge_rest_context(owner, &workspace, lender.as_ref())
+            .await?
+            .ok_or_else(|| {
+                ServerError::unprocessable_kind(
+                    "git_forge_refused",
+                    "Connect GitHub before reading pull request comments.",
+                )
+            })?;
+        let api_base = self.forge_api_base_for(&target.host);
+        let number = match workspace.pr.as_ref() {
+            Some(pr) => pr.number,
+            None => {
+                let values = crate::code::forge_rest::list_pull_requests_for_head(
+                    &api_base,
+                    &target,
+                    &credential,
+                    &workspace.branch_name,
+                )
+                .await
+                .map_err(|error| ServerError::unprocessable_kind("pr_comments_failed", error))?;
+                let pull = values
+                    .iter()
+                    .find(|value| value["state"].as_str() == Some("open"))
+                    .or_else(|| values.first());
+                pull.and_then(|value| value["number"].as_u64())
+                    .ok_or_else(|| {
+                        ServerError::not_found("No pull request exists for this branch.")
+                    })?
+            }
+        };
+        let prefix = format!("repos/{}/{}", target.owner, target.name);
+        let issue_endpoint = format!("{prefix}/issues/{number}/comments?per_page=100");
+        let reviews_endpoint = format!("{prefix}/pulls/{number}/reviews?per_page=100");
+        let inline_endpoint = format!("{prefix}/pulls/{number}/comments?per_page=100");
+        let (issues, reviews, inline) = tokio::try_join!(
+            crate::code::forge_rest::api_get(&api_base, &credential, &issue_endpoint),
+            crate::code::forge_rest::api_get(&api_base, &credential, &reviews_endpoint),
+            crate::code::forge_rest::api_get(&api_base, &credential, &inline_endpoint),
         )
-        .await
-        .map_err(map_gh)
+        .map_err(|error| ServerError::unprocessable_kind("pr_comments_failed", error))?;
+        let view = serde_json::json!({
+            "number": number,
+            "comments": issues,
+            "reviews": reviews,
+        });
+        let (_, mut comments) = gh::parse_pr_view_comments(&view.to_string());
+        comments.extend(gh::parse_review_comments(&inline.to_string()));
+        comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(gh::PrComments { number, comments })
     }
 
     /// Every pull request attributed to the workspace, from the durable fact
@@ -1332,7 +1648,7 @@ impl CodeRuntime {
         .map_err(map_gh)
     }
 
-    pub(super) async fn require_live_workspace(
+    pub(crate) async fn require_live_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -1350,6 +1666,7 @@ impl CodeRuntime {
                 "this workspace's engine runs in a remote sandbox; there is no host worktree",
             ));
         }
+        self.require_machine_execution()?;
         if !std::path::Path::new(&workspace.worktree_path).exists() {
             return Err(ServerError::not_found("workspace worktree is gone"));
         }
@@ -1363,5 +1680,318 @@ impl CodeRuntime {
         }
         #[cfg(not(any(test, feature = "test-support")))]
         None
+    }
+}
+
+#[cfg(test)]
+mod remote_pr_tests {
+    use super::*;
+    use crate::obo_gateway::test_support::FakeLender;
+    use tidebreak_core::db::code::resolve_external_machine_session;
+
+    async fn fixture(root: &Path) -> (CodeRuntime, Arc<FakeLender>, OwnerId, CodeWorkspace) {
+        fixture_with_host(root, Some("github.com")).await
+    }
+
+    async fn fixture_with_host(
+        root: &Path,
+        host: Option<&str>,
+    ) -> (CodeRuntime, Arc<FakeLender>, OwnerId, CodeWorkspace) {
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            root.join("remote-pr.db").display()
+        ))
+        .await
+        .unwrap();
+        let lender = Arc::new(FakeLender::offering("forge[bot]"));
+        let runtime = CodeRuntime::new(
+            Arc::new(db),
+            root.to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_git_credentials(lender.clone());
+        runtime.set_gh_search_path(Some(root.join("no-gh").display().to_string()));
+        let owner = OwnerId::local();
+        let repo = CodeRepo {
+            id: RepoId::new(),
+            owner: owner.clone(),
+            root_path: root.join("missing-repository").display().to_string(),
+            display_name: "tools".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: Vec::new(),
+            created_at: Utc::now(),
+            removed_at: None,
+            cloned_from: None,
+            origin_host: host.map(str::to_owned),
+            origin_owner: Some("acme".into()),
+            origin_name: Some("tools".into()),
+        };
+        insert_repo(&runtime.db, &repo).await.unwrap();
+        let mut workspace = runtime
+            .build_remote_workspace(&owner, &repo, Some("Remote delivery".into()))
+            .await
+            .unwrap();
+        workspace.pr = Some(
+            serde_json::from_value(serde_json::json!({
+                "number": 17,
+                "url": "https://github.com/acme/tools/pull/17",
+                "state": "open",
+                "title": "Stored title"
+            }))
+            .unwrap(),
+        );
+        insert_workspace(&runtime.db, &workspace).await.unwrap();
+        (runtime, lender, owner, workspace)
+    }
+
+    async fn bind(runtime: &CodeRuntime, owner: &OwnerId, workspace: WorkspaceId, identity: &str) {
+        let (grant, _) = runtime
+            .mint_adapter_grant(owner, "slack", identity, "T-TEST")
+            .await
+            .unwrap();
+        let session = CodeRuntime::remote_session_value(
+            owner,
+            workspace,
+            HarnessKind::Codex,
+            NewSessionSettings::default(),
+        );
+        resolve_external_machine_session(&runtime.db, owner, grant.id, "slack", identity, &session)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_status_preserves_the_pr_without_inventing_local_git_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, workspace) = fixture(dir.path()).await;
+        assert!(!Path::new(&workspace.worktree_path).exists());
+        let status = runtime.workspace_pr(&owner, workspace.id).await.unwrap();
+        assert!(status.remote);
+        assert!(status.git.is_none());
+        assert_eq!(status.pr, workspace.pr);
+        assert_eq!(status.pushes_as.as_deref(), Some("forge[bot]"));
+        assert_eq!(status.pushes_as_self, Some(false));
+        assert!(lender.minted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_reads_refuse_a_missing_original_connection_without_browser_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, workspace) = fixture(dir.path()).await;
+        bind(&runtime, &owner, workspace.id, "U-ONE").await;
+        let error = runtime
+            .workspace_pr(&owner, workspace.id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "external_reconnect_required");
+        let error = runtime
+            .workspace_pr_comments(&owner, workspace.id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "external_reconnect_required");
+        assert!(runtime
+            .refresh_workspace_pr(&owner, workspace.id)
+            .await
+            .is_err());
+        assert!(lender.minted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_reads_refuse_conflicting_original_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, workspace) = fixture(dir.path()).await;
+        bind(&runtime, &owner, workspace.id, "U-ONE").await;
+        bind(&runtime, &owner, workspace.id, "U-TWO").await;
+        let error = runtime
+            .workspace_pr(&owner, workspace.id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "external_connection_conflict");
+        let error = runtime
+            .workspace_pr_comments(&owner, workspace.id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "external_connection_conflict");
+        assert!(lender.minted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_refresh_refuses_unknown_or_unsupported_origins_before_lending() {
+        for host in [Some("evil.example"), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, lender, owner, workspace) = fixture_with_host(dir.path(), host).await;
+            assert!(runtime
+                .refresh_workspace_pr(&owner, workspace.id)
+                .await
+                .is_err());
+            assert!(runtime
+                .workspace_pr_comments(&owner, workspace.id)
+                .await
+                .is_err());
+            assert!(lender.minted().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_reads_refuse_a_pr_outside_the_registered_repository_before_lending() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
+        workspace.pr.as_mut().unwrap().url =
+            Some("https://github.com/other/repository/pull/17".into());
+        save_workspace(&runtime.db, &workspace).await.unwrap();
+        assert!(runtime
+            .refresh_workspace_pr(&owner, workspace.id)
+            .await
+            .is_err());
+        let error = runtime
+            .workspace_pr_comments(&owner, workspace.id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "workspace_pr_target_changed");
+        assert!(lender.minted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_refresh_and_discussion_use_the_registered_repository_over_rest() {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, Uri};
+        use tidebreak_core::PullRequestCommentKind;
+        type Seen = Arc<Mutex<Vec<String>>>;
+        async fn forge(
+            State(seen): State<Seen>,
+            uri: Uri,
+            headers: HeaderMap,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(
+                headers.get("authorization").unwrap(),
+                "Bearer ghs_fake_borrowed"
+            );
+            let path = uri.path();
+            seen.lock().unwrap().push(path.to_owned());
+            let value = match path {
+                "/repos/acme/tools/pulls" => {
+                    assert!(uri
+                        .query()
+                        .unwrap_or_default()
+                        .contains("head=acme:tidebreak/remote-delivery"));
+                    serde_json::json!([{
+                        "number": 17,
+                        "html_url": "https://github.com/acme/tools/pull/17",
+                        "title": "Fresh title",
+                        "state": "open",
+                        "head": {"ref": "tidebreak/remote-delivery", "sha": "feedfeed"},
+                        "base": {"ref": "main"}
+                    }])
+                }
+                "/repos/acme/tools/pulls/17" => serde_json::json!({
+                    "number": 17,
+                    "html_url": "https://github.com/acme/tools/pull/17",
+                    "title": "Fresh title",
+                    "state": "open",
+                    "draft": false,
+                    "user": {"login": "author"},
+                    "head": {"ref": "tidebreak/remote-delivery", "sha": "feedfeed"},
+                    "base": {"ref": "main"},
+                    "merged": false,
+                    "mergeable": true,
+                    "mergeable_state": "clean",
+                    "created_at": "2026-09-04T10:00:00Z",
+                    "updated_at": "2026-09-04T10:00:00Z"
+                }),
+                "/repos/acme/tools/commits/feedfeed/check-runs" => {
+                    serde_json::json!({"check_runs": []})
+                }
+                "/repos/acme/tools/issues/17/comments" => serde_json::json!([{
+                    "id": 1, "body": "Issue comment", "user": {"login": "issue-author", "avatar_url": "https://avatars.example/1"},
+                    "html_url": "https://github.com/acme/tools/pull/17#issuecomment-1",
+                    "created_at": "2026-09-04T11:00:00Z"
+                }]),
+                "/repos/acme/tools/pulls/17/reviews" => serde_json::json!([{
+                    "id": 2, "body": "Review body", "state": "CHANGES_REQUESTED", "user": {"login": "review-author"},
+                    "html_url": "https://github.com/acme/tools/pull/17#pullrequestreview-2",
+                    "submitted_at": "2026-09-04T10:00:00Z"
+                }]),
+                "/repos/acme/tools/pulls/17/comments" => serde_json::json!([{
+                    "id": 3, "body": "Inline comment", "user": {"login": "inline-author"},
+                    "html_url": "https://github.com/acme/tools/pull/17#discussion_r3",
+                    "created_at": "2026-09-04T12:00:00Z", "path": "src/lib.rs", "line": 4
+                }]),
+                "/repos/acme/tools/issues/17/timeline"
+                | "/repos/acme/tools/rules/branches/main" => serde_json::json!([]),
+                other => panic!("unexpected forge request: {other}"),
+            };
+            axum::Json(value)
+        }
+        let seen: Seen = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(forge).with_state(seen.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
+        workspace.pr = None;
+        save_workspace(&runtime.db, &workspace).await.unwrap();
+        runtime.set_forge_api_base(Some(base));
+        let refreshed = runtime
+            .refresh_workspace_pr(&owner, workspace.id)
+            .await
+            .unwrap();
+        assert!(refreshed.remote);
+        assert!(refreshed.git.is_none());
+        assert_eq!(refreshed.pr.unwrap().title.as_deref(), Some("Fresh title"));
+        let attributed = runtime
+            .workspace_pull_requests(&owner, workspace.id)
+            .await
+            .unwrap();
+        assert_eq!(attributed.len(), 1);
+        assert_eq!(attributed[0].0.number, 17);
+        assert_eq!(attributed[0].0.head_branch, workspace.branch_name);
+        assert_eq!(
+            attributed[0].1,
+            tidebreak_core::CodePullRequestRelation::Contributed
+        );
+        let comments = runtime
+            .workspace_pr_comments(&owner, workspace.id)
+            .await
+            .unwrap();
+        assert_eq!(comments.number, 17);
+        assert_eq!(comments.comments.len(), 3);
+        assert_eq!(comments.comments[0].kind, PullRequestCommentKind::Review);
+        assert_eq!(
+            comments.comments[0].author.as_deref(),
+            Some("review-author")
+        );
+        assert_eq!(
+            comments.comments[0].review_state.as_deref(),
+            Some("changes_requested")
+        );
+        assert_eq!(comments.comments[1].kind, PullRequestCommentKind::Issue);
+        assert_eq!(comments.comments[1].author.as_deref(), Some("issue-author"));
+        assert_eq!(
+            comments.comments[1].avatar_url.as_deref(),
+            Some("https://avatars.example/1")
+        );
+        assert_eq!(comments.comments[2].kind, PullRequestCommentKind::Inline);
+        assert_eq!(comments.comments[2].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(comments.comments[2].line, Some(4));
+        assert!(comments
+            .comments
+            .iter()
+            .all(|comment| comment.url.is_some() && comment.created_at.is_some()));
+        assert_eq!(lender.minted(), ["acme/tools", "acme/tools"]);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path.starts_with("/repos/acme/tools/")));
+        server.abort();
     }
 }

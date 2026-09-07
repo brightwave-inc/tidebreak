@@ -80,15 +80,16 @@ ENV CARGO_PROFILE_DEV_DEBUG=0
 # stage copies one path whichever profile built it (cargo writes `dev` to
 # `target/debug`).
 RUN set -eu; \
-    cargo build --profile "${CARGO_PROFILE}" --locked -p tidebreak-cli \
+    cargo build --profile "${CARGO_PROFILE}" --locked -p tidebreak-cli -p tidebreak-supervised-agent \
         --features tidebreak-server/postgres; \
     case "${CARGO_PROFILE}" in dev) target_dir=debug ;; *) target_dir="${CARGO_PROFILE}" ;; esac; \
-    install -D "target/${target_dir}/tidebreak" /out/tidebreak
+    install -D "target/${target_dir}/tidebreak" /out/tidebreak; \
+    install -D "target/${target_dir}/tidebreak-supervised-agent" /out/tidebreak-supervised-agent
 
 # ---- runtime ---------------------------------------------------------------
 # Digest-pinned like the build stage: this is debian:bookworm-slim as of
 # 2026-08-10.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime-base
 
 # ca-certificates: the binary's TLS stack is rustls (no OpenSSL anywhere in
 # the lockfile), but parts of the graph resolve platform roots, so the system
@@ -184,20 +185,6 @@ RUN set -eu; \
     export PATH="/opt/tidebreak/node/${version}/bin:${PATH}"; \
     node --version; \
     npm --version
-
-COPY --from=build /out/tidebreak /usr/local/bin/tidebreak
-COPY --from=renderer /src/crates/tidebreak-desktop/ui/dist /opt/tidebreak/ui
-COPY deploy/self-host/entrypoint.sh /usr/local/bin/tidebreak-entrypoint
-
-# The server runs unprivileged. The uid is fixed rather than assigned by
-# adduser so a data volume initialized from this layer carries an ownership
-# the running user actually matches.
-RUN groupadd --gid 10001 tidebreak \
-    && useradd --uid 10001 --gid 10001 --home-dir /home/tidebreak --create-home \
-       --shell /usr/sbin/nologin tidebreak \
-    && chmod 0755 /usr/local/bin/tidebreak-entrypoint \
-    && mkdir -p /var/lib/tidebreak \
-    && chown -R tidebreak:tidebreak /var/lib/tidebreak /home/tidebreak
 
 # Optional toolchain bundles. Empty (the default) installs nothing, so this
 # RUN is a no-op and the image stays the size of git, gh, and managed Node.
@@ -299,6 +286,46 @@ RUN set -eu; \
           ;; \
       esac; \
     done
+
+# The supervised workload reuses the server's verified tools and runs behind
+# Gateway's sidecar. It carries no server, renderer, or authentication store.
+FROM runtime-base AS supervised-agent
+COPY --from=build /out/tidebreak-supervised-agent /usr/local/bin/tidebreak-supervised-agent
+COPY crates/tidebreak-harness/src/pin.rs /tmp/harness-pins.rs
+COPY deploy/supervised-agent/install-harness.mjs /tmp/install-harness.mjs
+COPY deploy/supervised-agent/entrypoint.sh /usr/local/bin/sandbox-agent
+RUN set -eu; \
+    node_root="$(find /opt/tidebreak/node -mindepth 1 -maxdepth 1 -type d)"; \
+    test -x "$node_root/bin/node"; \
+    for executable in node npm npx; do \
+        ln -s "$node_root/bin/$executable" "/usr/local/bin/$executable"; \
+    done; \
+    "$node_root/bin/node" /tmp/install-harness.mjs /tmp/harness-pins.rs "$node_root/bin/npm"; \
+    rm -f /tmp/harness-pins.rs /tmp/install-harness.mjs; \
+    chmod 0755 /usr/local/bin/sandbox-agent
+ENV HOME=/workspace \
+    SHELL=/bin/sh \
+    TIDEBREAK_AGENT_ENGINE=claude_code \
+    RUSTUP_HOME=/usr/local/rustup
+WORKDIR /workspace
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/sandbox-agent"]
+
+# Keep the server as the default target for existing local and release builds.
+FROM runtime-base AS server
+COPY --from=build /out/tidebreak /usr/local/bin/tidebreak
+COPY --from=renderer /src/crates/tidebreak-desktop/ui/dist /opt/tidebreak/ui
+COPY deploy/self-host/entrypoint.sh /usr/local/bin/tidebreak-entrypoint
+
+# The server runs unprivileged. The uid is fixed rather than assigned by
+# adduser so a data volume initialized from this layer carries an ownership
+# the running user actually matches.
+RUN groupadd --gid 10001 tidebreak \
+    && useradd --uid 10001 --gid 10001 --home-dir /home/tidebreak --create-home \
+       --shell /usr/sbin/nologin tidebreak \
+    && chmod 0755 /usr/local/bin/tidebreak-entrypoint \
+    && mkdir -p /var/lib/tidebreak \
+    && chown -R tidebreak:tidebreak /var/lib/tidebreak /home/tidebreak
 
 # The self-host profile. `TIDEBREAK_DATABASE_URL` and `TIDEBREAK_AUTH_TOKENS_FILE`
 # have no defaults and must be supplied — the server refuses to open a shared

@@ -572,9 +572,11 @@ export function WorkspaceWorkflowControl({
               />
             </div>
             <div className="flex flex-wrap gap-1 border-t border-border-subtle p-1.5">
-              <Button variant="ghost" size="sm" onClick={onOpenSourceControl}>
-                Source control
-              </Button>
+              {!model.remote && (
+                <Button variant="ghost" size="sm" onClick={onOpenSourceControl}>
+                  Source control
+                </Button>
+              )}
               {model.pr?.url && (
                 <Button
                   variant="ghost"

@@ -189,7 +189,8 @@ pub async fn configure_workspace_identity(
 /// Live git + `gh` observation for the workspace PR card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
-    pub git: super::types::CodeWorkspaceGitState,
+    pub git: Option<super::types::CodeWorkspaceGitState>,
+    pub remote: bool,
     pub dirty: bool,
     pub unpushed: bool,
     pub ahead: u64,
@@ -361,7 +362,8 @@ pub async fn workspace_git_status(
     // which the runtime drives with the fact row's ETags; this observation
     // only carries the persisted copy and the local git state.
     Ok(WorkspaceGitStatus {
-        git: inspect.git,
+        git: Some(inspect.git),
+        remote: false,
         dirty: inspect.dirty,
         unpushed: inspect.unpushed,
         ahead: inspect.ahead,
@@ -699,8 +701,8 @@ pub fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
     })
 }
 
-/// Parse `gh pr view --json number,comments,reviews`: issue comments plus
-/// review bodies. Missing or malformed entries are skipped, never fatal.
+/// Parse issue comments and review bodies from the `gh pr view` or REST vocabulary.
+/// Missing or malformed entries are skipped, never fatal.
 pub fn parse_pr_view_comments(
     json: &str,
 ) -> (Option<u64>, Vec<tidebreak_core::PullRequestComment>) {
@@ -719,6 +721,7 @@ pub fn parse_pr_view_comments(
     let login = |value: &serde_json::Value| {
         value
             .get("author")
+            .or_else(|| value.get("user"))
             .and_then(|author| author.get("login"))
             .and_then(|inner| inner.as_str())
             .filter(|inner| !inner.is_empty())
@@ -727,6 +730,7 @@ pub fn parse_pr_view_comments(
     let avatar = |value: &serde_json::Value| {
         value
             .get("author")
+            .or_else(|| value.get("user"))
             .and_then(|author| author.get("avatarUrl").or_else(|| author.get("avatar_url")))
             .and_then(|inner| inner.as_str())
             .filter(|inner| !inner.is_empty())
@@ -747,8 +751,8 @@ pub fn parse_pr_view_comments(
             id: id(item),
             author: login(item),
             avatar_url: avatar(item),
-            url: text(item, "url"),
-            created_at: text(item, "createdAt"),
+            url: text(item, "url").or_else(|| text(item, "html_url")),
+            created_at: text(item, "createdAt").or_else(|| text(item, "created_at")),
             body,
             review_state: None,
             path: None,
@@ -771,8 +775,11 @@ pub fn parse_pr_view_comments(
             id: id(item),
             author: login(item),
             avatar_url: avatar(item),
-            url: text(item, "url"),
-            created_at: text(item, "submittedAt").or_else(|| text(item, "createdAt")),
+            url: text(item, "url").or_else(|| text(item, "html_url")),
+            created_at: text(item, "submittedAt")
+                .or_else(|| text(item, "submitted_at"))
+                .or_else(|| text(item, "createdAt"))
+                .or_else(|| text(item, "created_at")),
             body,
             review_state: text(item, "state").map(|state| state.to_ascii_lowercase()),
             path: None,

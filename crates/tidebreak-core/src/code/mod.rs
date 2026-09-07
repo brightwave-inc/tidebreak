@@ -5,6 +5,9 @@
 
 mod caps;
 mod event;
+mod remote_task;
+
+pub use remote_task::RemoteWorkspaceTask;
 
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{

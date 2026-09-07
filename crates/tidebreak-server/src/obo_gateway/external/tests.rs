@@ -15,6 +15,7 @@ const RESOURCE: &str = "tidebreak:test-machine";
 #[derive(Clone, Default)]
 struct Gateway {
     approvals: Arc<AtomicUsize>,
+    exchanges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     mints: Arc<AtomicUsize>,
     revokes: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
@@ -52,9 +53,11 @@ async fn gateway() -> (String, Gateway) {
             state.enrolled.lock().unwrap().remove(&id);
             StatusCode::NO_CONTENT
         }))
-        .route("/oauth/token", post(|axum::Form(body): axum::Form<HashMap<String, String>>| async move {
+        .route("/oauth/token", post(|State(state): State<Gateway>, axum::Form(body): axum::Form<HashMap<String, String>>| async move {
             assert!(body["subject_token"].starts_with("delegated-"), "a browser token must never supply external inference");
-            Json(serde_json::json!({"access_token": format!("llm-{}", body["subject_token"]), "expires_in": 600}))
+            state.exchanges.lock().unwrap().push((body["subject_token"].clone(), body["audience"].clone()));
+            let prefix = if body["audience"].starts_with("runtime:") { "runtime" } else { "llm" };
+            Json(serde_json::json!({"access_token": format!("{prefix}-{}", body["subject_token"]), "expires_in": 600}))
         }))
         .route("/compat/openai/v1/responses", post(|headers: HeaderMap| async move {
             headers.get("authorization").unwrap().to_str().unwrap().to_owned()
@@ -521,4 +524,293 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
         author.starts_with("Slack Owner <owner@example.com>"),
         "the setup script must run with delegated Git identity: {author}"
     );
+}
+
+async fn bind_runtime_session(
+    db: &DbStore,
+    owner: &OwnerId,
+    grant: CodeGrantId,
+    workspace: Option<tidebreak_core::WorkspaceId>,
+) -> SessionId {
+    use tidebreak_core::{
+        Attention, AttentionSource, ExecutionLocation, HarnessKind, PermissionMode, Session,
+        SessionKind, SessionLifecycle, SessionVisibility,
+    };
+    let session = Session {
+        id: SessionId::new(),
+        owner: owner.clone(),
+        workspace_id: workspace,
+        kind: SessionKind::Interactive,
+        harness_kind: HarnessKind::ClaudeCode,
+        harness_version: None,
+        harness_resume_ref: None,
+        permission_mode: PermissionMode::Ask,
+        model: None,
+        reasoning_effort: None,
+        fast_mode: false,
+        lifecycle: SessionLifecycle::Idle,
+        fence_reason: None,
+        child_pid: None,
+        child_process_identity: None,
+        spawn_epoch: 1,
+        attention: Attention::working(AttentionSource::Lifecycle),
+        unrecognized_event_count: 0,
+        subagents: Vec::new(),
+        created_at: chrono::Utc::now(),
+        visibility: SessionVisibility::Private,
+        execution_location: if workspace.is_some() {
+            ExecutionLocation::Sandbox
+        } else {
+            ExecutionLocation::Machine
+        },
+    };
+    tidebreak_core::db::code::resolve_external_machine_session(
+        db,
+        owner,
+        grant,
+        "slack",
+        "T1/C1/runtime",
+        &session,
+    )
+    .await
+    .unwrap();
+    session.id
+}
+
+#[tokio::test]
+async fn runtime_tokens_follow_the_session_grant_after_restart_refresh_and_revocation() {
+    use crate::code::remote::{RemoteSandboxError, RuntimeTokenSource};
+    let (_dir, db, runtime, _browser, base, state, owner) = setup().await;
+    let grant = connect(&runtime, &owner).await;
+    let session = bind_runtime_session(&db, &owner, grant.id, None).await;
+    let restarted_gateway = obo(&base);
+    let tokens = restarted_gateway
+        .runtime_tokens("tidebreak")
+        .with_external_delegations(db.clone());
+    let first = tokens.runtime_token(&owner, session).await.unwrap();
+    assert_eq!(first.secret, "runtime-delegated-1");
+    assert_eq!(
+        tokens.runtime_token(&owner, session).await.unwrap().secret,
+        first.secret
+    );
+    assert_eq!(
+        state.exchanges.lock().unwrap().as_slice(),
+        &[("delegated-1".into(), "runtime:tidebreak".into())]
+    );
+    // A refreshed delegation invalidates the cached runtime token even while
+    // that runtime token is fresh.
+    let slot = tokens
+        .external
+        .as_ref()
+        .unwrap()
+        .slots
+        .lock()
+        .unwrap()
+        .get(&grant.id)
+        .unwrap()
+        .clone();
+    slot.lock().await.as_mut().unwrap().expires_at = 0;
+    assert_eq!(
+        tokens.runtime_token(&owner, session).await.unwrap().secret,
+        "runtime-delegated-2"
+    );
+    // A browser sign-in cannot mask a revoked connection or replace its grant.
+    restarted_gateway.record_caller(&owner, "replacement-browser-session".into());
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "disconnect")
+        .await
+        .unwrap();
+    let _replacement = connect(&runtime, &owner).await;
+    assert!(matches!(
+        tokens.runtime_token(&owner, session).await,
+        Err(RemoteSandboxError::SignInRequired(_))
+    ));
+    assert_eq!(state.exchanges.lock().unwrap().len(), 2);
+}
+
+// The map and this test own two references. A third means the request has
+// cloned the slot and is waiting for the lock that the test holds.
+async fn wait_for_slot_waiter<T>(slot: &Arc<T>) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(slot) < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the request must reach the held credential slot");
+}
+
+#[tokio::test]
+async fn runtime_tokens_refuse_missing_and_wrong_owner_sessions_before_browser_fallback() {
+    use crate::code::remote::{RemoteSandboxError, RuntimeTokenSource};
+    let (_dir, db, runtime, browser, _base, state, owner) = setup().await;
+    let grant = connect(&runtime, &owner).await;
+    let session = bind_runtime_session(&db, &owner, grant.id, None).await;
+    let other = OwnerId::new("user:another-owner").unwrap();
+    browser.record_caller(&other, "another-browser-session".into());
+    let tokens = browser
+        .runtime_tokens("tidebreak")
+        .with_external_delegations(db);
+    for (caller, target) in [(&owner, SessionId::new()), (&other, session)] {
+        assert!(matches!(
+            tokens.runtime_token(caller, target).await,
+            Err(RemoteSandboxError::Refused {
+                operation: "token",
+                ..
+            })
+        ));
+    }
+    assert_eq!(state.mints.load(Ordering::SeqCst), 0);
+    assert!(state.exchanges.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cached_delegation_refuses_revocation_while_waiting_for_its_slot() {
+    let (_dir, db, runtime, _browser, base, state, owner) = setup().await;
+    let grant = connect(&runtime, &owner).await;
+    let delegations = Arc::new(ExternalDelegations::new(obo(&base), db));
+    delegations.for_grant(&owner, grant.id).await.unwrap();
+    let slot = delegations
+        .slots
+        .lock()
+        .unwrap()
+        .get(&grant.id)
+        .unwrap()
+        .clone();
+    let held = slot.lock().await;
+    let caller = owner.clone();
+    let waiting = {
+        let delegations = delegations.clone();
+        tokio::spawn(async move { delegations.for_grant(&caller, grant.id).await })
+    };
+    wait_for_slot_waiter(&slot).await;
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "disconnect")
+        .await
+        .unwrap();
+    drop(held);
+    assert!(matches!(
+        waiting.await.unwrap(),
+        Err(AgentError::SignInRequired(_))
+    ));
+    assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cached_runtime_token_refuses_revocation_while_waiting_for_its_slot() {
+    use crate::code::remote::{RemoteSandboxError, RuntimeTokenSource};
+    let (_dir, db, runtime, _browser, base, state, owner) = setup().await;
+    let grant = connect(&runtime, &owner).await;
+    let session = bind_runtime_session(&db, &owner, grant.id, None).await;
+    let tokens = obo(&base)
+        .runtime_tokens("tidebreak")
+        .with_external_delegations(db);
+    tokens.runtime_token(&owner, session).await.unwrap();
+    let slot = tokens
+        .slots
+        .lock()
+        .unwrap()
+        .get(&(owner.clone(), session))
+        .unwrap()
+        .clone();
+    let held = slot.lock().await;
+    let caller = owner.clone();
+    let waiting = {
+        let tokens = tokens.clone();
+        tokio::spawn(async move { tokens.runtime_token(&caller, session).await })
+    };
+    wait_for_slot_waiter(&slot).await;
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "disconnect")
+        .await
+        .unwrap();
+    drop(held);
+    assert!(matches!(
+        waiting.await.unwrap(),
+        Err(RemoteSandboxError::SignInRequired(_))
+    ));
+    assert_eq!(state.exchanges.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn remote_workspace_status_keeps_the_original_grant_after_restart_and_revocation() {
+    use tidebreak_core::{CodeRepo, CodeWorkspace, CodeWorkspaceStatus, RepoId, WorkspaceId};
+    let (dir, db, runtime, browser, base, state, owner) = setup().await;
+    let grant = connect(&runtime, &owner).await;
+    let repo = CodeRepo {
+        id: RepoId::new(),
+        owner: owner.clone(),
+        root_path: String::new(),
+        display_name: "Tools".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "thet/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: Some("https://github.com/acme/tools".into()),
+        origin_host: Some("github.com".into()),
+        origin_owner: Some("acme".into()),
+        origin_name: Some("tools".into()),
+    };
+    tidebreak_core::db::code::insert_repo(&db, &repo)
+        .await
+        .unwrap();
+    let id = WorkspaceId::new();
+    let workspace = CodeWorkspace {
+        id,
+        owner: owner.clone(),
+        repo_id: repo.id,
+        title: "Slack work".into(),
+        worktree_path: CodeWorkspace::remote_worktree_marker(id),
+        branch_name: "thet/slack-work".into(),
+        base_ref: "main".into(),
+        status: CodeWorkspaceStatus::Active,
+        pr: None,
+        created_at: chrono::Utc::now(),
+        archived_at: None,
+        released_at: None,
+        released_tip: None,
+        bundle_bytes: None,
+    };
+    tidebreak_core::db::code::insert_workspace(&db, &workspace)
+        .await
+        .unwrap();
+    bind_runtime_session(&db, &owner, grant.id, Some(id)).await;
+    let relay = Arc::new(HarnessLlmRelay::new(obo(&base)).with_external_delegations(db.clone()));
+    let restarted = CodeRuntime::new(
+        db,
+        dir.path().to_path_buf(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(relay),
+    )
+    .with_git_credentials(browser.clone());
+    let status = restarted.workspace_pr(&owner, id).await.unwrap();
+    assert_eq!(status.pushes_as.as_deref(), Some("slack-owner"));
+    assert_eq!(status.pushes_as_self, Some(true));
+    assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+    browser.record_caller(&owner, "replacement-browser-session".into());
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "disconnect")
+        .await
+        .unwrap();
+    let _replacement = connect(&runtime, &owner).await;
+    assert!(
+        restarted.workspace_pr(&owner, id).await.is_err(),
+        "status must refuse the original revoked grant"
+    );
+    assert!(
+        restarted.refresh_workspace_pr(&owner, id).await.is_err(),
+        "refresh must refuse before borrowing browser credentials"
+    );
+    assert!(
+        restarted.workspace_pr_comments(&owner, id).await.is_err(),
+        "comments must refuse before borrowing browser credentials"
+    );
+    assert_eq!(state.mints.load(Ordering::SeqCst), 1);
 }

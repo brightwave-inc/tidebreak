@@ -179,15 +179,12 @@ impl CodeRuntime {
             _ => {}
         }
 
-        let workspace = self.session_workspace(&session).await?;
-        if workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.is_remote())
-        {
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
             // The sandbox carries the engine. Persist the mode on the row and
             // do not relaunch a host harness against the empty worktree.
             let mut session = session;
             session.permission_mode = mode;
+            self.validate_remote_execution(&session)?;
             crate::code::attention::persist_session(&self.db, &self.bus, &session).await?;
             return Ok(session);
         }
@@ -579,6 +576,15 @@ impl CodeRuntime {
         effort: Option<ReasoningEffort>,
     ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            let mut next = SessionExecutionSettings::from(&session);
+            next.reasoning_effort = effort;
+            self.validate_remote_execution(&session)?;
+            self.validate_remote_settings_change(&session, &next)?;
+            if next == SessionExecutionSettings::from(&session) {
+                return Ok(session);
+            }
+        }
         match session.lifecycle {
             SessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
@@ -635,6 +641,14 @@ impl CodeRuntime {
         fast_mode: bool,
     ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            let mut requested = session.clone();
+            requested.fast_mode = fast_mode;
+            self.validate_remote_execution(&requested)?;
+            if session.fast_mode == fast_mode {
+                return Ok(session);
+            }
+        }
         match session.lifecycle {
             SessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(

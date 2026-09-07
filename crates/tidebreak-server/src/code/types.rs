@@ -1002,6 +1002,10 @@ pub struct CodePushSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CodeWorkspacePrSnapshot {
+    /// The checkout lives in a remote runtime; local git mutations are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remote: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub git: Option<CodeWorkspaceGitState>,

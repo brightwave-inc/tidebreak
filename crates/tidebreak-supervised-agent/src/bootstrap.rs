@@ -122,6 +122,16 @@ pub fn run(
                     stage: "repository_clone_failed",
                     message,
                 })?;
+            if position == 0 {
+                if let Some(branch) = inputs.workspace_branch.as_deref() {
+                    checkout_workspace_branch(&target, branch, &trust).map_err(|message| {
+                        BootstrapError {
+                            stage: "workspace_branch_failed",
+                            message,
+                        }
+                    })?;
+                }
+            }
             push(
                 "repository_cloned",
                 serde_json::json!({
@@ -129,6 +139,7 @@ pub fn run(
                     "ref": repository.repository_ref,
                     "directory": target.display().to_string(),
                     "position": position,
+                    "workspace_branch": (position == 0).then_some(inputs.workspace_branch.as_deref()).flatten(),
                 }),
             );
             clones.push(ClonedRepository {
@@ -272,6 +283,25 @@ fn clone_repository(
         }
     }
     Ok(target)
+}
+
+/// Start the assigned branch at the selected base or WIP commit in the fresh clone.
+fn checkout_workspace_branch(target: &Path, branch: &str, trust: &Trust) -> Result<(), String> {
+    if branch.is_empty() || branch.starts_with('-') || branch.contains("@{") {
+        return Err("the workspace branch is invalid".into());
+    }
+    run_git(
+        target,
+        trust,
+        &["check-ref-format", &format!("refs/heads/{branch}")],
+    )
+    .map_err(|error| format!("the workspace branch is invalid: {error}"))?;
+    run_git(
+        target,
+        trust,
+        &["checkout", "--no-track", "-B", branch, "HEAD"],
+    )
+    .map_err(|error| format!("the workspace branch could not be checked out: {error}"))
 }
 
 /// Runs one git command with the trust environment, output inherited so it
@@ -451,6 +481,102 @@ mod tests {
             .unwrap();
         assert_eq!(cloned.1["position"], 0);
         assert_eq!(cloned.1["ref"], "feature");
+    }
+
+    #[test]
+    fn a_workspace_task_starts_its_assigned_branch_at_the_selected_base_or_wip() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = fixture_remote(root.path());
+        let trust = trust::prepare(&trust_options(root.path())).unwrap();
+        run_git(&remote, &trust, &["checkout", "-b", "mg-wip/sandbox-1"]).unwrap();
+        std::fs::write(remote.join("checkpoint.txt"), "saved work\n").unwrap();
+        run_git(&remote, &trust, &["add", "checkpoint.txt"]).unwrap();
+        run_git(
+            &remote,
+            &trust,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "checkpoint",
+            ],
+        )
+        .unwrap();
+        for (index, reference) in ["main", "mg-wip/sandbox-1"].iter().enumerate() {
+            let workspace = root.path().join(format!("workspace-{index}"));
+            let task = "Fix the bug.\nKeep this task text.\n";
+            let inputs = resolve(RawInputs {
+                task: Some(
+                    tidebreak_core::code::RemoteWorkspaceTask::encode(task, "thet/slack-pr")
+                        .unwrap(),
+                ),
+                workspace: Some(workspace.display().to_string()),
+                repository_url: Some(remote.display().to_string()),
+                repository_ref: Some((*reference).into()),
+                ..RawInputs::default()
+            })
+            .unwrap();
+            let bootstrap = run(&inputs, &trust_options(root.path()), None).unwrap();
+            let output = |directory: &Path, arguments: &[&str]| {
+                let output = Command::new("git")
+                    .args(arguments)
+                    .current_dir(directory)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            };
+            assert_eq!(
+                output(&bootstrap.workdir, &["branch", "--show-current"]),
+                "thet/slack-pr"
+            );
+            assert_eq!(
+                output(&bootstrap.workdir, &["rev-parse", "HEAD"]),
+                output(&remote, &["rev-parse", reference])
+            );
+            assert_eq!(
+                bootstrap.workdir.join("checkpoint.txt").exists(),
+                index == 1
+            );
+            assert_eq!(inputs.task, task);
+            let cloned = bootstrap
+                .events
+                .iter()
+                .find(|(kind, _)| kind == "repository_cloned")
+                .unwrap();
+            assert_eq!(cloned.1["workspace_branch"], "thet/slack-pr");
+        }
+    }
+
+    #[test]
+    fn a_workspace_branch_cannot_be_a_revision_or_checkout_option() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = fixture_remote(root.path());
+        let trust = trust::prepare(&trust_options(root.path())).unwrap();
+        for branch in [
+            "@{-1}",
+            "--orphan",
+            "bad..branch",
+            "bad.lock",
+            "HEAD",
+            "main~1",
+        ] {
+            assert!(
+                checkout_workspace_branch(&repository, branch, &trust).is_err(),
+                "accepted {branch}"
+            );
+        }
+        let head = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "main");
     }
 
     #[test]

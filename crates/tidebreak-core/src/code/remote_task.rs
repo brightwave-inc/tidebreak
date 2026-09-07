@@ -1,0 +1,81 @@
+//! Versioned workspace metadata carried through the runtime's task string.
+
+use serde::{Deserialize, Serialize};
+
+const PREFIX: &str = "tidebreak-workspace-task\n";
+const VERSION: u8 = 1;
+
+/// A Tidebreak workspace's first task and the branch its remote checkout uses.
+/// The supervisor consumes the metadata before handing the task to the engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWorkspaceTask {
+    version: u8,
+    pub task: String,
+    pub branch: String,
+}
+
+impl RemoteWorkspaceTask {
+    /// Wrap a task for a Tidebreak supervisor without changing its text.
+    pub fn encode(task: &str, branch: &str) -> Result<String, serde_json::Error> {
+        let envelope = Self {
+            version: VERSION,
+            task: task.to_owned(),
+            branch: branch.to_owned(),
+        };
+        Ok(format!("{PREFIX}{}", serde_json::to_string(&envelope)?))
+    }
+
+    /// Decode Tidebreak metadata, leaving ordinary custom tasks untouched.
+    pub fn parse(value: &str) -> Result<Option<Self>, String> {
+        let Some(json) = value.strip_prefix(PREFIX) else {
+            return Ok(None);
+        };
+        let envelope: Self = serde_json::from_str(json)
+            .map_err(|error| format!("the workspace task envelope is invalid: {error}"))?;
+        if envelope.version != VERSION {
+            return Err("the workspace task envelope version is unsupported".into());
+        }
+        if envelope.task.trim().is_empty() {
+            return Err("the workspace task is empty".into());
+        }
+        if envelope.branch.is_empty()
+            || envelope.branch.len() > 1024
+            || envelope.branch != envelope.branch.trim()
+            || envelope.branch.starts_with('-')
+            || envelope.branch.contains("@{")
+        {
+            return Err("the workspace branch is invalid".into());
+        }
+        Ok(Some(envelope))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_envelope_preserves_task_text_and_branch() {
+        let task = "  Keep \"this\" text.\nThen test it.\n";
+        let encoded = RemoteWorkspaceTask::encode(task, "thet/slack-pr").unwrap();
+        let parsed = RemoteWorkspaceTask::parse(&encoded).unwrap().unwrap();
+        assert_eq!(parsed.task, task);
+        assert_eq!(parsed.branch, "thet/slack-pr");
+        assert_eq!(RemoteWorkspaceTask::parse(task).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_envelopes_fail_instead_of_becoming_engine_instructions() {
+        for body in [
+            r#"{"version":2,"task":"work","branch":"task"}"#,
+            r#"{"version":1,"task":"work","branch":"task","extra":true}"#,
+            r#"{"version":1,"task":" ","branch":"task"}"#,
+            r#"{"version":1,"task":"work","branch":"-reset"}"#,
+            r#"{"version":1,"task":"work","branch":"@{-1}"}"#,
+            "not json",
+        ] {
+            assert!(RemoteWorkspaceTask::parse(&format!("{PREFIX}{body}")).is_err());
+        }
+    }
+}

@@ -205,6 +205,8 @@ pub struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
+    /// Hosted execution keeps untrusted engines outside this server process.
+    sandbox_only_execution: bool,
     /// Live fan-out for adapter-grant revocations, so an event stream
     /// holding a revoked grant drops immediately (docs/slack-sessions.md).
     pub grant_revocations: Arc<super::grants::GrantRevocations>,
@@ -450,6 +452,7 @@ impl CodeRuntime {
             harness_llm,
             gateway_runtime: None,
             remote: None,
+            sandbox_only_execution: false,
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
@@ -610,6 +613,7 @@ impl CodeRuntime {
             harness_llm: None,
             gateway_runtime: None,
             remote: None,
+            sandbox_only_execution: false,
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
@@ -695,6 +699,22 @@ impl CodeRuntime {
     ) -> Self {
         self.remote = Some(remote);
         self
+    }
+
+    /// Refuse local engines on a hosted deployment that requires isolation.
+    pub fn with_sandbox_only_execution(mut self) -> Self {
+        self.sandbox_only_execution = true;
+        self
+    }
+
+    fn require_machine_execution(&self) -> Result<(), ServerError> {
+        if self.sandbox_only_execution {
+            return Err(ServerError::conflict_kind(
+                "sandbox_session_required",
+                "this hosted deployment runs agents in isolated sandboxes; start a new sandbox session",
+            ));
+        }
+        Ok(())
     }
 
     /// The remote-session context, when this deployment configured one.

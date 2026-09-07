@@ -255,6 +255,8 @@ pub struct Config {
     /// Required together with [`Config::runtime_endpoint`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_profile: Option<String>,
+    /// Engine packaged in a supervised sandbox profile, when explicitly declared.
+    pub runtime_engine: Option<crate::HarnessKind>,
     /// Concurrent remote sandboxes one owner may hold. The reservation is
     /// atomic, so competing starts cannot exceed this cap.
     #[serde(
@@ -394,6 +396,7 @@ impl Config {
             listen_addr: None,
             runtime_endpoint: None,
             runtime_profile: None,
+            runtime_engine: None,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
             runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
@@ -468,7 +471,29 @@ impl Config {
             std::env::var("TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD").ok(),
             std::env::var("TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD").ok(),
         )
+        .and_then(|config| {
+            config.with_runtime_engine_var(std::env::var("TIDEBREAK_RUNTIME_ENGINE").ok())
+        })
         .map(|config| config.with_ui_dist_var(std::env::var_os("TIDEBREAK_UI_DIST")))
+    }
+
+    /// Declare the engine in the remote profile without changing existing sessions.
+    pub fn with_runtime_engine_var(mut self, value: Option<String>) -> Result<Self> {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            return Ok(self);
+        };
+        if self.runtime_profile.is_none() {
+            return Err(AgentError::config(
+                "TIDEBREAK_RUNTIME_ENGINE requires a sandbox runtime profile",
+            ));
+        }
+        let engine = crate::HarnessKind::from_str(value.trim())
+            .filter(|kind| !kind.is_in_process())
+            .ok_or_else(|| {
+                AgentError::config("TIDEBREAK_RUNTIME_ENGINE must name a supported external engine")
+            })?;
+        self.runtime_engine = Some(engine);
+        Ok(self)
     }
 
     /// Apply `TIDEBREAK_UI_DIST`. Split from [`Config::from_env`] like the
@@ -592,6 +617,7 @@ impl Config {
             listen_addr,
             runtime_endpoint,
             runtime_profile,
+            runtime_engine: None,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
             runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
@@ -969,6 +995,40 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
         assert_eq!(config.runtime_profile.as_deref(), Some("tidebreak-remote"));
+    }
+
+    #[test]
+    fn runtime_engine_requires_a_profile_and_an_external_engine() {
+        let config = Config::desktop("/data");
+        assert!(config
+            .clone()
+            .with_runtime_engine_var(Some("claude_code".into()))
+            .is_err());
+        assert_eq!(
+            config
+                .clone()
+                .with_runtime_engine_var(Some("  ".into()))
+                .unwrap()
+                .runtime_engine,
+            None
+        );
+        let mut configured = config;
+        configured.runtime_endpoint = Some("tidebreak".into());
+        configured.runtime_profile = Some("tidebreak-supervised".into());
+        assert_eq!(
+            configured
+                .clone()
+                .with_runtime_engine_var(Some(" claude_code ".into()))
+                .unwrap()
+                .runtime_engine,
+            Some(crate::HarnessKind::ClaudeCode)
+        );
+        for engine in ["tidebreak", "missing-engine"] {
+            assert!(configured
+                .clone()
+                .with_runtime_engine_var(Some(engine.into()))
+                .is_err());
+        }
     }
 
     #[test]

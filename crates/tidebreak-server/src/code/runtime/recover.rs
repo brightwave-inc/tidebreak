@@ -216,25 +216,14 @@ impl CodeRuntime {
         // Remote sessions have no local worker to re-attach: their engine
         // lives in a sandbox, and spawning a host harness against the empty
         // worktree path would fail loudly for a session that is healthy.
-        let mut remote_workspaces = std::collections::HashSet::new();
-        let mut checked_workspaces = std::collections::HashSet::new();
-        for session in &recovered_sessions {
-            if !checked_workspaces.insert(session.workspace_id) {
-                continue;
-            }
-            if let Ok(Some(workspace)) = self.session_workspace(session).await {
-                if workspace.is_remote() {
-                    remote_workspaces.insert(session.workspace_id);
-                }
-            }
-        }
         let resumable: Vec<Session> = recovered_sessions
             .into_iter()
             .filter(|session| {
                 !matches!(
                     session.lifecycle,
                     SessionLifecycle::Ended | SessionLifecycle::Fenced
-                ) && !remote_workspaces.contains(&session.workspace_id)
+                ) && !self.sandbox_only_execution
+                    && session.execution_location == tidebreak_core::ExecutionLocation::Machine
                     && !self
                         .workers
                         .lock()
@@ -253,7 +242,8 @@ impl CodeRuntime {
                         if !matches!(
                             latest.lifecycle,
                             SessionLifecycle::Ended | SessionLifecycle::Fenced
-                        ) && !self
+                        ) && latest.execution_location == tidebreak_core::ExecutionLocation::Machine
+                            && !self
                             .workers
                             .lock()
                             .expect("code workers")

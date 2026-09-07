@@ -93,10 +93,8 @@ pub(crate) async fn recover_running_sessions_with_caps(
         // Running with no pid is its normal shape, and interrupting it here
         // would abandon a lease that is still spending. Its own lifecycle
         // (the pump, the stale-intent sweep, reap) settles it.
-        if let Some(workspace) = super::session_workspace(store, &session).await? {
-            if workspace.is_remote() {
-                continue;
-            }
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            continue;
         }
         let parks = durable_parks(&session);
         if let Some(action) = recover_one(store, bus, session, &probe, parks).await? {
@@ -107,10 +105,8 @@ pub(crate) async fn recover_running_sessions_with_caps(
         if !matches!(session.fence_reason, Some(FenceReason::OrphanAlive)) {
             continue;
         }
-        if let Some(workspace) = super::session_workspace(store, &session).await? {
-            if workspace.is_remote() {
-                continue;
-            }
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            continue;
         }
         let Some(pid) = session.child_pid else {
             continue;
@@ -670,7 +666,15 @@ mod tests {
     }
 
     async fn seeded_running(pid: Option<i64>) -> (tempfile::TempDir, DbStore, SessionId, TurnId) {
-        let (directory, store, session_id) = seeded_session(pid, SessionLifecycle::Running).await;
+        seeded_running_at(pid, tidebreak_core::ExecutionLocation::Machine).await
+    }
+
+    async fn seeded_running_at(
+        pid: Option<i64>,
+        location: tidebreak_core::ExecutionLocation,
+    ) -> (tempfile::TempDir, DbStore, SessionId, TurnId) {
+        let (directory, store, session_id) =
+            seeded_session_at(pid, SessionLifecycle::Running, location).await;
         let turn_id = TurnId::new();
         insert_turn(
             &store,
@@ -705,6 +709,14 @@ mod tests {
     async fn seeded_session(
         pid: Option<i64>,
         lifecycle: SessionLifecycle,
+    ) -> (tempfile::TempDir, DbStore, SessionId) {
+        seeded_session_at(pid, lifecycle, tidebreak_core::ExecutionLocation::Machine).await
+    }
+
+    async fn seeded_session_at(
+        pid: Option<i64>,
+        lifecycle: SessionLifecycle,
+        location: tidebreak_core::ExecutionLocation,
     ) -> (tempfile::TempDir, DbStore, SessionId) {
         let directory = tempfile::tempdir().unwrap();
         let store = DbStore::connect(&format!(
@@ -783,7 +795,7 @@ mod tests {
                 unrecognized_event_count: 0,
                 subagents: Vec::new(),
                 created_at: now(),
-                execution_location: tidebreak_core::ExecutionLocation::Machine,
+                execution_location: location,
             },
         )
         .await
@@ -796,24 +808,10 @@ mod tests {
     /// still working.
     #[tokio::test]
     async fn boot_recovery_leaves_remote_sessions_running() {
-        let (_directory, store, session_id, _turn) = seeded_running(None).await;
+        let (_directory, store, session_id, _turn) =
+            seeded_running_at(None, tidebreak_core::ExecutionLocation::Sandbox).await;
         let owner = tidebreak_core::OwnerId::local();
-        let session = get_session(&store, &owner, session_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut workspace = tidebreak_core::db::code::get_workspace(
-            &store,
-            &owner,
-            session.workspace_id.expect("workspace"),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        workspace.worktree_path = String::new();
-        tidebreak_core::db::code::save_workspace(&store, &workspace)
-            .await
-            .unwrap();
+        // Even an obsolete local workspace path must not select local recovery.
 
         let bus = CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)

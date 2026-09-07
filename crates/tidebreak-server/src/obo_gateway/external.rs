@@ -166,7 +166,7 @@ impl ExternalDelegations {
 
     /// Validate durable consent before serving even a fresh cached token.
     pub async fn for_grant(&self, owner: &OwnerId, grant: CodeGrantId) -> Result<Arc<OboGateway>> {
-        let handshake = self.live_handshake(owner, grant).await?;
+        self.live_handshake(owner, grant).await?;
         let slot = {
             let mut slots = self
                 .slots
@@ -178,6 +178,8 @@ impl ExternalDelegations {
                 .clone()
         };
         let mut held = slot.lock().await;
+        // Consent may change while another request holds this slot.
+        let handshake = self.live_handshake(owner, grant).await?;
         if let Some(current) = held.as_ref() {
             if current.expires_at > unix_time().saturating_add(EXPIRY_LEEWAY_SECONDS) {
                 return Ok(current.gateway.clone());
@@ -240,6 +242,9 @@ impl ExternalDelegations {
         owner: &OwnerId,
         session: SessionId,
     ) -> Result<Option<Arc<OboGateway>>> {
+        tidebreak_core::db::code::get_session(&self.db, owner, session)
+            .await?
+            .ok_or_else(|| AgentError::InvalidTarget("code session not found".into()))?;
         let bindings =
             tidebreak_core::db::code::list_bindings_for_session(&self.db, owner, session).await?;
         let Some(first) = bindings.first() else {
