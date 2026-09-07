@@ -14,6 +14,7 @@ mod credentials;
 mod exa;
 mod extract_source;
 mod fetch_policy;
+mod firecrawl;
 mod host;
 mod http;
 mod model_provider;
@@ -30,6 +31,7 @@ pub use extract_source::{ExtractedPageSink, ExtractedPageSinkError, StoredExtrac
 pub use fetch_policy::{
     admit_fetch_address, admit_fetch_url, FetchPolicyViolation, MAX_FETCH_URL_BYTES,
 };
+pub use firecrawl::FirecrawlProvider;
 pub use host::{
     config_info, credential_provider, credentials_info, delete_credential, read_config,
     resolve_provider, resolve_turn_web_search, update_config, write_credential, WebSearchConfig,

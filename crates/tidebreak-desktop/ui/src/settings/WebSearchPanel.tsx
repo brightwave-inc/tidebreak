@@ -214,7 +214,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Providers"
-            description="Give a key to every provider you want available. Brave Search has a free tier; Exa and Tavily are paid. Each key is stored in the system keychain and never shown again."
+            description="Give a key to every provider you want available. Brave Search has a free tier; Exa, Tavily, and Firecrawl may require paid accounts. Each key is stored in the system keychain and never shown again."
           >
             {credentials.map((credential) => (
               <ProviderCredentialField
@@ -256,7 +256,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Active provider"
-            description="Agents search and open pages through this one provider. The others stay configured and idle."
+            description="Agents search through this one provider. The others stay configured and idle."
           >
             <ActiveProviderField
               value={provider}
@@ -305,7 +305,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             {config.provider
-              ? `Agents also open single pages through ${providerLabel(config.provider)}. If a page comes back empty or ${providerLabel(config.provider)} is unavailable, Tidebreak reads it directly instead.`
+              ? `Agents can also open single pages. If ${providerLabel(config.provider)} cannot read a page, Tidebreak reads it directly instead.`
               : "Agents can still open single pages without a provider: Tidebreak reads them directly."}
           </p>
         </>
@@ -323,6 +323,8 @@ function providerLabel(provider: WebSearchProviderKind): string {
       return "Tavily";
     case "brave":
       return "Brave Search";
+    case "firecrawl":
+      return "Firecrawl";
     case "searxng":
       return "SearXNG";
     case "model_provider":

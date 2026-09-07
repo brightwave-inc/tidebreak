@@ -9,12 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, ModelProviderSearch,
-    NativeExtractor, OutboundOrigin, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher,
-    SearchModel, SearxngBaseUrl, SearxngProvider, StoredExtractedPage, TavilyProvider,
-    TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebExtractTool,
-    WebSearchCredential, WebSearchCredentialState, WebSearchCredentials, WebSearchProvider,
-    WebSearchProviderKind, WebSearchResolver, WebSearchResolverError, WebSearchTool,
+    BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, FirecrawlProvider,
+    ModelProviderSearch, NativeExtractor, OutboundOrigin, PageExtractor, ReqwestHttpClient,
+    ReqwestPageFetcher, SearchModel, SearxngBaseUrl, SearxngProvider, StoredExtractedPage,
+    TavilyProvider, TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse,
+    WebExtractTool, WebSearchCredential, WebSearchCredentialState, WebSearchCredentials,
+    WebSearchProvider, WebSearchProviderKind, WebSearchResolver, WebSearchResolverError,
+    WebSearchTool,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -87,10 +88,11 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000;
 /// self-hosted and holds none, so it is absent here. Keeping this allow-list
 /// here means a local API route can never turn an arbitrary path segment into
 /// a keychain key.
-const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 3] = [
+const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 4] = [
     WebSearchProviderKind::Exa,
     WebSearchProviderKind::Tavily,
     WebSearchProviderKind::Brave,
+    WebSearchProviderKind::Firecrawl,
 ];
 
 /// Which search a turn should use, as the operator chose it.
@@ -711,6 +713,9 @@ async fn configured_provider(
                 WebSearchProviderKind::Brave => {
                     Arc::new(BraveProvider::new(client, credential).map_err(|_| unavailable())?)
                 }
+                WebSearchProviderKind::Firecrawl => {
+                    Arc::new(FirecrawlProvider::new(client, credential).map_err(|_| unavailable())?)
+                }
                 // Handled above; `OutboundOrigin::fixed` has already refused
                 // both.
                 WebSearchProviderKind::Searxng | WebSearchProviderKind::ModelProvider => {
@@ -1075,6 +1080,71 @@ mod tests {
             "timeout_ms": DEFAULT_TIMEOUT_MS,
         }));
         assert!(config.is_err());
+    }
+
+    #[tokio::test]
+    async fn firecrawl_credential_lifecycle_controls_readiness_and_resolution() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+
+        let readiness = credentials_info(&secrets).await.unwrap();
+        assert_eq!(
+            readiness.credentials,
+            vec![
+                WebSearchCredentialReadiness {
+                    provider: WebSearchProviderKind::Exa,
+                    has_credential: false,
+                },
+                WebSearchCredentialReadiness {
+                    provider: WebSearchProviderKind::Tavily,
+                    has_credential: false,
+                },
+                WebSearchCredentialReadiness {
+                    provider: WebSearchProviderKind::Brave,
+                    has_credential: false,
+                },
+                WebSearchCredentialReadiness {
+                    provider: WebSearchProviderKind::Firecrawl,
+                    has_credential: false,
+                },
+            ]
+        );
+
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(Some(WebSearchProviderKind::Firecrawl)),
+                mode: Some(WebSearchMode::Host),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        let stored = write_credential(&secrets, WebSearchProviderKind::Firecrawl, "fc-key")
+            .await
+            .unwrap();
+        assert!(stored.has_credential);
+
+        let info = config_info(&store, &secrets).await.unwrap();
+        assert!(info.has_credential);
+        assert!(info.available);
+        let resolved = resolve_configured(&store, &secrets)
+            .await
+            .unwrap()
+            .expect("a stored Firecrawl key resolves its adapter");
+        assert_eq!(resolved.kind(), WebSearchProviderKind::Firecrawl);
+
+        let removed = delete_credential(&secrets, WebSearchProviderKind::Firecrawl)
+            .await
+            .unwrap();
+        assert!(!removed.has_credential);
+        assert!(!config_info(&store, &secrets).await.unwrap().available);
+        assert!(resolve_configured(&store, &secrets)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

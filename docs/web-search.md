@@ -13,9 +13,10 @@ through a resolver. Configuration alone performs no outbound request.
 | Exa | paid API key | yes | yes |
 | Tavily | paid API key | yes | yes |
 | Brave | API key, free tier available | yes | no — routes to the native engine |
+| Firecrawl | API key | yes | no — routes to the native engine |
 | SearXNG | a self-hosted instance URL, no key | yes | no — routes to the native engine |
 
-Two of the four therefore work without paying anyone: Brave on its free tier,
+Two providers work without paying anyone: Brave on its free tier,
 and SearXNG on an instance the operator runs.
 
 ## Adapters are plain HTTP, and stay that way
@@ -45,8 +46,8 @@ The loopback API exposes a bearer-protected host policy at `/web-search`.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /web-search` | Read the selected provider, timeout, the SearXNG instance URL, and whether the selection is usable. |
-| `PUT /web-search` | Select `exa`, `tavily`, `brave`, `searxng`, or `null` to disable (clears the host provider and sets mode `off` so turns do not fall back to vendor search); optionally set `mode`, timeout, and the SearXNG instance URL. |
-| `GET /web-search/credentials` | Read readiness for the fixed Exa, Tavily, and Brave key slots. |
+| `PUT /web-search` | Select `exa`, `tavily`, `brave`, `firecrawl`, `searxng`, or `null` to disable (clears the host provider and sets mode `off` so turns do not fall back to vendor search); optionally set `mode`, timeout, and the SearXNG instance URL. |
+| `GET /web-search/credentials` | Read readiness for the fixed Exa, Tavily, Brave, and Firecrawl key slots. |
 | `PUT /web-search/credentials/{provider}` | Store a key for one of those slots; returns readiness only. |
 | `DELETE /web-search/credentials/{provider}` | Delete that fixed provider key; returns readiness only. |
 
@@ -82,10 +83,10 @@ for every fixed key slot; SearXNG is absent from it, exactly as local execution
 is absent from the code-execution credential list. Keys are read
 from and written to the OS keychain through
 `SecretProvider` under the fixed names `web_search.exa.api_key`,
-`web_search.tavily.api_key`, and `web_search.brave.api_key`. Credential writes
-reject empty values and values over 8 KiB. They never alter selection or
-timeout policy. A missing key or disabled selection fails closed: there is no
-provider to invoke.
+`web_search.tavily.api_key`, `web_search.brave.api_key`, and
+`web_search.firecrawl.api_key`. Credential writes reject empty values and
+values over 8 KiB. They never alter selection or timeout policy. A missing key
+or disabled selection fails closed: there is no provider to invoke.
 
 ## Brave Search
 
@@ -123,6 +124,24 @@ Brave publishes no page-extraction endpoint, so it does not implement the
 extract contract and `web_extract` routes to the native engine (see
 [Page extraction](#page-extraction)).
 
+## Firecrawl
+
+Firecrawl is a search-only backend. Tidebreak sends a `POST` to the fixed
+`https://api.firecrawl.dev/v2/search` endpoint with the key in the bearer
+authorization header.
+
+| | Firecrawl |
+| --- | --- |
+| Query | `query`, `limit` (the request's `max_results`), and `sources: ["web"]` |
+| Domains | `includeDomains`, followed by the same host-side result filter used for other providers |
+| Dates | `tbs=cdr:1,cd_min:MM/DD/YYYY,cd_max:MM/DD/YYYY`, sent only when the request carries both ends |
+| Result mapping | `url`, `title`, and `description` → snippet. Firecrawl reports no page text, score, or publication time in this response shape, so those fields stay empty. |
+
+The request does not include `scrapeOptions`. Search stays bounded to result
+metadata, and `web_extract` opens a selected page through Tidebreak's native
+engine. Status `401` is a rejected credential, `402` is exhausted quota, and
+`429` is a rate limit.
+
 ## SearXNG (self-hosted)
 
 SearXNG is a metasearch engine the operator runs themselves. It is the backend
@@ -139,7 +158,8 @@ that do need one — credential resolution answers with three states:
 
 - **Present** — the provider's fixed key is stored and non-empty.
 - **Missing** — the provider requires a key and none is stored. The host fails
-  closed and makes no request. This is unchanged for Exa, Tavily, and Brave.
+  closed and makes no request. This is unchanged for Exa, Tavily, Brave, and
+  Firecrawl.
 - **Not required** — the provider takes no credential. Only SearXNG reaches it.
 
 SearXNG has no keychain slot, does not appear in `/web-search/credentials`, and
@@ -244,8 +264,9 @@ search-only or when no provider is configured at all. Extraction therefore
 works with zero web-search configuration.
 
 Exa and Tavily both implement the extract contract, so a host with either
-selected extracts through the vendor and falls back to native. Brave is
-search-only and never receives an extraction request. They reach
+selected extracts through the vendor and falls back to native. Brave and
+Firecrawl are search-only and never receive an extraction request. Exa and
+Tavily reach
 `https://api.exa.ai/contents` and `https://api.tavily.com/extract`, on the same
 fixed authority their search calls use, with the key as a bearer token.
 
