@@ -134,6 +134,7 @@ impl CodeRuntime {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
+            owner_kind: None,
             workspace_id: Some(workspace_id),
             kind: SessionKind::Interactive,
             harness_kind: harness,
@@ -309,6 +310,7 @@ impl CodeRuntime {
                 let session = self
                     .create_session_of_kind_unattached(
                         owner,
+                        None,
                         workspace.id,
                         SessionKind::Interactive,
                         harness,

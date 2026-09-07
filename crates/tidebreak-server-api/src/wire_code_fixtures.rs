@@ -161,6 +161,7 @@ fn session() -> SessionSnapshot {
     SessionSnapshot {
         visibility: tidebreak_core::SessionVisibility::Private,
         id: session_id(),
+        owner_kind: Some("service".to_owned()),
         workspace_id: Some(workspace_id()),
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,

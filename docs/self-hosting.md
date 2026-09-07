@@ -131,12 +131,14 @@ Rules the loader enforces:
 
 - Tokens are at least **32 characters** drawn from `[A-Za-z0-9._~-]`. Thirty-two
   random bytes in hex gives 64 characters, comfortably over the floor.
-- The optional third field is the user's role. `admin` puts them on the
-  deployment plane; an absent field means member, and anything else is a parse
-  error rather than a silent demotion.
-- **At least one line must say `admin`**, or the file fails to load and the
-  server does not start. A deployment nobody is empowered to configure must
-  not exist.
+- The optional third field is `admin` or `service`. `admin` puts a person on
+  the deployment plane. `service` names a member that owns automated sessions
+  and never signs in. An absent field means a person member. Combining
+  `admin` and `service`, or any other value, is a parse error rather than a
+  silent demotion.
+- **At least one person line must say `admin`**, or the file fails to load and
+  the server does not start. A service line does not satisfy that check. A
+  deployment nobody is empowered to configure must not exist.
 - A user's lines must agree about their role. A file that says both fails to
   load.
 - One user may hold several tokens, which is how rotation works. A token may
@@ -486,7 +488,7 @@ address directly, outlives its bearer, or arrives with a code that has
 already been used shows a sign-in screen that sends you back through the
 console.
 
-**With a token file** (`TIDEBREAK_AUTH_TOKENS_FILE`), the page asks you to
+**With a token file** (`TIDEBREAK_AUTH_TOKENS_FILE`), write one whitespace-separated mapping per line as `name token`, with an optional third field. Use `admin` for a person who may configure the deployment, or `service` for a member that owns automated sessions and never signs in. Do not combine `admin` and `service`; keep at least one person marked `admin`. The page asks you to
 paste your token. It probes the token against an authenticated read on the
 machine first, so a wrong one leaves you on the same screen with the
 refusal instead of a broken session. A token is as strong as the file it came

@@ -163,6 +163,7 @@ pub(crate) fn session_value() -> Session {
     Session {
         id: SessionId::new(),
         owner: OwnerId::local(),
+        owner_kind: None,
         workspace_id: Some(WorkspaceId::new()),
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,

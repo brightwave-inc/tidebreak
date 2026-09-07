@@ -85,6 +85,7 @@ async fn seed_owner(
             visibility: tidebreak_core::SessionVisibility::Private,
             id: session_id,
             owner: owner.clone(),
+            owner_kind: None,
             workspace_id: Some(workspace_id),
             kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,

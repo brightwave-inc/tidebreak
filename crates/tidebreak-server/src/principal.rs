@@ -47,6 +47,15 @@ pub enum Role {
     Member,
 }
 
+/// Whether a named principal represents a person or deployment service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalKind {
+    /// A person who may use browser sign-in affordances.
+    Person,
+    /// A deployment identity that owns work but never signs in.
+    Service,
+}
+
 /// The authenticated identity a request acts as.
 ///
 /// The desktop bearer is per-launch and loopback-only, so whoever presents it
@@ -65,6 +74,8 @@ pub enum Principal {
     User {
         /// Who the credential names.
         id: UserId,
+        /// Whether the identity is a person or a deployment service.
+        kind: PrincipalKind,
         /// What the selected authenticator says they may reconfigure.
         role: Role,
     },
@@ -97,6 +108,24 @@ impl Principal {
             Self::LocalOwner => true,
             Self::User { role, .. } => *role == Role::Admin,
         }
+    }
+
+    /// Whether this principal represents a deployment service.
+    #[must_use]
+    pub fn is_service(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                kind: PrincipalKind::Service,
+                ..
+            }
+        )
+    }
+
+    /// The value persisted on service-owned sessions; absence means person.
+    #[must_use]
+    pub fn session_owner_kind(&self) -> Option<&'static str> {
+        self.is_service().then_some("service")
     }
 }
 

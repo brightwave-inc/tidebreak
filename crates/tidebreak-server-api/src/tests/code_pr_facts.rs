@@ -164,6 +164,7 @@ async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> 
     let session = Session {
         id: SessionId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         workspace_id: Some(workspace_id),
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,

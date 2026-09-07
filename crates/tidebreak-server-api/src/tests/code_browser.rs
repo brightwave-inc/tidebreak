@@ -314,6 +314,7 @@ async fn seed_session(db: &DbStore, lc: SessionLifecycle) -> (WorkspaceId, Sessi
     let s = Session {
         id: SessionId::new(),
         owner: OwnerId::local(),
+        owner_kind: None,
         workspace_id: Some(ws.id),
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,

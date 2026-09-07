@@ -122,6 +122,7 @@ fn approval_lease() -> crate::auth::GatewayAuthLease {
     crate::auth::GatewayAuthLease::for_test(
         crate::principal::Principal::User {
             id: crate::principal::UserId::new(USER).unwrap(),
+            kind: crate::principal::PrincipalKind::Person,
             role: crate::principal::Role::Member,
         },
         "browser-owner".into(),
@@ -332,6 +333,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
     let session = Session {
         id: SessionId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         workspace_id: None,
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
@@ -541,6 +543,7 @@ async fn bind_runtime_session(
     let session = Session {
         id: SessionId::new(),
         owner: owner.clone(),
+        owner_kind: None,
         workspace_id: workspace,
         kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,

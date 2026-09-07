@@ -229,6 +229,7 @@ where
             Some(owner) if !owner.is_local() => Set(owner.as_str().to_owned()),
             _ => sea_orm::ActiveValue::NotSet,
         },
+        owner_kind: Set(None),
         workspace_id: Set(None),
         kind: Set(SessionKind::Interactive.as_str().to_owned()),
         harness_kind: Set(HarnessKind::Internal.as_str().to_owned()),
