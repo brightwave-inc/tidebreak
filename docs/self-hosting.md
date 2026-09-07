@@ -486,7 +486,7 @@ address directly, outlives its bearer, or arrives with a code that has
 already been used shows a sign-in screen that sends you back through the
 console.
 
-**With a token file** (`TIDEBREAK_AUTH_TOKENS_FILE`), the page asks you to
+**With a token file** (`TIDEBREAK_AUTH_TOKENS_FILE`), write one whitespace-separated mapping per line as `name token`, with an optional third field. Use `admin` for a person who may configure the deployment, or `service` for a member that owns automated sessions and never signs in. Do not combine `admin` and `service`; keep at least one person marked `admin`. The page asks you to
 paste your token. It probes the token against an authenticated read on the
 machine first, so a wrong one leaves you on the same screen with the
 refusal instead of a broken session. A token is as strong as the file it came

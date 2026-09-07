@@ -348,7 +348,14 @@ impl CodeRuntime {
             _ => {}
         }
         let session = self
-            .create_session_of_kind(owner, workspace_id, SessionKind::Watch, harness, settings)
+            .create_session_of_kind(
+                owner,
+                None,
+                workspace_id,
+                SessionKind::Watch,
+                harness,
+                settings,
+            )
             .await?;
         let now = Utc::now();
         let watch = CodeWatch {

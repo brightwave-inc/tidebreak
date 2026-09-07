@@ -88,12 +88,11 @@ const DISCOVERY_PATH = "/auth/discovery";
 /**
  * The authenticated read a pasted token has to pass before the tab holds it.
  *
- * `/models` is a member-plane capability read: every principal may make it,
- * it names nobody, and it is the kind of request the shell makes with a
- * bearer the moment boot finishes. A machine that refuses it refuses the
- * token, which is the whole answer the sign-in screen needs.
+ * The dedicated route distinguishes a person signing in from a service
+ * principal using ordinary member APIs. A service owns sessions but never
+ * becomes a browser session.
  */
-const PRINCIPAL_PROBE_PATH = "/models";
+const PRINCIPAL_PROBE_PATH = "/auth/token-sign-in";
 
 /**
  * Take a token the reader pasted and, if the machine accepts it, hold it for
@@ -115,6 +114,7 @@ export async function acceptPastedToken(
   let response: Response;
   try {
     response = await fetch(`${origin}${PRINCIPAL_PROBE_PATH}`, {
+      method: "POST",
       cache: "no-store",
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
     });

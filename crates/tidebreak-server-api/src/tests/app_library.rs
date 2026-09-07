@@ -215,6 +215,7 @@ async fn another_principal_cannot_reach_an_app_through_any_app_route() {
                 request.extensions_mut().insert(AuthContext {
                     principal: Principal::User {
                         id: UserId::new(&id).unwrap(),
+                        kind: crate::principal::PrincipalKind::Person,
                         role: Role::Member,
                     },
                     client_executor: false,

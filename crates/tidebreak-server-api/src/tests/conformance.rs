@@ -13,6 +13,9 @@ use super::*;
 use std::net::SocketAddr;
 
 use tidebreak_core::{ApprovalDecision, ApprovalGate, ApprovalRequest};
+use tidebreak_harness::AdapterRegistry;
+
+use crate::code::CodeRuntime;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -22,17 +25,18 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 /// token file — one that names no admin refuses to load.
 async fn self_host_app() -> (Router, AppState, Arc<dyn Store>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("conformance.db").await;
-    let store: Arc<dyn Store> = Arc::new(store);
+    let db = Arc::new(store);
+    let store: Arc<dyn Store> = db.clone();
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
-        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\nchannel {CAROL_TOKEN} service\n"),
     )
     .unwrap();
     let mut config = Config::desktop(dir.path());
     config.profile = Profile::SelfHost;
     config.auth_tokens_file = Some(tokens_file);
-    let state = AppState::new(
+    let mut state = AppState::new(
         config,
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
@@ -43,6 +47,11 @@ async fn self_host_app() -> (Router, AppState, Arc<dyn Store>, tempfile::TempDir
             ..AgentConfig::default()
         },
     );
+    state.code = Some(Arc::new(CodeRuntime::with_registry(
+        db,
+        dir.path().to_path_buf(),
+        AdapterRegistry::new(),
+    )));
     spawn_turn_worker(&state);
     (app(state.clone()), state, store, dir)
 }
@@ -66,6 +75,44 @@ async fn request(
     }
     .unwrap();
     router.clone().oneshot(request).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_service_token_runs_member_work_but_does_not_sign_in() {
+    let (router, _state, _store, _dir) = self_host_app().await;
+    let service = format!("Bearer {CAROL_TOKEN}");
+
+    let sign_in = request(&router, "POST", "/auth/token-sign-in", &service, None).await;
+    assert_eq!(sign_in.status(), StatusCode::FORBIDDEN);
+    let message = String::from_utf8(
+        axum::body::to_bytes(sign_in.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(message.contains("service principals do not sign in"));
+
+    let created = request(
+        &router,
+        "POST",
+        "/sessions",
+        &service,
+        Some(serde_json::json!({ "permission_mode": "ask" })),
+    )
+    .await;
+    let created_status = created.status();
+    let created_body = axum::body::to_bytes(created.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        created_status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&created_body)
+    );
+    let snapshot: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+    assert_eq!(snapshot["owner_kind"], "service");
 }
 
 #[tokio::test]

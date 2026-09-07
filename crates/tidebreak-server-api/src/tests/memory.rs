@@ -147,6 +147,7 @@ async fn memory_routes_isolate_records_by_owner() {
                 request.extensions_mut().insert(AuthContext {
                     principal: Principal::User {
                         id: UserId::new("bob").unwrap(),
+                        kind: crate::principal::PrincipalKind::Person,
                         role: Role::Member,
                     },
                     client_executor: false,

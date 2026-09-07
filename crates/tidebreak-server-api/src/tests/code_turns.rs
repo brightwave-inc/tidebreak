@@ -768,6 +768,7 @@ async fn a_workspace_still_holds_only_one_watch_session() {
     let watch = |()| {
         runtime.create_session_of_kind(
             &owner,
+            None,
             workspace_id,
             tidebreak_core::SessionKind::Watch,
             HarnessKind::ClaudeCode,
