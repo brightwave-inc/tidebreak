@@ -1231,8 +1231,6 @@ struct GatewayPrincipal {
     user_id: uuid::Uuid,
     #[serde(default)]
     kind: GatewayPrincipalKind,
-    #[serde(default)]
-    username: Option<String>,
     is_admin: bool,
 }
 
@@ -1400,12 +1398,7 @@ impl GatewayAuthenticator {
         let principal: GatewayPrincipal = serde_json::from_slice(&bytes).map_err(|error| {
             AgentError::msg(format!("gateway auth response was invalid: {error}"))
         })?;
-        let id = UserId::new(
-            principal
-                .username
-                .as_deref()
-                .unwrap_or(&principal.user_id.to_string()),
-        )?;
+        let id = UserId::new(&principal.user_id.to_string())?;
         let kind = match principal.kind {
             GatewayPrincipalKind::Person => PrincipalKind::Person,
             GatewayPrincipalKind::Service => PrincipalKind::Service,
@@ -1607,7 +1600,8 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
     if auth.principal.is_admin() {
         next.run(request).await
     } else if auth.principal.is_service() {
-        ServerError::forbidden("service principals do not sign in").into_response()
+        ServerError::forbidden("service principals do not administer the deployment")
+            .into_response()
     } else {
         StatusCode::FORBIDDEN.into_response()
     }
@@ -2203,6 +2197,13 @@ mod tests {
                                 "is_admin": false,
                             }))
                             .into_response(),
+                            Some("Bearer mg_at_service") => Json(serde_json::json!({
+                                "user_id": user_id,
+                                "is_admin": true,
+                                "kind": "service",
+                                "username": "tidebreak-slack",
+                            }))
+                            .into_response(),
                             Some("Bearer mg_at_broken") => StatusCode::BAD_GATEWAY.into_response(),
                             _ => StatusCode::UNAUTHORIZED.into_response(),
                         }
@@ -2222,6 +2223,14 @@ mod tests {
         let member = verifier.resolve("mg_at_member").await.unwrap().unwrap();
         assert!(!member.is_admin());
         assert_eq!(member.owner_id().as_str(), format!("user:{user_id}"));
+        assert!(!member.is_service());
+
+        // A service identity keeps the gateway's stable id as its owner key,
+        // never its username, and no flag on the wire makes it an admin.
+        let service = verifier.resolve("mg_at_service").await.unwrap().unwrap();
+        assert!(service.is_service());
+        assert!(!service.is_admin());
+        assert_eq!(service.owner_id().as_str(), format!("user:{user_id}"));
 
         assert!(verifier.resolve("mg_at_revoked").await.unwrap().is_none());
         assert!(verifier

@@ -319,8 +319,9 @@ describe("a pasted token", () => {
       }),
     ).resolves.toBe(true);
     expect(fetch).toHaveBeenCalledWith(
-      "https://tidebreak.example.com/models",
+      "https://tidebreak.example.com/auth/token-sign-in",
       expect.objectContaining({
+        method: "POST",
         cache: "no-store",
         headers: expect.objectContaining({
           authorization: "Bearer alice-token-one-padded-to-thirty-two",
