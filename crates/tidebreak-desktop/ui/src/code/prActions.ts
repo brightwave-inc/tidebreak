@@ -212,10 +212,7 @@ export function prMergeControls(state: PrGate): {
 }
 
 /** The workflow actions an agent carries out, as opposed to an endpoint. */
-export type PrPromptAction = Exclude<
-  PrWorkflowAction,
-  "watch_and_fix" | "mark_ready" | "merge"
->;
+export type PrPromptAction = Exclude<PrWorkflowAction, "mark_ready" | "merge">;
 
 /**
  * A delivery row in the digest vocabulary the workflow prompts consume.
@@ -291,9 +288,7 @@ export function prFreshAgentPrompt(
 /**
  * Prompt actions run in the workspace's interactive session.
  *
- * Three of the workflow actions are deliberately absent. "Watch and fix"
- * starts a durable server-side watch task (`POST
- * /code/workspaces/{id}/watch`). Merging and readying a draft are
+ * Watch and fix runs in the existing conversation. Merging and readying a draft are
  * pull-request state changes, which decision 42 reserves for the user: they
  * run through their own endpoints, and excluding them from this type is what
  * stops a merge prompt from being wired back up by accident.

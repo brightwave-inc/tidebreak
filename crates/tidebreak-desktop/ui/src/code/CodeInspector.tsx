@@ -22,7 +22,6 @@ import { toast } from "sonner";
 import { HttpError, type ApiClient } from "../api/client";
 import type {
   CodePrMergeMethod,
-  CodeWorkspacePullRequestFact,
   CodeWorkspaceSnapshot,
   PullRequestCheck,
   PullRequestComment,
@@ -118,7 +117,9 @@ export function CodeInspector({
   onClose?: () => void;
 }) {
   const digest = useWorkspaceDigest(workspaceId);
-  const pr = prResource?.data?.pr ?? digest?.pr_state ?? workspace?.pr;
+  const pr = prResource?.data
+    ? prResource.data.pr
+    : (digest?.pr_state ?? workspace?.pr);
   const scope = useCodeUiStore((state) => state.inspectorScope);
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const filesSearchPending = useCodeUiStore(
@@ -354,10 +355,9 @@ export function inspectorTurnLabel(
  * Selecting a non-primary row shows its stored snapshot; the primary row
  * returns to the live resource.
  *
- * Numbers repeat across repositories and the live digest carries no
- * repository identity, so the primary is resolved only when exactly one
- * attributed fact carries the live number. A colliding row is never treated
- * as the primary: selecting it shows its own stored snapshot.
+ * Numbers repeat across repositories, so the primary is resolved only when
+ * exactly one attributed fact carries the live number and URL. Matching the
+ * full URL keeps another repository's number from becoming the primary row.
  */
 function WorkspacePrTab({
   client,
@@ -374,16 +374,19 @@ function WorkspacePrTab({
   prResource?: CodeWorkspacePrResource;
   prCount?: number;
 }) {
-  const attributed = useWorkspacePullRequests(client, workspaceId, prCount);
-  const [selected, setSelected] = useState<CodeWorkspacePullRequestFact | null>(
-    null,
-  );
+  const attributed = useWorkspacePullRequests(client, workspaceId, prCount, pr);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   useEffect(() => {
-    setSelected(null);
+    setSelectedId(null);
   }, [workspaceId]);
   const items = attributed.data?.items ?? [];
+  const selected = items.find((item) => factKey(item) === selectedId);
   const primaryMatches =
-    pr === undefined ? [] : items.filter((item) => item.number === pr.number);
+    pr === undefined
+      ? []
+      : items.filter(
+          (item) => item.number === pr.number && item.url === pr.url,
+        );
   const primary = primaryMatches.length === 1 ? primaryMatches[0] : undefined;
   const selectedKey = selected
     ? factKey(selected)
@@ -398,8 +401,10 @@ function WorkspacePrTab({
           items={items}
           selectedKey={selectedKey}
           onSelect={(item) =>
-            setSelected(
-              primary && factKey(item) === factKey(primary) ? null : item,
+            setSelectedId(
+              primary && factKey(item) === factKey(primary)
+                ? null
+                : factKey(item),
             )
           }
         />
@@ -439,7 +444,7 @@ export function WorkspaceDeliveryPrTab({
         client={client}
         summary={deliverySummaryFromWorkspacePr(pr, target)}
         onChanged={() => {
-          void prResource?.refreshFromHost();
+          void prResource?.refreshFromHost().catch(() => undefined);
         }}
         onOpenWorkspace={() => undefined}
       />

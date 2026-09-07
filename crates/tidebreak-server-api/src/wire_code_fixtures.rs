@@ -13,9 +13,10 @@
 use crate::wire::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
     CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,
-    HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest,
-    SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
+    CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
+    HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
+    SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot,
+    UpdateNotice,
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
@@ -555,6 +556,20 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace pr",
             "workspace_pr",
             &CodeWorkspacePrSnapshot {
+                git: Some(CodeWorkspaceGitState {
+                    branch: Some("mara/code-parsers-bounded".to_owned()),
+                    head_sha: "cec166ffc1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6".to_owned(),
+                    base_ref: "main".to_owned(),
+                    upstream: Some("origin/mara/code-parsers-bounded".to_owned()),
+                    ahead_of_upstream: 2,
+                    behind_upstream: 0,
+                    changed_files: 1,
+                    staged_files: 0,
+                    unstaged_files: 1,
+                    untracked_files: 0,
+                    conflicted_files: 0,
+                    branch_has_changes: true,
+                }),
                 dirty: false,
                 unpushed: true,
                 ahead: 2,

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState, type ComponentProps } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Archive,
@@ -11,7 +11,8 @@ import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
 import { attachedRemotely } from "@/host";
-import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import type { ApiClient } from "../api/client";
 import { useLayoutState } from "@/panel/usePanelNav";
 import { searchFromLayout } from "@/panel/panelUrl";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
@@ -52,8 +53,12 @@ import {
 } from "./workspaceSelection";
 import { fetchFixErrorsLogs } from "./checkLogs";
 import { prWorkflowPrompt } from "./prActions";
-import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
+import {
+  workspaceActionPrompt,
+  type WorkspaceWorkflowAction,
+} from "./workspaceWorkflow";
 import { readBrowserTabLayout } from "./workspace/browserTabLayout";
+import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 
 /**
  * The code-mode rail: one toolbar, then workspace cards.
@@ -287,7 +292,7 @@ export function CodeSidebar() {
               const selected = selectedWorkspaceIds.includes(workspace.id);
               const bulk = selected && selectedWorkspaces.length > 1;
               return (
-                <WorkspaceCard
+                <LiveWorkspaceCard
                   key={workspace.id}
                   workspace={workspace}
                   digest={digest}
@@ -376,7 +381,11 @@ export function CodeSidebar() {
                       },
                     })
                   }
-                  onWorkflowAction={(action: WorkspaceWorkflowAction) => {
+                  onWorkflowAction={(
+                    action: WorkspaceWorkflowAction,
+                    currentPr,
+                  ) => {
+                    const pr = currentPr;
                     if (action === "open_pr") {
                       run("open-pr", {
                         workspace,
@@ -386,25 +395,42 @@ export function CodeSidebar() {
                       });
                       return;
                     }
-                    if (action === "watch_and_fix") {
-                      void client
-                        .startCodeWatch(workspace.id)
-                        .then(() => toast.success("Watching the pull request"))
-                        .catch((error) =>
-                          toast.error(
-                            friendlyErrorMessage(
-                              error,
-                              "Could not start the watch",
-                            ),
-                          ),
-                        );
+                    if (action === "archive") {
+                      run("archive", {
+                        workspace,
+                        title: digest?.title ?? workspace.title,
+                        pr,
+                        session: sessions[workspace.id],
+                      });
+                      return;
+                    }
+                    if (
+                      action === "compose_pr" ||
+                      action === "update_pr" ||
+                      action === "follow_up_pr" ||
+                      action === "sync_branch" ||
+                      action === "resolve_divergence" ||
+                      action === "resolve_local_conflicts"
+                    ) {
+                      const prompt = workspaceActionPrompt(
+                        action,
+                        pr,
+                        workspace.base_ref,
+                      );
+                      if (prompt && !runComposerPrompt(workspace.id, prompt)) {
+                        toast.error("Another agent action is already running");
+                        return;
+                      }
+                      void navigate({
+                        to: "/code/w/$workspaceId",
+                        params: { workspaceId: workspace.id },
+                      });
                       return;
                     }
                     if (
                       action === "open_source" ||
                       action === "push" ||
                       action === "create_pr" ||
-                      action === "compose_pr" ||
                       action === "merge" ||
                       action === "mark_ready"
                     ) {
@@ -601,5 +627,35 @@ function SidebarEmptyAction({
     >
       {label}
     </button>
+  );
+}
+
+function LiveWorkspaceCard(props: ComponentProps<typeof WorkspaceCard>) {
+  const { client } = useApp();
+  if (typeof client.getCodeWorkspacePr !== "function") {
+    return <WorkspaceCard {...props} />;
+  }
+  return <ObservedWorkspaceCard {...props} client={client} />;
+}
+
+function ObservedWorkspaceCard({
+  client,
+  ...props
+}: ComponentProps<typeof WorkspaceCard> & { client: ApiClient }) {
+  const [open, setOpen] = useState(false);
+  const pr = props.digest?.pr_state ?? props.workspace.pr;
+  const resource = useCodeWorkspacePr(
+    client,
+    props.workspace.id,
+    0,
+    pr,
+    open && props.workspace.status === "active",
+  );
+  return (
+    <WorkspaceCard
+      {...props}
+      prResource={resource}
+      onDetailOpenChange={setOpen}
+    />
   );
 }

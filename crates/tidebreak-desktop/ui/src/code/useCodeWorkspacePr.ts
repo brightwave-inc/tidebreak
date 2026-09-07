@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
-import { useLiveResource, type LiveResource } from "./useLiveContent";
+import { friendlyErrorMessage } from "@/lib/utils";
+import type { LiveResource } from "./useLiveContent";
 
 export type CodeWorkspacePrMutation =
   | "refresh"
@@ -14,148 +14,216 @@ export type CodeWorkspacePrMutation =
   | "auto_merge"
   | "watch"
   | "stop_watch";
-
 export type CodeWorkspacePrResource = LiveResource<CodeWorkspacePrSnapshot> & {
   busy: CodeWorkspacePrMutation | null;
   mutationError: string | null;
   setMutationError: (error: string | null) => void;
-  /** Force a fresh host read through the same lock and generation as writes. */
   refreshFromHost: () => Promise<CodeWorkspacePrSnapshot | undefined>;
   runMutation: <T>(
     mutation: CodeWorkspacePrMutation,
     operation: () => Promise<T>,
   ) => Promise<T | undefined>;
 };
+type Client = Pick<ApiClient, "getCodeWorkspacePr"> &
+  Partial<Pick<ApiClient, "refreshCodeWorkspacePr">>;
+type State = Pick<
+  CodeWorkspacePrResource,
+  "data" | "error" | "refreshing" | "busy" | "mutationError"
+>;
+const resources = new WeakMap<
+  Client["getCodeWorkspacePr"],
+  Map<string, WorkspacePrResource>
+>();
 
-/** One shareable live Git/PR snapshot for the header and inspector. */
+/** One read, mutation lock, and refresh timer for every view of a workspace. */
+class WorkspacePrResource {
+  state: State = {
+    data: null,
+    error: null,
+    refreshing: true,
+    busy: null,
+    mutationError: null,
+  };
+  listeners = new Set<() => void>();
+  generation = 0;
+  hostError: string | null = null;
+  inFlight: Promise<void> | null = null;
+  pending = false;
+  readers = 0;
+  timer: ReturnType<typeof setInterval> | undefined;
+  debounce: ReturnType<typeof setTimeout> | undefined;
+  constructor(
+    public client: Client,
+    readonly id: string,
+  ) {}
+  snapshot = () => this.state;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+  update(patch: Partial<State>) {
+    this.state = { ...this.state, ...patch };
+    for (const listener of this.listeners) listener();
+  }
+  retain = () => {
+    if (this.readers++ === 0) {
+      void this.refresh();
+      this.timer = setInterval(this.onFocus, 15_000);
+      window.addEventListener("focus", this.onFocus);
+      document.addEventListener("visibilitychange", this.onFocus);
+    }
+    return () => {
+      if (--this.readers === 0) {
+        clearInterval(this.timer);
+        clearTimeout(this.debounce);
+        window.removeEventListener("focus", this.onFocus);
+        document.removeEventListener("visibilitychange", this.onFocus);
+      }
+    };
+  };
+  onFocus = () => {
+    if (document.visibilityState !== "hidden") void this.refresh();
+  };
+  invalidate = () => {
+    clearTimeout(this.debounce);
+    this.debounce = setTimeout(() => void this.refresh(), 250);
+  };
+  refresh = (): Promise<void> => {
+    if (this.state.busy !== null) {
+      this.pending = true;
+      return Promise.resolve();
+    }
+    if (this.inFlight) {
+      this.pending = true;
+      return this.inFlight;
+    }
+    const generation = this.generation;
+    this.update({ refreshing: true });
+    this.inFlight = Promise.resolve()
+      .then(() => this.client.getCodeWorkspacePr(this.id))
+      .then(
+        (data) => {
+          if (generation === this.generation) {
+            this.hostError = null;
+            this.update({ data, error: null });
+          }
+        },
+        (error) => {
+          if (generation === this.generation)
+            this.update({
+              error: friendlyErrorMessage(
+                error,
+                "Could not load workspace status",
+              ),
+            });
+        },
+      )
+      .finally(() => {
+        if (generation !== this.generation) return;
+        this.inFlight = null;
+        this.update({ refreshing: false });
+        if (this.pending) {
+          this.pending = false;
+          void this.refresh();
+        }
+      });
+    return this.inFlight;
+  };
+  adopt = (data: CodeWorkspacePrSnapshot) => {
+    this.hostError = null;
+    this.generation++;
+    this.inFlight = null;
+    this.pending = false;
+    this.update({ data, error: null, refreshing: false, mutationError: null });
+  };
+  setMutationError = (mutationError: string | null) =>
+    this.update({ mutationError });
+  runMutation = async <T>(
+    busy: CodeWorkspacePrMutation,
+    operation: () => Promise<T>,
+  ): Promise<T | undefined> => {
+    if (this.state.busy !== null) return undefined;
+    this.update({ busy, mutationError: null });
+    try {
+      return await operation();
+    } finally {
+      this.update({ busy: null });
+      if (this.pending) {
+        this.pending = false;
+        void this.refresh();
+      }
+    }
+  };
+  refreshFromHost = () =>
+    this.runMutation("refresh", async () => {
+      try {
+        const next = await (this.client.refreshCodeWorkspacePr?.(this.id) ??
+          this.client.getCodeWorkspacePr(this.id));
+        this.adopt(next);
+        return next;
+      } catch (error) {
+        this.hostError = friendlyErrorMessage(
+          error,
+          "Could not refresh workspace status",
+        );
+        this.update({ error: this.hostError });
+        throw error;
+      }
+    });
+}
+
 export function useCodeWorkspacePr(
-  client: Pick<ApiClient, "getCodeWorkspacePr"> &
-    Partial<Pick<ApiClient, "refreshCodeWorkspacePr">>,
+  client: Client,
   workspaceId: string,
   contentRevision: number,
   livePr?: PullRequestDigest,
+  enabled = true,
 ): CodeWorkspacePrResource {
-  const [busy, setBusy] = useState<CodeWorkspacePrMutation | null>(null);
-  const [mutationError, setMutationError] = useState<string | null>(null);
-  const busyRef = useRef<{
-    generation: number;
-    mutation: CodeWorkspacePrMutation;
-  } | null>(null);
-  const workspaceRef = useRef(workspaceId);
-  const workspaceGenerationRef = useRef(0);
-  if (workspaceRef.current !== workspaceId) {
-    workspaceRef.current = workspaceId;
-    workspaceGenerationRef.current += 1;
-  }
-  const workspaceGeneration = workspaceGenerationRef.current;
-  const load = useCallback(
-    () => client.getCodeWorkspacePr(workspaceId),
-    [client, workspaceId],
-  );
-  const resource = useLiveResource({
-    key: workspaceId,
-    revision: contentRevision,
-    load,
-    errorMessage: "Could not load workspace status",
-  });
-  const livePrSignature = pullRequestDigestSignature(livePr);
-  const seenLivePrRef = useRef({ workspaceId, signature: livePrSignature });
-
-  useEffect(() => {
-    busyRef.current = null;
-    setBusy(null);
-    setMutationError(null);
-  }, [workspaceId]);
-
-  useEffect(() => {
-    if (!resource.refreshing && resource.error === null && resource.data) {
-      setMutationError(null);
+  const resource = useMemo(() => {
+    let entries = resources.get(client.getCodeWorkspacePr);
+    if (!entries) {
+      entries = new Map();
+      resources.set(client.getCodeWorkspacePr, entries);
     }
-  }, [resource.data, resource.error, resource.refreshing]);
-
-  useEffect(() => {
-    const seen = seenLivePrRef.current;
-    if (seen.workspaceId !== workspaceId) {
-      // The keyed resource is already loading the new workspace.
-      seenLivePrRef.current = { workspaceId, signature: livePrSignature };
-      return;
+    let value = entries.get(workspaceId);
+    if (!value) {
+      value = new WorkspacePrResource(client, workspaceId);
+      entries.set(workspaceId, value);
     }
-    if (seen.signature === livePrSignature) return;
-    seenLivePrRef.current = { workspaceId, signature: livePrSignature };
-    // A digest is a cheap signal that persisted PR state changed elsewhere.
-    // Re-read the complete snapshot so local Git fields and hosted PR fields
-    // continue to come from one source of truth.
-    void resource.refresh();
-  }, [livePrSignature, resource.refresh, workspaceId]);
-
-  const adopt = useCallback(
-    (value: CodeWorkspacePrSnapshot) => {
-      if (workspaceGeneration !== workspaceGenerationRef.current) return;
-      resource.adopt(value);
-      setMutationError(null);
-    },
-    [resource.adopt, workspaceGeneration],
+    return value;
+  }, [client.getCodeWorkspacePr, workspaceId]);
+  resource.client = client;
+  const state = useSyncExternalStore(
+    resource.subscribe,
+    resource.snapshot,
+    resource.snapshot,
   );
-  const setBoundMutationError = useCallback(
-    (error: string | null) => {
-      if (workspaceGeneration !== workspaceGenerationRef.current) return;
-      setMutationError(error);
-    },
-    [workspaceGeneration],
+  useEffect(
+    () => (enabled ? resource.retain() : undefined),
+    [enabled, resource],
   );
-
-  const runMutation = useCallback(
-    async <T>(
-      mutation: CodeWorkspacePrMutation,
-      operation: () => Promise<T>,
-    ): Promise<T | undefined> => {
-      if (workspaceGeneration !== workspaceGenerationRef.current) {
-        return undefined;
-      }
-      if (busyRef.current?.generation === workspaceGeneration) {
-        return undefined;
-      }
-      busyRef.current = { generation: workspaceGeneration, mutation };
-      setBusy(mutation);
-      setMutationError(null);
-      try {
-        return await operation();
-      } finally {
-        if (
-          workspaceGeneration === workspaceGenerationRef.current &&
-          busyRef.current?.generation === workspaceGeneration
-        ) {
-          busyRef.current = null;
-          setBusy(null);
-        }
-      }
-    },
-    [workspaceGeneration],
-  );
-
-  const refreshFromHost = useCallback(
-    () =>
-      runMutation("refresh", async () => {
-        const next = client.refreshCodeWorkspacePr
-          ? await client.refreshCodeWorkspacePr(workspaceId)
-          : await client.getCodeWorkspacePr(workspaceId);
-        // Adopt inside the serialized operation. Besides keeping the lock held
-        // until the state is visible, adopt retires any older passive read so
-        // it cannot land after this fresh host snapshot.
-        adopt(next);
-        return next;
-      }),
-    [adopt, client, runMutation, workspaceId],
-  );
-
+  const liveSignature = pullRequestDigestSignature(livePr);
+  const seen = useRef({ resource, contentRevision, liveSignature });
+  useEffect(() => {
+    const previous = seen.current;
+    seen.current = { resource, contentRevision, liveSignature };
+    if (previous.resource !== resource || !enabled) return;
+    if (
+      previous.contentRevision !== contentRevision ||
+      previous.liveSignature !== liveSignature
+    )
+      resource.invalidate();
+  }, [resource, enabled, contentRevision, liveSignature]);
   return {
-    ...resource,
-    adopt,
-    busy,
-    mutationError,
-    setMutationError: setBoundMutationError,
-    refreshFromHost,
-    runMutation,
+    ...state,
+    refresh: resource.refresh,
+    adopt: resource.adopt,
+    busy: state.busy,
+    setMutationError: resource.setMutationError,
+    runMutation: resource.runMutation,
+    refreshFromHost: resource.refreshFromHost,
   };
 }
 
