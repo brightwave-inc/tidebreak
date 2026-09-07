@@ -225,6 +225,24 @@ pub enum HarnessNoticeLevel {
     Error,
 }
 
+/// Why a machine session's own git or `gh` was refused a forge credential
+/// at the loopback route (decision 63's seam), so the surfaces can name
+/// the remedy rather than show the bare status git prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialRefusalReason {
+    /// The external connection that authorizes this session is gone:
+    /// revoked, replaced by a newer connect, or no longer delegated by the
+    /// gateway. Reconnecting from the channel is the remedy.
+    ConnectionEnded,
+    /// The forge offers no identity for this session yet: the person has
+    /// not connected their account at the gateway.
+    NotConnected,
+    /// The forge or the gateway refused the mint for another reason, which
+    /// the message carries.
+    ForgeRefused,
+}
+
 /// Outcome recorded on [`Event::ApprovalResolved`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -514,6 +532,18 @@ pub enum Event {
         /// Bounded message.
         message: String,
     },
+    /// The session's own git or `gh` asked the machine for a forge
+    /// credential and was refused. Journaled by the loopback route so the
+    /// desktop and the channel see why a push stopped, beside the bare
+    /// status the helper printed for the engine.
+    CredentialRefused {
+        /// Which class of refusal, so a renderer can pick the remedy.
+        reason: CredentialRefusalReason,
+        /// Bounded message, as the machine answered the helper.
+        message: String,
+        /// Bounded remedy sentence for the person.
+        remediation: String,
+    },
     /// Server-computed attention changed.
     AttentionChanged {
         /// New state.
@@ -649,6 +679,7 @@ mod tests {
             Event::ContextTruncated { .. } => 22,
             Event::CompactionStarted => 23,
             Event::CompactionFinished { .. } => 24,
+            Event::CredentialRefused { .. } => 25,
         }
     }
 
@@ -759,6 +790,11 @@ mod tests {
             Event::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
                 message: "unrecognized event type counted".into(),
+            },
+            Event::CredentialRefused {
+                reason: CredentialRefusalReason::ConnectionEnded,
+                message: "this external connection has no live gateway delegation".into(),
+                remediation: "Reconnect this session from Slack.".into(),
             },
             Event::AttentionChanged {
                 state: AttentionState::Fenced {

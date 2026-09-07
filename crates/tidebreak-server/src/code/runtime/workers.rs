@@ -60,6 +60,54 @@ impl CodeRuntime {
         )
     }
 
+    /// Journal that the session's own git or `gh` asked this machine for a
+    /// forge credential and was refused, so the desktop and the channel can
+    /// say why a push stopped rather than only the engine's transcript. Best
+    /// effort: a session that cannot take the row (ended, superseded epoch)
+    /// still gets the refusal in the log.
+    pub async fn note_credential_refusal(
+        &self,
+        session: &Session,
+        reason: tidebreak_core::CredentialRefusalReason,
+        message: &str,
+        remediation: &str,
+    ) {
+        tracing::warn!(
+            session = %session.id,
+            ?reason,
+            message,
+            "the session's git credential borrow was refused"
+        );
+        let bounded = |text: &str| -> String {
+            text.chars()
+                .take(tidebreak_core::MAX_NOTICE_CHARS)
+                .collect()
+        };
+        let event = tidebreak_core::Event::CredentialRefused {
+            reason,
+            message: bounded(message),
+            remediation: bounded(remediation),
+        };
+        match tidebreak_core::db::code::append_event(
+            &self.db,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            &event,
+        )
+        .await
+        {
+            Ok(seq) => self
+                .bus
+                .publish(session.id, tidebreak_core::SequencedEvent { seq, event }),
+            Err(error) => tracing::warn!(
+                session = %session.id,
+                %error,
+                "the credential refusal was not journaled"
+            ),
+        }
+    }
+
     pub(super) fn wake_all_workers(&self) {
         for handle in self.workers.lock().expect("code workers").values() {
             wake_queue(handle);

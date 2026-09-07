@@ -1098,6 +1098,27 @@ describe("parseCodeEvent", () => {
     });
     expect(
       parseCodeEvent({
+        type: "credential_refused",
+        reason: "connection_ended",
+        message: "no live gateway delegation",
+        remediation: "Reconnect this session from Slack.",
+      }),
+    ).toEqual({
+      type: "credential_refused",
+      reason: "connection_ended",
+      message: "no live gateway delegation",
+      remediation: "Reconnect this session from Slack.",
+    });
+    expect(
+      parseCodeEvent({
+        type: "credential_refused",
+        reason: "revoked",
+        message: "x",
+        remediation: "y",
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeEvent({
         type: "turn_resumed",
         turn_id: "11111111-1111-4111-8111-111111111111",
       }),

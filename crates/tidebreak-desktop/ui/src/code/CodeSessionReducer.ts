@@ -1105,6 +1105,23 @@ export function reduceCodeSessionEvent(
       };
     }
 
+    case "credential_refused": {
+      // A push the machine could not credential: one notice row naming the
+      // reason and the remedy, where the engine's own error lands beside it.
+      return {
+        state: {
+          ...state,
+          items: insertBeforeTurnBoundary(state.items, attributedTurnId, {
+            kind: "notice",
+            id: deps.nextId(),
+            level: "warning",
+            message: `Push refused: ${event.message} ${event.remediation}`,
+          }),
+        },
+        effects,
+      };
+    }
+
     case "checkpoint_recorded": {
       return {
         state: {

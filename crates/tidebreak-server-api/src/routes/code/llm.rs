@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use crate::code::harness_llm::RelayEndpoint;
 use crate::obo_gateway::GitForgeError;
 use crate::state::AppState;
+use tidebreak_core::CredentialRefusalReason;
 
 /// Body cap for one relayed inference request. A long session's request
 /// carries its whole context, so this is far above the default limit and
@@ -153,6 +154,9 @@ pub async fn harness_git_credential(
     {
         return plain(StatusCode::OK, "");
     }
+    // Every refusal from here on is journaled beside the answer: the helper
+    // prints the body for the engine, and the row tells the desktop and the
+    // channel why a push stopped (decision 88's machine sessions).
     let delegated = match relay
         .external_gateway_for_session(&subject.owner, subject.session)
         .await
@@ -161,8 +165,28 @@ pub async fn harness_git_credential(
         Err(
             error @ (tidebreak_core::AgentError::SignInRequired(_)
             | tidebreak_core::AgentError::InvalidTarget(_)),
-        ) => return plain(StatusCode::UNAUTHORIZED, &error.to_string()),
-        Err(error) => return plain(StatusCode::BAD_GATEWAY, &error.to_string()),
+        ) => {
+            let message = error.to_string();
+            code.note_credential_refusal(
+                &session,
+                CredentialRefusalReason::ConnectionEnded,
+                &message,
+                RECONNECT_REMEDY,
+            )
+            .await;
+            return plain(StatusCode::UNAUTHORIZED, &message);
+        }
+        Err(error) => {
+            let message = error.to_string();
+            code.note_credential_refusal(
+                &session,
+                CredentialRefusalReason::ForgeRefused,
+                &message,
+                RETRY_REMEDY,
+            )
+            .await;
+            return plain(StatusCode::BAD_GATEWAY, &message);
+        }
     };
     let lender: &dyn crate::obo_gateway::GitCredentialLender = match delegated.as_ref() {
         Some(gateway) => gateway.as_ref(),
@@ -179,13 +203,51 @@ pub async fn harness_git_credential(
                 credential.username, credential.secret
             ),
         ),
-        Err(GitForgeError::SignInRequired(message)) => plain(StatusCode::UNAUTHORIZED, &message),
-        Err(error) => plain(
-            StatusCode::BAD_GATEWAY,
-            &crate::code::clone::git_forge_refusal_message(&error),
-        ),
+        Err(GitForgeError::SignInRequired(message)) => {
+            code.note_credential_refusal(
+                &session,
+                CredentialRefusalReason::ConnectionEnded,
+                &message,
+                RECONNECT_REMEDY,
+            )
+            .await;
+            plain(StatusCode::UNAUTHORIZED, &message)
+        }
+        Err(error @ GitForgeError::NotConnected { .. }) => {
+            let message = crate::code::clone::git_forge_refusal_message(&error);
+            code.note_credential_refusal(
+                &session,
+                CredentialRefusalReason::NotConnected,
+                &message,
+                CONNECT_REMEDY,
+            )
+            .await;
+            plain(StatusCode::FORBIDDEN, &message)
+        }
+        Err(error) => {
+            let message = crate::code::clone::git_forge_refusal_message(&error);
+            code.note_credential_refusal(
+                &session,
+                CredentialRefusalReason::ForgeRefused,
+                &message,
+                RETRY_REMEDY,
+            )
+            .await;
+            plain(StatusCode::BAD_GATEWAY, &message)
+        }
     }
 }
+
+/// The remedy a refusal names when the session's external connection is
+/// gone: only a new connect from the channel restores its authority.
+const RECONNECT_REMEDY: &str =
+    "Reconnect this session from Slack; a newer connect or a revoke ended the one it used.";
+/// The remedy when the forge offers no identity for this person yet.
+const CONNECT_REMEDY: &str = "Connect your GitHub account at the gateway, then push again.";
+/// The remedy when the forge or the gateway refused for a reason the
+/// message carries.
+const RETRY_REMEDY: &str =
+    "Read the reason above; if it names the deployment, ask an administrator.";
 
 /// What git asked for, from the description lines a helper receives.
 #[derive(Default)]

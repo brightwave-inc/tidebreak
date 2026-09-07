@@ -259,6 +259,17 @@ Trust boundaries, stated rather than implied:
   fences the workspace's grants for re-connect rather than guessing at
   remapped IDs.
 
+A machine session's own `git` and `gh` borrow the person's forge
+credential per call through the machine's loopback route, so the engine
+never holds a token. When that borrow is refused, the helper prints
+`Tidebreak: git credential refused (<status>): <reason>` to the engine's
+stderr and the machine journals a `credential_refused` event carrying the
+reason class (`connection_ended`, `not_connected`, or `forge_refused`),
+the message, and the remedy. The desktop shows it as a notice on the
+session; the adapter posts it in the thread, with the connect card when
+the connection ended, so a push that stops is never a bare authentication
+failure nobody can act on.
+
 Only the session owner's messages reach the session. Anyone else's reply
 gets an acknowledging reaction from the bot and, once per user per
 thread, an ephemeral notice that says what they can do: who the owner
@@ -479,11 +490,19 @@ sessions but to withhold `Allow`.
 Permission mode follows the location. Inside a sandbox the engine is
 `Allow`; confinement is the permission boundary
 ([`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)).
-On the machine the session takes the deployment's default mode, and the
-owner answers approvals from the desktop or the web, where the session
-is visible like any other, until the channel can carry them. Slack
-renders no harness approval cards yet. Slack `NeedsYou` is connect,
-fenced, or failed — never `approval_requested`.
+On the machine the session takes the mode the channel named, else the
+operator's default: `TIDEBREAK_EXTERNAL_PERMISSION_MODE` sets that
+default (`ask` unless the operator says otherwise) and
+`TIDEBREAK_EXTERNAL_PERMISSION_CEILING` bounds what a channel may ask
+for with `/tidebreak mode`. A request above the ceiling is refused by
+name, `permission_mode_above_ceiling`, so the person learns the
+deployment's rule instead of getting a silently clamped session; a
+request for anything but `allow` on a sandbox deployment is refused as
+`permission_mode_unsupported`. The owner answers approvals from the
+desktop or the web, where the session is visible like any other, until
+the channel can carry them. Slack renders no harness approval cards yet.
+Slack `NeedsYou` is connect, fenced, or failed — never
+`approval_requested`.
 
 Incarnations follow a durable intent protocol: write the incarnation
 intent row, provision, activate. Stop and reincarnate serialize through

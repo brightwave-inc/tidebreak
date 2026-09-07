@@ -207,6 +207,10 @@ pub struct CodeRuntime {
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
     /// Hosted execution keeps untrusted engines outside this server process.
     sandbox_only_execution: bool,
+    /// The mode a channel-bound session takes on this machine's engine when
+    /// the channel names none, and the most permissive mode a channel may
+    /// name (decision 88). Both default to `ask`.
+    external_permission: ExternalPermissionPolicy,
     /// Live fan-out for adapter-grant revocations, so an event stream
     /// holding a revoked grant drops immediately (docs/slack-sessions.md).
     pub grant_revocations: Arc<super::grants::GrantRevocations>,
@@ -391,6 +395,28 @@ struct CachedBranchRules {
     rules: Option<super::pr_fetch::BranchRules>,
 }
 
+/// The operator's permission policy for channel-bound sessions that run on
+/// this machine's own engine (decision 88): the mode such a session takes
+/// when the channel names none, and the most permissive mode a channel may
+/// name. Above the ceiling, get-or-create refuses by name rather than
+/// clamping, so the person in the channel learns the deployment's rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalPermissionPolicy {
+    /// The mode a machine session takes when the channel names none.
+    pub default_mode: PermissionMode,
+    /// The most permissive mode a channel may name.
+    pub ceiling: PermissionMode,
+}
+
+impl Default for ExternalPermissionPolicy {
+    fn default() -> Self {
+        Self {
+            default_mode: PermissionMode::DEFAULT,
+            ceiling: PermissionMode::DEFAULT,
+        }
+    }
+}
+
 /// What a new session starts on, beyond the engine it is bound to.
 ///
 /// One value rather than three parameters: a caller sets all of them together,
@@ -453,6 +479,7 @@ impl CodeRuntime {
             gateway_runtime: None,
             remote: None,
             sandbox_only_execution: false,
+            external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
@@ -614,6 +641,7 @@ impl CodeRuntime {
             gateway_runtime: None,
             remote: None,
             sandbox_only_execution: false,
+            external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
@@ -702,6 +730,29 @@ impl CodeRuntime {
     }
 
     /// Refuse local engines on a hosted deployment that requires isolation.
+    /// The operator's permission policy for channel-bound sessions on this
+    /// machine's engine: the default mode and the ceiling a channel may ask
+    /// for. Config validated the pair at boot, so the ceiling is never below
+    /// the default here.
+    pub fn with_external_permission_policy(
+        mut self,
+        default_mode: PermissionMode,
+        ceiling: PermissionMode,
+    ) -> Self {
+        self.external_permission = ExternalPermissionPolicy {
+            default_mode,
+            ceiling,
+        };
+        self
+    }
+
+    /// The policy [`Self::with_external_permission_policy`] set, for the
+    /// routes and the snapshot copy that name it.
+    #[must_use]
+    pub fn external_permission_policy(&self) -> ExternalPermissionPolicy {
+        self.external_permission
+    }
+
     pub fn with_sandbox_only_execution(mut self) -> Self {
         self.sandbox_only_execution = true;
         self

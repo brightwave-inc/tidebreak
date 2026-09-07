@@ -487,6 +487,10 @@ pub fn spawn_wiring(
 /// The loopback route a machine session's git asks for a credential.
 pub const GIT_CREDENTIAL_PATH: &str = "/code/git/credential";
 
+/// What the git helper and the `gh` wrapper print to stderr, before the
+/// status and the machine's reason, when the loopback route refuses.
+pub const REFUSAL_PREFIX: &str = "Tidebreak: git credential refused";
+
 /// The environment that points a machine session's own `git` at the
 /// loopback credential route, so the harness's shell can push the branch it
 /// made without the person holding a token on the machine.
@@ -499,11 +503,22 @@ pub const GIT_CREDENTIAL_PATH: &str = "/code/git/credential";
 /// origin, so a rewritten remote gets no credential. The shell policy
 /// refuses the agent's own `credential.helper` changes, which keeps this
 /// the only helper the session ever runs.
+///
+/// A refusal is said, not swallowed: the helper reads the route's status
+/// beside its body and, on anything but 200, prints the machine's reason to
+/// stderr as `Tidebreak: git credential refused (<status>): <reason>` and
+/// answers git nothing, so the engine's transcript names why a push stopped
+/// instead of only the authentication failure the forge answers next.
 pub fn git_credential_wiring(loopback_base: &str) -> Vec<(String, String)> {
     let base = loopback_base.trim_end_matches('/');
     let helper = format!(
-        "!f() {{ if [ \"$1\" = get ]; then curl -fsS -X POST --data-binary @- \
-         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" \"{base}{GIT_CREDENTIAL_PATH}\"; \
+        "!f() {{ if [ \"$1\" = get ]; then \
+         out=$(curl -sS -w '\\n%{{http_code}}' -X POST --data-binary @- \
+         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" \"{base}{GIT_CREDENTIAL_PATH}\"); \
+         code=$(printf '%s' \"$out\" | tail -n 1); \
+         body=$(printf '%s' \"$out\" | sed '$d'); \
+         if [ \"$code\" = 200 ]; then printf '%s\\n' \"$body\"; \
+         else printf '{REFUSAL_PREFIX} (%s): %s\\n' \"$code\" \"$body\" >&2; fi; \
          else cat >/dev/null; fi; }}; f"
     );
     vec![
@@ -527,7 +542,9 @@ pub fn git_credential_wiring(loopback_base: &str) -> Vec<(String, String)> {
 /// `gh auth status` reads signed in, `gh pr create` works against the
 /// workspace's own repository, and a token that dies within the hour is
 /// fetched fresh on the next call. With no relay key in the environment, or
-/// no credential lent, the real `gh` runs as it would have anyway.
+/// no credential lent, the real `gh` runs as it would have anyway; a refused
+/// borrow is said on stderr the way the git helper says it, and the real
+/// `gh` still runs, so its own sign-in error follows the reason.
 pub fn gh_shim_script(real_gh: &Path, loopback_base: &str, origin_host: &str) -> String {
     let base = loopback_base.trim_end_matches('/');
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
@@ -535,11 +552,17 @@ pub fn gh_shim_script(real_gh: &Path, loopback_base: &str, origin_host: &str) ->
         "#!/bin/sh\n\
          # Tidebreak: gh borrows this session's forge credential per call.\n\
          if [ -n \"${RELAY_KEY_ENV}\" ]; then\n\
-         \x20 token=$(printf 'protocol=https\\nhost=%s\\n' {host} | \
-         curl -fsS -X POST --data-binary @- \
-         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" {route} 2>/dev/null | \
-         sed -n 's/^password=//p')\n\
-         \x20 if [ -n \"$token\" ]; then GH_TOKEN=\"$token\"; export GH_TOKEN; fi\n\
+         \x20 out=$(printf 'protocol=https\\nhost=%s\\n' {host} | \
+         curl -sS -w '\\n%{{http_code}}' -X POST --data-binary @- \
+         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" {route})\n\
+         \x20 code=$(printf '%s' \"$out\" | tail -n 1)\n\
+         \x20 body=$(printf '%s' \"$out\" | sed '$d')\n\
+         \x20 if [ \"$code\" = 200 ]; then\n\
+         \x20   token=$(printf '%s' \"$body\" | sed -n 's/^password=//p')\n\
+         \x20   if [ -n \"$token\" ]; then GH_TOKEN=\"$token\"; export GH_TOKEN; fi\n\
+         \x20 else\n\
+         \x20   printf '{REFUSAL_PREFIX} (%s): %s\\n' \"$code\" \"$body\" >&2\n\
+         \x20 fi\n\
          fi\n\
          exec {real} \"$@\"\n",
         host = quote(origin_host),
@@ -979,6 +1002,26 @@ mod tests {
             helper.contains("cat >/dev/null"),
             "store and erase swallow: {helper}"
         );
+        // A refusal is said on stderr with the route's status and reason,
+        // and git is answered nothing rather than a half-parsed body.
+        assert!(
+            helper.contains("-w '\\n%{http_code}'"),
+            "the status rides behind the body: {helper}"
+        );
+        assert!(
+            helper.contains("if [ \"$code\" = 200 ]; then printf '%s\\n' \"$body\""),
+            "only a 200 body reaches git: {helper}"
+        );
+        assert!(
+            helper.contains(&format!(
+                "printf '{REFUSAL_PREFIX} (%s): %s\\n' \"$code\" \"$body\" >&2"
+            )),
+            "the refusal names the status and the reason: {helper}"
+        );
+        assert!(
+            !helper.contains("curl -fsS"),
+            "-f would discard the reason: {helper}"
+        );
     }
 
     #[test]
@@ -1004,6 +1047,16 @@ mod tests {
             "{script}"
         );
         assert!(script.ends_with("exec '/usr/bin/gh' \"$@\"\n"), "{script}");
+        assert!(
+            script.contains(&format!(
+                "printf '{REFUSAL_PREFIX} (%s): %s\\n' \"$code\" \"$body\" >&2"
+            )),
+            "a refused borrow is said before the real gh runs: {script}"
+        );
+        assert!(
+            !script.contains("2>/dev/null"),
+            "the route's reason is not swallowed: {script}"
+        );
         assert!(
             !script.contains("gh auth login"),
             "nothing durable is written: {script}"

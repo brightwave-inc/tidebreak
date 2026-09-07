@@ -257,6 +257,23 @@ pub struct Config {
     pub runtime_profile: Option<String>,
     /// Engine packaged in a supervised sandbox profile, when explicitly declared.
     pub runtime_engine: Option<crate::HarnessKind>,
+    /// The permission mode an external (channel-bound) session starts in
+    /// when it runs on this machine's own engine and the channel names none
+    /// (decision 88). `ask` unless the operator says otherwise: an unattended
+    /// `allow` on the machine is the operator's call, never the default.
+    #[serde(
+        default = "default_external_permission_mode",
+        skip_serializing_if = "external_permission_mode_is_default"
+    )]
+    pub external_permission_mode: crate::PermissionMode,
+    /// The most permissive mode a channel may ask for on a machine session.
+    /// A request above it is refused by name rather than clamped, so the
+    /// person in the channel learns the deployment's rule.
+    #[serde(
+        default = "default_external_permission_mode",
+        skip_serializing_if = "external_permission_mode_is_default"
+    )]
+    pub external_permission_ceiling: crate::PermissionMode,
     /// Concurrent remote sandboxes one owner may hold. The reservation is
     /// atomic, so competing starts cannot exceed this cap.
     #[serde(
@@ -397,6 +414,8 @@ impl Config {
             runtime_endpoint: None,
             runtime_profile: None,
             runtime_engine: None,
+            external_permission_mode: crate::PermissionMode::DEFAULT,
+            external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
             runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
@@ -474,6 +493,12 @@ impl Config {
         .and_then(|config| {
             config.with_runtime_engine_var(std::env::var("TIDEBREAK_RUNTIME_ENGINE").ok())
         })
+        .and_then(|config| {
+            config.with_external_permission_vars(
+                std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_MODE").ok(),
+                std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_CEILING").ok(),
+            )
+        })
         .map(|config| config.with_ui_dist_var(std::env::var_os("TIDEBREAK_UI_DIST")))
     }
 
@@ -493,6 +518,47 @@ impl Config {
                 AgentError::config("TIDEBREAK_RUNTIME_ENGINE must name a supported external engine")
             })?;
         self.runtime_engine = Some(engine);
+        Ok(self)
+    }
+
+    /// Apply `TIDEBREAK_EXTERNAL_PERMISSION_MODE` and
+    /// `TIDEBREAK_EXTERNAL_PERMISSION_CEILING`: the mode a channel-bound
+    /// session takes on this machine's engine when the channel names none,
+    /// and the most permissive mode a channel may name. Empty means unset.
+    /// The ceiling defaults to the mode, so raising the default alone never
+    /// admits a request above it, and a default above the ceiling is a boot
+    /// error rather than a silent clamp.
+    pub fn with_external_permission_vars(
+        mut self,
+        mode: Option<String>,
+        ceiling: Option<String>,
+    ) -> Result<Self> {
+        let parse = |name: &str, value: Option<String>| -> Result<Option<crate::PermissionMode>> {
+            let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+                return Ok(None);
+            };
+            crate::PermissionMode::from_str(value.trim())
+                .map(Some)
+                .ok_or_else(|| {
+                    AgentError::config(format!(
+                        "{name} must be one of plan, ask, auto, allow; got {:?}",
+                        value.trim()
+                    ))
+                })
+        };
+        let mode = parse("TIDEBREAK_EXTERNAL_PERMISSION_MODE", mode)?;
+        let ceiling = parse("TIDEBREAK_EXTERNAL_PERMISSION_CEILING", ceiling)?;
+        let mode = mode.unwrap_or(crate::PermissionMode::DEFAULT);
+        let ceiling = ceiling.unwrap_or(mode);
+        if mode > ceiling {
+            return Err(AgentError::config(format!(
+                "TIDEBREAK_EXTERNAL_PERMISSION_MODE ({mode}) is above \
+                 TIDEBREAK_EXTERNAL_PERMISSION_CEILING ({ceiling}); raise the ceiling or \
+                 lower the mode"
+            )));
+        }
+        self.external_permission_mode = mode;
+        self.external_permission_ceiling = ceiling;
         Ok(self)
     }
 
@@ -618,6 +684,8 @@ impl Config {
             runtime_endpoint,
             runtime_profile,
             runtime_engine: None,
+            external_permission_mode: crate::PermissionMode::DEFAULT,
+            external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
             runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
@@ -779,6 +847,14 @@ pub fn tidebreak_machine_resource(canonical_public_url: &str) -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn default_external_permission_mode() -> crate::PermissionMode {
+    crate::PermissionMode::DEFAULT
+}
+
+fn external_permission_mode_is_default(value: &crate::PermissionMode) -> bool {
+    *value == crate::PermissionMode::DEFAULT
 }
 
 fn default_runtime_concurrency_cap() -> usize {
@@ -1029,6 +1105,61 @@ mod tests {
                 .with_runtime_engine_var(Some(engine.into()))
                 .is_err());
         }
+    }
+
+    #[test]
+    fn external_permission_vars_default_to_ask_and_refuse_a_mode_above_the_ceiling() {
+        let config = Config::desktop("/data");
+        let unset = config
+            .clone()
+            .with_external_permission_vars(None, Some("  ".into()))
+            .unwrap();
+        assert_eq!(unset.external_permission_mode, crate::PermissionMode::Ask);
+        assert_eq!(
+            unset.external_permission_ceiling,
+            crate::PermissionMode::Ask
+        );
+
+        // The ceiling follows the mode unless named, so a raised default
+        // never admits a request above itself by accident.
+        let raised = config
+            .clone()
+            .with_external_permission_vars(Some(" allow ".into()), None)
+            .unwrap();
+        assert_eq!(
+            raised.external_permission_mode,
+            crate::PermissionMode::Allow
+        );
+        assert_eq!(
+            raised.external_permission_ceiling,
+            crate::PermissionMode::Allow
+        );
+
+        let roomy = config
+            .clone()
+            .with_external_permission_vars(Some("ask".into()), Some("allow".into()))
+            .unwrap();
+        assert_eq!(roomy.external_permission_mode, crate::PermissionMode::Ask);
+        assert_eq!(
+            roomy.external_permission_ceiling,
+            crate::PermissionMode::Allow
+        );
+
+        let inverted = config
+            .clone()
+            .with_external_permission_vars(Some("allow".into()), Some("ask".into()))
+            .unwrap_err();
+        assert!(inverted
+            .to_string()
+            .contains("TIDEBREAK_EXTERNAL_PERMISSION_CEILING"));
+
+        let unknown = config
+            .with_external_permission_vars(Some("bypass".into()), None)
+            .unwrap_err();
+        assert!(unknown
+            .to_string()
+            .contains("TIDEBREAK_EXTERNAL_PERMISSION_MODE"));
+        assert!(unknown.to_string().contains("bypass"));
     }
 
     #[test]

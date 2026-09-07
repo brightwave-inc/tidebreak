@@ -324,6 +324,26 @@ describe("turn lifecycle", () => {
     });
   });
 
+  it("paints a refused credential borrow as a warning with its remedy", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "credential_refused",
+        reason: "connection_ended",
+        message: "no live gateway delegation",
+        remediation: "Reconnect this session from Slack.",
+      },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+    const notice = state.items.find((item) => item.kind === "notice");
+    expect(notice).toMatchObject({
+      kind: "notice",
+      level: "warning",
+      message:
+        "Push refused: no live gateway delegation Reconnect this session from Slack.",
+    });
+  });
+
   it("closes a refused turn as completed with its usage", () => {
     const { state } = play([
       { type: "turn_started", turn_id: "t1" },

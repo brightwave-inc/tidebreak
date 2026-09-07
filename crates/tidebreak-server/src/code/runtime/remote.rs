@@ -165,6 +165,13 @@ impl CodeRuntime {
     /// resurrecting, and a binding under another grant refuses. Two racing
     /// creates converge on one session through the binding's unique
     /// conversation key.
+    ///
+    /// `requested_mode` is the permission mode the channel named, if any. On
+    /// the machine's engine it is honored up to the operator's ceiling and
+    /// refused by name above it; absent, the session takes the operator's
+    /// default (decision 88). A sandbox session is `Allow` because confinement
+    /// is its boundary (decision 39), so a request for any other mode there
+    /// is refused rather than approximated.
     #[allow(clippy::too_many_arguments)]
     pub async fn external_get_or_create(
         &self,
@@ -176,6 +183,7 @@ impl CodeRuntime {
         title: Option<String>,
         harness: HarnessKind,
         settings: NewSessionSettings,
+        requested_mode: Option<tidebreak_core::PermissionMode>,
     ) -> Result<tidebreak_core::ExternalSessionResolution, ServerError> {
         if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
             return Err(ServerError::conflict_kind(
@@ -226,6 +234,15 @@ impl CodeRuntime {
         Self::refuse_removed_repo(&repo)?;
         match self.external_execution_location() {
             ExecutionLocation::Sandbox => {
+                if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {
+                    return Err(ServerError::conflict_kind(
+                        "permission_mode_unsupported",
+                        format!(
+                            "this deployment runs channel sessions in a sandbox, which is \
+                             always allow; {mode} is not available here"
+                        ),
+                    ));
+                }
                 if repo.origin_host.is_none()
                     || repo.origin_owner.is_none()
                     || repo.origin_name.is_none()
@@ -252,12 +269,26 @@ impl CodeRuntime {
             ExecutionLocation::Machine => {
                 // The machine's own engine: the ordinary local workspace and
                 // session, then the binding. The channel's `Allow` is a
-                // sandbox posture; on the machine the session takes the
-                // deployment's default mode, and the owner decides approvals
-                // from the desktop or the web until the channel can carry
+                // sandbox posture; on the machine the session takes the mode
+                // the channel named, up to the operator's ceiling, else the
+                // operator's default, and the owner decides approvals from
+                // the desktop, the web, or the channel once it can carry
                 // them (decision 0088).
+                let policy = self.external_permission;
+                let mode = requested_mode.unwrap_or(policy.default_mode);
+                if mode > policy.ceiling {
+                    return Err(ServerError::conflict_kind(
+                        "permission_mode_above_ceiling",
+                        format!(
+                            "this deployment allows channel sessions up to {} on its own \
+                             engine; {mode} needs the operator to raise \
+                             TIDEBREAK_EXTERNAL_PERMISSION_CEILING",
+                            policy.ceiling
+                        ),
+                    ));
+                }
                 let settings = NewSessionSettings {
-                    permission_mode: tidebreak_core::PermissionMode::default(),
+                    permission_mode: mode,
                     ..settings
                 };
                 let workspace = self

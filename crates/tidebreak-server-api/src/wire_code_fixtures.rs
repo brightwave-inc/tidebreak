@@ -23,8 +23,8 @@ use tidebreak_core::{
     ApprovalClass, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Attention,
     AttentionSource, AttentionState, BoundedError, CapLevel, CheckpointHint, CodeSubagentStatus,
     CodeSubagentSummary, CodeTerminalId, CodeWatchId, CodeWatchState, CodeWorkspaceStatus,
-    Diffstat, Event, FenceReason, FileChangeKind, GrantScope, HarnessCaps, HarnessCommand,
-    HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
+    CredentialRefusalReason, Diffstat, Event, FenceReason, FileChangeKind, GrantScope, HarnessCaps,
+    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
     InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
     QuickAction, ReasoningEffort, RefusalOutcome, RepoId, SessionActivity, SessionId, SessionKind,
     SessionLifecycle, ToolApprovalKind, ToolDetail, ToolOutcome, TurnId, TurnStatus, TurnUsage,
@@ -873,6 +873,21 @@ fn event_frames() -> Vec<Fixture> {
         (
             "event: turn_interrupted",
             frame(52, Event::TurnInterrupted { usage: None }),
+        ),
+        (
+            "event: credential_refused",
+            frame(
+                66,
+                Event::CredentialRefused {
+                    reason: CredentialRefusalReason::ConnectionEnded,
+                    message: "this external connection has no live gateway delegation; \
+                              reconnect it from Slack"
+                        .to_owned(),
+                    remediation: "Reconnect this session from Slack; a newer connect or a \
+                                  revoke ended the one it used."
+                        .to_owned(),
+                },
+            ),
         ),
         (
             "event: checkpoint_recorded",

@@ -66,3 +66,19 @@ together with the per-session override the adapter exposes.
 - What this does not decide: the operator's `Allow` setting, the
   per-session mode override on the external routes, spend accounting per
   location, and the sandbox path's own defects. Each is its own slice.
+
+## Amendment 2026-09-07: the operator's mode and the channel's request
+
+The "later slice" above landed as two deployment settings and one request
+field. `TIDEBREAK_EXTERNAL_PERMISSION_MODE` is the mode a machine session
+takes when the channel names none, `ask` by default;
+`TIDEBREAK_EXTERNAL_PERMISSION_CEILING` is the most permissive mode a
+channel may name, defaulting to the mode so a raised default never admits
+more than itself. The external get-or-create request carries an optional
+`permission_mode`; on the machine it is honored up to the ceiling and
+refused by name above it (`permission_mode_above_ceiling`), and on a
+sandbox deployment anything but `allow` is refused
+(`permission_mode_unsupported`) because confinement, not consent, is that
+placement's boundary. `Allow` on the machine therefore stays an
+operator's decision per deployment, taken once at boot, and a channel can
+only ask within it.
