@@ -1028,9 +1028,6 @@ async fn execute_operation(
         &event_call,
         crate::computer_use_action::ComputerUseActionSource::Native,
     );
-    if let Some(activity) = &activity {
-        crate::computer_use_action::emit_computer_use_action(app, activity);
-    }
     let resolution = async {
         match action {
             CuAction::ReturnToTidebreak => {

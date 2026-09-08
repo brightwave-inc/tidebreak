@@ -151,7 +151,6 @@ impl BrowserRuntime for DesktopBrowserRuntime {
             event.browser_id = Some(args.browser_id.clone());
             event.workspace_id = Some(scope.workspace.to_string());
             event.document_epoch = Some(args.document_epoch);
-            crate::computer_use_action::emit_computer_use_action(&self.app, event);
         }
         let result = crate::browser_semantics::browser_native_act(
             &self.app,
