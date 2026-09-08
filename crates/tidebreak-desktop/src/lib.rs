@@ -972,6 +972,13 @@ pub fn run() {
             browser_url_observer::detach_all_browser_url_observers();
         }
         tauri::RunEvent::Exit => {
+            // Cancel any code session's in-flight native input before the
+            // broker goes down, so exit never abandons synthesized input.
+            if let Some(native) =
+                app.try_state::<std::sync::Arc<native_runtime_adapter::DesktopNativeRuntime>>()
+            {
+                tauri::async_runtime::block_on(native.shutdown());
+            }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
         }
         _ => {}
@@ -1049,10 +1056,14 @@ async fn boot_server(
     );
     // Native computer use for code sessions rides the same trusted bridge
     // executable. The adapter is installed on every platform; it reports
-    // unavailable off macOS, so no channel is minted there.
-    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = Arc::new(
-        native_runtime_adapter::DesktopNativeRuntime::new(app.clone()),
-    );
+    // unavailable off macOS, so no channel is minted there. The concrete
+    // handle is managed so process exit can cancel in-flight input, and so
+    // the computer-runtime wrapper can share its scope validation.
+    let native_adapter = Arc::new(native_runtime_adapter::DesktopNativeRuntime::new(
+        app.clone(),
+    ));
+    app.manage(native_adapter.clone());
+    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = native_adapter;
     let native_binding = tidebreak_server::NativeChannelBinding::new(
         native_runtime,
         desktop_sibling_exe("tidebreak")?,

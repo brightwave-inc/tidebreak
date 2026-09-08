@@ -99,7 +99,7 @@ impl NativeSessionClient {
         if !metadata.file_type().is_file() || metadata.len() > CAPFILE_MAX_BYTES {
             return Err("native capfile is not a small regular file".to_owned());
         }
-        let raw = std::fs::read_to_string(path)
+        let raw = read_file_capped(path, CAPFILE_MAX_BYTES as usize)
             .map_err(|error| format!("native capfile cannot be read ({error})"))?;
         let wire: NativeCapfileWire = serde_json::from_str(&raw)
             .map_err(|error| format!("native capfile is not valid JSON ({error})"))?;
@@ -164,16 +164,7 @@ impl NativeSessionClient {
             .await
             .map_err(|_| ToolFailure::transport("the native channel is unreachable"))?;
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| ToolFailure::transport("the native response body was unreadable"))?;
-        if bytes.len() > NATIVE_FRAME_MAX_BYTES {
-            return Err(ToolFailure::failed(format!(
-                "the native response exceeded the {NATIVE_FRAME_MAX_BYTES}-byte frame limit; \
-                 request a smaller capture (scope it to one app with app_id)"
-            )));
-        }
+        let bytes = read_body_bounded(response, NATIVE_FRAME_MAX_BYTES).await?;
         if status.is_success() {
             return serde_json::from_slice(&bytes)
                 .map_err(|_| ToolFailure::transport("the native response did not parse"));
@@ -191,6 +182,54 @@ impl NativeSessionClient {
             .to_owned();
         Err(ToolFailure::from_status(status.as_u16(), &kind, &message))
     }
+}
+
+/// Read `path` into a `String`, reading at most `cap + 1` bytes so a racing
+/// append after the metadata check cannot allocate unbounded.
+fn read_file_capped(path: &std::path::Path, cap: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(cap.saturating_add(1).min(cap + 4096));
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        let room = cap.saturating_add(1).saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..n.min(room)]);
+        if buf.len() > cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "capfile exceeds the size limit",
+            ));
+        }
+    }
+    String::from_utf8(buf)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Read a response body up to `max_bytes`, refusing — not buffering — the
+/// remainder of an oversized stream.
+async fn read_body_bounded(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ToolFailure> {
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::with_capacity(max_bytes.min(4096));
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result
+            .map_err(|_| ToolFailure::transport("the native response body was unreadable"))?;
+        if chunk.len() > max_bytes.saturating_sub(buf.len()) {
+            return Err(ToolFailure::failed(format!(
+                "the native response exceeded the {max_bytes}-byte frame limit; request a \
+                 smaller capture (scope it to one app with app_id)"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<(), String> {

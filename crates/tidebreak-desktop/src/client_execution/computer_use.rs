@@ -1035,7 +1035,7 @@ fn consent_capability(call: &ToolCallRecord, request: &OperationRequest) -> Cons
 /// Whether this call acts on the host (synthesizes input or moves windows), as
 /// opposed to only reading. Acting ops are what the Stop latch halts, what the
 /// indicator reports, and what the blocklist pre-check guards.
-fn acts_on_host(name: &str) -> bool {
+pub(crate) fn acts_on_host(name: &str) -> bool {
     tidebreak_core::is_computer_use_control_tool(name)
         || name == COMPUTER_SCROLL_TOOL
         || name == COMPUTER_FOCUS_WINDOW_TOOL
@@ -1698,6 +1698,16 @@ pub(crate) struct SessionNativeOutput {
     pub(crate) acts_on_host: bool,
 }
 
+/// Cancel pending native input for an interrupt, a revocation with work in
+/// flight, or process shutdown: latch the executor's Stop — the same latch
+/// the user's Stop button sets, cleared only by a trusted resume, never
+/// automatically — and wait for any acting broker dispatch to drain before
+/// returning. Every cancellation path shares this helper so broker-side
+/// cancellation of long-running synthesized input hooks in exactly once.
+pub(crate) async fn cancel_native_input(state: &HostAccess) {
+    state.computer_use.halt().await;
+}
+
 /// Execute one native computer-use operation for a code session.
 ///
 /// Same executor, same authority: the broker authorizes against per-session
@@ -1736,6 +1746,10 @@ pub(crate) async fn execute_session_native_operation(
         } => SessionNativeResolution::Failed {
             result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
             error_code,
+        },
+        StoredResolution::Cancelled { result } => SessionNativeResolution::Failed {
+            result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
+            error_code: "computer_use_cancelled".to_owned(),
         },
     };
     Ok(SessionNativeOutput {
