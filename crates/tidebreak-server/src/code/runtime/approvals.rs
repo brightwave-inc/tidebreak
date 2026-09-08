@@ -85,6 +85,25 @@ pub(super) fn resolve_decision_request(
     }
 }
 
+fn already_settled_error(approval: &Approval) -> ServerError {
+    let who = approval
+        .actor
+        .as_ref()
+        .and_then(|actor| {
+            actor
+                .display
+                .as_deref()
+                .or(actor.external_identity.as_deref())
+                .or(actor.principal.as_deref())
+        })
+        .unwrap_or("someone else");
+    ServerError::conflict_kind_with(
+        "already_settled",
+        format!("this card is no longer awaiting a decision: it was settled by {who}"),
+        serde_json::json!({ "actor": approval.actor }),
+    )
+}
+
 impl CodeRuntime {
     pub(super) fn approval_channel(
         &self,
@@ -292,13 +311,7 @@ impl CodeRuntime {
     ) -> Result<Approval, ServerError> {
         let initial = self.get_approval(owner, id).await?;
         if !initial.state.is_pending() {
-            return Err(ServerError::conflict_kind(
-                "approval_not_pending",
-                format!(
-                    "approval {id} is no longer awaiting a decision: it is {}",
-                    initial.state.as_str()
-                ),
-            ));
+            return Err(already_settled_error(&initial));
         }
         if initial.decision_claim.is_some() {
             return Err(ServerError::conflict_kind(
@@ -312,13 +325,7 @@ impl CodeRuntime {
         // Re-read every durable precondition after the gate is ours.
         let approval = self.get_approval(owner, id).await?;
         if !approval.state.is_pending() {
-            return Err(ServerError::conflict_kind(
-                "approval_not_pending",
-                format!(
-                    "approval {id} is no longer awaiting a decision: it is {}",
-                    approval.state.as_str()
-                ),
-            ));
+            return Err(already_settled_error(&approval));
         }
         if approval.decision_claim.is_some() {
             return Err(ServerError::conflict_kind(
@@ -363,15 +370,13 @@ impl CodeRuntime {
         .await?
         else {
             let current = self.get_approval(owner, id).await?;
-            let kind = if current.state.is_pending() && current.decision_claim.is_some() {
-                "approval_decision_in_progress"
-            } else {
-                "approval_not_pending"
-            };
-            return Err(ServerError::conflict_kind(
-                kind,
-                format!("approval {id} no longer accepts this decision"),
-            ));
+            if current.state.is_pending() && current.decision_claim.is_some() {
+                return Err(ServerError::conflict_kind(
+                    "approval_decision_in_progress",
+                    format!("approval {id} already has a decision in progress"),
+                ));
+            }
+            return Err(already_settled_error(&current));
         };
         let (reply, rx) = oneshot::channel();
         if handle

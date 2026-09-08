@@ -120,6 +120,7 @@ import type {
   CodeCheckLogsSnapshot,
   CodeForkTranscript,
 } from "../api/types";
+import { parseToolActionPreview } from "../api/parsers";
 import type {
   Event as WireCodeEvent,
   CodeRepoSnapshot as WireCodeRepoSnapshot,
@@ -2919,6 +2920,69 @@ export function parseTurnActor(
   };
 }
 
+const APPROVAL_CLASSES = new Set(["read_only", "workspace", "sensitive"]);
+const TOOL_APPROVAL_KINDS = new Set([
+  "search_may_share_query_and_excerpts",
+  "web_search_may_share_query",
+  "web_extract_may_fetch_url",
+  "exec_may_run_networked_command",
+  "external_mcp_may_call_server",
+  "workspace_may_modify_files",
+  "delegate_may_run_background_agent",
+  "computer_may_control_app",
+  "unsupported",
+]);
+
+function parseInternalApprovalRequest(
+  value: unknown,
+): import("../generated/wire").InternalApprovalRequest | null {
+  if (!isRecord(value)) return null;
+  if (value.kind === "questions" || value.kind === "plan") {
+    if (!onlyKeys(value, ["kind", "turn_id"]) || !wireId(value.turn_id)) {
+      return null;
+    }
+    return { kind: value.kind, turn_id: value.turn_id };
+  }
+  if (value.kind !== "tool_use") return null;
+  if (
+    !onlyKeys(value, [
+      "kind",
+      "auto_judging",
+      "tool_name",
+      "class",
+      "approval",
+      "grant_scopes",
+      "preview",
+      "preview_truncated",
+    ]) ||
+    typeof value.tool_name !== "string" ||
+    !APPROVAL_CLASSES.has(value.class as string) ||
+    !TOOL_APPROVAL_KINDS.has(value.approval as string) ||
+    (value.auto_judging !== undefined &&
+      typeof value.auto_judging !== "boolean") ||
+    (value.preview_truncated !== undefined &&
+      typeof value.preview_truncated !== "boolean") ||
+    (value.grant_scopes !== undefined && !Array.isArray(value.grant_scopes))
+  ) {
+    return null;
+  }
+  const preview =
+    value.preview === undefined
+      ? undefined
+      : parseToolActionPreview(value.preview);
+  if (value.preview !== undefined && !preview) return null;
+  return {
+    kind: "tool_use",
+    ...(value.auto_judging ? { auto_judging: true } : {}),
+    tool_name: value.tool_name,
+    class: value.class as import("../generated/wire").ApprovalClass,
+    approval: value.approval as import("../generated/wire").ToolApprovalKind,
+    ...(value.grant_scopes ? { grant_scopes: value.grant_scopes } : {}),
+    ...(preview ? { preview } : {}),
+    ...(value.preview_truncated ? { preview_truncated: true } : {}),
+  };
+}
+
 const IMAGE_MEDIA_TYPES = new Set<import("../generated/wire").ImageMediaType>([
   "png",
   "jpeg",
@@ -3976,16 +4040,26 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         message: value.message,
         remediation: value.remediation,
       };
-    case "approval_requested":
-      // The internal engine journals the card's request beside the id so
-      // the chat surface replays it; the code surface loads the row.
+    case "approval_requested": {
+      // Machine sessions journal the card's facts beside the id so a
+      // channel adapter can render it; sandbox sessions carry none.
       if (
         !onlyKeys(value, ["type", "approval_id", "request"]) ||
         !wireId(value.approval_id)
       ) {
         return null;
       }
-      return { type: "approval_requested", approval_id: value.approval_id };
+      if (value.request === undefined) {
+        return { type: "approval_requested", approval_id: value.approval_id };
+      }
+      const request = parseInternalApprovalRequest(value.request);
+      if (!request) return null;
+      return {
+        type: "approval_requested",
+        approval_id: value.approval_id,
+        request,
+      };
+    }
     case "approval_resolved": {
       if (
         !onlyKeys(value, ["type", "approval_id", "decision", "actor"]) ||

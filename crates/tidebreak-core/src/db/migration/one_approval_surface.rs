@@ -620,6 +620,7 @@ fn rewrite_event(payload: &serde_json::Value) -> Result<Event, String> {
                 grant_scopes: parse_optional::<Vec<GrantScope>>(payload, "grant_scopes")?
                     .unwrap_or_default(),
                 preview: parse_optional::<ToolActionPreview>(payload, "preview")?,
+                preview_truncated: false,
             }),
         },
         "tool_approval_decided" => Event::ApprovalResolved {

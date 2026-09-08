@@ -97,7 +97,11 @@ pub async fn insert_approval_for_worker(
         .map_err(store_err)?;
     let event = Event::ApprovalRequested {
         approval_id: approval.id,
-        request: None,
+        request: Some(crate::code::InternalApprovalRequest::from_kind(
+            &approval.kind,
+            approval.turn_id,
+            approval.auto_judge_status.is_some(),
+        )),
     };
     let seq = append_event_on_locked(&transaction, owner, approval.session_id, &event).await?;
     transaction.commit().await.map_err(store_err)?;

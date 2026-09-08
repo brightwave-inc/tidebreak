@@ -12,10 +12,10 @@ use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{ApprovalId, HarnessKind, TurnId};
+use super::{ApprovalId, ApprovalKind, HarnessKind, TurnId};
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
-use crate::preview::{ToolActionPreview, ToolResultPreview};
+use crate::preview::{ToolActionPreview, ToolResultPreview, MAX_ACTION_FIELD_CHARS};
 use crate::provider::{RefusalOutcome, StopReason};
 use crate::tool::{ApprovalClass, ToolOutput};
 
@@ -320,6 +320,10 @@ pub enum InternalApprovalRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         preview: Option<ToolActionPreview>,
+        /// True when the preview was cut to the action-field bound so a
+        /// channel adapter can fall back to a web link for the rest.
+        #[serde(default, skip_serializing_if = "is_false")]
+        preview_truncated: bool,
     },
     /// A questions card parked the turn; the questions ride the row's kind.
     Questions {
@@ -331,6 +335,230 @@ pub enum InternalApprovalRequest {
         /// Turn that resumes after the decision commits.
         turn_id: TurnId,
     },
+}
+
+impl InternalApprovalRequest {
+    /// Card facts a channel can render without loading the approval row.
+    #[must_use]
+    pub fn from_kind(kind: &ApprovalKind, turn_id: TurnId, auto_judging: bool) -> Self {
+        match kind {
+            ApprovalKind::ToolUse {
+                preview,
+                offered_grants,
+            } => {
+                let (preview, preview_truncated) = bound_action_preview(preview.clone());
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: tool_name_for_preview(&preview),
+                    class: class_for_preview(&preview),
+                    approval: ToolApprovalKind::for_tool_name(&tool_name_for_preview(&preview)),
+                    grant_scopes: offered_grants.clone(),
+                    preview: Some(preview),
+                    preview_truncated,
+                }
+            }
+            ApprovalKind::Questions { .. } => Self::Questions { turn_id },
+            ApprovalKind::Plan { .. } => Self::Plan { turn_id },
+            ApprovalKind::Command { cmd, cwd } => {
+                let (command, preview_truncated) = bound_preview_text(cmd);
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "exec".into(),
+                    class: ApprovalClass::Workspace,
+                    approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::Exec {
+                        command,
+                        args: Vec::new(),
+                        cwd: cwd.clone().unwrap_or_else(|| ".".into()),
+                        files: Vec::new(),
+                        summary: None,
+                    }),
+                    preview_truncated,
+                }
+            }
+            ApprovalKind::FileWrite { paths } => {
+                // The person consents to every path, so the card names them
+                // all: the first as the path, the whole set in the summary.
+                // A set the summary cannot hold is a truncated preview, and
+                // the adapter falls back to the web link.
+                let path = paths.first().cloned().unwrap_or_default();
+                let (path, path_truncated) = bound_preview_text(&path);
+                let (summary, summary_truncated) = if paths.len() > 1 {
+                    let (joined, truncated) = bound_preview_text(&paths.join("\n"));
+                    (Some(format!("{} files:\n{joined}", paths.len())), truncated)
+                } else {
+                    (None, false)
+                };
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "write_file".into(),
+                    class: ApprovalClass::Workspace,
+                    approval: ToolApprovalKind::WorkspaceMayModifyFiles,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::WriteFile { path, summary }),
+                    preview_truncated: path_truncated || summary_truncated,
+                }
+            }
+            ApprovalKind::Network { summary } | ApprovalKind::Other { summary } => {
+                let (summary, preview_truncated) = bound_preview_text(summary);
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "other".into(),
+                    class: ApprovalClass::Sensitive,
+                    approval: ToolApprovalKind::Unsupported,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::WriteFile {
+                        path: summary,
+                        summary: None,
+                    }),
+                    preview_truncated,
+                }
+            }
+        }
+    }
+}
+
+fn bound_preview_text(text: &str) -> (String, bool) {
+    if text.chars().count() > MAX_ACTION_FIELD_CHARS {
+        (text.chars().take(MAX_ACTION_FIELD_CHARS).collect(), true)
+    } else {
+        (text.to_owned(), false)
+    }
+}
+
+/// Whether a field the preview builder already clamped may have been cut.
+///
+/// `ToolActionPreview::build` clamps every field to `MAX_ACTION_FIELD_CHARS`
+/// and keeps no record of it, so by the time a card is projected the only
+/// trace of a cut is a field sitting exactly at the cap. Treating that as
+/// truncated is conservative: a field that happens to be exactly the cap's
+/// length reads as possibly cut, and the adapter falls back to the web link,
+/// which is the safe direction for a consent surface.
+fn at_field_cap(text: &str) -> bool {
+    text.chars().count() >= MAX_ACTION_FIELD_CHARS
+}
+
+fn any_at_field_cap<'a>(fields: impl IntoIterator<Item = &'a str>) -> bool {
+    fields.into_iter().any(at_field_cap)
+}
+
+fn bound_action_preview(preview: ToolActionPreview) -> (ToolActionPreview, bool) {
+    let already_cut = match &preview {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+            summary,
+        } => any_at_field_cap(
+            [command.as_str(), cwd.as_str()]
+                .into_iter()
+                .chain(args.iter().map(String::as_str))
+                .chain(files.iter().map(String::as_str))
+                .chain(summary.as_deref()),
+        ),
+        ToolActionPreview::Search { query, summary } => {
+            any_at_field_cap([query.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::WebSearch {
+            query,
+            domains,
+            start_published_at,
+            end_published_at,
+            summary,
+        } => any_at_field_cap(
+            [query.as_str()]
+                .into_iter()
+                .chain(domains.iter().map(String::as_str))
+                .chain(start_published_at.as_deref())
+                .chain(end_published_at.as_deref())
+                .chain(summary.as_deref()),
+        ),
+        ToolActionPreview::WebExtract { url, summary } => {
+            any_at_field_cap([url.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::WriteFile { path, summary } => {
+            any_at_field_cap([path.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::DelegateAgent { .. } => false,
+    };
+    let (preview, truncated) = match preview {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+            summary,
+        } => {
+            let (command, truncated) = bound_preview_text(&command);
+            (
+                ToolActionPreview::Exec {
+                    command,
+                    args,
+                    cwd,
+                    files,
+                    summary,
+                },
+                truncated,
+            )
+        }
+        ToolActionPreview::Search { query, summary } => {
+            let (query, truncated) = bound_preview_text(&query);
+            (ToolActionPreview::Search { query, summary }, truncated)
+        }
+        ToolActionPreview::WebSearch {
+            query,
+            domains,
+            start_published_at,
+            end_published_at,
+            summary,
+        } => {
+            let (query, truncated) = bound_preview_text(&query);
+            (
+                ToolActionPreview::WebSearch {
+                    query,
+                    domains,
+                    start_published_at,
+                    end_published_at,
+                    summary,
+                },
+                truncated,
+            )
+        }
+        ToolActionPreview::WebExtract { url, summary } => {
+            let (url, truncated) = bound_preview_text(&url);
+            (ToolActionPreview::WebExtract { url, summary }, truncated)
+        }
+        ToolActionPreview::WriteFile { path, summary } => {
+            let (path, truncated) = bound_preview_text(&path);
+            (ToolActionPreview::WriteFile { path, summary }, truncated)
+        }
+        other => (other, false),
+    };
+    (preview, truncated || already_cut)
+}
+
+fn tool_name_for_preview(preview: &ToolActionPreview) -> String {
+    match preview {
+        ToolActionPreview::Exec { .. } => "exec".into(),
+        ToolActionPreview::Search { .. } => "search".into(),
+        ToolActionPreview::WebSearch { .. } => "web_search".into(),
+        ToolActionPreview::WebExtract { .. } => "web_extract".into(),
+        ToolActionPreview::WriteFile { .. } => "write_file".into(),
+        ToolActionPreview::DelegateAgent { .. } => crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+    }
+}
+
+fn class_for_preview(preview: &ToolActionPreview) -> ApprovalClass {
+    match preview {
+        ToolActionPreview::Exec { .. }
+        | ToolActionPreview::WriteFile { .. }
+        | ToolActionPreview::DelegateAgent { .. } => ApprovalClass::Workspace,
+        ToolActionPreview::Search { .. }
+        | ToolActionPreview::WebSearch { .. }
+        | ToolActionPreview::WebExtract { .. } => ApprovalClass::Sensitive,
+    }
 }
 
 /// One event in an external agent-engine session's journal.
@@ -451,8 +679,9 @@ pub enum Event {
     ApprovalRequested {
         /// Hint id; the row is the source of truth.
         approval_id: ApprovalId,
-        /// What the card asks, for the chat surface's replay. Internal
-        /// engine; absent on every row an external adapter writes.
+        /// What the card asks: tool name, class, consent kind, grant ladder,
+        /// and a size-capped preview. Written for machine sessions; absent
+        /// on sandbox sessions, which never park on these cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         request: Option<InternalApprovalRequest>,
@@ -609,6 +838,90 @@ mod tests {
     use crate::attention::FenceReason;
     use crate::code::HarnessKind;
     use uuid::Uuid;
+
+    #[test]
+    fn a_command_the_builder_clamped_projects_as_a_truncated_card() {
+        let turn_id = TurnId::new();
+        let long = crate::ToolActionPreview::build(
+            "exec",
+            &serde_json::json!({ "command": "x".repeat(600) }),
+        )
+        .expect("a command builds a preview");
+        let card = InternalApprovalRequest::from_kind(
+            &ApprovalKind::ToolUse {
+                preview: long,
+                offered_grants: Vec::new(),
+            },
+            turn_id,
+            false,
+        );
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a tool use projects a tool-use card");
+        };
+        assert!(
+            preview_truncated,
+            "a command the builder cut to the cap is not the command being approved"
+        );
+
+        let short = crate::ToolActionPreview::build(
+            "exec",
+            &serde_json::json!({ "command": "cargo test" }),
+        )
+        .expect("a command builds a preview");
+        let card = InternalApprovalRequest::from_kind(
+            &ApprovalKind::ToolUse {
+                preview: short,
+                offered_grants: Vec::new(),
+            },
+            turn_id,
+            false,
+        );
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a tool use projects a tool-use card");
+        };
+        assert!(!preview_truncated, "a short command is shown whole");
+    }
+
+    #[test]
+    fn a_multi_path_file_write_names_every_path_or_says_it_was_cut() {
+        let turn_id = TurnId::new();
+        let paths = vec!["a.rs".to_owned(), "b.rs".to_owned(), "c.rs".to_owned()];
+        let card =
+            InternalApprovalRequest::from_kind(&ApprovalKind::FileWrite { paths }, turn_id, false);
+        let InternalApprovalRequest::ToolUse {
+            preview: Some(ToolActionPreview::WriteFile { path, summary }),
+            preview_truncated,
+            ..
+        } = card
+        else {
+            panic!("a file write projects a write_file card");
+        };
+        assert_eq!(path, "a.rs");
+        assert_eq!(summary.as_deref(), Some("3 files:\na.rs\nb.rs\nc.rs"));
+        assert!(!preview_truncated, "three short paths fit the card");
+
+        let paths: Vec<String> = (0..64)
+            .map(|index| format!("{}/{index}.rs", "d".repeat(40)))
+            .collect();
+        let card =
+            InternalApprovalRequest::from_kind(&ApprovalKind::FileWrite { paths }, turn_id, false);
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a file write projects a write_file card");
+        };
+        assert!(
+            preview_truncated,
+            "a set the summary cannot hold is a truncated preview"
+        );
+    }
 
     #[test]
     fn event_is_internally_tagged() {

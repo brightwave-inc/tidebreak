@@ -2192,8 +2192,9 @@ diffstat: Diffstat, } | { "type": "approval_requested",
  */
 approval_id: ApprovalId,
 /**
- * What the card asks, for the chat surface's replay. Internal
- * engine; absent on every row an external adapter writes.
+ * What the card asks: tool name, class, consent kind, grant ladder,
+ * and a size-capped preview. Written for machine sessions; absent
+ * on sandbox sessions, which never park on these cards.
  */
 request?: InternalApprovalRequest, } | { "type": "approval_resolved",
 /**
@@ -3054,7 +3055,12 @@ grant_scopes?: Array<GrantScope>,
 /**
  * Closed projection of what the call will do, when its tool has one.
  */
-preview?: ToolActionPreview, } | { "kind": "questions",
+preview?: ToolActionPreview,
+/**
+ * True when the preview was cut to the action-field bound so a
+ * channel adapter can fall back to a web link for the rest.
+ */
+preview_truncated?: boolean, } | { "kind": "questions",
 /**
  * Turn that resumes after the answer commits.
  */

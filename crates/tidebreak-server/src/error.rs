@@ -16,6 +16,7 @@ use tidebreak_core::{AgentError, AgentErrorInfo};
 pub struct ServerError {
     status: StatusCode,
     info: AgentErrorInfo,
+    extra: Option<serde_json::Value>,
 }
 
 impl ServerError {
@@ -27,6 +28,7 @@ impl ServerError {
                 kind: "not_found".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -38,6 +40,7 @@ impl ServerError {
                 kind: "unauthorized".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -50,6 +53,7 @@ impl ServerError {
                 kind: "forbidden".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -62,6 +66,7 @@ impl ServerError {
                 kind: "not_implemented".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -76,6 +81,7 @@ impl ServerError {
                 kind: "bad_request".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -87,6 +93,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -99,6 +106,7 @@ impl ServerError {
                 kind: "payload_too_large".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -121,6 +129,7 @@ impl ServerError {
                 kind: "conflict".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -132,6 +141,23 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
+        }
+    }
+
+    /// A conflict that also names who already acted.
+    pub fn conflict_kind_with(
+        kind: &'static str,
+        message: impl Into<String>,
+        extra: serde_json::Value,
+    ) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+            extra: Some(extra),
         }
     }
 
@@ -143,6 +169,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -154,6 +181,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -165,6 +193,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -177,6 +206,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -190,6 +220,7 @@ impl ServerError {
                 kind: "internal".to_string(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
@@ -218,6 +249,7 @@ impl From<AgentError> for ServerError {
         Self {
             status,
             info: (&err).into(),
+            extra: None,
         }
     }
 }
@@ -254,7 +286,20 @@ impl From<tidebreak_core::MemoryError> for ServerError {
 
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.info)).into_response()
+        let mut body = serde_json::to_value(&self.info).unwrap_or_else(|_| {
+            serde_json::json!({
+                "kind": self.info.kind,
+                "message": self.info.message,
+            })
+        });
+        if let Some(extra) = self.extra {
+            if let (Some(object), Some(extra_object)) = (body.as_object_mut(), extra.as_object()) {
+                for (key, value) in extra_object {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 

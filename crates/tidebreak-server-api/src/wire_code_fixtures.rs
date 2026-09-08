@@ -971,6 +971,7 @@ fn event_frames() -> Vec<Fixture> {
                             command: "cargo".to_owned(),
                         }],
                         preview: None,
+                        preview_truncated: false,
                     }),
                 },
             ),
@@ -992,6 +993,30 @@ fn event_frames() -> Vec<Fixture> {
                 Event::ApprovalRequested {
                     approval_id: approval_id(),
                     request: Some(InternalApprovalRequest::Plan { turn_id: turn_id() }),
+                },
+            ),
+        ),
+        (
+            "event: approval_requested (truncated preview)",
+            frame(
+                61,
+                Event::ApprovalRequested {
+                    approval_id: approval_id(),
+                    request: Some(InternalApprovalRequest::ToolUse {
+                        auto_judging: false,
+                        tool_name: "exec".to_owned(),
+                        class: ApprovalClass::Workspace,
+                        approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                        grant_scopes: Vec::new(),
+                        preview: Some(tidebreak_core::ToolActionPreview::Exec {
+                            command: "x".repeat(512),
+                            args: Vec::new(),
+                            cwd: ".".to_owned(),
+                            files: Vec::new(),
+                            summary: None,
+                        }),
+                        preview_truncated: true,
+                    }),
                 },
             ),
         ),

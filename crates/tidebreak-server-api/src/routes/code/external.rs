@@ -16,8 +16,8 @@ use axum::http::StatusCode;
 use axum::response::Response;
 
 use tidebreak_core::{
-    CodeExternalGrant, ExternalSessionResolution, GrantRotation, HarnessKind, PermissionMode,
-    RepoId, SessionId,
+    ApprovalId, CodeExternalGrant, ExternalSessionResolution, GrantRotation, HarnessKind,
+    PermissionMode, RepoId, SessionId,
 };
 
 use crate::code::runtime::{ExternalMessage, ExternalMessageOutcome, NewSessionSettings};
@@ -25,7 +25,10 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
-use super::types::{QueuedTurn, SessionEventsQuery, SessionSnapshot};
+use super::types::{
+    ApprovalDecision, ApprovalSnapshot, QueuedTurn, SessionEventsQuery, SessionSnapshot,
+};
+use crate::code::runtime::ApprovalDecisionRequest;
 
 /// The authenticated grant behind an adapter request.
 ///
@@ -557,4 +560,98 @@ pub async fn external_rotate(
             "the refresh token matches no live grant",
         )),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalDecisionActor {
+    pub external_identity: String,
+    #[serde(default)]
+    pub display: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalDecisionBody {
+    pub decision: ApprovalDecision,
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// Workspace-grant messages name the person in the body. A person grant
+    /// omits this and the machine records the grant identity.
+    #[serde(default)]
+    pub actor: Option<ExternalDecisionActor>,
+}
+
+/// `POST /external/code/sessions/{id}/approvals/{call}/decision`
+pub async fn external_approval_decision(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, call)): Path<(SessionId, ApprovalId)>,
+    Json(body): Json<ExternalDecisionBody>,
+) -> Result<Json<ApprovalSnapshot>, ServerError> {
+    external_decide(state, grant, id, call, body).await
+}
+
+/// `POST /external/code/sessions/{id}/questions/{call}/decision`
+pub async fn external_question_decision(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, call)): Path<(SessionId, ApprovalId)>,
+    Json(body): Json<ExternalDecisionBody>,
+) -> Result<Json<ApprovalSnapshot>, ServerError> {
+    external_decide(state, grant, id, call, body).await
+}
+
+/// `POST /external/code/sessions/{id}/plans/{call}/decision`
+pub async fn external_plan_decision(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, call)): Path<(SessionId, ApprovalId)>,
+    Json(body): Json<ExternalDecisionBody>,
+) -> Result<Json<ApprovalSnapshot>, ServerError> {
+    external_decide(state, grant, id, call, body).await
+}
+
+async fn external_decide(
+    state: AppState,
+    grant: CodeExternalGrant,
+    session_id: SessionId,
+    call: ApprovalId,
+    body: ExternalDecisionBody,
+) -> Result<Json<ApprovalSnapshot>, ServerError> {
+    let runtime = require_bound(&state, &grant, session_id).await?;
+    let approval = runtime.get_approval(&grant.owner, call).await?;
+    if approval.session_id != session_id {
+        return Err(ServerError::not_found("code session not found"));
+    }
+    let decision = match body.decision {
+        ApprovalDecision::Approve => ApprovalDecisionRequest::Approve,
+        ApprovalDecision::Deny => ApprovalDecisionRequest::Deny {
+            feedback: body.feedback,
+        },
+        ApprovalDecision::ApproveWithGrant { grant_index } => {
+            ApprovalDecisionRequest::ApproveWithGrant { grant_index }
+        }
+        ApprovalDecision::Answers { answers } => ApprovalDecisionRequest::Answers { answers },
+        ApprovalDecision::PlanDecision { approve } => ApprovalDecisionRequest::PlanDecision {
+            approve,
+            feedback: body.feedback,
+        },
+    };
+    let actor = match body.actor {
+        Some(actor) => tidebreak_core::TurnActor {
+            principal: None,
+            display: actor.display,
+            channel_kind: Some(grant.channel_kind.clone()),
+            external_identity: Some(actor.external_identity),
+        },
+        None => tidebreak_core::TurnActor {
+            principal: None,
+            display: None,
+            channel_kind: Some(grant.channel_kind.clone()),
+            external_identity: Some(grant.external_identity.clone()),
+        },
+    };
+    let settled = runtime
+        .decide_approval(&grant.owner, call, decision, Some(actor))
+        .await?;
+    Ok(Json(ApprovalSnapshot::from(settled)))
 }

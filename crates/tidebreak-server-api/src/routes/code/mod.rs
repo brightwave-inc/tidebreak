@@ -51,7 +51,8 @@ pub(crate) use delivery::{
     resolve_repositories as resolve_delivery_repositories, run_detail as delivery_run_detail,
 };
 pub(crate) use external::{
-    external_events, external_get_or_create, external_interrupt, external_messages, external_reap,
+    external_approval_decision, external_events, external_get_or_create, external_interrupt,
+    external_messages, external_plan_decision, external_question_decision, external_reap,
     external_rotate, external_session_access,
 };
 pub(crate) use git::{

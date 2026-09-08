@@ -420,8 +420,9 @@ readable repository whose contents prompt-inject an engine holding the
 shared identity's forge credential. With the gate, a changed default
 cannot silently redirect anyone. Setting or changing a default also
 posts a visible notice naming who changed it. This confirmation is
-session-lifecycle consent, not an engine approval; the ban on approving
-engine actions from Slack stands.
+session-lifecycle consent, not an engine approval. You still approve
+engine actions from Slack when a machine session parks on a card; the
+repository gate is a different question.
 
 The GitHub App installation intersected with the person's access is the
 allowlist, refused with a human-readable rendering: outside the App
@@ -526,11 +527,12 @@ for with `/tidebreak mode`. A request above the ceiling is refused by
 name, `permission_mode_above_ceiling`, so the person learns the
 deployment's rule instead of getting a silently clamped session; a
 request for anything but `allow` on a sandbox deployment is refused as
-`permission_mode_unsupported`. The owner answers approvals from the
-desktop or the web, where the session is visible like any other, until
-the channel can carry them. Slack renders no harness approval cards yet.
-Slack `NeedsYou` is connect, fenced, or failed — never
-`approval_requested`.
+`permission_mode_unsupported`. You answer approvals where you are. A
+machine session parks on the same cards the desktop shows; the external
+stream carries their facts and you settle them from Slack. A sandbox
+session stays Allow and never asks, so it still carries none of these
+events. Slack `NeedsYou` includes `approval_requested` on a machine
+session; connect, fenced, or failed stay as they were.
 
 Incarnations follow a durable intent protocol: write the incarnation
 intent row, provision, activate. Stop and reincarnate serialize through
@@ -808,9 +810,10 @@ cost, recorded so the gate is honest:
 - Streaming tool activity or reasoning into Slack. The assistant record
   streams; the engine's interior does not.
 - Reusing `tidebreak-sandbox-protocol`.
-- Approving engine actions from a Slack button. The repository
-  confirmation and the reap button are session-lifecycle consent, and
-  that line is the boundary.
+- Approving engine actions from a Slack button on a sandbox session. The
+  repository confirmation and the reap button stay session-lifecycle
+  consent. A machine session's approval, question, and plan cards are in
+  scope (decision 91).
 - Transcript-level resume for scratch sessions.
 
 ## Open questions

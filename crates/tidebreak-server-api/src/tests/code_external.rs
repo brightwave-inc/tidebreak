@@ -709,12 +709,19 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
     .await;
     assert_eq!(fake.spawns.lock().unwrap().len(), 1);
     assert!(!runtime.has_worker(session_id));
-    assert!(
-        tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+    // The queued turn drains after the send lands, so wait for it rather
+    // than reading the queue in the same instant.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
             .await
             .unwrap()
             .is_empty()
-    );
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued turn drains after the send lands");
     let interrupted = client
         .post(format!(
             "http://{addr}/code/sessions/{session_id}/interrupt"
@@ -2820,4 +2827,268 @@ async fn a_person_grant_refuses_a_body_actor() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+fn long_command_approval_script() -> Vec<tidebreak_harness::HarnessEvent> {
+    use tidebreak_harness::{HarnessApprovalRef, HarnessEvent};
+    let cmd = "x".repeat(600);
+    vec![
+        HarnessEvent::SessionStarted {
+            harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
+            harness_version: "scripted".into(),
+            resume_ref: Some("scripted-session".into()),
+        },
+        HarnessEvent::TurnStarted,
+        HarnessEvent::ApprovalRequested {
+            harness_ref: HarnessApprovalRef::engine("toolu_scripted"),
+            raw: serde_json::json!({}),
+            kind: Some(tidebreak_core::ApprovalKind::Command {
+                cmd,
+                cwd: Some(".".into()),
+            }),
+        },
+        HarnessEvent::AssistantDelta {
+            text: "after the decision".into(),
+        },
+        HarnessEvent::TurnCompleted {
+            usage: Default::default(),
+        },
+    ]
+}
+
+/// A Default-mode machine session parks on a command; the external stream
+/// carries the card facts with a bounded preview; a contributor settles it
+/// and the journal names them; a second decision answers already_settled;
+/// standing grants stay off for this engine; a sandbox session emits none.
+#[tokio::test]
+async fn a_machine_session_parks_on_an_approval_a_contributor_can_settle() {
+    use std::time::Duration;
+    use tidebreak_core::{ApprovalState, HarnessKind};
+
+    let (router, runtime, repo_id, _dir) = machine_app_built(|mut runtime| {
+        runtime.adapters.register(Arc::new(
+            crate::scripted_harness::ScriptedAdapter::new(long_command_approval_script())
+                .with_kind(HarnessKind::ClaudeCode)
+                .with_approvals(tidebreak_core::CapLevel::Supported)
+                .with_plan_mode(tidebreak_core::CapLevel::Supported)
+                .with_auto_mode(tidebreak_core::CapLevel::Supported)
+                .with_allow_mode(tidebreak_core::CapLevel::Supported),
+        ));
+        runtime
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U7", "T1")
+        .await
+        .unwrap();
+
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C-approve/1.1",
+            "repo_id": repo_id,
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-approve/1.1").await;
+
+    let delivered = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "text": "run a command",
+            "event_id": "Ev-approve",
+            "channel_ts": "1.1",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delivered.status(), reqwest::StatusCode::OK);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let approval = loop {
+        let pending = runtime
+            .list_approvals(&owner, Some(ApprovalState::Pending), Some(session_id))
+            .await
+            .unwrap();
+        if let Some(row) = pending.into_iter().next() {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the machine session parks on an approval"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    let mut request = format!("ws://{addr}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", pair.token).parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let mut saw_card = false;
+    let ws_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !saw_card {
+        let frame = tokio::time::timeout_at(ws_deadline, socket.next())
+            .await
+            .expect("the stream carries the approval card")
+            .expect("the stream stays open")
+            .unwrap();
+        let Ok(text) = frame.to_text() else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        if value["event"]["type"] == "approval_requested" {
+            let request = &value["event"]["request"];
+            assert_eq!(request["kind"], "tool_use");
+            assert_eq!(request["tool_name"], "exec");
+            assert_eq!(request["preview_truncated"], true);
+            let preview = request["preview"]["command"].as_str().unwrap();
+            assert_eq!(preview.chars().count(), 512);
+            assert!(
+                request["grant_scopes"].is_null()
+                    || request["grant_scopes"] == serde_json::json!([])
+            );
+            saw_card = true;
+        }
+    }
+
+    let grant_refused = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/approvals/{}/decision",
+            approval.id
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "decision": { "approve_with_grant": { "grant_index": 0 } },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        grant_refused.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let grant_body: serde_json::Value = grant_refused.json().await.unwrap();
+    assert_eq!(grant_body["kind"], "standing_grants_unavailable");
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/approvals/{}/decision",
+            approval.id
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "decision": "approve",
+            "actor": { "external_identity": "U7", "display": "Ada" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        decided.status(),
+        reqwest::StatusCode::OK,
+        "{}",
+        decided.text().await.unwrap()
+    );
+
+    let page = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &owner,
+        session_id,
+        0,
+        tidebreak_core::db::code::MAX_REPLAY_EVENTS,
+    )
+    .await
+    .unwrap();
+    let resolved = page
+        .events
+        .iter()
+        .find_map(|sequenced| match &sequenced.event {
+            tidebreak_core::Event::ApprovalResolved { actor, .. } => actor.clone(),
+            _ => None,
+        });
+    let actor = resolved.expect("the journal names who decided");
+    assert_eq!(actor.external_identity.as_deref(), Some("U7"));
+    assert_eq!(actor.display.as_deref(), Some("Ada"));
+
+    let second = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/questions/{}/decision",
+            approval.id
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::CONFLICT);
+    let second: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(second["kind"], "already_settled");
+    assert_eq!(second["actor"]["external_identity"], "U7");
+    assert_eq!(second["actor"]["display"], "Ada");
+
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U7", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C-sandbox/1.1",
+            "repo_id": repo_id,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-sandbox/1.1").await;
+    let _ = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "text": "run a command",
+            "event_id": "Ev-sandbox",
+            "channel_ts": "1.1",
+        }))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let page = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &owner,
+        session_id,
+        0,
+        tidebreak_core::db::code::MAX_REPLAY_EVENTS,
+    )
+    .await
+    .unwrap();
+    assert!(
+        page.events.iter().all(|sequenced| {
+            !matches!(
+                sequenced.event,
+                tidebreak_core::Event::ApprovalRequested { .. }
+                    | tidebreak_core::Event::ApprovalResolved { .. }
+            )
+        }),
+        "a sandbox session carries none of these cards"
+    );
 }
