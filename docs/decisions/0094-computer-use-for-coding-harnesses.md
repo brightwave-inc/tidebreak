@@ -41,4 +41,4 @@ The native runtime must reuse the host broker and native consent path. Browser w
 - Tests cover wrong-session calls, changed targets, Stop, takeover, reconnect, uncertain outcomes, and concurrent input.
 - macOS native and packaged evidence is recorded separately from Linux or simulated tests.
 
-The integration PR has no unresolved P1 or P2 findings. Reviewers may report no findings. Formatting, focused behavior tests, build checks, and real native acceptance determine completion.
+Before merge, the integration PR must have no unresolved P1 or P2 findings. Reviewers may report no findings. Formatting, focused behavior tests, build checks, and real native acceptance determine completion.

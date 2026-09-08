@@ -1148,9 +1148,9 @@ impl ChromeComputerUseService {
             if bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES
                 && encoded.len() <= MAX_BROWSER_SCREENSHOT_FRAME_BYTES
             {
-                let (delivered_width, delivered_height) = image::ImageReader::with_format(
+                let (delivered_width, delivered_height) = ::image::ImageReader::with_format(
                     std::io::Cursor::new(&bytes),
-                    image::ImageFormat::Png,
+                    ::image::ImageFormat::Png,
                 )
                 .into_dimensions()
                 .map_err(|_| "Chrome screenshot has invalid PNG dimensions")?;
