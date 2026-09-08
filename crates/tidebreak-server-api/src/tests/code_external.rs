@@ -483,7 +483,7 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
             .register(Arc::new(crate::scripted_harness::ScriptedAdapter::new(
                 crate::scripted_harness::plain_text_script(),
             )));
-        runtime.with_sandbox_only_execution()
+        runtime
     })
     .await;
     let addr = serve(router).await;
@@ -623,6 +623,98 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
         .unwrap()
         .iter()
         .any(|message| message.interrupt));
+}
+
+/// A configured runtime places an external session in the sandbox and leaves
+/// a desktop session on the same app on the machine, with a host worktree.
+#[tokio::test]
+async fn a_runtime_places_only_external_sessions_in_the_sandbox() {
+    let (router, _fake, runtime, repo_id, token, dir) = external_app_built(|mut runtime| {
+        runtime
+            .adapters
+            .register(Arc::new(crate::scripted_harness::ScriptedAdapter::new(
+                crate::scripted_harness::plain_text_script(),
+            )));
+        runtime
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-place/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-place/1.1").await;
+    let snapshot = client
+        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status(), reqwest::StatusCode::OK);
+    let snapshot: serde_json::Value = snapshot.json().await.unwrap();
+    assert_eq!(snapshot["execution_location"], "sandbox");
+    assert_eq!(
+        runtime
+            .get_session(&owner, session_id)
+            .await
+            .unwrap()
+            .execution_location,
+        tidebreak_core::ExecutionLocation::Sandbox
+    );
+
+    let repo = super::code::init_git_repo(dir.path());
+    let (_repo, workspace) =
+        super::code::register_and_workspace(&client, addr, &token, &repo).await;
+    let desktop = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            super::code::json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "harness": "claude_code", "permission_mode": "plan" }))
+        .send()
+        .await
+        .unwrap();
+    let desktop_status = desktop.status();
+    let desktop_body = desktop.text().await.unwrap();
+    assert_eq!(
+        desktop_status,
+        reqwest::StatusCode::CREATED,
+        "{desktop_body}"
+    );
+    let desktop: serde_json::Value = serde_json::from_str(&desktop_body).unwrap();
+    assert_eq!(desktop["execution_location"], "machine");
+    let desktop_id: tidebreak_core::SessionId =
+        desktop["id"].as_str().unwrap().parse().expect("session id");
+    assert_eq!(
+        runtime
+            .get_session(&owner, desktop_id)
+            .await
+            .unwrap()
+            .execution_location,
+        tidebreak_core::ExecutionLocation::Machine
+    );
+    assert!(runtime.has_worker(desktop_id));
+    let files = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/files",
+            super::code::json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(files.status(), reqwest::StatusCode::OK);
 }
 
 /// The whole adapter surface over HTTP: bad tokens refuse, get-or-create

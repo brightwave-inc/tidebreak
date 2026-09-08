@@ -201,7 +201,6 @@ impl CodeRuntime {
                 )
                 .await;
         }
-        self.require_machine_execution()?;
         if workspace
             .as_ref()
             .is_some_and(|workspace| workspace.is_remote())
@@ -512,9 +511,6 @@ impl CodeRuntime {
         paused: bool,
     ) -> Result<(), ServerError> {
         let session = self.get_session(owner, id).await?;
-        if !paused && session.execution_location == tidebreak_core::ExecutionLocation::Machine {
-            self.require_machine_execution()?;
-        }
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, paused).await?;
         if !paused {
             self.wake_queue_for_location(&session);
@@ -527,9 +523,6 @@ impl CodeRuntime {
     /// pause, move the row first, stop the live turn, then this.
     pub async fn send_queued_now(&self, owner: &OwnerId, id: SessionId) -> Result<(), ServerError> {
         let session = self.get_session(owner, id).await?;
-        if session.execution_location == tidebreak_core::ExecutionLocation::Machine {
-            self.require_machine_execution()?;
-        }
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
         self.wake_queue_for_location(&session);
         Ok(())

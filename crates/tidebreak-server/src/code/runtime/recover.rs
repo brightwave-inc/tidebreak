@@ -222,8 +222,7 @@ impl CodeRuntime {
                 !matches!(
                     session.lifecycle,
                     SessionLifecycle::Ended | SessionLifecycle::Fenced
-                ) && !self.sandbox_only_execution
-                    && session.execution_location == tidebreak_core::ExecutionLocation::Machine
+                ) && session.execution_location == tidebreak_core::ExecutionLocation::Machine
                     && !self
                         .workers
                         .lock()

@@ -344,7 +344,8 @@ impl CodeRuntime {
 
     /// Where an external session runs on this deployment (decision 0088):
     /// a gateway sandbox when a sandbox runtime is configured, else the
-    /// machine's own engine. The machine is the floor, not an interim path.
+    /// machine's own engine. Desktop, mobile, and `agent-mcp` sessions do
+    /// not use this default. The machine is the floor, not an interim path.
     #[must_use]
     pub fn external_execution_location(&self) -> ExecutionLocation {
         if self.remote.is_some() {
@@ -743,7 +744,6 @@ impl CodeRuntime {
         }
         let session = self.get_session(owner, session_id).await?;
         if session.execution_location == ExecutionLocation::Machine {
-            self.require_machine_execution()?;
             if let Some(external) = self
                 .harness_llm
                 .as_ref()

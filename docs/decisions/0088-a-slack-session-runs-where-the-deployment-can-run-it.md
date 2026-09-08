@@ -82,3 +82,18 @@ sandbox deployment anything but `allow` is refused
 placement's boundary. `Allow` on the machine therefore stays an
 operator's decision per deployment, taken once at boot, and a channel can
 only ask within it.
+
+## Amendment 2026-09-08: placement defaults for external sessions only
+
+The deployment default (sandbox when a runtime is configured, else
+machine) applies at external get-or-create only. Desktop, mobile, and
+`agent-mcp` sessions on the same machine keep machine execution and the
+utilities that go with it: terminal, diffs, scripts, previews. A
+configured runtime is not a server-wide sandbox-only switch.
+
+`execution_location` on the session is the only dispatch rule after
+create. Turns, queue drain, worker attach, and recovery read that
+column. They do not re-derive placement from the workspace or from a
+process-wide flag. A message typed on the web into a sandbox session
+reaches the sandbox lease (or a typed conflict if the lease is gone),
+never a local engine spawn.
