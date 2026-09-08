@@ -225,10 +225,18 @@ as good as that confirmation gate.
 ## Identity and connect
 
 A session acts as one forge identity, chosen when it starts, the same way it
-chooses where the engine runs. A person's session acts as them; a service
-principal's acts as the App's bot. Hosted git names that choice on every
-borrow, and the gateway answers or refuses by name. This page does not yet
-let the channel pick the identity; get-or-create keeps today's default.
+chooses where the engine runs. Hosted git names that choice on every borrow,
+and the gateway answers or refuses by name.
+
+A DM session defaults to acting as the person when the gateway offers their
+identity. When it does not, the session runs as the bot, says so, and offers
+a Connect link. A person may ask for `bot` explicitly. A session owned by a
+service principal always acts as the bot; the body's `acts_as` is ignored.
+
+Get-or-create decides this once, before the workspace is cloned, so the clone
+borrows the same identity the session will. The response names `acts_as`,
+`acting_login`, `app_name`, and `connect_url` (only when the person could
+connect and did not) so the adapter can say who is acting and how to connect.
 
 A Slack user does not run until they hold a grant. Channel sessions run
 under a workspace grant instead: a service principal starts that
@@ -645,6 +653,10 @@ an owner attaches a file ("Attachments aren't read yet").
 The command surface is four words; nothing propagates by folklore:
 
 - `/tidebreak help` lists everything with examples.
+- `/tidebreak mode` names the permission mode a machine session should
+  take, within the operator's ceiling.
+- `/tidebreak identity` names who the next session acts as (`person` or
+  `bot`), within the get-or-create rule above.
 - The App Home shows grant status, active sessions with thread links,
   the channel defaults the user can see, and a revoke control.
 - The install welcome DM introduces the mention pattern and the

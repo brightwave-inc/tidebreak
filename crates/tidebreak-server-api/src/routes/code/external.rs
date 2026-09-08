@@ -116,6 +116,10 @@ pub struct ExternalSessionBody {
     /// workspace grant creates a pending confirmation.
     #[serde(default)]
     pub set_by: Option<ExternalSetBy>,
+    /// Whose forge identity this conversation should act as. A service-owned
+    /// session or a workspace grant ignores this and always acts as the bot.
+    #[serde(default)]
+    pub acts_as: Option<tidebreak_core::ActsAs>,
 }
 
 #[derive(serde::Deserialize)]
@@ -129,6 +133,16 @@ pub struct ExternalSessionResponse {
     /// `created`, `existing`, or `ended`.
     pub status: &'static str,
     pub session_id: SessionId,
+    pub acts_as: tidebreak_core::ActsAs,
+    /// The person's login or the App's bot login, when the forge named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acting_login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    /// Present only when the person could connect and did not, so the session
+    /// is running as the bot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_url: Option<String>,
 }
 
 /// `POST /external/code/sessions` — idempotent get-or-create for one
@@ -220,9 +234,13 @@ pub async fn external_get_or_create(
             ));
         }
     }
-    let resolution = runtime
+    let owner_kind = state
+        .principal_authenticator
+        .session_owner_kind_for(&grant.owner);
+    let (resolution, identity) = runtime
         .external_get_or_create(
             &grant.owner,
+            owner_kind,
             grant.id,
             &grant.channel_kind,
             &body.external_key,
@@ -238,30 +256,29 @@ pub async fn external_get_or_create(
                 acts_as: None,
             },
             body.permission_mode,
+            body.acts_as,
         )
         .await?;
+    let response_from = |status: &'static str, session_id: SessionId| ExternalSessionResponse {
+        status,
+        session_id,
+        acts_as: identity.acts_as,
+        acting_login: identity.acting_login.clone(),
+        app_name: identity.app_name.clone(),
+        connect_url: identity.connect_url.clone(),
+    };
     let (status, response) = match resolution {
         ExternalSessionResolution::Created(binding) => (
             StatusCode::CREATED,
-            ExternalSessionResponse {
-                status: "created",
-                session_id: binding.session_id,
-            },
+            response_from("created", binding.session_id),
         ),
         ExternalSessionResolution::Existing(binding) => (
             StatusCode::OK,
-            ExternalSessionResponse {
-                status: "existing",
-                session_id: binding.session_id,
-            },
+            response_from("existing", binding.session_id),
         ),
-        ExternalSessionResolution::Ended { session_id } => (
-            StatusCode::OK,
-            ExternalSessionResponse {
-                status: "ended",
-                session_id,
-            },
-        ),
+        ExternalSessionResolution::Ended { session_id } => {
+            (StatusCode::OK, response_from("ended", session_id))
+        }
         ExternalSessionResolution::GrantMismatch => {
             return Err(ServerError::not_found("code session not found"));
         }

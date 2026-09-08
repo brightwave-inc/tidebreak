@@ -90,6 +90,7 @@ mod adapters;
 mod approvals;
 mod recover;
 mod remote;
+pub use remote::ExternalActsAsView;
 mod repos;
 mod sessions;
 mod settings;

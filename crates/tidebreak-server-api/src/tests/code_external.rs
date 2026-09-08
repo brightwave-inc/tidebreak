@@ -314,7 +314,23 @@ impl crate::obo_gateway::GitCredentialLender for LendingFake {
         attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
         self.asked.lock().unwrap().push(attribution);
-        Err(crate::obo_gateway::GitForgeError::NoGitForge)
+        Ok(crate::obo_gateway::GitForgeIdentity {
+            app_name: "Acme Forge".to_owned(),
+            attribution: match attribution {
+                crate::obo_gateway::GitForgeAttributionRequest::Person => {
+                    crate::obo_gateway::GitForgeAttribution::Person {
+                        login: "mira".to_owned(),
+                        display_name: None,
+                        commit_email: None,
+                    }
+                }
+                crate::obo_gateway::GitForgeAttributionRequest::Installation => {
+                    crate::obo_gateway::GitForgeAttribution::Bot {
+                        bot_login: Some("acme-bot".to_owned()),
+                    }
+                }
+            },
+        })
     }
 
     async fn git_credential(
@@ -413,8 +429,11 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
     );
     assert_eq!(
         lender.asked.lock().unwrap().as_slice(),
-        [crate::obo_gateway::GitForgeAttributionRequest::Person],
-        "a person session asks to act as the person"
+        [
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
+        ],
+        "get-or-create probes the person, then the session's git borrow uses that identity"
     );
 
     let person = runtime.get_session(&owner, session_id).await.unwrap();
@@ -438,6 +457,7 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
     assert_eq!(
         lender.asked.lock().unwrap().as_slice(),
         [
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
             crate::obo_gateway::GitForgeAttributionRequest::Person,
             crate::obo_gateway::GitForgeAttributionRequest::Installation,
         ],
@@ -505,20 +525,21 @@ async fn a_sessions_git_borrows_the_standalone_deployment_token_from_the_loopbac
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session_id = bound_session_id(&runtime, &owner, "T1/C8/1.1").await;
-    let person = runtime.get_session(&owner, session_id).await.unwrap();
-    let mut bot_session = person.clone();
-    bot_session.id = tidebreak_core::SessionId::new();
-    bot_session.acts_as = Some(tidebreak_core::ActsAs::Bot);
-    tidebreak_core::db::code::insert_session(&runtime.db, &bot_session)
+    let bot = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(bot.acts_as(), tidebreak_core::ActsAs::Bot);
+    let mut person_session = bot.clone();
+    person_session.id = tidebreak_core::SessionId::new();
+    person_session.acts_as = Some(tidebreak_core::ActsAs::Person);
+    tidebreak_core::db::code::insert_session(&runtime.db, &person_session)
         .await
         .unwrap();
     let bot_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
-        session: bot_session.id,
+        session: session_id,
     });
     let person_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
-        session: session_id,
+        session: person_session.id,
     });
     let route = format!(
         "http://{addr}{}",
@@ -1909,6 +1930,351 @@ async fn a_machine_session_above_the_ceiling_is_refused_by_name() {
             .unwrap()
             .is_none(),
         "a refused start binds nothing"
+    );
+}
+
+struct ProbeFake {
+    person:
+        StdMutex<Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError>>,
+    installation:
+        StdMutex<Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError>>,
+    minted: StdMutex<Vec<crate::obo_gateway::GitForgeAttributionRequest>>,
+    asked: StdMutex<Vec<crate::obo_gateway::GitForgeAttributionRequest>>,
+}
+
+impl ProbeFake {
+    fn person_connected(login: &str) -> Arc<Self> {
+        Arc::new(Self {
+            person: StdMutex::new(Ok(crate::obo_gateway::GitForgeIdentity {
+                app_name: "Acme Forge".to_owned(),
+                attribution: crate::obo_gateway::GitForgeAttribution::Person {
+                    login: login.to_owned(),
+                    display_name: Some("Mira".to_owned()),
+                    commit_email: None,
+                },
+            })),
+            installation: StdMutex::new(Ok(crate::obo_gateway::GitForgeIdentity {
+                app_name: "Acme Forge".to_owned(),
+                attribution: crate::obo_gateway::GitForgeAttribution::Bot {
+                    bot_login: Some("acme-bot".to_owned()),
+                },
+            })),
+            minted: StdMutex::new(Vec::new()),
+            asked: StdMutex::new(Vec::new()),
+        })
+    }
+
+    fn not_connected(connect_url: &str) -> Arc<Self> {
+        let fake = Self::person_connected("mira");
+        *fake.person.lock().unwrap() = Err(crate::obo_gateway::GitForgeError::NotConnected {
+            connect_url: Some(connect_url.to_owned()),
+        });
+        fake
+    }
+
+    fn unavailable() -> Arc<Self> {
+        let fake = Self::person_connected("mira");
+        *fake.person.lock().unwrap() = Err(crate::obo_gateway::GitForgeError::Unavailable(
+            "forge down".into(),
+        ));
+        fake
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::obo_gateway::GitCredentialLender for ProbeFake {
+    async fn git_forge_identity(
+        &self,
+        _owner: &OwnerId,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
+    ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
+        self.asked.lock().unwrap().push(attribution);
+        match attribution {
+            crate::obo_gateway::GitForgeAttributionRequest::Person => {
+                self.person.lock().unwrap().clone()
+            }
+            crate::obo_gateway::GitForgeAttributionRequest::Installation => {
+                self.installation.lock().unwrap().clone()
+            }
+        }
+    }
+
+    async fn git_credential(
+        &self,
+        _owner: &OwnerId,
+        _repository: &str,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
+    ) -> Result<crate::obo_gateway::GitCredential, crate::obo_gateway::GitForgeError> {
+        self.minted.lock().unwrap().push(attribution);
+        Ok(crate::obo_gateway::GitCredential {
+            username: "x-access-token".to_owned(),
+            secret: "lent-secret".to_owned(),
+        })
+    }
+
+    async fn list_repositories(
+        &self,
+        _owner: &OwnerId,
+        _attribution: crate::obo_gateway::GitForgeAttributionRequest,
+    ) -> Result<Vec<crate::obo_gateway::GitHubRepository>, crate::obo_gateway::GitForgeError> {
+        Ok(Vec::new())
+    }
+}
+
+async fn machine_with_lender(
+    lender: Arc<ProbeFake>,
+) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
+    let cloned = lender.clone();
+    machine_app_built(move |runtime| runtime.with_git_credentials(cloned)).await
+}
+
+/// A DM with no `acts_as` acts as the person when the gateway offers them.
+#[tokio::test]
+async fn an_external_machine_session_acts_as_the_connected_person() {
+    let lender = ProbeFake::person_connected("mira");
+    let (router, runtime, repo_id, _dir) = machine_with_lender(lender.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-id/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["acts_as"], "person");
+    assert_eq!(body["acting_login"], "mira");
+    assert_eq!(body["app_name"], "Acme Forge");
+    assert!(body.get("connect_url").is_none());
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-id/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Person);
+    assert!(
+        lender
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&crate::obo_gateway::GitForgeAttributionRequest::Person),
+        "the clone path probes the person before checkout"
+    );
+}
+
+/// When the person is not connected, the session runs as the bot and names
+/// the connect URL.
+#[tokio::test]
+async fn an_external_machine_session_falls_back_to_the_bot_when_not_connected() {
+    let lender = ProbeFake::not_connected("https://gateway.example/connect");
+    let (router, runtime, repo_id, _dir) = machine_with_lender(lender.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-id/2.2", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["acts_as"], "bot");
+    assert_eq!(body["connect_url"], "https://gateway.example/connect");
+    assert_eq!(body["acting_login"], "acme-bot");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-id/2.2").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
+    assert!(
+        lender
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&crate::obo_gateway::GitForgeAttributionRequest::Installation),
+        "the clone borrows the installation after the person probe fails"
+    );
+}
+
+/// A person may ask for the bot even when their identity is offered.
+#[tokio::test]
+async fn an_explicit_bot_request_acts_as_the_bot_while_connected() {
+    let lender = ProbeFake::person_connected("mira");
+    let (router, runtime, repo_id, _dir) = machine_with_lender(lender.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C-id/3.3",
+            "repo_id": repo_id,
+            "acts_as": "bot",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["acts_as"], "bot");
+    assert_eq!(body["acting_login"], "acme-bot");
+    assert!(
+        !lender
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&crate::obo_gateway::GitForgeAttributionRequest::Person),
+        "an explicit bot request does not probe the person"
+    );
+}
+
+/// A transient forge failure starts nothing so the adapter can retry.
+#[tokio::test]
+async fn an_unavailable_forge_refuses_get_or_create_with_no_binding() {
+    let lender = ProbeFake::unavailable();
+    let (router, runtime, repo_id, _dir) = machine_with_lender(lender).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-id/4.4", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "forge_unavailable");
+    assert!(
+        tidebreak_core::db::code::get_external_binding(&runtime.db, &owner, "slack", "T1/C-id/4.4")
+            .await
+            .unwrap()
+            .is_none(),
+        "an unavailable forge starts nothing"
+    );
+}
+
+/// A service-owned grant always acts as the bot, whatever the body says.
+#[tokio::test]
+async fn a_service_owned_grant_acts_as_the_bot_regardless_of_the_body() {
+    let lender = ProbeFake::person_connected("mira");
+    let tokens = crate::auth::TokenMap::parse(
+        "admin aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa admin\n\
+         bot-svc bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb service\n",
+    )
+    .unwrap();
+    let service = crate::principal::Principal::User {
+        id: crate::principal::UserId::new("bot-svc").unwrap(),
+        kind: crate::principal::PrincipalKind::Service,
+        role: crate::principal::Role::Member,
+    };
+    let owner = service.owner_id();
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = tidebreak_harness::AdapterRegistry::new();
+    registry.register(Arc::new(
+        crate::scripted_harness::ScriptedAdapter::new(crate::scripted_harness::plain_text_script())
+            .with_approvals(tidebreak_core::CapLevel::Supported)
+            .with_plan_mode(tidebreak_core::CapLevel::Supported)
+            .with_auto_mode(tidebreak_core::CapLevel::Supported)
+            .with_allow_mode(tidebreak_core::CapLevel::Supported),
+    ));
+    let runtime = Arc::new(
+        CodeRuntime::with_registry_and_browser_runtime(
+            db,
+            dir.path().to_path_buf(),
+            registry,
+            None,
+            None,
+        )
+        .with_git_credentials(lender.clone()),
+    );
+    let root = super::code::init_git_repo(dir.path());
+    let repo = CodeRepo {
+        id: RepoId::new(),
+        owner: owner.clone(),
+        root_path: root.display().to_string(),
+        display_name: "tools".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "tidebreak/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: None,
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
+    };
+    insert_repo(&runtime.db, &repo).await.unwrap();
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime.clone());
+    state.principal_authenticator = Arc::new(crate::auth::PrincipalAuthenticator::Static(tokens));
+    state.adapter_bootstrap_tokens = Some(Arc::new(crate::auth::AdapterBootstrapTokens::for_test(
+        ADAPTER_BOOTSTRAP_TOKEN,
+    )));
+    let router = app(state);
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-bot", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C-svc/1.1",
+            "repo_id": repo.id,
+            "acts_as": "person",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED,);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["acts_as"], "bot", "{body}");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-svc/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
+    assert_eq!(session.owner_kind.as_deref(), Some("service"));
+    assert!(
+        !lender
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&crate::obo_gateway::GitForgeAttributionRequest::Person),
+        "a service owner never probes the person"
     );
 }
 
