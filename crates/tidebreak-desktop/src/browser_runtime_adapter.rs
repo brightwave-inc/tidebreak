@@ -156,6 +156,7 @@ impl BrowserRuntime for DesktopBrowserRuntime {
             &self.app,
             &self.registry,
             capability_id,
+            scope.session,
             args.clone(),
         )
         .await

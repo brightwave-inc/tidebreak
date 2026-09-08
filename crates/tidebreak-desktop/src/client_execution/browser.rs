@@ -622,6 +622,7 @@ async fn execute_operation(
                 app,
                 registry,
                 capability_id,
+                call.chat_id,
                 arguments.clone(),
             )
             .await

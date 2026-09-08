@@ -367,7 +367,10 @@ impl ComputerUseState {
         lock(&self.dispatch_state).owner == Some(session)
     }
 
-    fn stop_all<E>(&self, cancel_helper: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+    pub(crate) fn stop_all<E>(
+        &self,
+        cancel_helper: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
         let mut state = lock(&self.dispatch_state);
         state.stop_revision = state.stop_revision.saturating_add(1);
         self.halt.send_replace(true);
@@ -409,6 +412,29 @@ impl ComputerUseState {
             }
         };
         Ok(dispatch().await)
+    }
+
+    /// Foreground WK input shares the native app input owner. Dropping its
+    /// operation disarms the queued native callback and waits for an executing
+    /// callback's lock before this method releases the shared dispatch gate.
+    pub(crate) async fn dispatch_foreground_browser<T, F, Fut>(
+        &self,
+        session: SessionId,
+        dispatch: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        self.dispatch_acting(session, || async {
+            tokio::select! {
+                biased;
+                _ = self.wait_for_halt() => Err("browser control was stopped by the user".to_owned()),
+                result = dispatch() => result,
+            }
+        })
+        .await
+        .map_err(|_| "browser control was stopped by the user".to_owned())?
     }
 
     #[cfg(test)]
@@ -2661,6 +2687,45 @@ mod tests {
         assert!(cu.is_halted());
         cu.resume();
         assert!(!cu.is_halted());
+    }
+
+    #[tokio::test]
+    async fn foreground_browser_waits_for_the_native_app_input_owner() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let native_session = SessionId::new();
+        let browser_session = SessionId::new();
+        let (native_started, native_started_rx) = oneshot::channel();
+        let (release_native, release_native_rx) = oneshot::channel();
+        let native_cu = cu.clone();
+        let native = tokio::spawn(async move {
+            native_cu
+                .dispatch_acting(native_session, || async {
+                    native_started.send(()).unwrap();
+                    release_native_rx.await.unwrap();
+                })
+                .await
+        });
+        native_started_rx.await.unwrap();
+        let (browser_started, mut browser_started_rx) = oneshot::channel();
+        let browser_cu = cu.clone();
+        let browser = tokio::spawn(async move {
+            browser_cu
+                .dispatch_foreground_browser(browser_session, || async {
+                    browser_started.send(()).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(cu.owns_dispatch(native_session));
+        assert!(matches!(
+            browser_started_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        release_native.send(()).unwrap();
+        native.await.unwrap().unwrap();
+        browser_started_rx.await.unwrap();
+        browser.await.unwrap().unwrap();
     }
 
     #[tokio::test]

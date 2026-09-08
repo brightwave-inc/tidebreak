@@ -1323,6 +1323,7 @@ pub(crate) async fn browser_native_act(
     app: &AppHandle,
     registry: &BrowserRegistry,
     capability_id: Uuid,
+    session_id: tidebreak_core::SessionId,
     arguments: tidebreak_core::BrowserActArgs,
 ) -> Result<tidebreak_core::BrowserActResult, String> {
     use tidebreak_core::BrowserActStatus;
@@ -1482,16 +1483,20 @@ pub(crate) async fn browser_native_act(
                     )
                     .await
                 } else {
-                    execute_native_action(
-                        app,
-                        dispatch_registry,
-                        capability_id,
-                        workspace_id,
-                        dispatch_origin,
-                        fence,
-                        arguments,
-                    )
-                    .await
+                    let host = app.state::<crate::host_access::HostAccess>();
+                    host.computer_use
+                        .dispatch_foreground_browser(session_id, || {
+                            execute_native_action(
+                                app.clone(),
+                                dispatch_registry,
+                                capability_id,
+                                workspace_id,
+                                dispatch_origin,
+                                fence,
+                                arguments,
+                            )
+                        })
+                        .await
                 }
             },
         )
@@ -6791,6 +6796,47 @@ mod tests {
         let callback = state.lock().unwrap();
         assert!(callback.cancelled);
         assert!(callback.sender.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn global_stop_disarms_wk_callback_before_releasing_shared_input() {
+        use crate::client_execution::computer_use::ComputerUseState;
+        use std::sync::{Arc, Mutex};
+        let computer_use = Arc::new(ComputerUseState::default());
+        let session = tidebreak_core::SessionId::new();
+        let (sender, mut receiver) = oneshot::channel();
+        let callback = Arc::new(Mutex::new(NativeInputCallbackState {
+            sender: Some(sender),
+            cancelled: false,
+        }));
+        let (entered, entered_rx) = oneshot::channel();
+        let action_cu = computer_use.clone();
+        let action_callback = callback.clone();
+        let action = tokio::spawn(async move {
+            action_cu
+                .dispatch_foreground_browser(session, || async move {
+                    let _cancellation = NativeInputCancellation(action_callback);
+                    entered.send(()).unwrap();
+                    std::future::pending::<Result<(), String>>().await
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        assert!(computer_use.owns_dispatch(session));
+        computer_use.stop_all(|| Ok::<_, ()>(())).unwrap();
+        assert_eq!(
+            action.await.unwrap().unwrap_err(),
+            "browser control was stopped by the user"
+        );
+        computer_use.drain_acting().await;
+        assert!(!computer_use.owns_dispatch(session));
+        assert!(callback.lock().unwrap().cancelled);
+        assert!(callback.lock().unwrap().sender.is_none());
         assert!(matches!(
             receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
