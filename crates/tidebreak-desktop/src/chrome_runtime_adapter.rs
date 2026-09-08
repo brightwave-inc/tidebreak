@@ -86,6 +86,27 @@ struct SessionState {
     last_error: Option<String>,
 }
 
+impl SessionState {
+    fn connection_for_mode(&self, mode: ChromeConnectionMode) -> Option<&Connection> {
+        self.connection
+            .as_ref()
+            .filter(|connection| connection.mode == mode && connection.cdp.is_connected())
+    }
+
+    fn discard_closed_connection(&mut self, session: &Session) {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|connection| !connection.cdp.is_connected())
+        {
+            session.stop();
+            self.connection.take();
+            self.last_error =
+                Some("Chrome closed. Request chrome_connect and approve a new connection.".into());
+        }
+    }
+}
+
 struct Session {
     control: Mutex<ControlState>,
     state: AsyncMutex<SessionState>,
@@ -184,6 +205,7 @@ impl Drop for ManagedChrome {
 
 struct Connection {
     service: ChromeComputerUseService,
+    cdp: CdpSession,
     id: String,
     mode: ChromeConnectionMode,
     _managed: Option<ManagedChrome>,
@@ -297,6 +319,7 @@ impl ChromeRuntimeAdapter {
                 )
             };
         }
+        state.discard_closed_connection(&session);
         if !is_connection && (paused_at_enqueue || queued_stop.is_cancelled()) {
             return rejected(call, "Chrome stopped while this action was queued. Propose a new action after native approval to resume.", "stopped");
         }
@@ -437,22 +460,19 @@ impl ChromeRuntimeAdapter {
         call: &ComputerUseCall,
         mode: ChromeConnectionMode,
     ) -> ComputerUseResult {
+        state.discard_closed_connection(session);
         let paused = session
             .control
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .paused;
-        if state
-            .connection
-            .as_ref()
-            .is_some_and(|connection| connection.mode == mode)
-            && !paused
-        {
+        if state.connection_for_mode(mode).is_some() && !paused {
             return completed(call, "Chrome is connected.", view(session, state, scope));
         }
+        let resume = paused && state.connection_for_mode(mode).is_some();
         let stop = session.begin_consent();
         let setup = async {
-            if !native_consent(&self.app, mode, paused).await? {
+            if !native_consent(&self.app, mode, resume).await? {
                 return Err("Chrome connection was not approved.".to_owned());
             }
             if stop.is_cancelled()
@@ -461,11 +481,9 @@ impl ChromeRuntimeAdapter {
             {
                 return Err("Chrome connection was stopped.".to_owned());
             }
-            if let Some(connection) = &state.connection {
-                if connection.mode == mode {
-                    session.activate(connection.service.clone(), &stop)?;
-                    return Ok(());
-                }
+            if let Some(connection) = state.connection_for_mode(mode) {
+                session.activate(connection.service.clone(), &stop)?;
+                return Ok(());
             }
             state.connection.take();
             let browser = installed_chrome(&self.home)?;
@@ -504,10 +522,11 @@ impl ChromeRuntimeAdapter {
                     grant: ChromeConnectionGrant::DeveloperAllSites,
                     managed_isolated: mode == ChromeConnectionMode::Managed,
                 },
-                cdp,
+                cdp.clone(),
             )?;
             let connection = Connection {
                 service,
+                cdp,
                 id,
                 mode,
                 _managed: managed,
@@ -685,18 +704,24 @@ fn view(session: &Session, state: &SessionState, scope: &ChromeScope) -> ChromeC
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .paused;
+    let live_connection = state
+        .connection
+        .as_ref()
+        .filter(|connection| connection.cdp.is_connected());
     ChromeConnectionView {
-        status: match (&state.connection, paused) {
+        status: match (live_connection, paused) {
             (None, _) => ChromeConnectionStatus::Disconnected,
             (Some(_), true) => ChromeConnectionStatus::Paused,
             (Some(_), false) => ChromeConnectionStatus::Connected,
         },
-        mode: state.connection.as_ref().map(|connection| connection.mode),
-        tab_count: state
-            .connection
-            .as_ref()
+        mode: live_connection.map(|connection| connection.mode),
+        tab_count: live_connection
             .map_or(0, |connection| connection.service.state(scope).tab_count),
-        last_error: state.last_error.clone(),
+        last_error: if live_connection.is_none() && state.connection.is_some() {
+            Some("Chrome closed. Request chrome_connect and approve a new connection.".into())
+        } else {
+            state.last_error.clone()
+        },
     }
 }
 
@@ -1083,6 +1108,111 @@ fn unknown(call: &ComputerUseCall, text: &str, code: &str) -> ComputerUseResult 
 mod tests {
     use super::*;
 
+    struct TestTransport;
+
+    #[async_trait::async_trait]
+    impl tidebreak_server::chrome::cdp::CdpTransport for TestTransport {
+        async fn send_text(
+            &mut self,
+            _text: &str,
+        ) -> Result<(), tidebreak_server::chrome::cdp::CdpError> {
+            Ok(())
+        }
+
+        async fn next(
+            &mut self,
+        ) -> Result<
+            Option<tidebreak_server::chrome::cdp::CdpFrame>,
+            tidebreak_server::chrome::cdp::CdpError,
+        > {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_connections_cannot_report_connected_or_resume_after_approval() {
+        for mode in [
+            ChromeConnectionMode::Managed,
+            ChromeConnectionMode::Existing,
+        ] {
+            for paused in [false, true] {
+                let session = Session::new();
+                let mut state = session.state.lock().await;
+                let scope = ChromeScope {
+                    owner: OwnerId::local(),
+                    workspace: WorkspaceId::new(),
+                    session: SessionId::new(),
+                    cancel: CancelToken::new(),
+                };
+                let cdp = CdpSession::with_transport(TestTransport);
+                let service = ChromeComputerUseService::new();
+                let id = Uuid::new_v4().to_string();
+                service
+                    .install_connection(
+                        ChromeConnectionSpec {
+                            connection_id: id.clone(),
+                            owner: scope.owner.clone(),
+                            workspace: scope.workspace,
+                            endpoint_label: "fixture".into(),
+                            websocket_endpoint: "ws://127.0.0.1:9222/devtools/browser/fixture"
+                                .into(),
+                            grant: ChromeConnectionGrant::DeveloperAllSites,
+                            managed_isolated: mode == ChromeConnectionMode::Managed,
+                        },
+                        cdp.clone(),
+                    )
+                    .unwrap();
+                let key = ScopeKey::from(&scope);
+                let holder = Arc::new(Mutex::new(Some(key.clone())));
+                state.connection = Some(Connection {
+                    service: service.clone(),
+                    cdp: cdp.clone(),
+                    id,
+                    mode,
+                    _managed: None,
+                    _existing: Some(ExistingLease {
+                        key,
+                        holder: holder.clone(),
+                    }),
+                });
+                session
+                    .activate(service.clone(), &CancelToken::new())
+                    .unwrap();
+                if paused {
+                    session.stop();
+                }
+                assert!(state.connection_for_mode(mode).is_some());
+                assert_eq!(
+                    view(&session, &state, &scope).status,
+                    if paused {
+                        ChromeConnectionStatus::Paused
+                    } else {
+                        ChromeConnectionStatus::Connected
+                    }
+                );
+                // A socket can close while idle or while native approval waits.
+                cdp.close();
+                assert!(state.connection_for_mode(mode).is_none());
+                let closed = view(&session, &state, &scope);
+                assert_eq!(closed.status, ChromeConnectionStatus::Disconnected);
+                assert_eq!(closed.tab_count, 0);
+                assert!(closed
+                    .last_error
+                    .unwrap()
+                    .contains("approve a new connection"));
+                state.discard_closed_connection(&session);
+                assert!(state.connection.is_none());
+                assert!(holder.lock().unwrap().is_none());
+                assert!(service.state(&scope).connection_id.is_none());
+                assert!(session.control.lock().unwrap().paused);
+                assert_eq!(
+                    view(&session, &state, &scope).status,
+                    ChromeConnectionStatus::Disconnected
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn chrome_activation_waits_for_native_input_while_background_calls_continue() {
         use crate::client_execution::computer_use::ComputerUseState;
@@ -1422,8 +1552,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    #[ignore = "launches a visible isolated Chrome window"]
-    async fn managed_chrome_launches_connects_and_cleans_up() {
+    #[ignore = "launches isolated Chrome and captures a background tab"]
+    async fn managed_chrome_opens_captures_closes_and_cleans_up() {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         let binary = installed_chrome(&home).unwrap();
         verify_chrome_version(&binary).await.unwrap();
@@ -1444,6 +1574,67 @@ mod tests {
         assert!(endpoint.starts_with("ws://127.0.0.1:"));
         let version = cdp.command("Browser.getVersion", json!({})).await.unwrap();
         assert!(version["product"].as_str().unwrap().starts_with("Chrome/"));
+        let target = tokio::time::timeout(Duration::from_secs(15), async {
+            let target = cdp
+                .command(
+                    "Target.createTarget",
+                    json!({"url":"about:blank","background":true}),
+                )
+                .await
+                .unwrap()["targetId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let attached = cdp
+                .command(
+                    "Target.attachToTarget",
+                    json!({"targetId":target,"flatten":true}),
+                )
+                .await
+                .unwrap()["sessionId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            cdp.command_in_session(&attached, "Page.enable", json!({}))
+                .await
+                .unwrap();
+            let screenshot = cdp
+                .command_in_session(&attached, "Page.captureScreenshot", json!({"format":"png"}))
+                .await
+                .unwrap();
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(screenshot["data"].as_str().unwrap())
+                .unwrap();
+            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert!(bytes.len() > 100);
+            eprintln!("managed Chrome background PNG: {} bytes", bytes.len());
+            let result = cdp
+                .command("Target.closeTarget", json!({"targetId":target}))
+                .await
+                .unwrap();
+            assert_eq!(result["success"], true);
+            target
+        })
+        .await
+        .expect("Chrome must render and capture a background tab, not only expose a debugger");
+        // Chrome acknowledges the close request before destroying the target.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let targets = cdp.command("Target.getTargets", json!({})).await.unwrap();
+                if targets["targetInfos"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|info| info["targetId"] != target)
+                {
+                    break;
+                }
+                tokio::time::sleep(ENDPOINT_POLL).await;
+            }
+        })
+        .await
+        .expect("the owned background tab must close");
         cdp.close();
         drop(managed);
         assert!(!profile.exists());
