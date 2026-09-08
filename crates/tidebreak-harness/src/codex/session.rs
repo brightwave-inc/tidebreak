@@ -892,6 +892,7 @@ impl CodexSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdin = child

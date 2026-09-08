@@ -626,6 +626,7 @@ impl ClaudeSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdin = child
@@ -1476,6 +1477,7 @@ mod tests {
             binary: Some(binary),
             sink,
             browser: None,
+            native: None,
         })
     }
 
@@ -1650,6 +1652,7 @@ done
             binary: Some(PathBuf::from("/usr/bin/claude")),
             sink: Arc::new(Discard),
             browser: None,
+            native: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
@@ -1855,6 +1858,7 @@ done
             binary: Some(dir.path().join("claude")),
             sink: Arc::new(Discard),
             browser: Some(browser),
+            native: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         assert_eq!(
@@ -1912,6 +1916,7 @@ done
             binary: Some(dir.path().join("claude")),
             sink: Arc::new(Discard),
             browser: None,
+            native: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan

@@ -93,6 +93,21 @@ impl CodeRuntime {
             };
             runtime.revoke_session(&scope);
         }
+        self.revoke_native_session(session);
+    }
+
+    /// Revoke the session-native token and permanently tombstone its native
+    /// adapter authority. Idempotent, like the browser half.
+    pub(super) fn revoke_native_session(&self, session: &Session) {
+        self.native_tokens.revoke(session.id);
+        if let (Some(runtime), Some(workspace)) = (&self.native_runtime, session.workspace_id) {
+            let scope = NativeRuntimeScope {
+                owner: session.owner.clone(),
+                workspace,
+                session: session.id,
+            };
+            runtime.revoke_session(&scope);
+        }
     }
 
     /// Revoke only the outgoing worker's transient browser and approval channels.
@@ -104,6 +119,7 @@ impl CodeRuntime {
     /// enduring tombstone.
     pub(super) fn revoke_worker_channels(&self, session_id: SessionId) {
         self.browser_tokens.revoke(session_id);
+        self.native_tokens.revoke(session_id);
         self.approvals.revoke_session(session_id);
         if let Some(relay) = &self.harness_llm {
             relay.revoke(session_id);

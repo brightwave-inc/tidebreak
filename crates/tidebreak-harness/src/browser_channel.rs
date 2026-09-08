@@ -10,7 +10,7 @@
 
 use std::ffi::OsString;
 
-use crate::{filter_engine_child_env, BrowserChannelSpec};
+use crate::{filter_engine_child_env, BrowserChannelSpec, NativeChannelSpec};
 
 /// Adapter must inject this exact key; engines must consume it.
 ///
@@ -40,6 +40,7 @@ pub fn apply_child_env_tokio<I>(
     snapshot: I,
     plan_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&NativeChannelSpec>,
 ) where
     I: IntoIterator<Item = (OsString, OsString)>,
 {
@@ -52,6 +53,9 @@ pub fn apply_child_env_tokio<I>(
     }
     if let Some(browser) = browser {
         browser.inject_env_tokio(cmd);
+    }
+    if let Some(native) = native {
+        native.inject_env_tokio(cmd);
     }
 }
 
@@ -82,9 +86,10 @@ mod tests {
         snapshot: impl IntoIterator<Item = (OsString, OsString)>,
         plan_env: &[(String, String)],
         browser: Option<&BrowserChannelSpec>,
+        native: Option<&NativeChannelSpec>,
     ) -> std::collections::BTreeMap<String, String> {
         let mut cmd = tokio::process::Command::new("/bin/true");
-        apply_child_env_tokio(&mut cmd, kind, snapshot, plan_env, browser);
+        apply_child_env_tokio(&mut cmd, kind, snapshot, plan_env, browser, native);
         cmd.as_std()
             .get_envs()
             .filter_map(|(name, value)| {
@@ -125,7 +130,7 @@ mod tests {
         let trusted = PathBuf::from("/tmp/trusted-cap.json");
         let browser = BrowserChannelSpec::new(trusted.clone(), bridge_fixture());
 
-        let env = final_env(Vec::new(), &[], Some(&browser));
+        let env = final_env(Vec::new(), &[], Some(&browser), None);
         let (key, value) = env
             .iter()
             .find(|(name, _)| name.as_str() == BROWSER_CAPFILE_ENV_KEY)
@@ -141,12 +146,34 @@ mod tests {
 
     #[test]
     fn apply_without_browser_injects_no_browser_entry() {
-        let env = final_env(Vec::new(), &[], None);
+        let env = final_env(Vec::new(), &[], None, None);
         assert!(
             !env.contains_key(BROWSER_CAPFILE_ENV_KEY),
             "None must not add a browser capability entry"
         );
         assert!(env.is_empty(), "empty inputs yield an empty environment");
+    }
+
+    #[test]
+    fn apply_with_native_injects_the_trusted_pair_last() {
+        let native = NativeChannelSpec::new(
+            PathBuf::from("/tmp/native-cap.json"),
+            PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let env = final_env(Vec::new(), &[], None, Some(&native));
+        assert_eq!(
+            env.get(NativeChannelSpec::ENV_KEY).map(String::as_str),
+            Some("/tmp/native-cap.json")
+        );
+        assert_eq!(env.len(), 1);
+    }
+
+    #[test]
+    fn native_env_key_is_tidebreak_prefixed() {
+        assert!(
+            NativeChannelSpec::ENV_KEY.starts_with("TIDEBREAK_"),
+            "the key must use the TIDEBREAK_ prefix so filter_child_env strips it"
+        );
     }
 
     #[test]
@@ -161,6 +188,7 @@ mod tests {
             tidebreak_core::HarnessKind::ClaudeCode,
             Vec::new(),
             &[],
+            None,
             None,
         );
 
@@ -188,10 +216,11 @@ mod tests {
             snapshot(),
             &[],
             None,
+            None,
         );
         assert!(claude.contains_key("ANTHROPIC_API_KEY"));
         assert!(!claude.contains_key("OPENAI_API_KEY"));
-        let codex = final_env_for(tidebreak_core::HarnessKind::Codex, snapshot(), &[], None);
+        let codex = final_env_for(tidebreak_core::HarnessKind::Codex, snapshot(), &[], None, None);
         assert!(codex.contains_key("OPENAI_API_KEY"));
         assert!(!codex.contains_key("ANTHROPIC_API_KEY"));
         for kind in [
@@ -199,7 +228,7 @@ mod tests {
             tidebreak_core::HarnessKind::Grok,
         ] {
             assert!(
-                final_env_for(kind, snapshot(), &[], None).is_empty(),
+                final_env_for(kind, snapshot(), &[], None, None).is_empty(),
                 "{kind:?} detection reads no auth environment, so its child receives none"
             );
         }
@@ -213,7 +242,7 @@ mod tests {
             OsString::from("tidebreak_browser_capfile"),
             OsString::from("/tmp/snapshot-cap.json"),
         )];
-        let env = final_env(snapshot, &[], None);
+        let env = final_env(snapshot, &[], None, None);
         assert!(
             !env.contains_key(BROWSER_CAPFILE_ENV_KEY),
             "a reserved snapshot key must be stripped before the browser step"
@@ -251,7 +280,7 @@ mod tests {
             BROWSER_CAPFILE_ENV_KEY.to_owned(),
             "/tmp/plan-conflict-cap.json".to_owned(),
         )];
-        let env = final_env(Vec::new(), &plan_env, Some(&browser));
+        let env = final_env(Vec::new(), &plan_env, Some(&browser), None);
         assert_eq!(
             env.get(BROWSER_CAPFILE_ENV_KEY).map(String::as_str),
             Some(trusted.to_string_lossy().as_ref()),
