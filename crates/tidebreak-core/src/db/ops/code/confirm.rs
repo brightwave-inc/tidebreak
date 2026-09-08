@@ -11,6 +11,21 @@ use crate::OwnerId;
 use super::super::super::{entities, store_err, DbStore};
 use super::super::agent_run::database_now;
 
+async fn grant_owned_by(
+    conn: &impl sea_orm::ConnectionTrait,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+) -> Result<bool> {
+    Ok(
+        entities::code_external_grant::Entity::find_by_id(grant_id.0)
+            .filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()))
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .is_some(),
+    )
+}
+
 fn confirm_from_model(
     model: entities::code_channel_repository_confirm::Model,
 ) -> Result<CodeChannelRepositoryConfirm> {
@@ -35,8 +50,12 @@ fn confirm_from_model(
 /// Every confirmation row one grant holds, newest first.
 pub async fn list_channel_repository_confirms(
     store: &DbStore,
+    owner: &OwnerId,
     grant_id: CodeGrantId,
 ) -> Result<Vec<CodeChannelRepositoryConfirm>> {
+    if !grant_owned_by(&store.conn, owner, grant_id).await? {
+        return Ok(Vec::new());
+    }
     entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
         .order_by_desc(entities::code_channel_repository_confirm::Column::CreatedAt)
@@ -51,10 +70,14 @@ pub async fn list_channel_repository_confirms(
 /// Whether `(grant, channel, repository)` is confirmed.
 pub async fn channel_repository_is_confirmed(
     store: &DbStore,
+    owner: &OwnerId,
     grant_id: CodeGrantId,
     channel_id: &str,
     repository: &str,
 ) -> Result<bool> {
+    if !grant_owned_by(&store.conn, owner, grant_id).await? {
+        return Ok(false);
+    }
     Ok(entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
         .filter(entities::code_channel_repository_confirm::Column::ChannelId.eq(channel_id))
@@ -73,6 +96,7 @@ pub async fn channel_repository_is_confirmed(
 /// channel is superseded. Returns the pending row.
 pub async fn ensure_pending_channel_repository(
     store: &DbStore,
+    owner: &OwnerId,
     grant_id: CodeGrantId,
     channel_id: &str,
     repository: &str,
@@ -80,6 +104,10 @@ pub async fn ensure_pending_channel_repository(
     set_by_display: &str,
 ) -> Result<CodeChannelRepositoryConfirm> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !grant_owned_by(&transaction, owner, grant_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Err(AgentError::Store("grant not found".into()));
+    }
     let now = database_now(&transaction).await?;
     let pending = entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
@@ -126,12 +154,17 @@ pub async fn ensure_pending_channel_repository(
 /// An admin confirms a pending `(grant, channel, repository)` pair.
 pub async fn confirm_channel_repository(
     store: &DbStore,
+    owner: &OwnerId,
     grant_id: CodeGrantId,
     channel_id: &str,
     repository: &str,
     admin: &OwnerId,
 ) -> Result<Option<CodeChannelRepositoryConfirm>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !grant_owned_by(&transaction, owner, grant_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
     let Some(row) = entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
         .filter(entities::code_channel_repository_confirm::Column::ChannelId.eq(channel_id))

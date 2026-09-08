@@ -2254,6 +2254,8 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let session_id = bound_session_id(&runtime, &service, "T1/C1/1.1").await;
+    let session = runtime.get_session(&service, session_id).await.unwrap();
+    assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
 
     let (status, named) = call_json(
         &router,

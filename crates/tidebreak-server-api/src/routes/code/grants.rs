@@ -52,7 +52,7 @@ async fn snapshot_grant(
     let mut snapshot = CodeGrantSnapshot::from_grant_and_profile(grant.clone(), profile);
     if grant.kind.is_workspace() {
         let channels = code
-            .list_channel_repository_confirms(grant.id)
+            .list_channel_repository_confirms(&grant.owner, grant.id)
             .await?
             .into_iter()
             .map(|row| crate::code::types::CodeGrantChannelSnapshot {
@@ -74,7 +74,7 @@ async fn snapshot_grant(
 pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>>, ServerError> {
     let mut grants = code.list_adapter_grants().await?;
     if code.is_admin() {
-        for grant in code.list_workspace_grants_all_owners().await? {
+        for grant in code.list_workspace_grants_as_admin().await? {
             if !grants.iter().any(|existing| existing.id == grant.id) {
                 grants.push(grant);
             }
@@ -87,7 +87,7 @@ pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>
         .map(|profile| (profile.grant_id, profile))
         .collect();
     if code.is_admin() {
-        for profile in code.list_workspace_grant_profiles_all_owners().await? {
+        for profile in code.list_workspace_grant_profiles_as_admin().await? {
             profiles.entry(profile.grant_id).or_insert(profile);
         }
     }
@@ -385,14 +385,11 @@ pub struct WorkspaceApproveBody {
 
 /// `POST /deployment/code/grants/workspace/{id}/approve`
 pub async fn approve_workspace_grant(
-    State(state): State<AppState>,
-    auth: crate::principal::AuthContext,
+    code: ScopedCode,
     Path(id): Path<tidebreak_core::CodeHandshakeId>,
     Json(body): Json<WorkspaceApproveBody>,
 ) -> Result<StatusCode, ServerError> {
-    let runtime = adapter_runtime(&state)?;
-    runtime
-        .approve_workspace_handshake(id, &body.csrf, &auth.principal.owner_id())
+    code.approve_workspace_handshake(id, &body.csrf)
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(StatusCode::NO_CONTENT)
@@ -405,19 +402,11 @@ pub struct ConfirmRepositoryBody {
 
 /// `POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/confirm`
 pub async fn confirm_workspace_channel_repository(
-    State(state): State<AppState>,
-    auth: crate::principal::AuthContext,
+    code: ScopedCode,
     Path((id, channel_id)): Path<(tidebreak_core::CodeGrantId, String)>,
     Json(body): Json<ConfirmRepositoryBody>,
 ) -> Result<StatusCode, ServerError> {
-    let runtime = adapter_runtime(&state)?;
-    runtime
-        .confirm_channel_repository(
-            id,
-            &channel_id,
-            &body.repository,
-            &auth.principal.owner_id(),
-        )
+    code.confirm_workspace_channel_repository(id, &channel_id, &body.repository)
         .await?
         .ok_or_else(|| ServerError::not_found("repository confirmation not found"))?;
     Ok(StatusCode::NO_CONTENT)

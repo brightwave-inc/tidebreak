@@ -1,4 +1,4 @@
-# 90. Workspace grants
+# 92. Workspace grants
 
 - Status: Accepted
 - Date: 2026-09-08

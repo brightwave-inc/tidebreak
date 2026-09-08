@@ -32,7 +32,9 @@ describe("WorkspaceApprovalView", () => {
 
     expect(screen.getByText("Acme Corp")).toBeTruthy();
     expect(
-      screen.getByText(/Run channel sessions for Slack workspace Acme Corp as tidebreak-slack/),
+      screen.getByText(
+        /Run channel sessions for Slack workspace Acme Corp as tidebreak-slack/,
+      ),
     ).toBeTruthy();
 
     await userEvent

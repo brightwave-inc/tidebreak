@@ -5844,10 +5844,12 @@ async fn connect_completion_is_owner_bound_and_atomic() {
     crate::db::code::mint_external_grant(
         &store,
         &alice,
-        "slack",
-        "U-existing",
-        "T-existing",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U-existing",
+            workspace_identity: "T-existing",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("conflicting-token"),
         &fake_hash("existing-refresh"),
     )
@@ -5934,10 +5936,12 @@ async fn workspace_revoke_updates_the_whole_scope() {
         crate::db::code::mint_external_grant(
             &store,
             &owner,
-            "slack",
-            user,
-            workspace,
-            crate::code::CodeGrantKind::Person,
+            crate::db::code::MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: user,
+                workspace_identity: workspace,
+                kind: crate::code::CodeGrantKind::Person,
+            },
             &fake_hash(token),
             &fake_hash(&format!("{token}-refresh")),
         )
@@ -5981,10 +5985,12 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
     let grant = crate::db::code::mint_external_grant(
         &store,
         &owner,
-        "slack",
-        "U1",
-        "T1",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U1",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("token-1"),
         &fake_hash("refresh-1"),
     )
@@ -6000,10 +6006,12 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
     assert!(crate::db::code::mint_external_grant(
         &store,
         &owner,
-        "slack",
-        "U1",
-        "T1",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U1",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("token-x"),
         &fake_hash("refresh-x"),
     )
@@ -6078,10 +6086,12 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
     assert!(crate::db::code::mint_external_grant(
         &store,
         &owner,
-        "slack",
-        "U1",
-        "T1",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U1",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("token-5"),
         &fake_hash("refresh-5"),
     )
@@ -6102,10 +6112,12 @@ async fn an_old_generation_refresh_replay_still_revokes() {
     let grant = crate::db::code::mint_external_grant(
         &store,
         &owner,
-        "slack",
-        "U1",
-        "T1",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U1",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("token-1"),
         &fake_hash("refresh-1"),
     )
@@ -6146,10 +6158,12 @@ async fn an_old_generation_refresh_replay_still_revokes() {
     let fresh = crate::db::code::mint_external_grant(
         &store,
         &owner,
-        "slack",
-        "U2",
-        "T1",
-        crate::code::CodeGrantKind::Person,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U2",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
         &fake_hash("u2-token"),
         &fake_hash("u2-refresh"),
     )

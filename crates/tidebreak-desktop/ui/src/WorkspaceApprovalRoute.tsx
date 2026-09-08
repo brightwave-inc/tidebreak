@@ -3,10 +3,7 @@ import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
 import { type CodeConnectPage } from "./api";
-import {
-  connectPageFailurePhase,
-  channelLabel,
-} from "./ConnectApprovalRoute";
+import { connectPageFailurePhase, channelLabel } from "./ConnectApprovalRoute";
 import { Logomark } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";

@@ -1841,7 +1841,7 @@ pub struct CodeExternalGrant {
     pub id: CodeGrantId,
     /// Owner.
     pub owner: crate::OwnerId,
-    /// Person grant or workspace grant (decision 90).
+    /// Person grant or workspace grant (decision 92).
     pub kind: CodeGrantKind,
     /// Which channel family linked (for example `slack`).
     pub channel_kind: String,
@@ -1871,7 +1871,7 @@ pub struct CodeExternalGrant {
 pub struct CodeConnectHandshake {
     /// Stable id.
     pub id: CodeHandshakeId,
-    /// Person handshake or workspace handshake (decision 90).
+    /// Person handshake or workspace handshake (decision 92).
     pub kind: CodeGrantKind,
     /// Which channel family is linking (for example `slack`).
     pub channel_kind: String,

@@ -985,18 +985,57 @@ impl ScopedCode {
         self.runtime.list_adapter_grants(&self.owner).await
     }
 
-    pub async fn list_workspace_grants_all_owners(
+    pub async fn list_workspace_grants_as_admin(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
+        if !self.allow_unscoped_delivery {
+            return Err(ServerError::forbidden("administrator access is required"));
+        }
         self.runtime.list_workspace_grants_all_owners().await
     }
 
     pub async fn list_channel_repository_confirms(
         &self,
+        owner: &OwnerId,
         grant_id: tidebreak_core::CodeGrantId,
     ) -> Result<Vec<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
+        if owner != &self.owner && !self.allow_unscoped_delivery {
+            return Ok(Vec::new());
+        }
         self.runtime
-            .list_channel_repository_confirms(grant_id)
+            .list_channel_repository_confirms(owner, grant_id)
+            .await
+    }
+
+    pub async fn approve_workspace_handshake(
+        &self,
+        id: tidebreak_core::CodeHandshakeId,
+        csrf: &str,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        if !self.allow_unscoped_delivery {
+            return Err(ServerError::forbidden("administrator access is required"));
+        }
+        self.runtime
+            .approve_workspace_handshake(id, csrf, &self.owner)
+            .await
+    }
+
+    pub async fn confirm_workspace_channel_repository(
+        &self,
+        grant_id: tidebreak_core::CodeGrantId,
+        channel_id: &str,
+        repository: &str,
+    ) -> Result<Option<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
+        if !self.allow_unscoped_delivery {
+            return Err(ServerError::forbidden("administrator access is required"));
+        }
+        self.runtime
+            .confirm_workspace_channel_repository_as_admin(
+                &self.owner,
+                grant_id,
+                channel_id,
+                repository,
+            )
             .await
     }
 
@@ -1042,9 +1081,12 @@ impl ScopedCode {
         self.runtime.list_adapter_grant_profiles(&self.owner).await
     }
 
-    pub async fn list_workspace_grant_profiles_all_owners(
+    pub async fn list_workspace_grant_profiles_as_admin(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        if !self.allow_unscoped_delivery {
+            return Err(ServerError::forbidden("administrator access is required"));
+        }
         self.runtime
             .list_workspace_grant_profiles_all_owners()
             .await

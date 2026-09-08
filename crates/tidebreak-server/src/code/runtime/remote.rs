@@ -235,6 +235,18 @@ impl CodeRuntime {
         }
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
+        let workspace_grant =
+            tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+                .await?
+                .is_some_and(|grant| grant.kind.is_workspace());
+        let settings = NewSessionSettings {
+            acts_as: if workspace_grant {
+                Some(tidebreak_core::ActsAs::Bot)
+            } else {
+                settings.acts_as
+            },
+            ..settings
+        };
         match self.external_execution_location() {
             ExecutionLocation::Sandbox => {
                 if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {
@@ -293,6 +305,14 @@ impl CodeRuntime {
                 }
                 let settings = NewSessionSettings {
                     permission_mode: mode,
+                    ..settings
+                };
+                let settings = NewSessionSettings {
+                    acts_as: if workspace_grant {
+                        Some(tidebreak_core::ActsAs::Bot)
+                    } else {
+                        settings.acts_as
+                    },
                     ..settings
                 };
                 let workspace = self

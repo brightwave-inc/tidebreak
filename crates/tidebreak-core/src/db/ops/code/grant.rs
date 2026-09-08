@@ -37,6 +37,14 @@ pub(super) fn hash_like(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Channel identity a new adapter grant covers.
+pub struct MintGrantSubject<'a> {
+    pub channel_kind: &'a str,
+    pub external_identity: &'a str,
+    pub workspace_identity: &'a str,
+    pub kind: CodeGrantKind,
+}
+
 /// Mint one grant. The caller hashes the token pair; the secrets never
 /// reach this layer. A live grant already covering the same linked
 /// identity refuses — revoke it first, so a re-link is an explicit
@@ -44,13 +52,16 @@ pub(super) fn hash_like(value: &str) -> bool {
 pub async fn mint_external_grant(
     store: &DbStore,
     owner: &OwnerId,
-    channel_kind: &str,
-    external_identity: &str,
-    workspace_identity: &str,
-    kind: CodeGrantKind,
+    subject: MintGrantSubject<'_>,
     token_hash: &str,
     refresh_hash: &str,
 ) -> Result<CodeExternalGrant> {
+    let MintGrantSubject {
+        channel_kind,
+        external_identity,
+        workspace_identity,
+        kind,
+    } = subject;
     if channel_kind.trim().is_empty()
         || external_identity.trim().is_empty()
         || workspace_identity.trim().is_empty()

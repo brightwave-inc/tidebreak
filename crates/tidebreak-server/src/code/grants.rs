@@ -174,10 +174,12 @@ impl super::runtime::CodeRuntime {
         let grant = tidebreak_core::db::code::mint_external_grant(
             &self.db,
             owner,
-            channel_kind,
-            external_identity,
-            workspace_identity,
-            tidebreak_core::CodeGrantKind::Person,
+            tidebreak_core::db::code::MintGrantSubject {
+                channel_kind,
+                external_identity,
+                workspace_identity,
+                kind: tidebreak_core::CodeGrantKind::Person,
+            },
             &hash_adapter_token(&pair.token),
             &hash_adapter_token(&pair.refresh),
         )
@@ -505,17 +507,24 @@ impl super::runtime::CodeRuntime {
 
     pub async fn list_channel_repository_confirms(
         &self,
+        owner: &OwnerId,
         grant_id: CodeGrantId,
     ) -> Result<Vec<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
-        Ok(tidebreak_core::db::code::list_channel_repository_confirms(&self.db, grant_id).await?)
+        Ok(
+            tidebreak_core::db::code::list_channel_repository_confirms(&self.db, owner, grant_id)
+                .await?,
+        )
     }
 
-    pub async fn confirm_channel_repository(
+    /// An admin confirms a pending channel repository on a workspace grant.
+    /// The grant is owned by the service principal; this path resolves that
+    /// owner and then uses the owner-scoped store.
+    pub async fn confirm_workspace_channel_repository_as_admin(
         &self,
+        admin: &OwnerId,
         grant_id: CodeGrantId,
         channel_id: &str,
         repository: &str,
-        admin: &OwnerId,
     ) -> Result<Option<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
         let grant = tidebreak_core::db::code::get_external_grant_all_owners(&self.db, grant_id)
             .await?
@@ -524,7 +533,12 @@ impl super::runtime::CodeRuntime {
             return Err(ServerError::not_found("grant not found"));
         }
         Ok(tidebreak_core::db::code::confirm_channel_repository(
-            &self.db, grant_id, channel_id, repository, admin,
+            &self.db,
+            &grant.owner,
+            grant_id,
+            channel_id,
+            repository,
+            admin,
         )
         .await?)
     }

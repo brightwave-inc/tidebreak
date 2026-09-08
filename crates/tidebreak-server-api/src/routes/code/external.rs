@@ -191,6 +191,7 @@ pub async fn external_get_or_create(
         if existing.is_none()
             && !tidebreak_core::db::code::channel_repository_is_confirmed(
                 &runtime.db,
+                &grant.owner,
                 grant.id,
                 channel_id,
                 &repository,
@@ -205,6 +206,7 @@ pub async fn external_get_or_create(
             })?;
             tidebreak_core::db::code::ensure_pending_channel_repository(
                 &runtime.db,
+                &grant.owner,
                 grant.id,
                 channel_id,
                 &repository,

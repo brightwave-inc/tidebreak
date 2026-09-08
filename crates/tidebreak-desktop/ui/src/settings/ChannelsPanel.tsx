@@ -159,15 +159,20 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
                           {grant.external_identity}
                         </p>
                       )}
-                      {grant.kind === "workspace" && grant.channels && grant.channels.length > 0 && (
-                        <ul className="mt-1 text-xs text-muted-foreground">
-                          {grant.channels.map((channel) => (
-                            <li key={`${channel.channel_id}:${channel.repository}`}>
-                              {channel.channel_id} · {channel.repository} ({channel.state})
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                      {grant.kind === "workspace" &&
+                        grant.channels &&
+                        grant.channels.length > 0 && (
+                          <ul className="mt-1 text-xs text-muted-foreground">
+                            {grant.channels.map((channel) => (
+                              <li
+                                key={`${channel.channel_id}:${channel.repository}`}
+                              >
+                                {channel.channel_id} · {channel.repository} (
+                                {channel.state})
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       <p className="text-xs text-muted-foreground">
                         {grant.revoked_at
                           ? `Revoked ${formatDay(grant.revoked_at)} — ${grant.revoked_reason ?? "no reason recorded"}`
