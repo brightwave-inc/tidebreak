@@ -3,7 +3,7 @@
 //! The broker enforces this list, and the native helper mirrors it. Tidebreak's
 //! own app family and OS security surfaces stay under human control. Other
 //! development apps use explicit app grants, including terminals and editors
-//! that can run local commands. Decision 93 defines the consent boundary.
+//! that can run local commands. Decision 94 defines the consent boundary.
 
 /// Bundle ids blocked exactly and at a dotted boundary.
 pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[

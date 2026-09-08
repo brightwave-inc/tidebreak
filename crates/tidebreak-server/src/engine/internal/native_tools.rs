@@ -1,6 +1,6 @@
 //! Session-native computer-use tools for the internal engine.
 //!
-//! Decision 93: the internal engine calls the same host-owned native runtime
+//! Decision 94: the internal engine calls the same host-owned native runtime
 //! every external harness does, with the same authority. The session worker
 //! hands the engine a [`NativeChannelSpec`] naming a session-private
 //! capability file; these tools read it once at session launch and drive the

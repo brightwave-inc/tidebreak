@@ -473,7 +473,7 @@ impl CodeRuntime {
         // session continue, so its browser capfile and native capability must
         // remain live for later turns. Pending native computer-use input is
         // cancelled, though: an interrupt releases the session's exclusive
-        // desktop input ownership immediately (decision 93).
+        // desktop input ownership immediately (decision 94).
         if let (Some(runtime), Some(workspace)) = (self.native_runtime(), session.workspace_id) {
             let scope = crate::code::native_runtime::NativeRuntimeScope {
                 owner: session.owner.clone(),

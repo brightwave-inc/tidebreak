@@ -871,7 +871,7 @@ pub(crate) async fn browser_screenshot(
             capability_id,
             &browser_id,
             &origin,
-            // Decision 93: capture requires the grant taken under the
+            // Decision 94: capture requires the grant taken under the
             // disclosure that visible pixels reach the selected model.
             BrowserGrantCapability::BrowserCaptureVisibleTab,
             "screenshot",
@@ -929,7 +929,7 @@ async fn capture_screenshot(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    // Decision 93: the capture grant's disclosure covers everything visible
+    // Decision 94: the capture grant's disclosure covers everything visible
     // in the tab, so capture proceeds without a redaction pre-scan. The
     // document-epoch fence above and the atomic completion below still refuse
     // a page that changed underneath the snapshot.

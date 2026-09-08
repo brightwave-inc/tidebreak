@@ -55,7 +55,7 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // the engine-neutral semantic command contract.
             semantic_snapshot: cfg!(target_os = "macos"),
             semantic_actions: cfg!(target_os = "macos"),
-            // Decision 93: capture is gated on the disclosed capture grant,
+            // Decision 94: capture is gated on the disclosed capture grant,
             // not on proving closed-shadow privacy first.
             screenshot: cfg!(target_os = "macos"),
             developer_diagnostics: cfg!(target_os = "macos"),
@@ -1617,7 +1617,7 @@ impl BrowserRegistry {
                 record.controller = BrowserController::default();
                 record.controller_capability_id = None;
             }
-            // Decision 93: human takeover ends the opening agent's lifecycle
+            // Decision 94: human takeover ends the opening agent's lifecycle
             // ownership. The tab stays under human control from here on.
             record.opened_by_capability = None;
             record.paused_origin = None;
