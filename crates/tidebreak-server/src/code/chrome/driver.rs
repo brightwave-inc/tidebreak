@@ -6,10 +6,11 @@ pub const SNAPSHOT_SCRIPT: &str = r#"(options => {
   const visible = el => { const r=el.getBoundingClientRect(), s=getComputedStyle(el); return r.width>0 && r.height>0 && s.visibility!=="hidden" && s.display!=="none"; };
   const label = el => (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0,512);
   const fingerprint = el => JSON.stringify([el.tagName,el.getAttribute('role'),el.getAttribute('type'),label(el),el.getAttribute('href'),el.disabled,el.checked,el.value,el.isContentEditable]);
-  let truncated=false;
+  let truncated=false,visited=0;
   function walk(root, depth) {
-    if(depth>32 || nodes.length>=options.max) {truncated=true; return;}
+    if(depth>32 || nodes.length>=options.max || visited>=10000) {truncated=true; return;}
     for(const el of root.children || []) {
+      if(++visited>10000){truncated=true;break;}
       if(nodes.length>=options.max) {truncated=true; break;}
       if(['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(el.tagName)) continue;
       const interactive=el.matches('button,a[href],input:not([type=hidden]),textarea,select,[tabindex],[contenteditable=true],[role=button],[role=checkbox],[draggable=true]');
