@@ -709,12 +709,19 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
     .await;
     assert_eq!(fake.spawns.lock().unwrap().len(), 1);
     assert!(!runtime.has_worker(session_id));
-    assert!(
-        tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+    // The queued turn drains after the send lands, so wait for it rather
+    // than reading the queue in the same instant.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
             .await
             .unwrap()
             .is_empty()
-    );
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued turn drains after the send lands");
     let interrupted = client
         .post(format!(
             "http://{addr}/code/sessions/{session_id}/interrupt"
