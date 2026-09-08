@@ -5,7 +5,16 @@ import {
   resumeComputerUseControl,
   stopComputerUseControl,
   useComputerUseState,
+  type ComputerUseSnapshot,
 } from "./computerUse";
+import {
+  computerUseActionLabel,
+  computerUseModeLabel,
+  isVisibleComputerUseAction,
+  useComputerUseAction,
+  type ComputerUseAction,
+} from "./computerUseAction";
+import { Check, Hand, MousePointer2, TriangleAlert } from "lucide-react";
 
 function appLabel(appName: string | null, bundleId: string): string {
   // A screen-scoped ask (whole-display capture, screen-wide window list)
@@ -22,6 +31,46 @@ function appLabel(appName: string | null, bundleId: string): string {
  */
 export function ComputerUseIndicator() {
   const snapshot = useComputerUseState();
+  const action = useComputerUseAction(undefined, ["native", "chrome"]);
+  return (
+    <ComputerUseIndicatorView
+      snapshot={snapshot}
+      action={action}
+      onStop={stopComputerUseControl}
+      onResume={resumeComputerUseControl}
+    />
+  );
+}
+
+export function ComputerUseIndicatorView({
+  snapshot,
+  action = null,
+  onStop,
+  onResume,
+}: {
+  snapshot: ComputerUseSnapshot;
+  action?: ComputerUseAction | null;
+  onStop: () => Promise<void>;
+  onResume: () => Promise<void>;
+}) {
+  const liveAction =
+    (action?.source === "native" || action?.source === "chrome") &&
+    isVisibleComputerUseAction(action)
+      ? action
+      : null;
+  const foregroundRequired = liveAction?.phase === "foreground_required";
+  const failed = liveAction?.phase === "failed";
+  const completed = liveAction?.phase === "completed";
+  const label =
+    liveAction?.source === "chrome"
+      ? "Google Chrome"
+      : appLabel(
+          snapshot.active?.bundleId ===
+            (liveAction?.bundleId ?? snapshot.active?.bundleId)
+            ? (snapshot.active?.appName ?? null)
+            : null,
+          liveAction?.bundleId ?? snapshot.active?.bundleId ?? "",
+        );
   // The active banner re-arms to hidden once control has been idle past its
   // window; the tick keeps that honest without a native timer. It only runs
   // while the banner is up: with no session on record — the common case for a
@@ -30,7 +79,9 @@ export function ComputerUseIndicator() {
   // re-render itself, which re-evaluates this line; the crossing tick renders
   // the banner away and stops the interval with it.
   const showActive =
-    snapshot.active !== null && Date.now() < snapshot.active.visibleUntilMillis;
+    Boolean(liveAction) ||
+    (snapshot.active !== null &&
+      Date.now() < snapshot.active.visibleUntilMillis);
   useNowWhile(showActive);
 
   // In-flight invokes, keyed per card (or "control" for Stop/Resume). The
@@ -69,33 +120,55 @@ export function ComputerUseIndicator() {
 
   return (
     <>
-      {(snapshot.halted || (showActive && snapshot.active)) && (
+      {(snapshot.halted || showActive) && (
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
           <div
-            className="bg-popover text-popover-foreground pointer-events-auto flex min-w-0 max-w-md items-center gap-3 rounded-2xl border px-3 py-2.5 shadow-2xl"
+            className="bg-popover text-popover-foreground pointer-events-auto flex min-w-0 max-w-md items-center gap-3 rounded-xl border px-3 py-2.5 shadow-lg"
             role="status"
           >
-            <span
-              className={`size-2.5 shrink-0 rounded-full ${
-                snapshot.halted
-                  ? "bg-muted-foreground"
-                  : "bg-live ring-4 ring-live/20"
-              }`}
-              aria-hidden="true"
-            />
+            {snapshot.halted ? (
+              <MousePointer2
+                aria-hidden
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+            ) : foregroundRequired ? (
+              <Hand aria-hidden className="size-4 shrink-0 text-warning" />
+            ) : failed ? (
+              <TriangleAlert
+                aria-hidden
+                className="size-4 shrink-0 text-critical"
+              />
+            ) : completed ? (
+              <Check
+                aria-hidden
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+            ) : (
+              <MousePointer2
+                aria-hidden
+                className="size-4 shrink-0 text-live"
+              />
+            )}
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold">
                 {snapshot.halted
                   ? "Computer control is stopped"
-                  : `Tidebreak is controlling ${appLabel(
-                      snapshot.active?.appName ?? null,
-                      snapshot.active?.bundleId ?? "",
-                    )}`}
+                  : foregroundRequired
+                    ? "Tidebreak needs foreground access"
+                    : failed
+                      ? `Action failed in ${label}`
+                      : completed
+                        ? `Action completed in ${label}`
+                        : `Tidebreak is controlling ${label}`}
               </p>
               <p className="text-muted-foreground text-2xs">
                 {snapshot.halted
                   ? "Resume only when you want the agent to continue."
-                  : "You can stop before the next action."}
+                  : foregroundRequired && liveAction
+                    ? computerUseModeLabel(liveAction)
+                    : liveAction
+                      ? `${computerUseActionLabel(liveAction)} · ${computerUseModeLabel(liveAction)}`
+                      : "You can stop before the next action."}
               </p>
             </div>
             <Button
@@ -104,12 +177,8 @@ export function ComputerUseIndicator() {
               disabled={busy.has("control")}
               onClick={() =>
                 snapshot.halted
-                  ? run("control", "Could not resume control", () =>
-                      resumeComputerUseControl(),
-                    )
-                  : run("control", "Could not stop control", () =>
-                      stopComputerUseControl(),
-                    )
+                  ? run("control", "Could not resume control", () => onResume())
+                  : run("control", "Could not stop control", () => onStop())
               }
             >
               {snapshot.halted
