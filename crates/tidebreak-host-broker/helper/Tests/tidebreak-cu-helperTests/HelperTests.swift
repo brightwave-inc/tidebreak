@@ -33,7 +33,13 @@ struct HelperTests {
         print("PASS testScrollDirectionMatchesAPI")
         suite.testDisplayCaptureKeepsGlobalPlacement()
         print("PASS testDisplayCaptureKeepsGlobalPlacement")
-        print("14 helper regression tests passed")
+        try suite.testBackgroundIsDefaultAndForegroundOnlyInputRefusesEarly()
+        print("PASS testBackgroundIsDefaultAndForegroundOnlyInputRefusesEarly")
+        try suite.testExecutionModeIsExplicitInControlResults()
+        print("PASS testExecutionModeIsExplicitInControlResults")
+        suite.testBackgroundScrollClampsAtEachEnd()
+        print("PASS testBackgroundScrollClampsAtEachEnd")
+        print("17 helper regression tests passed")
     }
 
     func testScrollDirectionMatchesAPI() {
@@ -54,6 +60,37 @@ struct HelperTests {
             width: 500, height: 400, coordinateFrame: frame, displayScoped: false)
         expectEqual(window.sourceRect, .zero)
         expectTrue(window.ignoreShadowsSingleWindow)
+    }
+
+    func testBackgroundIsDefaultAndForegroundOnlyInputRefusesEarly() throws {
+        let command = try request(#"{"op":"hover"}"#)
+        expectNil(command.executionMode)
+        let calls: [(HelperRequest) throws -> Control.Result] = [
+            Control.hover, Control.drag, Control.keyPress, Control.focusWindow,
+        ]
+        for call in calls {
+            expectError(try call(command)) { error in
+                expectEqual((error as? HelperError)?.code, .requiresForeground)
+            }
+        }
+        let foreground = try request(#"{"op":"hover","execution_mode":"foreground"}"#)
+        expectSuccess(try Control.requireForeground(foreground, operation: "hover"))
+    }
+
+    func testExecutionModeIsExplicitInControlResults() throws {
+        let result = Control.Result(
+            executionMode: .background, success: true, usedFallback: false, detail: "AXPress")
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let value = try requireValue(
+            JSONSerialization.jsonObject(with: encoder.encode(result)) as? [String: Any])
+        expectEqual(value["execution_mode"] as? String, "background")
+    }
+
+    func testBackgroundScrollClampsAtEachEnd() {
+        expectEqual(Control.backgroundScrollPosition(current: 0, delta: -180), 0)
+        expectEqual(Control.backgroundScrollPosition(current: 1, delta: 180), 1)
+        expectEqual(Control.backgroundScrollPosition(current: 0, delta: 180), 0.1)
     }
 
     private func request(_ json: String) throws -> HelperRequest {
