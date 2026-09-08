@@ -1390,10 +1390,7 @@ async fn bind_inner(
     // The native computer-use adapter and its bridge executable arrive as
     // one binding so a runtime can never be installed without the sidecar
     // that harness bridges invoke, and vice versa.
-    .with_native_binding(
-        native_binding
-            .map(|binding| (binding.runtime, binding.bridge_command)),
-    )
+    .with_native_binding(native_binding.map(|binding| (binding.runtime, binding.bridge_command)))
     // A channel-bound session on this machine's engine starts in the
     // operator's default mode and may ask up to the operator's ceiling
     // (decision 88); both are `ask` unless the deployment says otherwise.

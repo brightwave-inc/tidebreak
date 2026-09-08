@@ -257,7 +257,7 @@ fn write_capfile(
         }
         let payload = serde_json::json!({
             "version": version,
-            "endpoint": loopback_base,
+            "endpoint": format!("{loopback_base}/code/native"),
             "token": token,
         });
         file.write_all(
@@ -312,7 +312,9 @@ mod tests {
         let owner = OwnerId::new("local").unwrap();
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
-        let path = reg.issue(subject(session, workspace, owner.clone())).unwrap();
+        let path = reg
+            .issue(subject(session, workspace, owner.clone()))
+            .unwrap();
         assert!(path.to_string_lossy().contains("native-cap-"));
         let raw = std::fs::read_to_string(&path).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -321,7 +323,10 @@ mod tests {
             reg.subject_for_token(&token),
             Some(subject(session, workspace, owner.clone()))
         );
-        assert_eq!(reg.revoke(session), Some(subject(session, workspace, owner)));
+        assert_eq!(
+            reg.revoke(session),
+            Some(subject(session, workspace, owner))
+        );
         assert!(reg.subject_for_token(&token).is_none());
         assert!(!path.exists());
     }
@@ -339,8 +344,7 @@ mod tests {
         );
         let first = reg.issue(subject.clone()).unwrap();
         let first_raw = std::fs::read_to_string(&first).unwrap();
-        let first_token = serde_json::from_str::<serde_json::Value>(&first_raw)
-            .unwrap()["token"]
+        let first_token = serde_json::from_str::<serde_json::Value>(&first_raw).unwrap()["token"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -348,14 +352,31 @@ mod tests {
         assert_ne!(first, second);
         assert!(!first.exists());
         let second_raw = std::fs::read_to_string(&second).unwrap();
-        let second_token = serde_json::from_str::<serde_json::Value>(&second_raw)
-            .unwrap()["token"]
+        let second_token = serde_json::from_str::<serde_json::Value>(&second_raw).unwrap()["token"]
             .as_str()
             .unwrap()
             .to_owned();
         assert_ne!(first_token, second_token);
         assert!(reg.subject_for_token(&first_token).is_none());
         assert_eq!(reg.subject_for_token(&second_token), Some(subject));
+    }
+
+    #[test]
+    fn capfile_endpoint_names_the_native_route() {
+        let dir = temp_data_dir();
+        let reg = NativeTokenRegistry::new(dir.path()).unwrap();
+        reg.set_loopback_base("http://127.0.0.1:4567/");
+        let path = reg
+            .issue(subject(
+                SessionId::new(),
+                WorkspaceId::new(),
+                OwnerId::new("local").unwrap(),
+            ))
+            .unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(wire["endpoint"], "http://127.0.0.1:4567/code/native");
+        assert_eq!(wire["version"], 1);
     }
 
     #[test]
@@ -367,10 +388,7 @@ mod tests {
         std::fs::write(&stale, b"stale").unwrap();
         reg.delete_all_stale_capfiles().unwrap();
         assert!(!stale.exists());
-        assert_eq!(
-            std::fs::read_dir(reg.capfile_dir()).unwrap().count(),
-            0
-        );
+        assert_eq!(std::fs::read_dir(reg.capfile_dir()).unwrap().count(), 0);
     }
 
     #[test]
