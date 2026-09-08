@@ -214,6 +214,80 @@ impl BrowserRuntime for FakeBrowserRuntime {
             title: Some("Example".to_owned()),
         })
     }
+    async fn open(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &tidebreak_core::BrowserOpenArgs,
+    ) -> Result<tidebreak_core::BrowserOpenResult, BrowserRuntimeError> {
+        self.record("open", scope);
+        if self.not_authorized {
+            return Err(BrowserRuntimeError::NotAuthorized(
+                "browser origin is not shared with this agent".to_owned(),
+            ));
+        }
+        Ok(tidebreak_core::BrowserOpenResult {
+            browser_id: "browser-2".to_owned(),
+            url: args.url.clone(),
+            load_state: BrowserLoadState::Loading,
+            document_epoch: 0,
+            visible: false,
+        })
+    }
+    async fn close(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &tidebreak_core::BrowserCloseArgs,
+    ) -> Result<tidebreak_core::BrowserLifecycleResult, BrowserRuntimeError> {
+        self.record("close", scope);
+        Ok(tidebreak_core::BrowserLifecycleResult {
+            browser_id: args.browser_id.clone(),
+            status: if args.browser_id == "browser-2" {
+                tidebreak_core::BrowserLifecycleStatus::Ok
+            } else {
+                tidebreak_core::BrowserLifecycleStatus::Refused
+            },
+            message: "close handled".to_owned(),
+        })
+    }
+    async fn activate(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &tidebreak_core::BrowserActivateArgs,
+    ) -> Result<tidebreak_core::BrowserLifecycleResult, BrowserRuntimeError> {
+        self.record("activate", scope);
+        Ok(tidebreak_core::BrowserLifecycleResult {
+            browser_id: args.browser_id.clone(),
+            status: tidebreak_core::BrowserLifecycleStatus::Ok,
+            message: "visible".to_owned(),
+        })
+    }
+    async fn diagnostics(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &tidebreak_core::BrowserDiagnosticsArgs,
+    ) -> Result<tidebreak_core::BrowserDiagnosticsResult, BrowserRuntimeError> {
+        self.record("diagnostics", scope);
+        if self.not_authorized {
+            return Err(BrowserRuntimeError::NotAuthorized(
+                "browser origin is not shared for this operation".to_owned(),
+            ));
+        }
+        Ok(tidebreak_core::BrowserDiagnosticsResult {
+            browser_id: args.browser_id.clone(),
+            document_epoch: 2,
+            content_trust: tidebreak_core::BrowserContentTrust::UntrustedPage,
+            entries: vec![tidebreak_core::BrowserDiagnosticsEntry {
+                sequence: 7,
+                channel: tidebreak_core::BrowserDiagnosticsChannel::Console,
+                level: tidebreak_core::BrowserLogLevel::Error,
+                text: "boom".to_owned(),
+                url: None,
+                status: None,
+            }],
+            truncated: false,
+            network_captured: true,
+        })
+    }
     fn revoke_session(&self, scope: &BrowserRuntimeScope) {
         self.revoked.lock().unwrap().push(scope.clone());
     }
@@ -1020,4 +1094,98 @@ async fn bodies_reject_subject_ids() {
         );
     }
     assert!(a.fake.as_ref().unwrap().subjects().is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_roundtrip_and_refusal() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let opened = post(
+        a.addr,
+        "open",
+        Some(&t),
+        serde_json::json!({"url":"http://localhost:5173/app"}),
+    )
+    .await;
+    assert_eq!(opened.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = opened.json().await.unwrap();
+    assert_eq!(body["browserId"], "browser-2");
+    assert_eq!(body["visible"], false);
+    let closed = post(
+        a.addr,
+        "close",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-2"}),
+    )
+    .await;
+    assert_eq!(closed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        closed.json::<serde_json::Value>().await.unwrap()["status"],
+        "ok"
+    );
+    let refused = post(
+        a.addr,
+        "close",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-1"}),
+    )
+    .await;
+    assert_eq!(
+        refused.json::<serde_json::Value>().await.unwrap()["status"],
+        "refused"
+    );
+    let activated = post(
+        a.addr,
+        "activate",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-1"}),
+    )
+    .await;
+    assert_eq!(activated.status(), reqwest::StatusCode::OK);
+    let invalid = post(a.addr, "open", Some(&t), serde_json::json!({"url":"file:///x"})).await;
+    assert_eq!(invalid.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn open_requires_a_granted_origin() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::not_authorized()))).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "open",
+        Some(&t),
+        serde_json::json!({"url":"https://example.com"}),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(r.text().await.unwrap().contains("not shared"));
+}
+
+#[tokio::test]
+async fn diagnostics_roundtrip_marks_content_untrusted() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "diagnostics",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-1","after_sequence":0,"max_entries":50}),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["contentTrust"], "untrusted_page");
+    assert_eq!(body["entries"][0]["channel"], "console");
+    assert_eq!(body["networkCaptured"], true);
+    let invalid = post(
+        a.addr,
+        "diagnostics",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-1","max_entries":0}),
+    )
+    .await;
+    assert_eq!(invalid.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
 }

@@ -2035,3 +2035,181 @@ async fn browser_client_ignores_ambient_http_proxy() {
         "Authorization must reach the listener: {req_headers:?}"
     );
 }
+
+// ── screenshot budget and file output ───────────────────────────────
+
+/// Encode a synthetic image as PNG base64 for screenshot fixtures. The xor
+/// noise pattern resists PNG compression so large fixtures stay large.
+fn synthetic_screenshot(width: u32, height: u32) -> BrowserScreenshotResult {
+    use base64::Engine as _;
+
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([
+            ((x.wrapping_mul(31)) ^ (y.wrapping_mul(17))) as u8,
+            ((x.wrapping_mul(7)) ^ (y.wrapping_mul(101))) as u8,
+            ((x.wrapping_mul(59)) ^ (y.wrapping_mul(3))) as u8,
+        ])
+    });
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    BrowserScreenshotResult {
+        browser_id: "browser-1".to_owned(),
+        snapshot_id: "snapshot-1".to_owned(),
+        document_epoch: 4,
+        image_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        mime_type: "image/png".to_owned(),
+    }
+}
+
+#[test]
+fn small_screenshots_pass_through_as_png_within_the_image_budget() {
+    let result = synthetic_screenshot(320, 200);
+    let (image_ref, data) = decode_screenshot_image(&result).unwrap();
+    assert_eq!(image_ref.media_type, ImageMediaType::Png);
+    assert_eq!((image_ref.width, image_ref.height), (320, 200));
+    assert!(data.bytes().len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES);
+}
+
+#[test]
+fn oversized_screenshots_reencode_within_the_image_budget_instead_of_dropping() {
+    use base64::Engine as _;
+
+    let result = synthetic_screenshot(2048, 1536);
+    assert!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&result.image_base64)
+            .unwrap()
+            .len()
+            > MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES,
+        "fixture must exceed the image-block budget"
+    );
+    let (image_ref, data) = decode_screenshot_image(&result).unwrap();
+    assert_eq!(image_ref.media_type, ImageMediaType::Jpeg);
+    assert!(
+        data.bytes().len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES,
+        "fitted image must fit the model-facing image block"
+    );
+    assert!(image_ref.width >= 512, "downscaling should stay legible");
+    let sniffed = image::guess_format(data.bytes()).unwrap();
+    assert_eq!(sniffed, image::ImageFormat::Jpeg);
+}
+
+#[test]
+fn screenshot_output_writes_a_private_image_file_without_base64_in_the_receipt() {
+    let result = synthetic_screenshot(320, 200);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.png");
+    let receipt = write_screenshot_output(&result, &path).unwrap();
+
+    let written = std::fs::read(&path).unwrap();
+    assert_eq!(written.len() as u64, receipt.byte_len);
+    assert_eq!(image::guess_format(&written).unwrap(), image::ImageFormat::Png);
+    assert_eq!(receipt.mime_type, "image/png");
+    assert_eq!((receipt.width, receipt.height), (320, 200));
+
+    let json = serde_json::to_value(&receipt).unwrap();
+    assert!(json.get("imageBase64").is_none());
+    assert_eq!(json["path"], path.display().to_string());
+    assert_eq!(json["documentEpoch"], 4);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn parse_browser_screenshot_accepts_an_output_path() {
+    match parse_browser(vec![
+        "screenshot".into(),
+        "--browser-id".into(),
+        "browser-1".into(),
+        "--snapshot-id".into(),
+        "snapshot-1".into(),
+        "--document-epoch".into(),
+        "2".into(),
+        "--output".into(),
+        "/tmp/capture.png".into(),
+    ])
+    .unwrap()
+    {
+        BrowserCommand::Screenshot { output, .. } => {
+            assert_eq!(output, Some(PathBuf::from("/tmp/capture.png")));
+        }
+        other => panic!("expected Screenshot, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_browser_lifecycle_and_diagnostics_commands() {
+    match parse_browser(vec![
+        "open".into(),
+        "--url".into(),
+        "http://localhost:5173/app".into(),
+    ])
+    .unwrap()
+    {
+        BrowserCommand::Open { url } => assert_eq!(url, "http://localhost:5173/app"),
+        other => panic!("expected Open, got {other:?}"),
+    }
+    match parse_browser(vec![
+        "close".into(),
+        "--browser-id".into(),
+        "browser-1".into(),
+    ])
+    .unwrap()
+    {
+        BrowserCommand::Close { browser_id } => assert_eq!(browser_id, "browser-1"),
+        other => panic!("expected Close, got {other:?}"),
+    }
+    match parse_browser(vec![
+        "activate".into(),
+        "--browser-id".into(),
+        "browser-1".into(),
+    ])
+    .unwrap()
+    {
+        BrowserCommand::Activate { browser_id } => assert_eq!(browser_id, "browser-1"),
+        other => panic!("expected Activate, got {other:?}"),
+    }
+    match parse_browser(vec![
+        "diagnostics".into(),
+        "--browser-id".into(),
+        "browser-1".into(),
+        "--after-sequence".into(),
+        "41".into(),
+        "--max-entries".into(),
+        "50".into(),
+    ])
+    .unwrap()
+    {
+        BrowserCommand::Diagnostics {
+            browser_id,
+            after_sequence,
+            max_entries,
+        } => {
+            assert_eq!(browser_id, "browser-1");
+            assert_eq!(after_sequence, Some(41));
+            assert_eq!(max_entries, Some(50));
+        }
+        other => panic!("expected Diagnostics, got {other:?}"),
+    }
+    assert!(parse_browser(vec!["open".into()]).is_err());
+    assert!(parse_browser(vec![
+        "diagnostics".into(),
+        "--browser-id".into(),
+        "browser-1".into(),
+        "--max-entries".into(),
+        "201".into(),
+    ])
+    .is_err());
+}
