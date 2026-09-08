@@ -257,7 +257,7 @@ fn write_capfile(
         }
         let payload = serde_json::json!({
             "version": version,
-            "endpoint": loopback_base,
+            "endpoint": format!("{loopback_base}/code/native"),
             "token": token,
         });
         file.write_all(
@@ -359,6 +359,24 @@ mod tests {
         assert_ne!(first_token, second_token);
         assert!(reg.subject_for_token(&first_token).is_none());
         assert_eq!(reg.subject_for_token(&second_token), Some(subject));
+    }
+
+    #[test]
+    fn capfile_endpoint_names_the_native_route() {
+        let dir = temp_data_dir();
+        let reg = NativeTokenRegistry::new(dir.path()).unwrap();
+        reg.set_loopback_base("http://127.0.0.1:4567/");
+        let path = reg
+            .issue(subject(
+                SessionId::new(),
+                WorkspaceId::new(),
+                OwnerId::new("local").unwrap(),
+            ))
+            .unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(wire["endpoint"], "http://127.0.0.1:4567/code/native");
+        assert_eq!(wire["version"], 1);
     }
 
     #[test]

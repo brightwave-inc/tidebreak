@@ -10,6 +10,7 @@ fn app_server_plan_is_clean() {
         &[],
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -23,6 +24,7 @@ fn extra_bypass_flag_is_rejected() {
         &["--dangerously-bypass-approvals-and-sandbox".into()],
         std::path::Path::new("/workspace"),
         &[],
+        None,
         None,
         None,
     )
@@ -1316,12 +1318,76 @@ async fn native_steer_uses_the_active_turn_id_and_waits_for_ack() {
 // ── Browser MCP advertisement contract tests ──
 
 #[test]
+fn native_present_appends_exactly_one_trusted_config_override() {
+    let spec = crate::NativeChannelSpec::new(
+        std::path::PathBuf::from("/tmp/native-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let plan = compose_app_server_plan(
+        std::path::Path::new("/usr/bin/codex"),
+        &[],
+        std::path::Path::new("/workspace"),
+        &[],
+        None,
+        Some(&spec),
+        None,
+    )
+    .unwrap();
+    let overrides: Vec<_> = plan
+        .argv
+        .iter()
+        .filter(|arg| arg.starts_with("mcp_servers.tb-native="))
+        .collect();
+    assert_eq!(overrides.len(), 1);
+    let value = overrides[0];
+    assert!(value.contains("\"/usr/local/bin/tidebreak\""));
+    assert!(value.contains("args=[\"computer-mcp\"]"));
+    assert!(value.contains("env_vars=[\"TIDEBREAK_NATIVE_CAPFILE\"]"));
+    // The capfile path is inherited through the environment, never argv.
+    assert!(!plan
+        .argv
+        .iter()
+        .any(|arg| arg.contains("/tmp/native-cap.json")));
+}
+
+#[test]
+fn browser_and_native_each_get_their_own_override() {
+    let browser = BrowserChannelSpec::new(
+        std::path::PathBuf::from("/tmp/browser-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let native = crate::NativeChannelSpec::new(
+        std::path::PathBuf::from("/tmp/native-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let plan = compose_app_server_plan(
+        std::path::Path::new("/usr/bin/codex"),
+        &[],
+        std::path::Path::new("/workspace"),
+        &[],
+        Some(&browser),
+        Some(&native),
+        None,
+    )
+    .unwrap();
+    assert!(plan
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("mcp_servers.tb-browser=")));
+    assert!(plan
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("mcp_servers.tb-native=")));
+}
+
+#[test]
 fn browser_absent_produces_same_argv_as_before() {
     let plan = compose_app_server_plan(
         std::path::Path::new("/usr/bin/codex"),
         &[],
         std::path::Path::new("/workspace"),
         &[],
+        None,
         None,
         None,
     )
@@ -1341,6 +1407,7 @@ fn browser_present_appends_exactly_one_trusted_config_override() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1375,6 +1442,7 @@ fn browser_override_is_after_extra_argv() {
         &[],
         Some(&spec),
         None,
+        None,
     )
     .unwrap();
     let browser_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -1395,6 +1463,7 @@ fn browser_capfile_path_is_never_in_argv() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1417,6 +1486,7 @@ fn browser_env_key_is_stripped_from_plan_even_when_browser_is_some() {
         std::path::Path::new("/workspace"),
         &[("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into())],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1442,6 +1512,7 @@ fn session_relay_key_survives_the_reserved_namespace_strip() {
             ("TIDEBREAK_LLM_KEY".into(), "tbreak_hl_test".into()),
             ("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into()),
         ],
+        None,
         None,
         Some("TIDEBREAK_LLM_KEY"),
     )
@@ -1469,6 +1540,7 @@ fn relay_key_is_stripped_when_no_relay_is_wired() {
         &[("TIDEBREAK_LLM_KEY".into(), "from-settings".into())],
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(plan.env.is_empty(), "{:?}", plan.env);
@@ -1486,6 +1558,7 @@ fn bridge_command_with_spaces_remains_one_command_value() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1511,6 +1584,7 @@ fn bridge_command_with_backslashes_is_escaped() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1540,6 +1614,7 @@ fn bridge_command_with_embedded_quote_is_escaped() {
         &[],
         Some(&spec),
         None,
+        None,
     )
     .unwrap();
     let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -1568,6 +1643,7 @@ fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .expect_err("non-UTF-8 bridge paths must fail closed");
