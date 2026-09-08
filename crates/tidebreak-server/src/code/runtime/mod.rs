@@ -146,6 +146,8 @@ pub struct ExternalMessage {
     pub channel_ts: String,
     /// Who sent it, resolved from the grant behind the call.
     pub actor: TurnActor,
+    /// Bounded prior thread messages; accepted only with channel opt-in.
+    pub context: Option<tidebreak_core::code::ExternalThreadContext>,
 }
 
 /// Result of one external message delivery (`docs/slack-sessions.md`,

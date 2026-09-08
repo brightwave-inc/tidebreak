@@ -296,10 +296,11 @@ Only the session owner's messages reach a person-grant session. Anyone
 else's reply gets an acknowledging reaction from the bot and, once per
 user per thread, an ephemeral notice that says what they can do: who the
 owner is, that the agent does not read the thread, and how to connect
-themselves. Non-owner text never reaches the engine, even as context —
-a channel is an injection surface. Under a workspace grant the adapter
-sends the actor on each message and mirrors private-channel membership
-into session access rows (decision 86).
+themselves. Person-grant sessions refuse quoted thread context. Under a
+workspace grant, the adapter sends the actor on each message and mirrors
+private-channel membership into session access rows (decision 86). A channel
+that opts in may supply prior messages from full home-workspace members as
+quoted context on the session's first message.
 
 ## Thread and session
 
@@ -386,6 +387,23 @@ Idempotency follows the queued-turn pattern the code already uses: the
 `event_id` commits in the same transaction as the queue row or turn row
 it caused, and a replay derives its response from that row's current
 state. There is no separate outcome snapshot to go stale.
+
+The first message may include a `context` array of objects with `author`,
+`timestamp`, and `text`. Context requires a workspace grant,
+`context_opt_in: true`, and `context_binding_id` naming a binding owned by
+that grant and session. The machine records the consent on the binding in
+the same transaction as the input. Later context is refused, including after
+the first queued message was retracted; delivery retries retain their original
+outcome.
+
+Context contains at most 20 messages and 16 KiB of combined UTF-8 text.
+Author names are limited to 128 bytes and timestamps to 64 bytes. Each field
+must be nonempty and contain no NUL characters. The machine quotes the
+messages as JSON under an untrusted-context notice, then appends the current
+request. The turn stores that complete input so the web shows the same text
+that reached the engine. The adapter owns channel opt-in and membership
+filtering; the machine validates grant scope, binding, bounds, and first-use
+rules.
 
 A conflict response of `ended`, `fenced`, or unknown-session is the
 defined signal for the adapter to durably close its routing row and

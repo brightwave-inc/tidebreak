@@ -25,6 +25,7 @@
 
 mod baseline;
 mod channel_repository_confirm;
+mod external_thread_context;
 mod grant_kind;
 mod idens;
 mod one_approval_surface;
@@ -97,6 +98,7 @@ impl MigratorTrait for Migrator {
             Box::new(session_acts_as::SessionActsAs),
             Box::new(grant_kind::GrantKind),
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
+            Box::new(external_thread_context::ExternalThreadContext),
         ]
     }
 }

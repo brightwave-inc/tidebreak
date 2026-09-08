@@ -30,6 +30,7 @@ fn binding_from_model(
         grant_id: CodeGrantId(model.grant_id),
         session_id: SessionId(model.session_id),
         created_at: model.created_at,
+        context_opt_in: model.context_opt_in,
     })
 }
 
@@ -211,6 +212,7 @@ async fn resolve_external_session_inner(
         grant_id,
         session_id: session.id,
         created_at: now,
+        context_opt_in: false,
     };
     let inserted = entities::code_external_binding::ActiveModel {
         id: Set(binding.id.0),
@@ -220,6 +222,7 @@ async fn resolve_external_session_inner(
         grant_id: Set(grant_id.0),
         session_id: Set(session.id.0),
         created_at: Set(now),
+        context_opt_in: Set(false),
     }
     .insert(&transaction)
     .await;
@@ -288,6 +291,7 @@ pub async fn bind_external_session(
         grant_id,
         session_id,
         created_at: now,
+        context_opt_in: false,
     };
     let inserted = entities::code_external_binding::ActiveModel {
         id: Set(binding.id.0),
@@ -297,6 +301,7 @@ pub async fn bind_external_session(
         grant_id: Set(grant_id.0),
         session_id: Set(session_id.0),
         created_at: Set(now),
+        context_opt_in: Set(false),
     }
     .insert(&store.conn)
     .await;
@@ -379,6 +384,7 @@ pub async fn attach_external_binding(
         grant_id,
         session_id,
         created_at: now,
+        context_opt_in: false,
     };
     let inserted = entities::code_external_binding::Entity::insert(
         entities::code_external_binding::ActiveModel {
@@ -389,6 +395,7 @@ pub async fn attach_external_binding(
             grant_id: Set(grant_id.0),
             session_id: Set(session_id.0),
             created_at: Set(now),
+            context_opt_in: Set(false),
         },
     )
     .on_conflict(

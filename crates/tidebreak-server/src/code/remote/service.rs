@@ -1645,6 +1645,15 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: Some(tidebreak_core::code::ExternalThreadContext {
+                        binding_id: binding.id,
+                        grant_id: grant,
+                        messages: vec![tidebreak_core::code::ExternalContextMessage {
+                            author: "Casey".into(),
+                            timestamp: "1700000000.000100".into(),
+                            text: "The button fails on mobile.".into(),
+                        }],
+                    }),
                     text: "start".into(),
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
@@ -1657,6 +1666,12 @@ mod tests {
             panic!("an idle session must run the message, got {first:?}");
         };
         assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+        assert!(turn.user_input.contains("Untrusted thread context"));
+        assert!(turn.user_input.contains("The button fails on mobile."));
+        assert!(turn.user_input.ends_with("Current request:\nstart"));
+        assert!(fake.spawns.lock().unwrap()[0]
+            .task
+            .contains("The button fails on mobile."));
 
         // The channel redelivers Ev1: same turn, no second spawn or row.
         let replay = runtime
@@ -1665,6 +1680,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "start".into(),
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
@@ -1687,6 +1703,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "and then".into(),
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
@@ -1704,6 +1721,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "and then".into(),
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
@@ -1726,6 +1744,7 @@ mod tests {
                 tidebreak_core::CodeGrantId::new(),
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "hijack".into(),
                     event_id: "Ev3".to_owned(),
                     channel_ts: "1700000003.000100".to_owned(),
@@ -1747,6 +1766,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "still there?".into(),
                     event_id: "Ev4".to_owned(),
                     channel_ts: "1700000004.000100".to_owned(),
@@ -1796,6 +1816,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "start".into(),
                     event_id: "Ev0".to_owned(),
                     channel_ts: "1700000000.000100".to_owned(),
@@ -1810,6 +1831,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "message B".into(),
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
@@ -1836,6 +1858,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "message A".into(),
                     event_id: "EvA".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
@@ -1909,6 +1932,7 @@ mod tests {
                 grant,
                 session_id,
                 crate::code::runtime::ExternalMessage {
+                    context: None,
                     text: "message B".into(),
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
