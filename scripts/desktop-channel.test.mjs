@@ -73,3 +73,17 @@ test("the packaged staging overlay matches the channel contract", () => {
     overlay.bundle.icon.every((icon) => icon.startsWith("icons/staging/")),
   );
 });
+
+test("staging preserves the platform window configuration", () => {
+  const desktop = join(root, "crates", "tidebreak-desktop");
+  const load = (name) => JSON.parse(readFileSync(join(desktop, name), "utf8"));
+  const staging = load("tauri.staging.conf.json");
+  // Tauri replaces arrays when applying overlays. A title-only window entry
+  // discards the macOS overlay titlebar and the shared window dimensions.
+  assert.equal(staging.app?.windows, undefined);
+  const mac = load("tauri.macos.conf.json").app.windows[0];
+  assert.equal(mac.titleBarStyle, "Overlay");
+  assert.equal(mac.hiddenTitle, true);
+  assert.equal(mac.width, 1280);
+  assert.equal(mac.height, 800);
+});

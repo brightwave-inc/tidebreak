@@ -2,14 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tidebreak [staging]",
   "identifier": "io.brightwave.tidebreak.staging",
-  "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Tidebreak [staging]"
-      }
-    ]
-  },
   "plugins": {
     "deep-link": {
       "desktop": {
