@@ -2125,6 +2125,7 @@ export function parseCodeWorkspace(
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeWorkspaceSnapshot>(value, [
+      "base_refresh_warning",
       "id",
       "repo_id",
       "title",
@@ -2139,6 +2140,8 @@ export function parseCodeWorkspace(
       "released_tip",
       "bundle_bytes",
     ]) ||
+    (value.base_refresh_warning !== undefined &&
+      !nonEmptyLine(value.base_refresh_warning)) ||
     !wireId(value.id) ||
     !wireId(value.repo_id) ||
     !nonEmptyLine(value.title) ||
@@ -2155,6 +2158,9 @@ export function parseCodeWorkspace(
     return null;
   }
   const parsed: CodeWorkspaceSnapshot = {
+    ...(value.base_refresh_warning !== undefined
+      ? { base_refresh_warning: value.base_refresh_warning }
+      : {}),
     id: value.id,
     repo_id: value.repo_id,
     title: value.title,

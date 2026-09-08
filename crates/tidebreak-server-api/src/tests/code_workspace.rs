@@ -655,3 +655,115 @@ async fn reclaim_refuses_a_checkout_tidebreak_did_not_clone() {
         .unwrap();
     assert!(listed.is_empty(), "a removed registration leaves the list");
 }
+
+#[tokio::test]
+async fn workspace_creation_refreshes_main_by_default_and_honors_opt_out() {
+    for enabled in [true, false] {
+        let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+        if !enabled {
+            crate::code::naming_settings::write_keep_local_main_up_to_date(
+                &*runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        let origin = init_git_repo(dir.path());
+        let local = dir.path().join("local");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), local.to_str().unwrap()],
+        );
+        std::fs::write(origin.join("README.md"), "remote update\n").unwrap();
+        git(&origin, &["commit", "-am", "remote update"]);
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let (_, workspace) = register_and_workspace(&client, addr, &token, &local).await;
+        let expected = if enabled {
+            "remote update\n"
+        } else {
+            "hello\n"
+        };
+        assert_eq!(
+            std::fs::read_to_string(local.join("README.md")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(workspace["worktree_path"].as_str().unwrap())
+                    .join("README.md")
+            )
+            .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn workspace_creation_warns_and_continues_when_base_refresh_fails() {
+    for reason in ["fetch", "dirty", "diverged"] {
+        let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+        let origin = init_git_repo(dir.path());
+        let local = dir.path().join("local");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), local.to_str().unwrap()],
+        );
+        if reason == "fetch" {
+            git(
+                &local,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    dir.path().join("missing.git").to_str().unwrap(),
+                ],
+            );
+        } else {
+            std::fs::write(origin.join("README.md"), "remote update\n").unwrap();
+            git(&origin, &["commit", "-am", "remote update"]);
+            std::fs::write(local.join("README.md"), "local work\n").unwrap();
+            if reason == "diverged" {
+                git(&local, &["config", "user.email", "dev@example.com"]);
+                git(&local, &["config", "user.name", "Dev"]);
+                git(
+                    &local,
+                    &["-c", "commit.gpgsign=false", "commit", "-am", "local work"],
+                );
+            }
+        }
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let (_, workspace) = register_and_workspace(&client, addr, &token, &local).await;
+        assert_eq!(workspace["status"], "active", "{reason}");
+        assert_eq!(workspace["base_refresh_warning"], "Couldn't update main to the latest version. Your workspace uses the available local history.");
+        let expected = if reason == "fetch" {
+            "hello\n"
+        } else {
+            "local work\n"
+        };
+        assert_eq!(
+            std::fs::read_to_string(local.join("README.md")).unwrap(),
+            expected
+        );
+    }
+}

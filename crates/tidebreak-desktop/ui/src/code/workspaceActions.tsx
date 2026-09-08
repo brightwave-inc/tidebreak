@@ -708,7 +708,10 @@ export function useWorkspaceCardCommands(): {
             status: "creating",
             created_at: new Date().toISOString(),
           });
-          return client.createCodeWorkspace(body);
+          const workspace = await client.createCodeWorkspace(body);
+          if (workspace.base_refresh_warning)
+            toast.warning(workspace.base_refresh_warning);
+          return workspace;
         },
         onProgress: (progress) =>
           showPreparation(uneffPreparationSteps(progress)),

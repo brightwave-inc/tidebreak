@@ -45,18 +45,17 @@ pub async fn create_workspace(
     code: ScopedCode,
     Json(body): Json<CreateWorkspaceBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let workspace = code
-        .create_workspace(
+    let (workspace, base_refresh_warning) = code
+        .create_workspace_with_warning(
             body.repo_id,
             body.title,
             body.suggested_title,
             body.base_ref,
         )
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CodeWorkspaceSnapshot::from(workspace)),
-    ))
+    let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
+    snapshot.base_refresh_warning = base_refresh_warning;
+    Ok((StatusCode::CREATED, Json(snapshot)))
 }
 
 /// `POST /code/workspace-title` — name a workspace before its checkout exists.

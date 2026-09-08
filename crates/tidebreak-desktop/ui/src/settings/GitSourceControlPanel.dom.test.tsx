@@ -39,6 +39,7 @@ const initial: RuntimeSettings = {
   harness_update_channel: "pinned",
   git_source_control: {
     auto_rename_branches: true,
+    keep_local_main_up_to_date: true,
     branch_prefix_mode: "account",
     account_prefix: "alex/",
     effective_branch_prefix: "alex/",
@@ -49,6 +50,51 @@ const initial: RuntimeSettings = {
 afterEach(cleanup);
 
 describe("GitSourceControlPanel", () => {
+  it("defaults main updates on and saves an opt-out", async () => {
+    const putSettings = vi.fn(async () => ({
+      ...initial,
+      git_source_control: {
+        ...initial.git_source_control,
+        keep_local_main_up_to_date: false,
+      },
+    }));
+    render(
+      <GitSourceControlPanel
+        client={{ getSettings: async () => initial, putSettings } as never}
+      />,
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Keep local main up to date",
+    });
+    expect(toggle).toBeChecked();
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(putSettings).toHaveBeenCalledWith({
+      git_source_control: { keep_local_main_up_to_date: false },
+    });
+  });
+
+  it("restores main updates after a failed save", async () => {
+    render(
+      <GitSourceControlPanel
+        client={
+          {
+            getSettings: async () => initial,
+            putSettings: async () => {
+              throw new Error("Save failed");
+            },
+          } as never
+        }
+      />,
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Keep local main up to date",
+    });
+    await userEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("Save failed")).toBeVisible());
+    expect(toggle).toBeChecked();
+  });
+
   it("saves branch renaming and custom prefix choices", async () => {
     const putSettings = vi.fn(async (body) => ({
       ...initial,

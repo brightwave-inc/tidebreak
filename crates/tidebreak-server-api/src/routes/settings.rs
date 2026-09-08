@@ -208,6 +208,8 @@ pub struct GitSourceControlSettingsUpdate {
     #[serde(default)]
     pub auto_rename_branches: Option<bool>,
     #[serde(default)]
+    pub keep_local_main_up_to_date: Option<bool>,
+    #[serde(default)]
     pub branch_prefix_mode: Option<BranchPrefixMode>,
     #[serde(default, deserialize_with = "double_option")]
     pub custom_branch_prefix: Option<Option<String>>,
@@ -430,6 +432,10 @@ pub async fn put_settings(
             return Err(ServerError::bad_request(
                 "custom_branch_prefix is required in custom mode",
             ));
+        }
+        if let Some(enabled) = update.keep_local_main_up_to_date {
+            naming_settings::write_keep_local_main_up_to_date(&*state.store, &owner, enabled)
+                .await?;
         }
         if let Some(enabled) = update.auto_rename_branches {
             naming_settings::write_auto_rename_branches(&*state.store, &owner, enabled).await?;

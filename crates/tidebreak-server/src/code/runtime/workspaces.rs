@@ -27,6 +27,19 @@ impl CodeRuntime {
         suggested_title: Option<String>,
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
+        self.create_workspace_with_warning(owner, repo_id, title, suggested_title, base_ref)
+            .await
+            .map(|(workspace, _)| workspace)
+    }
+
+    pub async fn create_workspace_with_warning(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+        title: Option<String>,
+        suggested_title: Option<String>,
+        base_ref: Option<String>,
+    ) -> Result<(CodeWorkspace, Option<String>), ServerError> {
         self.create_workspace_with_git_credentials(
             owner,
             repo_id,
@@ -49,7 +62,7 @@ impl CodeRuntime {
         base_ref: Option<String>,
         lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
         acts_as: tidebreak_core::ActsAs,
-    ) -> Result<CodeWorkspace, ServerError> {
+    ) -> Result<(CodeWorkspace, Option<String>), ServerError> {
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
         let explicit_title = title
@@ -100,6 +113,8 @@ impl CodeRuntime {
         let requested_repo_default = explicit_base
             .as_deref()
             .is_none_or(|value| value == repo.default_base_ref);
+        let creation = self.workspace_creation_lock(repo_id);
+        let creation_guard = creation.lock().await;
         let base = if requested_repo_default {
             worktree::resolve_default_base_ref(repo_root, Some(&requested))
                 .await
@@ -109,14 +124,21 @@ impl CodeRuntime {
                 .await
                 .map_err(map_worktree)?
         };
+        let refreshed = match naming_settings::keep_local_main_up_to_date(&*self.db, owner).await {
+            Ok(false) => Ok(()),
+            Ok(true) => worktree::refresh_local_base(repo_root, &base).await,
+            Err(error) => Err(error.to_string()),
+        };
+        let base_refresh_warning = refreshed.err().map(|error| {
+            tracing::debug!(repo = %repo.id, %error, "local base refresh skipped");
+            format!("Couldn't update {base} to the latest version. Your workspace uses the available local history.")
+        });
         if requested_repo_default && repo.default_base_ref != base {
             let mut repo = repo.clone();
             repo.default_base_ref = base.clone();
             self.save_repo(&repo).await?;
         }
         let repo_root = std::path::Path::new(&repo.root_path);
-        let creation = self.workspace_creation_lock(repo_id);
-        let creation_guard = creation.lock().await;
         let mut existing = list_workspaces(&self.db, owner, Some(repo_id))
             .await?
             .into_iter()
@@ -204,7 +226,7 @@ impl CodeRuntime {
                     }
                 }
                 gh::run_auto_create_actions(&path, &repo.quick_actions).await;
-                Ok(workspace)
+                Ok((workspace, base_refresh_warning))
             }
             Err(err) => {
                 workspace.status = CodeWorkspaceStatus::SetupFailed;

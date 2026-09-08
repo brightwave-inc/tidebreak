@@ -139,7 +139,7 @@ export function GitSourceControlPanel({
   return (
     <SettingsPanel
       title="Git & source control"
-      description="Choose how Tidebreak names branches and worktree folders for new code workspaces."
+      description="Choose how Tidebreak updates local branches and names new code workspaces."
       busy={loading || saving}
     >
       {error && <SettingsError>{error}</SettingsError>}
@@ -147,82 +147,109 @@ export function GitSourceControlPanel({
         <p className="text-sm text-muted-foreground">Loading Git settings…</p>
       ) : (
         settings && (
-          <SettingsSection
-            title="Branch names"
-            description="These defaults apply when you add a repository. Existing repositories keep their own branch prefix."
-          >
-            <SettingsField
-              label="Name generated branches and folders automatically"
-              hint="When a new workspace starts with a message, Tidebreak names its local branch and worktree folder before creating them. Existing paths never move."
-            >
-              <Switch
-                checked={settings.auto_rename_branches}
-                disabled={saving}
-                onCheckedChange={(enabled) => {
-                  const rollback = { settings, customPrefix };
-                  setSettings({ ...settings, auto_rename_branches: enabled });
-                  void save({ auto_rename_branches: enabled }, rollback);
-                }}
-                aria-label="Name generated branches and folders automatically"
-              />
-            </SettingsField>
-            <SettingsField
-              label="Branch prefix"
-              hint={
-                settings.branch_prefix_mode === "account" &&
-                !settings.account_prefix
-                  ? "No Git account is available, so Tidebreak uses tidebreak/."
-                  : "The prefix is copied into each repository you add."
-              }
-            >
-              <Select
-                value={settings.branch_prefix_mode}
-                disabled={saving}
-                onValueChange={(value) => selectMode(value as BranchPrefixMode)}
-              >
-                <SelectTrigger aria-label="Branch prefix">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="account">
-                    Git account
-                    {settings.account_prefix
-                      ? ` (${prefixStem(settings.account_prefix)})`
-                      : ""}
-                  </SelectItem>
-                  <SelectItem value="custom">Custom</SelectItem>
-                  <SelectItem value="none">No prefix</SelectItem>
-                </SelectContent>
-              </Select>
-            </SettingsField>
-            {settings.branch_prefix_mode === "custom" && (
+          <>
+            <SettingsSection title="Local branches">
               <SettingsField
-                label="Custom prefix"
-                hint="Use a valid Git branch prefix. Tidebreak adds the trailing slash."
+                label="Keep local main up to date"
+                hint="When you create a workspace, Tidebreak fetches its base branch and fast-forwards the matching local branch. It skips branches with uncommitted changes or local-only commits. Enabled by default."
               >
-                <Input
-                  className="font-mono"
-                  aria-label="Custom prefix"
-                  value={customPrefix}
+                <Switch
+                  checked={settings.keep_local_main_up_to_date}
                   disabled={saving}
-                  spellCheck={false}
-                  placeholder="team/alex"
-                  onChange={(event) => setCustomPrefix(event.target.value)}
-                  onBlur={() => {
-                    if (customPrefix.trim()) {
-                      void save({ custom_branch_prefix: customPrefix });
-                    }
+                  onCheckedChange={(enabled) => {
+                    const rollback = { settings, customPrefix };
+                    setSettings({
+                      ...settings,
+                      keep_local_main_up_to_date: enabled,
+                    });
+                    void save(
+                      { keep_local_main_up_to_date: enabled },
+                      rollback,
+                    );
                   }}
+                  aria-label="Keep local main up to date"
                 />
               </SettingsField>
-            )}
-            <div className="rounded-lg border border-border-subtle bg-muted px-3 py-2.5">
-              <p className="text-xs text-muted-foreground">Example branch</p>
-              <p className="mt-1 truncate font-mono text-sm text-foreground">
-                {previewPrefix}fix-flaky-auth-retry
-              </p>
-            </div>
-          </SettingsSection>
+            </SettingsSection>
+            <SettingsSection
+              title="Branch names"
+              description="These defaults apply when you add a repository. Existing repositories keep their own branch prefix."
+            >
+              <SettingsField
+                label="Name generated branches and folders automatically"
+                hint="When a new workspace starts with a message, Tidebreak names its local branch and worktree folder before creating them. Existing paths never move."
+              >
+                <Switch
+                  checked={settings.auto_rename_branches}
+                  disabled={saving}
+                  onCheckedChange={(enabled) => {
+                    const rollback = { settings, customPrefix };
+                    setSettings({ ...settings, auto_rename_branches: enabled });
+                    void save({ auto_rename_branches: enabled }, rollback);
+                  }}
+                  aria-label="Name generated branches and folders automatically"
+                />
+              </SettingsField>
+              <SettingsField
+                label="Branch prefix"
+                hint={
+                  settings.branch_prefix_mode === "account" &&
+                  !settings.account_prefix
+                    ? "No Git account is available, so Tidebreak uses tidebreak/."
+                    : "The prefix is copied into each repository you add."
+                }
+              >
+                <Select
+                  value={settings.branch_prefix_mode}
+                  disabled={saving}
+                  onValueChange={(value) =>
+                    selectMode(value as BranchPrefixMode)
+                  }
+                >
+                  <SelectTrigger aria-label="Branch prefix">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="account">
+                      Git account
+                      {settings.account_prefix
+                        ? ` (${prefixStem(settings.account_prefix)})`
+                        : ""}
+                    </SelectItem>
+                    <SelectItem value="custom">Custom</SelectItem>
+                    <SelectItem value="none">No prefix</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingsField>
+              {settings.branch_prefix_mode === "custom" && (
+                <SettingsField
+                  label="Custom prefix"
+                  hint="Use a valid Git branch prefix. Tidebreak adds the trailing slash."
+                >
+                  <Input
+                    className="font-mono"
+                    aria-label="Custom prefix"
+                    value={customPrefix}
+                    disabled={saving}
+                    spellCheck={false}
+                    placeholder="team/alex"
+                    onChange={(event) => setCustomPrefix(event.target.value)}
+                    onBlur={() => {
+                      if (customPrefix.trim()) {
+                        void save({ custom_branch_prefix: customPrefix });
+                      }
+                    }}
+                  />
+                </SettingsField>
+              )}
+              <div className="rounded-lg border border-border-subtle bg-muted px-3 py-2.5">
+                <p className="text-xs text-muted-foreground">Example branch</p>
+                <p className="mt-1 truncate font-mono text-sm text-foreground">
+                  {previewPrefix}fix-flaky-auth-retry
+                </p>
+              </div>
+            </SettingsSection>
+          </>
         )
       )}
       <PortableConfigSection client={client} />

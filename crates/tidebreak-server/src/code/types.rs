@@ -195,6 +195,10 @@ impl From<CodeRepo> for CodeRepoSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceSnapshot {
+    /// Present only on creation when the base refresh could not complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_refresh_warning: Option<String>,
     pub id: WorkspaceId,
     pub repo_id: RepoId,
     pub title: String,
@@ -226,6 +230,7 @@ pub struct CodeWorkspaceSnapshot {
 impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
     fn from(workspace: CodeWorkspace) -> Self {
         Self {
+            base_refresh_warning: None,
             id: workspace.id,
             repo_id: workspace.repo_id,
             title: workspace.title,
