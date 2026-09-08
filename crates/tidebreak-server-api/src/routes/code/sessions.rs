@@ -17,8 +17,8 @@ use axum::response::{IntoResponse, Response};
 use super::types::{
     CodeForkTranscript, CreateInternalSessionBody, CreateRemoteSessionBody, CreateSessionBody,
     QueuePausedBody, QueuedTurn, QueuedTurnUpdate, QueuedTurnsSnapshot, SequencedEventFrame,
-    SessionExternalOrigin, SessionSnapshot, SetAttentionBody, SetFastModeBody,
-    SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody, TurnSnapshot,
+    SessionSnapshot, SetAttentionBody, SetFastModeBody, SetPermissionModeBody,
+    SetReasoningEffortBody, SteerBody, SubmitTurnBody, TurnSnapshot,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{PermissionMode, SessionId, TurnSteer, WorkspaceId};
@@ -128,21 +128,13 @@ pub async fn create_remote_session(
 /// here: the desktop writes the answer over its listed row, so a snapshot
 /// that hard-coded no origin would erase the provenance banner on the
 /// next reap, mode change, or attention edit.
-async fn snapshot_with_origin(
+pub(super) async fn snapshot_with_origin(
     code: &ScopedCode,
     session: tidebreak_core::Session,
 ) -> Result<SessionSnapshot, ServerError> {
-    let origin = code
-        .external_bindings_for_sessions(&[session.id])
-        .await?
-        .into_iter()
-        .next()
-        .map(|binding| SessionExternalOrigin {
-            channel_kind: binding.channel_kind,
-            external_key: binding.external_key,
-        });
+    let bindings = code.external_bindings_for_sessions(&[session.id]).await?;
     let mut snapshot = SessionSnapshot::from(session);
-    snapshot.external_origin = origin;
+    snapshot.set_external_origins(bindings);
     Ok(snapshot)
 }
 
@@ -151,32 +143,33 @@ pub async fn list_workspace_sessions(
     Path(workspace_id): Path<WorkspaceId>,
 ) -> Result<Json<Vec<SessionSnapshot>>, ServerError> {
     let sessions = code.list_workspace_sessions(workspace_id).await?;
+    Ok(Json(snapshots_with_origins(&code, sessions).await?))
+}
+
+async fn snapshots_with_origins(
+    code: &ScopedCode,
+    sessions: Vec<tidebreak_core::Session>,
+) -> Result<Vec<SessionSnapshot>, ServerError> {
     let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
-    let origins: std::collections::HashMap<SessionId, SessionExternalOrigin> = code
-        .external_bindings_for_sessions(&ids)
-        .await?
+    let mut bindings: std::collections::HashMap<
+        SessionId,
+        Vec<tidebreak_core::CodeExternalBinding>,
+    > = std::collections::HashMap::new();
+    for binding in code.external_bindings_for_sessions(&ids).await? {
+        bindings
+            .entry(binding.session_id)
+            .or_default()
+            .push(binding);
+    }
+    Ok(sessions
         .into_iter()
-        .map(|binding| {
-            (
-                binding.session_id,
-                SessionExternalOrigin {
-                    channel_kind: binding.channel_kind,
-                    external_key: binding.external_key,
-                },
-            )
+        .map(|session| {
+            let origins = bindings.remove(&session.id).unwrap_or_default();
+            let mut snapshot = SessionSnapshot::from(session);
+            snapshot.set_external_origins(origins);
+            snapshot
         })
-        .collect();
-    Ok(Json(
-        sessions
-            .into_iter()
-            .map(|session| {
-                let origin = origins.get(&session.id).cloned();
-                let mut snapshot = SessionSnapshot::from(session);
-                snapshot.external_origin = origin;
-                snapshot
-            })
-            .collect(),
-    ))
+        .collect())
 }
 
 /// `GET /sessions` — the owner's conversations that bind no
@@ -185,9 +178,7 @@ pub async fn list_internal_sessions(
     code: ScopedCode,
 ) -> Result<Json<Vec<SessionSnapshot>>, ServerError> {
     let sessions = code.list_internal_sessions().await?;
-    Ok(Json(
-        sessions.into_iter().map(SessionSnapshot::from).collect(),
-    ))
+    Ok(Json(snapshots_with_origins(&code, sessions).await?))
 }
 
 /// `GET /sessions/{id}` — one session by id, whatever it binds.
@@ -196,18 +187,7 @@ pub async fn get_session(
     Path(id): Path<SessionId>,
 ) -> Result<Json<SessionSnapshot>, ServerError> {
     let session = code.get_session(id).await?;
-    let origin = code
-        .external_bindings_for_sessions(&[id])
-        .await?
-        .into_iter()
-        .next()
-        .map(|binding| SessionExternalOrigin {
-            channel_kind: binding.channel_kind,
-            external_key: binding.external_key,
-        });
-    let mut snapshot = SessionSnapshot::from(session);
-    snapshot.external_origin = origin;
-    Ok(Json(snapshot))
+    Ok(Json(snapshot_with_origin(&code, session).await?))
 }
 
 pub async fn submit_turn(
@@ -367,7 +347,7 @@ pub async fn get_session_debug(
 ) -> Result<Json<super::types::SessionDebug>, ServerError> {
     let (session, turns, events) = code.session_debug(id).await?;
     Ok(Json(super::types::SessionDebug {
-        session: SessionSnapshot::from(session),
+        session: snapshot_with_origin(&code, session).await?,
         turns: turns.into_iter().map(TurnSnapshot::from).collect(),
         events: events
             .into_iter()

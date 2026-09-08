@@ -2689,6 +2689,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "visibility",
       "created_at",
       "external_origin",
+      "external_origins",
       "execution_location",
       "owner_kind",
       "acts_as",
@@ -2754,6 +2755,31 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
             (value.external_origin as Record<string, unknown>).external_key,
           ),
         };
+  let external_origins: CodeSessionExternalOrigin[] | undefined;
+  if (value.external_origins !== undefined) {
+    if (!Array.isArray(value.external_origins)) return null;
+    external_origins = [];
+    const seen = new Set<string>();
+    for (const origin of value.external_origins) {
+      if (
+        !isRecord(origin) ||
+        !onlyKeys<CodeSessionExternalOrigin>(origin, [
+          "channel_kind",
+          "external_key",
+        ]) ||
+        !nonEmptyLine(origin.channel_kind) ||
+        !wireId(origin.external_key)
+      )
+        return null;
+      const key = JSON.stringify([origin.channel_kind, origin.external_key]);
+      if (seen.has(key)) return null;
+      seen.add(key);
+      external_origins.push({
+        channel_kind: origin.channel_kind,
+        external_key: origin.external_key,
+      });
+    }
+  }
   return {
     id: value.id,
     workspace_id: value.workspace_id,
@@ -2782,6 +2808,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       : {}),
     ...(fence_reason ? { fence_reason } : {}),
     ...(external_origin !== undefined ? { external_origin } : {}),
+    ...(external_origins !== undefined ? { external_origins } : {}),
     ...(value.owner_kind !== undefined ? { owner_kind: value.owner_kind } : {}),
     ...(value.acts_as !== undefined
       ? { acts_as: value.acts_as as "person" | "bot" }

@@ -53,4 +53,22 @@ describe("SessionOriginBanner", () => {
       "Started from Slack; runs on this machine as the bot.",
     );
   });
+  it("links every conversation that reaches the session", () => {
+    render(
+      <SessionOriginBanner
+        origin={origin}
+        executionLocation="machine"
+        origins={[
+          origin,
+          {
+            channel_kind: "slack",
+            external_key: "T0400000:C0865432:1724900010.123456",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/Shared across 2 conversations/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open thread 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open thread 2" })).toBeTruthy();
+  });
 });

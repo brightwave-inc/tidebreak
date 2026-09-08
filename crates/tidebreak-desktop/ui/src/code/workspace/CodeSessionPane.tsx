@@ -547,6 +547,7 @@ export function CodeSessionPane({
       {!subagentCallId && session.external_origin && (
         <SessionOriginBanner
           origin={session.external_origin}
+          origins={session.external_origins}
           executionLocation={session.execution_location}
           actsAs={session.acts_as}
         />

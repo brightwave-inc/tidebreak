@@ -5,7 +5,9 @@
 //! for one conversation cannot both commit their session, so first contact
 //! converges on one session no matter how many times the channel retries.
 
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+};
 
 use crate::code::{
     CodeBindingId, CodeExternalBinding, CodeGrantId, CodeWorkspace, ExternalSessionResolution,
@@ -67,6 +69,8 @@ pub async fn list_external_bindings_for_sessions(
             entities::code_external_binding::Column::SessionId
                 .is_in(session_ids.iter().map(|id| id.0)),
         )
+        .order_by_asc(entities::code_external_binding::Column::CreatedAt)
+        .order_by_asc(entities::code_external_binding::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -323,10 +327,100 @@ pub async fn list_bindings_for_session(
     entities::code_external_binding::Entity::find()
         .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_external_binding::Column::SessionId.eq(session_id.0))
+        .order_by_asc(entities::code_external_binding::Column::CreatedAt)
+        .order_by_asc(entities::code_external_binding::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?
         .into_iter()
         .map(binding_from_model)
         .collect()
+}
+
+/// Attach another conversation to a session already held by this grant.
+///
+/// The session lock serializes attachment with lifecycle writes. A conversation
+/// held by another grant or session is refused without disclosing its target.
+pub async fn attach_external_binding(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_kind: &str,
+    external_key: &str,
+    session_id: SessionId,
+) -> Result<ExternalSessionResolution> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !super::acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok(ExternalSessionResolution::GrantMismatch);
+    }
+    let held = entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_binding::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_external_binding::Column::GrantId.eq(grant_id.0))
+        .filter(entities::code_external_binding::Column::ChannelKind.eq(channel_kind))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    let Some(held) = held else {
+        return Ok(ExternalSessionResolution::GrantMismatch);
+    };
+    if matches!(
+        classify_hit(&transaction, held, grant_id).await?,
+        ExternalSessionResolution::Ended { .. }
+    ) {
+        return Ok(ExternalSessionResolution::Ended { session_id });
+    }
+    let now = database_now(&transaction).await?;
+    let binding = CodeExternalBinding {
+        id: CodeBindingId::new(),
+        owner: owner.clone(),
+        channel_kind: channel_kind.to_owned(),
+        external_key: external_key.to_owned(),
+        grant_id,
+        session_id,
+        created_at: now,
+    };
+    let inserted = entities::code_external_binding::Entity::insert(
+        entities::code_external_binding::ActiveModel {
+            id: Set(binding.id.0),
+            owner: Set(owner.as_str().to_owned()),
+            channel_kind: Set(channel_kind.to_owned()),
+            external_key: Set(external_key.to_owned()),
+            grant_id: Set(grant_id.0),
+            session_id: Set(session_id.0),
+            created_at: Set(now),
+        },
+    )
+    .on_conflict(
+        sea_orm::sea_query::OnConflict::columns([
+            entities::code_external_binding::Column::Owner,
+            entities::code_external_binding::Column::ChannelKind,
+            entities::code_external_binding::Column::ExternalKey,
+        ])
+        .do_nothing()
+        .to_owned(),
+    )
+    .try_insert()
+    .exec(&transaction)
+    .await
+    .map_err(store_err)?;
+    if matches!(inserted, sea_orm::TryInsertResult::Inserted(_)) {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(ExternalSessionResolution::Created(Box::new(binding)));
+    }
+    let hit = entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_binding::Column::ChannelKind.eq(channel_kind))
+        .filter(entities::code_external_binding::Column::ExternalKey.eq(external_key))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    let resolution = match hit {
+        Some(hit) if hit.grant_id == grant_id.0 && hit.session_id == session_id.0 => {
+            ExternalSessionResolution::Existing(Box::new(binding_from_model(hit)?))
+        }
+        _ => ExternalSessionResolution::GrantMismatch,
+    };
+    transaction.commit().await.map_err(store_err)?;
+    Ok(resolution)
 }

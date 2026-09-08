@@ -4905,6 +4905,10 @@ fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, att
  */
 external_origin?: SessionExternalOrigin,
 /**
+ * Every conversation that reaches this session, in creation order.
+ */
+external_origins?: Array<SessionExternalOrigin>,
+/**
  * Where the engine runs, fixed at creation (decision 0088).
  */
 execution_location: ExecutionLocation,

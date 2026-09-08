@@ -854,3 +854,21 @@ proceeds on the stated answers.
   — the agent side of remote execution.
 - [`deferred.md`](deferred.md) — remote session execution, unparked by
   stage 1.
+
+
+### Several threads for one session
+
+The adapter attaches a thread through
+`POST /external/code/sessions/{id}/bindings` with `external_key`. The grant
+must already hold the session. Repeating an attachment returns the existing
+binding; a destination held by another session or grant returns not found.
+Ended sessions return `409 ended`. `GET` on the same route lists the bindings.
+
+A workspace grant also sends `channel_id` and names the person requesting a
+new repository confirmation in `set_by: {identity, display}`. An unconfirmed
+destination creates a pending approval and returns `409 repository_unconfirmed`.
+After an administrator confirms the repository, the adapter retries attachment. The adapter
+checks workspace membership before calling; attachment does not change the
+session's access rows. Each bound thread reads the same event stream with its
+own cursor. Snapshots expose `external_origins` and preserve `external_origin`
+as the first thread for older clients. Decision 93 records the boundary.

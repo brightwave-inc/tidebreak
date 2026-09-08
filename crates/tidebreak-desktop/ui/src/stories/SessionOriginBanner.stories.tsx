@@ -62,3 +62,31 @@ export const ActsAsYou: Story = {
 export const ActsAsTheBot: Story = {
   args: { ...SlackThread.args, actsAs: "bot" },
 };
+
+export const SeveralThreads: Story = {
+  args: {
+    ...ActsAsTheBot.args,
+    origins: [
+      SlackThread.args.origin,
+      {
+        channel_kind: "slack",
+        external_key: "T0400000:C0865432:1724900010.123456",
+      },
+      {
+        channel_kind: "slack",
+        external_key: "T0400000:C0898765:1724900020.123456",
+      },
+    ],
+  },
+};
+
+export const SeveralThreadsNarrow: Story = {
+  ...SeveralThreads,
+  decorators: [
+    (Story) => (
+      <div style={{ width: 320 }}>
+        <Story />
+      </div>
+    ),
+  ],
+};

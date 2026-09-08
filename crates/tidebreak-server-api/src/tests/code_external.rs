@@ -2715,6 +2715,35 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     let session_id = bound_session_id(&runtime, &service, "T1/C1/1.1").await;
     let session = runtime.get_session(&service, session_id).await.unwrap();
     assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
+    let bindings_url = format!("/external/code/sessions/{session_id}/bindings");
+    let destination = serde_json::json!({"external_key":"T1/C2/2.2", "channel_id":"C2", "set_by":{"identity":"U1", "display":"Casey"}});
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &bindings_url,
+        &grant_token,
+        Some(destination.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/deployment/code/grants/workspace/{grant_id}/channels/C2/repositories/confirm"),
+        ALICE_TOKEN,
+        Some(serde_json::json!({"repository":"acme/tools"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &bindings_url,
+        &grant_token,
+        Some(destination),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
 
     let (status, named) = call_json(
         &router,
@@ -3090,5 +3119,282 @@ async fn a_machine_session_parks_on_an_approval_a_contributor_can_settle() {
             )
         }),
         "a sandbox session carries none of these cards"
+    );
+}
+
+#[tokio::test]
+async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targets() {
+    let (router, fake, runtime, repo_id, token, _dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-bindings", "T1")
+        .await
+        .unwrap();
+    let (_, foreign) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-other", "T1")
+        .await
+        .unwrap();
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key":"T1/C1/1.1", "repo_id":repo_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id: tidebreak_core::SessionId =
+        serde_json::from_value(created["session_id"].clone()).unwrap();
+    let url = format!("http://{addr}/external/code/sessions/{id}/bindings");
+    let body = serde_json::json!({"external_key":"T1/C2/2.2"});
+    let request = || {
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&body)
+            .send()
+    };
+    let (left, right) = tokio::join!(request(), request());
+    let mut statuses = vec![
+        left.unwrap().status().as_u16(),
+        right.unwrap().status().as_u16(),
+    ];
+    statuses.sort();
+    assert_eq!(statuses, vec![200, 201]);
+    let bindings: serde_json::Value = client
+        .get(&url)
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bindings.as_array().unwrap().len(), 2);
+    assert_eq!(bindings[0]["external_key"], "T1/C1/1.1");
+    assert_eq!(bindings[1]["session_id"], created["session_id"]);
+    let snapshot: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(snapshot["external_origins"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["external_origin"], snapshot["external_origins"][0]);
+    for request in [client.get(&url), client.post(&url).json(&body)] {
+        assert_eq!(
+            request
+                .bearer_auth(&foreign.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    // A different grant can hold another session, but cannot capture its key.
+    client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&foreign.token)
+        .json(&serde_json::json!({"external_key":"T1/C3/3.3", "repo_id":repo_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"external_key":"T1/C3/3.3"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    // The same grant cannot move a key away from another session.
+    client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key":"T1/C5/5.5", "repo_id":repo_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"external_key":"T1/C5/5.5"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let (_, other_owner) = runtime
+        .mint_adapter_grant(
+            &OwnerId::new("other-owner").unwrap(),
+            "slack",
+            "U-foreign-owner",
+            "T1",
+        )
+        .await
+        .unwrap();
+    for request in [client.get(&url), client.post(&url).json(&body)] {
+        assert_eq!(
+            request
+                .bearer_auth(&other_owner.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    for key in [
+        String::new(),
+        "   ".to_owned(),
+        "bad\nkey".to_owned(),
+        "x".repeat(1025),
+    ] {
+        let response = client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"external_key":key}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["kind"],
+            "invalid_external_key"
+        );
+    }
+    for path in [
+        format!(
+            "/code/workspaces/{}/sessions",
+            snapshot["workspace_id"].as_str().unwrap()
+        ),
+        format!("/code/sessions/{id}/debug"),
+    ] {
+        let response: serde_json::Value = client
+            .get(format!("http://{addr}{path}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let row = if response.is_array() {
+            response
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == snapshot["id"])
+                .unwrap()
+        } else {
+            &response["session"]
+        };
+        assert_eq!(row["external_origins"], snapshot["external_origins"]);
+    }
+    // Two readers see the same session and both origins before the same journal.
+    let mut sockets = Vec::new();
+    for _ in 0..2 {
+        let mut request = format!("ws://{addr}/external/code/sessions/{id}/events")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {}", pair.token).parse().unwrap(),
+        );
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_eq!(
+            value["snapshot"]["external_origins"],
+            snapshot["external_origins"]
+        );
+        sockets.push(socket);
+    }
+    client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"text":"hello", "event_id":"Ev-bindings", "channel_ts":"3.3"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+        sandbox_id: "sb-ext".to_owned(),
+        state: SandboxState::Running,
+        latest_event_seq: 1,
+        events: vec![SandboxEvent {
+            seq: 1,
+            kind: "turn_started".to_owned(),
+            payload: serde_json::json!({"turn":1}),
+            created_at: String::new(),
+        }],
+    });
+    let mut live = runtime.get_session(&owner, id).await.unwrap();
+    runtime
+        .remote_sessions()
+        .unwrap()
+        .driver(&runtime.db, runtime.bus.as_ref())
+        .pump(&mut live, 0)
+        .await
+        .unwrap();
+    let mut frames = Vec::new();
+    for socket in &mut sockets {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        frames.push(serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap()).unwrap());
+    }
+    assert_eq!(frames[0], frames[1]);
+    let mut session = runtime.get_session(&owner, id).await.unwrap();
+    session.lifecycle = tidebreak_core::SessionLifecycle::Ended;
+    assert!(
+        tidebreak_core::db::code::save_session(&runtime.db, &session)
+            .await
+            .unwrap()
+    );
+    let ended = client
+        .post(&url)
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key":"T1/C4/4.4"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ended.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        ended.json::<serde_json::Value>().await.unwrap()["kind"],
+        "ended"
     );
 }
