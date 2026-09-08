@@ -631,12 +631,18 @@ async fn a_runtime_places_only_external_sessions_in_the_sandbox() {
             super::code::json_id(&workspace)
         ))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "harness": "claude_code" }))
+        .json(&serde_json::json!({ "harness": "claude_code", "permission_mode": "plan" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(desktop.status(), reqwest::StatusCode::CREATED);
-    let desktop: serde_json::Value = desktop.json().await.unwrap();
+    let desktop_status = desktop.status();
+    let desktop_body = desktop.text().await.unwrap();
+    assert_eq!(
+        desktop_status,
+        reqwest::StatusCode::CREATED,
+        "{desktop_body}"
+    );
+    let desktop: serde_json::Value = serde_json::from_str(&desktop_body).unwrap();
     assert_eq!(desktop["execution_location"], "machine");
     let desktop_id: tidebreak_core::SessionId =
         desktop["id"].as_str().unwrap().parse().expect("session id");
