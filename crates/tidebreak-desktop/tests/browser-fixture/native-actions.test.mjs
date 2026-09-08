@@ -1197,3 +1197,41 @@ test("select progress polling preserves focus, identity, and coverage checks", (
     assert.equal(resolveAction(doc, request, { registerTarget: false }).status, status, change);
   }
 });
+
+
+test("drag validates its default center before the destination", () => {
+  const element = button();
+  const overlay = button();
+  const doc = documentFor(element, { hit: (x, y) => x === 80 && y === 50 ? overlay : element });
+  const request = { ...payload({ action: { type: "drag" } }), points: [null, { x: 10, y: 10 }] };
+  const result = resolveAction(doc, request);
+  assert.equal(result.status, "target_obscured");
+});
+
+test("coordinates clamp inside the target rather than onto an adjacent element", () => {
+  const element = button();
+  const doc = documentFor(element, { hit: (x, y) => x >= 20 && x < 140 && y >= 30 && y < 70 ? element : null });
+  const request = { ...payload(), points: [{ x: 120, y: 40 }] };
+  assert.equal(resolveAction(doc, request).status, "ready");
+});
+
+
+test("canvas snapshots expose a ref and native coordinate actions", () => {
+  const snapshotMatch = semanticsSource.match(/const SNAPSHOT_SCRIPT: &str = r#"([\s\S]*?)"#;/);
+  const element = button();
+  element.localName = "canvas";
+  const doc = documentFor(element);
+  doc.querySelectorAll = selector => selector === "iframe" ? [] : selector.includes('"canvas"') || selector.split(",").includes("canvas") ? [element] : [];
+  const script = snapshotMatch[1]
+    .replace("__MAX_NODES__", "25")
+    .replace("__MARKER__", "__fixture_marker__")
+    .replace("__TARGET_IDENTITY_STORE__", identityStoreMatch[1])
+    .replace("__SENSITIVE_FIELD_POLICY__", policyMatch[1]);
+  const execute = new Function("document", "window", "Node", "location", "return (" + script + ");");
+  const snapshot = JSON.parse(execute(doc, doc.defaultView, { ELEMENT_NODE: 1 }, { href: "https://fixture.invalid/" }));
+  assert.equal(snapshot.nodes.length, 1);
+  assert.equal(snapshot.nodes[0].ref, "@e1");
+  for (const action of ["click", "hover", "right_click", "double_click", "drag", "scroll", "key_chord"]) {
+    assert.ok(snapshot.nodes[0].actions.includes(action), action);
+  }
+});
