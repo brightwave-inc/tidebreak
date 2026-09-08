@@ -235,6 +235,12 @@ pub(crate) async fn code_browser_command(
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 set_bounds(&webview, bounds)?;
+                if !visible {
+                    let _ = crate::browser_semantics::clear_browser_ghost_cursor(
+                        &app,
+                        &request.browser_id,
+                    );
+                }
                 set_visible(&webview, visible)?;
                 registry.set_visible(&request.browser_id, &request.workspace_id, visible)?;
                 return registry.snapshot(&request.browser_id, &request.workspace_id);
@@ -390,6 +396,7 @@ pub(crate) async fn code_browser_command(
             }
             let snapshot =
                 registry.revoke_browser_access(&request.browser_id, &request.workspace_id)?;
+            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             emit_access_event(&app, "agent_access_changed", &snapshot, None);
             Ok(snapshot)
         }
@@ -401,6 +408,7 @@ pub(crate) async fn code_browser_command(
             let snapshot = registry
                 .stop_agent_control(&request.browser_id, &request.workspace_id)
                 .await?;
+            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             emit_controller_event(&app, &snapshot);
             Ok(snapshot)
         }
@@ -412,6 +420,7 @@ pub(crate) async fn code_browser_command(
             let snapshot = registry
                 .take_human_control(&request.browser_id, &request.workspace_id)
                 .await?;
+            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             emit_controller_event(&app, &snapshot);
             Ok(snapshot)
         }
@@ -437,6 +446,10 @@ pub(crate) async fn code_browser_command(
                     .take_human_control(&request.browser_id, &request.workspace_id)
                     .await?;
                 emit_controller_event(&app, &snapshot);
+            }
+            if !matches!(&action, CodeBrowserAction::SetVisible { visible: true }) {
+                let _ =
+                    crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             }
             run_action(&app, &request.browser_id, &webview, action)?;
             if let Some(visible) = visible {
@@ -695,7 +708,7 @@ pub(crate) async fn close_browser_for_agent(
     ))
 }
 
-/// Make one shared tab visible by asking the renderer to select it, then
+/// Make one shared tab visible without changing keyboard focus, then
 /// waiting for the native visibility to confirm.
 pub(crate) async fn activate_browser_for_agent(
     app: &AppHandle,
@@ -723,7 +736,7 @@ pub(crate) async fn activate_browser_for_agent(
         return Ok(lifecycle_result(
             &arguments.browser_id,
             BrowserLifecycleStatus::Ok,
-            "The tab is already visible and focused.",
+            "The tab is already visible. Your keyboard focus is unchanged.",
         ));
     }
 
@@ -743,7 +756,7 @@ pub(crate) async fn activate_browser_for_agent(
             return Ok(lifecycle_result(
                 &arguments.browser_id,
                 BrowserLifecycleStatus::Ok,
-                "The tab is now visible and focused.",
+                "The tab is now visible. Your keyboard focus is unchanged.",
             ));
         }
         if tokio::time::Instant::now() >= deadline {
@@ -880,7 +893,7 @@ fn create_browser(
     let download_registry = registry.clone();
     let download_store = downloads.clone();
 
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(target)).focused(false);
     #[cfg(target_os = "macos")]
     let builder = builder.data_store_identifier(profile.data_store_identifier());
     // Installed at document start in the page world so browser_diagnostics

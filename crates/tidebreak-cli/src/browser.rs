@@ -689,6 +689,7 @@ pub(crate) enum BrowserCommand {
         document_epoch: u64,
         target_ref: String,
         action: BrowserAction,
+        execution_mode: tidebreak_core::BrowserExecutionMode,
     },
     Open {
         url: String,
@@ -1186,6 +1187,7 @@ fn parse_browser_act(
     let mut document_epoch = None;
     let mut target_ref = None;
     let mut action = None;
+    let mut execution_mode = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1206,6 +1208,18 @@ fn parse_browser_act(
                 })?);
             }
             "--ref" => parse_string_flag(&mut args, &mut target_ref, "--ref")?,
+            "--execution-mode" => {
+                if execution_mode.is_some() {
+                    return Err("duplicate --execution-mode".into());
+                }
+                execution_mode = Some(
+                    match required_flag_value(&mut args, "--execution-mode")?.as_str() {
+                        "background" => tidebreak_core::BrowserExecutionMode::Background,
+                        "foreground" => tidebreak_core::BrowserExecutionMode::Foreground,
+                        _ => return Err("--execution-mode expects background or foreground".into()),
+                    },
+                );
+            }
             "--click" => set_browser_action(&mut action, BrowserAction::Click { at: None })?,
             "--focus" => set_browser_action(&mut action, BrowserAction::Focus)?,
             "--hover" => set_browser_action(&mut action, BrowserAction::Hover { at: None })?,
@@ -1248,12 +1262,14 @@ fn parse_browser_act(
                 .to_string(),
         );
     };
+    let execution_mode = execution_mode.unwrap_or_default();
     let arguments = BrowserActArgs {
         browser_id,
         snapshot_id,
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     };
     if !arguments.is_well_formed() {
         return Err("browser act arguments are not well-formed".to_string());
@@ -1264,6 +1280,7 @@ fn parse_browser_act(
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     } = arguments;
     Ok(BrowserCommand::Act {
         browser_id,
@@ -1271,6 +1288,7 @@ fn parse_browser_act(
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     })
 }
 
@@ -1324,7 +1342,8 @@ usage: tidebreak browser list --json
        tidebreak browser act --browser-id <id> --snapshot-id <id> \
               --document-epoch <n> --ref <ref> \
               (--click | --focus | --hover | --fill <text> | --select <value> | \
-               --check | --uncheck | --press <key> | --scroll-into-view) --json
+               --check | --uncheck | --press <key> | --scroll-into-view) \
+              [--execution-mode <background|foreground>] --json
        tidebreak browser open --url <url> --json
        tidebreak browser close --browser-id <id> --json
        tidebreak browser activate --browser-id <id> --json
@@ -1471,6 +1490,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             document_epoch,
             target_ref,
             action,
+            execution_mode,
         } => {
             let args = BrowserActArgs {
                 browser_id,
@@ -1478,6 +1498,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
                 document_epoch,
                 target_ref,
                 action,
+                execution_mode,
             };
             if !args.is_well_formed() {
                 return Err(AgentError::msg("browser act arguments are not well-formed"));
