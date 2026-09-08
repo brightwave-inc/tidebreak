@@ -40,6 +40,7 @@ const NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS: u64 = 2;
 const MAX_NATIVE_SELECT_STEPS: usize = 512;
 const MAX_NATIVE_SCROLL_STEPS: usize = 24;
 const NATIVE_ACTION_VERIFY_DELAY_MILLIS: u64 = 25;
+const BROWSER_GHOST_VISIBLE_MILLIS: u64 = 1_200;
 
 #[cfg(target_os = "macos")]
 thread_local! {
@@ -924,6 +925,7 @@ async fn capture_screenshot(
     // in the tab, so capture proceeds without a redaction pre-scan. The
     // document-epoch fence above and the atomic completion below still refuse
     // a page that changed underneath the snapshot.
+    let _: String = evaluate_json(&webview, &browser_ghost_clear_script(None)).await?;
     let image_base64 =
         capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
 
@@ -1158,6 +1160,155 @@ async fn capture_browser_image(
     Err("screenshot capture is not available on this platform yet".to_owned())
 }
 
+/// Remove the page decoration without activating the tab or sending input.
+/// Lifecycle handlers call this after Stop, revoke, hide, and takeover.
+pub(crate) fn clear_browser_ghost_cursor(app: &AppHandle, browser_id: &str) -> Result<(), String> {
+    let label = browser_label(browser_id)?;
+    let Some(webview) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    clear_webview_ghost_cursor(&webview, None)
+}
+
+fn clear_webview_ghost_cursor(webview: &Webview, ghost_id: Option<&str>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = browser_ghost_clear_script(ghost_id);
+        with_browser_webview(webview, move |view| {
+            let _ = evaluate_browser_decoration(view, &script);
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (webview, ghost_id);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn evaluate_browser_decoration(
+    view: &objc2_web_kit::WKWebView,
+    script: &str,
+) -> Result<(), String> {
+    let content_world = browser_semantics_content_world()?;
+    let script = objc2_foundation::NSString::from_str(script);
+    unsafe {
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            None,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn schedule_browser_ghost_cleanup(
+    webview: Webview,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: String,
+    workspace_id: String,
+    fence: BrowserObservationFence,
+    ghost_id: String,
+) {
+    let Ok(mut halt) = registry.subscribe_halt(&browser_id, &workspace_id) else {
+        let _ = clear_webview_ghost_cursor(&webview, Some(&ghost_id));
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(BROWSER_GHOST_VISIBLE_MILLIS);
+        loop {
+            if *halt.borrow_and_update()
+                || !registry
+                    .observation_fence(capability_id, &browser_id)
+                    .is_ok_and(|live| {
+                        live.instance_id == fence.instance_id
+                            && live.document_epoch == fence.document_epoch
+                    })
+                || tokio::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            tokio::select! {
+                _ = halt.changed() => break,
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+        let _ = clear_webview_ghost_cursor(&webview, Some(&ghost_id));
+    });
+}
+
+fn native_action_ghost_point(
+    resolution: &NativeActionResolution,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+) -> Option<tidebreak_core::BrowserPoint> {
+    use tidebreak_core::BrowserAction;
+    match action {
+        BrowserAction::Click { at }
+        | BrowserAction::Hover { at }
+        | BrowserAction::RightClick { at }
+        | BrowserAction::DoubleClick { at } => native_css_point(resolution, *at).ok(),
+        BrowserAction::Drag { to, .. } => native_css_point(resolution, Some(*to)).ok(),
+        BrowserAction::Scroll { .. } | BrowserAction::Check { .. } => {
+            native_css_point(resolution, None).ok()
+        }
+        BrowserAction::Fill { .. } if matches!(phase, NativeActionDispatchPhase::Initial) => {
+            native_css_point(resolution, None).ok()
+        }
+        BrowserAction::ScrollIntoView => Some(tidebreak_core::BrowserPoint {
+            x: resolution.scroll_x?,
+            y: resolution.scroll_y?,
+        }),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn browser_ghost_script(
+    ghost_id: &str,
+    document_epoch: u64,
+    snapshot_id: &str,
+    url: &str,
+    point: tidebreak_core::BrowserPoint,
+    viewport_width: f64,
+    viewport_height: f64,
+    action: &str,
+) -> Result<String, String> {
+    if !point.x.is_finite()
+        || !point.y.is_finite()
+        || point.x < 0.0
+        || point.y < 0.0
+        || !viewport_width.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_width <= point.x
+        || viewport_height <= point.y
+    {
+        return Err("browser cursor position is outside its viewport".to_owned());
+    }
+    let payload = serde_json::json!({
+        "id": ghost_id, "documentEpoch": document_epoch,
+        "snapshotMarker": marker_for_snapshot(snapshot_id), "url": url,
+        "point": point, "viewportWidth": viewport_width, "viewportHeight": viewport_height,
+        "action": action, "visibleMillis": BROWSER_GHOST_VISIBLE_MILLIS,
+    });
+    Ok(BROWSER_GHOST_CURSOR_SCRIPT.replace("__PAYLOAD__", &payload.to_string()))
+}
+
+fn browser_ghost_clear_script(ghost_id: Option<&str>) -> String {
+    BROWSER_GHOST_CURSOR_SCRIPT.replace(
+        "__PAYLOAD__",
+        &serde_json::json!({
+            "clear": true, "id": ghost_id,
+        })
+        .to_string(),
+    )
+}
+
 // ── Native semantic act ───────────────────────────────────────────
 
 pub(crate) async fn browser_native_act(
@@ -1174,6 +1325,16 @@ pub(crate) async fn browser_native_act(
     if let Some(value) = arguments.action.value() {
         if value.chars().count() > MAX_ACTION_VALUE_CHARS {
             return Err("browser action value is too long".to_owned());
+        }
+    }
+
+    if let tidebreak_core::BrowserAction::KeyChord { key, modifiers } = &arguments.action {
+        if !native_key_chord_stays_in_page(key, modifiers) {
+            return Ok(act_result(
+                &arguments,
+                BrowserActStatus::UnsupportedNative,
+                "This shortcut can leave the page. Use a page editing or navigation shortcut.",
+            ));
         }
     }
 
@@ -1737,6 +1898,7 @@ async fn resolve_and_dispatch_native_action(
     let document_epoch = arguments.document_epoch;
     let target_ref = arguments.target_ref.clone();
     let action = arguments.action.clone();
+    let ghost_webview = webview.clone();
     with_browser_webview(webview, move |view| unsafe {
         let retained_view = view.retain();
         let content_world = match browser_semantics_content_world() {
@@ -1829,7 +1991,35 @@ async fn resolve_and_dispatch_native_action(
                         if tokio::time::Instant::now() >= deadline {
                             return Err(native_input_deadline_failure(phase, phase_deadline));
                         }
-                        dispatch_native_action(&retained_view, &resolution, &action, phase)
+                        dispatch_native_action(&retained_view, &resolution, &action, phase)?;
+                        if let Some(point) = native_action_ghost_point(&resolution, &action, phase)
+                        {
+                            let ghost_id = Uuid::new_v4().to_string();
+                            if let Ok(script) = browser_ghost_script(
+                                &ghost_id,
+                                document_epoch,
+                                &snapshot_id,
+                                &resolution.url,
+                                point,
+                                resolution.viewport_width.unwrap_or_default(),
+                                resolution.viewport_height.unwrap_or_default(),
+                                action.kind(),
+                            ) {
+                                // Decoration follows confirmed dispatch. A failed decoration
+                                // must never make a completed input look safe to replay.
+                                let _ = evaluate_browser_decoration(&retained_view, &script);
+                                schedule_browser_ghost_cleanup(
+                                    ghost_webview.clone(),
+                                    registry.clone(),
+                                    capability_id,
+                                    browser_id.clone(),
+                                    workspace_id.clone(),
+                                    fence,
+                                    ghost_id,
+                                );
+                            }
+                        }
+                        Ok(())
                     })
                     .err();
                 Ok(NativeActionDispatchOutcome::Resolved {
@@ -2652,12 +2842,10 @@ unsafe fn ensure_active_browser_window(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn native_window_point(
-    view: &objc2_app_kit::NSView,
+fn native_css_point(
     resolution: &NativeActionResolution,
     offset: Option<tidebreak_core::BrowserPoint>,
-) -> Result<objc2_foundation::NSPoint, String> {
+) -> Result<tidebreak_core::BrowserPoint, String> {
     let x = resolution
         .x
         .ok_or_else(|| "browser target has no horizontal position".to_owned())?;
@@ -2670,6 +2858,34 @@ fn native_window_point(
     let height = resolution
         .height
         .ok_or_else(|| "browser target has no height".to_owned())?;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err("browser target bounds are not valid".to_owned());
+    }
+    // Match the resolver's hit test and keep points inside adjacent edges.
+    let (x, y) = match offset {
+        Some(offset) if offset.is_well_formed() => (
+            x + offset.x.clamp(0.0, width - 0.5_f64.min(width / 2.0)),
+            y + offset.y.clamp(0.0, height - 0.5_f64.min(height / 2.0)),
+        ),
+        Some(_) => return Err("browser native input coordinates are not valid".to_owned()),
+        None => (x + width / 2.0, y + height / 2.0),
+    };
+    Ok(tidebreak_core::BrowserPoint { x, y })
+}
+
+#[cfg(target_os = "macos")]
+fn native_window_point(
+    view: &objc2_app_kit::NSView,
+    resolution: &NativeActionResolution,
+    offset: Option<tidebreak_core::BrowserPoint>,
+) -> Result<objc2_foundation::NSPoint, String> {
+    let point = native_css_point(resolution, offset)?;
     let viewport_width = resolution
         .viewport_width
         .filter(|value| *value > 0.0)
@@ -2678,17 +2894,7 @@ fn native_window_point(
         .viewport_height
         .filter(|value| *value > 0.0)
         .ok_or_else(|| "browser viewport has no height".to_owned())?;
-    // Element-relative points are clamped into the element's live bounds so a
-    // proposed coordinate can never reach outside the re-resolved target.
-    let (point_x, point_y) = match offset {
-        Some(offset) if offset.is_well_formed() => (
-            x + offset.x.clamp(0.0, width),
-            y + offset.y.clamp(0.0, height),
-        ),
-        Some(_) => return Err("browser native input coordinates are not valid".to_owned()),
-        None => (x + width / 2.0, y + height / 2.0),
-    };
-    native_window_point_for_css(view, point_x, point_y, viewport_width, viewport_height)
+    native_window_point_for_css(view, point.x, point.y, viewport_width, viewport_height)
 }
 
 #[cfg(target_os = "macos")]
@@ -3160,6 +3366,45 @@ fn native_modifier_flags(
     flags
 }
 
+/// Allow editing and selection shortcuts without invoking browser or OS UI.
+fn native_key_chord_stays_in_page(
+    key: &str,
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> bool {
+    use tidebreak_core::BrowserModifier;
+
+    if modifiers.is_empty() {
+        return false;
+    }
+    let meta = modifiers.contains(&BrowserModifier::Meta);
+    let control = modifiers.contains(&BrowserModifier::Control);
+    let alt = modifiers.contains(&BrowserModifier::Alt);
+    if meta {
+        return !control
+            && !alt
+            && matches!(
+                key,
+                "a" | "c"
+                    | "v"
+                    | "x"
+                    | "z"
+                    | "ArrowLeft"
+                    | "ArrowRight"
+                    | "ArrowUp"
+                    | "ArrowDown"
+                    | "Backspace"
+                    | "Delete"
+            );
+    }
+    if control || alt {
+        return !(control && alt)
+            && matches!(key, "ArrowLeft" | "ArrowRight" | "Backspace" | "Delete");
+    }
+    modifiers == [BrowserModifier::Shift]
+        && (tidebreak_core::valid_browser_press_key(key)
+            || tidebreak_core::valid_browser_chord_key(key))
+}
+
 #[cfg(target_os = "macos")]
 fn send_native_key_chord(
     window: &objc2_app_kit::NSWindow,
@@ -3169,6 +3414,9 @@ fn send_native_key_chord(
 ) -> Result<(), String> {
     use objc2_app_kit::{NSEvent, NSEventType};
 
+    if !native_key_chord_stays_in_page(key, modifiers) {
+        return Err("browser shortcut can leave the page".to_owned());
+    }
     let (key_code, character) = native_key(key)?;
     let flags = native_modifier_flags(modifiers);
     let characters = objc2_foundation::NSString::from_str(&character);
@@ -3426,12 +3674,12 @@ fn action_hit_points(action: &tidebreak_core::BrowserAction) -> Vec<serde_json::
         | BrowserAction::RightClick { at: Some(at) }
         | BrowserAction::DoubleClick { at: Some(at) } => vec![point(at)],
         BrowserAction::Drag { from, to } => {
-            let mut points = Vec::new();
-            if let Some(from) = from {
-                points.push(point(from));
-            }
-            points.push(point(to));
-            points
+            // Null asks the resolver to validate the live center before
+            // native input uses it as the default drag start.
+            vec![
+                from.as_ref().map_or(serde_json::Value::Null, point),
+                point(to),
+            ]
         }
         _ => Vec::new(),
     }
@@ -3952,6 +4200,74 @@ const SENSITIVE_FIELD_POLICY: &str = r##"
   };
 "##;
 
+const BROWSER_GHOST_CURSOR_SCRIPT: &str = r#"
+(() => {
+  const payload = __PAYLOAD__;
+  const key = Symbol.for("io.brightwave.tidebreak.browser.ghost-cursor");
+  const prior = globalThis[key];
+  if (payload.clear) {
+    if (prior && (!payload.id || prior.id === payload.id)) prior.clear();
+    return JSON.stringify("cleared");
+  }
+  if (globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] !== payload.snapshotMarker
+    || payload.url !== String(location.href)
+    || payload.viewportWidth !== window.innerWidth
+    || payload.viewportHeight !== window.innerHeight) return JSON.stringify("stale");
+  prior?.clear();
+  if (!document.documentElement) return JSON.stringify("unavailable");
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  host.setAttribute("data-tidebreak-ghost-cursor", "");
+  host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483647!important;contain:strict!important;user-select:none!important;";
+  const shadow = host.attachShadow({ mode: "closed" });
+  const svgNamespace = "http://www.w3.org/2000/svg";
+  const cursor = document.createElementNS(svgNamespace, "svg");
+  cursor.setAttribute("viewBox", "0 0 24 24");
+  cursor.setAttribute("width", "24");
+  cursor.setAttribute("height", "24");
+  cursor.style.cssText = "position:absolute;overflow:visible;pointer-events:none;";
+  cursor.style.left = `${payload.point.x - 4}px`;
+  cursor.style.top = `${payload.point.y - 3}px`;
+  const ring = document.createElementNS(svgNamespace, "circle");
+  ring.setAttribute("cx", "4");
+  ring.setAttribute("cy", "3");
+  ring.setAttribute("r", "8");
+  ring.setAttribute("fill", "none");
+  ring.setAttribute("stroke", "oklch(0.6 0.125 195)");
+  ring.setAttribute("stroke-width", "1.5");
+  ring.setAttribute("opacity", "0.55");
+  cursor.appendChild(ring);
+  const outline = document.createElementNS(svgNamespace, "path");
+  // Lucide mouse-pointer-2 geometry with an outer edge that stays legible on any page.
+  outline.setAttribute("d", "m4 3 7.07 17 2.51-7.39L21 10.07z");
+  outline.setAttribute("fill", "oklch(0.6 0.125 195)");
+  outline.setAttribute("stroke", "oklch(0.985 0.002 240)");
+  outline.setAttribute("stroke-width", "2");
+  outline.setAttribute("stroke-linejoin", "round");
+  cursor.appendChild(outline);
+  shadow.appendChild(cursor);
+  document.documentElement.appendChild(host);
+  const state = { id: payload.id, host, timer: null, frame: null, clear: null };
+  state.clear = () => {
+    clearTimeout(state.timer);
+    if (state.frame !== null) cancelAnimationFrame(state.frame);
+    host.remove();
+    if (globalThis[key] === state) delete globalThis[key];
+  };
+  globalThis[key] = state;
+  const checkDocument = () => {
+    if (globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] !== payload.snapshotMarker
+      || String(location.href) !== payload.url
+      || window.innerWidth !== payload.viewportWidth
+      || window.innerHeight !== payload.viewportHeight) { state.clear(); return; }
+    state.frame = requestAnimationFrame(checkDocument);
+  };
+  state.frame = requestAnimationFrame(checkDocument);
+  state.timer = setTimeout(state.clear, payload.visibleMillis);
+  return JSON.stringify("shown");
+})()
+"#;
+
 const TARGET_IDENTITY_STORE_SCRIPT: &str = r#"
   const tidebreakTargetIdentityStore = (() => {
     const key = Symbol.for("io.brightwave.tidebreak.browser.target-identities");
@@ -4044,6 +4360,8 @@ const SNAPSHOT_SCRIPT: &str = r#"
 (() => {
   const MAX_NODES = __MAX_NODES__;
   const MARKER = "__MARKER__";
+  globalThis[Symbol.for("io.brightwave.tidebreak.browser.ghost-cursor")]?.clear();
+  globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] = MARKER;
   const TEXT_LIMIT = 240;
   const nodes = [];
   const frames = [];
@@ -4052,7 +4370,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
   __TARGET_IDENTITY_STORE__
 
   const INTERACTIVE_SELECTOR = [
-    "a[href]", "button", "input:not([type='hidden'])", "textarea", "select",
+    "a[href]", "button", "canvas", "input:not([type='hidden'])", "textarea", "select",
     "[contenteditable]:not([contenteditable='false'])", "[role='textbox']",
     "[role='button']", "[role='link']",
     "[role='checkbox']", "[role='radio']", "[role='tab']",
@@ -4140,7 +4458,8 @@ const SNAPSHOT_SCRIPT: &str = r#"
     const nativePopupSelect = element.localName === "select" && !element.multiple && element.size <= 1;
     if (sensitive || nativePopupSelect) return ["human_takeover"];
     const actions = ["focus", "hover", "scroll_into_view"];
-    if (["button", "link", "checkbox", "radio", "tab"].includes(role)) actions.unshift("click");
+    if (["button", "link", "checkbox", "radio", "tab", "canvas"].includes(role)) actions.unshift("click");
+    actions.push("right_click", "double_click", "drag", "scroll", "key_chord");
     if (role === "textbox") actions.unshift("fill");
     if (role === "combobox") actions.unshift("select");
     if (role === "checkbox" || role === "radio") actions.unshift("check");
@@ -4943,10 +5262,10 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
   }
 
   const requestedPoints = Array.isArray(payload.points) && payload.points.length
-    ? payload.points.map((point) => ({
-      x: rect.left + Math.min(Math.max(Number(point.x) || 0, 0), rect.width),
-      y: rect.top + Math.min(Math.max(Number(point.y) || 0, 0), rect.height),
-    }))
+    ? payload.points.map((point) => point ? ({
+      x: rect.left + Math.min(Math.max(Number(point.x) || 0, 0), rect.width - Math.min(0.5, rect.width / 2)),
+      y: rect.top + Math.min(Math.max(Number(point.y) || 0, 0), rect.height - Math.min(0.5, rect.height / 2)),
+    }) : ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }))
     : [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }];
   for (const requested of requestedPoints) {
     const localX = requested.x;
@@ -5144,10 +5463,7 @@ pub(crate) async fn browser_inject_inspect_overlay(
         .as_ref()
         .is_some_and(|engine| engine.capabilities.screenshot)
     {
-        return Err(
-            "browser inspect requires human takeover because this engine cannot prove closed-shadow privacy"
-                .to_owned(),
-        );
+        return Err("browser inspect is not available on this platform yet".to_owned());
     }
     let label = crate::code_browser::browser_label(browser_id)?;
     let webview = app
@@ -5200,6 +5516,134 @@ mod tests {
             scroll_delta_y: None,
             target_focused: false,
             target_dom_focused: false,
+        }
+    }
+
+    #[test]
+    fn ghost_uses_the_executed_pointer_position_and_omits_keyboard_phases() {
+        use tidebreak_core::{BrowserAction, BrowserPoint};
+        let resolution = native_resolution();
+        let point = BrowserPoint { x: 100.0, y: 30.0 };
+        let expected = Some(BrowserPoint { x: 109.5, y: 49.5 });
+        assert_eq!(
+            native_action_ghost_point(
+                &resolution,
+                &BrowserAction::Click { at: Some(point) },
+                NativeActionDispatchPhase::Initial
+            ),
+            expected
+        );
+        assert_eq!(
+            native_action_ghost_point(
+                &resolution,
+                &BrowserAction::Drag {
+                    from: None,
+                    to: point
+                },
+                NativeActionDispatchPhase::Initial
+            ),
+            expected
+        );
+        assert!(native_action_ghost_point(
+            &resolution,
+            &BrowserAction::Press {
+                key: "Enter".to_owned()
+            },
+            NativeActionDispatchPhase::PressKey
+        )
+        .is_none());
+        assert!(native_action_ghost_point(
+            &resolution,
+            &BrowserAction::Fill {
+                value: "text".to_owned()
+            },
+            NativeActionDispatchPhase::FillInsert
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn ghost_rejects_nonfinite_or_offscreen_coordinates() {
+        for point in [
+            tidebreak_core::BrowserPoint {
+                x: f64::NAN,
+                y: 1.0,
+            },
+            tidebreak_core::BrowserPoint { x: 800.0, y: 1.0 },
+            tidebreak_core::BrowserPoint { x: 1.0, y: -1.0 },
+        ] {
+            assert!(browser_ghost_script(
+                "action",
+                0,
+                "snapshot",
+                "https://example.com/",
+                point,
+                800.0,
+                600.0,
+                "click"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn drag_hit_tests_both_the_default_start_and_requested_end() {
+        let end = tidebreak_core::BrowserPoint { x: 80.0, y: 20.0 };
+        assert_eq!(
+            action_hit_points(&tidebreak_core::BrowserAction::Drag {
+                from: None,
+                to: end
+            }),
+            vec![
+                serde_json::Value::Null,
+                serde_json::json!({"x": 80.0, "y": 20.0})
+            ]
+        );
+        let start = tidebreak_core::BrowserPoint { x: 5.0, y: 8.0 };
+        assert_eq!(
+            action_hit_points(&tidebreak_core::BrowserAction::Drag {
+                from: Some(start),
+                to: end
+            }),
+            vec![
+                serde_json::json!({"x": 5.0, "y": 8.0}),
+                serde_json::json!({"x": 80.0, "y": 20.0})
+            ]
+        );
+    }
+
+    #[test]
+    fn key_chords_cannot_open_browser_or_system_controls() {
+        use tidebreak_core::BrowserModifier::{Alt, Control, Meta, Shift};
+        for (key, modifiers) in [
+            ("q", vec![Meta]),
+            ("w", vec![Meta]),
+            ("l", vec![Meta]),
+            ("p", vec![Meta]),
+            (" ", vec![Meta]),
+            ("Tab", vec![Meta]),
+            ("Tab", vec![Control]),
+            ("Escape", vec![Meta, Alt]),
+            ("ArrowLeft", vec![Control, Alt]),
+        ] {
+            assert!(
+                !native_key_chord_stays_in_page(key, &modifiers),
+                "{key}: {modifiers:?}"
+            );
+        }
+        for (key, modifiers) in [
+            ("a", vec![Meta]),
+            ("c", vec![Meta]),
+            ("v", vec![Meta]),
+            ("z", vec![Meta, Shift]),
+            ("ArrowLeft", vec![Alt, Shift]),
+            ("Tab", vec![Shift]),
+            ("ArrowDown", vec![Shift]),
+        ] {
+            assert!(
+                native_key_chord_stays_in_page(key, &modifiers),
+                "{key}: {modifiers:?}"
+            );
         }
     }
 
@@ -5313,9 +5757,11 @@ mod tests {
             sensitive: false,
             consequential: false,
         };
-        let action =
-            native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Hover)
-                .unwrap();
+        let action = native_action_resolution_script(
+            &target,
+            &tidebreak_core::BrowserAction::Hover { at: None },
+        )
+        .unwrap();
         assert!(action.contains("tidebreakTargetIdentityStore.get(element)"));
         assert!(!action.contains("element[payload.marker]"));
     }
@@ -5338,9 +5784,11 @@ mod tests {
             sensitive: false,
             consequential: false,
         };
-        let script =
-            native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Hover)
-                .unwrap();
+        let script = native_action_resolution_script(
+            &target,
+            &tidebreak_core::BrowserAction::Hover { at: None },
+        )
+        .unwrap();
         assert!(script.contains(r#""action":{"type":"hover"}"#));
     }
 
@@ -5351,7 +5799,7 @@ mod tests {
         let select = tidebreak_core::BrowserAction::Select {
             value: "publish".to_owned(),
         };
-        let click = tidebreak_core::BrowserAction::Click;
+        let click = tidebreak_core::BrowserAction::Click { at: None };
 
         assert!(native_action_requires_confirmation(
             &external, false, &select

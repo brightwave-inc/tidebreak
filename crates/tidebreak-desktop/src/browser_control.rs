@@ -1067,14 +1067,13 @@ impl BrowserRegistry {
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
     }
 
-    /// Extend every grant that already covers this browser's share target
-    /// with additional capabilities the user just approved through a fresh
-    /// native disclosure. Never creates a grant: a target with no covering
-    /// consent still needs the full sharing dialog.
+    /// Add disclosed capabilities for the exact origin shown in the native
+    /// consent dialog. Existing broad grants do not widen this disclosure.
     pub(crate) fn extend_browser_access(
         &self,
         browser_id: &str,
         workspace_id: &str,
+        target_origin: &BrowserOrigin,
         capabilities: &[BrowserGrantCapability],
     ) -> Result<BrowserSnapshot, String> {
         let mut state = self.lock();
@@ -1083,22 +1082,32 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, workspace_id, record)?;
-        let target = share_target_for_record(record)
-            .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())?;
-        let owner_id = record.owner_id.clone();
-        let mut next = state.grants.clone();
-        let mut extended = false;
-        for grant in next.iter_mut() {
-            if grant.owner_id == owner_id
-                && grant.workspace_id == workspace_id
-                && grant.scope.covers(&target)
-            {
-                grant.capabilities.extend(capabilities.iter().copied());
-                extended = true;
-            }
+        if share_target_for_record(record).as_ref() != Some(target_origin) {
+            return Err("browser origin changed while permission was being requested".to_owned());
         }
-        if !extended {
+        let owner_id = record.owner_id.clone();
+        if !state.grants.iter().any(|grant| {
+            grant.owner_id == owner_id
+                && grant.workspace_id == workspace_id
+                && grant.scope.covers(target_origin)
+        }) {
             return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let scope = BrowserOriginScope::Origin {
+            origin: target_origin.clone(),
+        };
+        let mut next = state.grants.clone();
+        if let Some(grant) = next.iter_mut().find(|grant| {
+            grant.owner_id == owner_id && grant.workspace_id == workspace_id && grant.scope == scope
+        }) {
+            grant.capabilities.extend(capabilities.iter().copied());
+        } else {
+            next.push(BrowserGrant {
+                owner_id,
+                workspace_id: workspace_id.to_owned(),
+                scope,
+                capabilities: capabilities.iter().copied().collect(),
+            });
         }
         persist_browser_grants(&state, &next)?;
         state.grants = next;
@@ -1167,6 +1176,9 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
         if record.opened_by_capability != Some(capability_id) {
             return Err("browser tab was not opened by this agent".to_owned());
         }
@@ -1189,6 +1201,9 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
         if !grants_cover(

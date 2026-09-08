@@ -1072,7 +1072,10 @@ fn platform_claims_only_implemented_agent_capabilities() {
         descriptor.capabilities.semantic_actions,
         cfg!(target_os = "macos")
     );
-    assert!(!descriptor.capabilities.screenshot);
+    assert_eq!(
+        descriptor.capabilities.screenshot,
+        cfg!(target_os = "macos")
+    );
     assert_eq!(
         descriptor.capabilities.profile_reset,
         cfg!(target_os = "macos")
@@ -2271,6 +2274,15 @@ fn complete_screenshot_recording_rejects_wrong_instance() {
 #[test]
 fn complete_screenshot_recording_rejects_forged_snapshot_id() {
     let (registry, instance, _origin, capability, _private) = controlled_registry();
+    let origin = BrowserOrigin::from_url("https://example.com").unwrap();
+    registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[BrowserGrantCapability::BrowserCaptureVisibleTab],
+        )
+        .unwrap();
     registry
         .record_semantic_snapshot(
             "browser-1",
@@ -2293,6 +2305,15 @@ fn complete_screenshot_recording_rejects_forged_snapshot_id() {
 #[test]
 fn complete_screenshot_recording_rejects_missing_snapshot() {
     let (registry, instance, _origin, capability, _private) = controlled_registry();
+    let origin = BrowserOrigin::from_url("https://example.com").unwrap();
+    registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[BrowserGrantCapability::BrowserCaptureVisibleTab],
+        )
+        .unwrap();
     // No record_semantic_snapshot call — there is no stored snapshot.
 
     let error = registry
@@ -2844,4 +2865,154 @@ fn observation_only_consent_cannot_navigate_or_queue_replay() {
         .take_pending_navigation("browser-1", "workspace-1")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn screenshot_completion_requires_disclosed_capture_consent() {
+    let (registry, instance, origin, capability, _private) = controlled_registry();
+    registry
+        .record_semantic_snapshot(
+            "browser-1",
+            "workspace-1",
+            0,
+            "snapshot-1".to_owned(),
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(registry
+        .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-1")
+        .unwrap_err()
+        .contains("not shared for screenshots"));
+    registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[BrowserGrantCapability::BrowserCaptureVisibleTab],
+        )
+        .unwrap();
+    registry
+        .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-1")
+        .unwrap();
+    registry.lock().grants.iter_mut().for_each(|grant| {
+        grant
+            .capabilities
+            .remove(&BrowserGrantCapability::BrowserCaptureVisibleTab);
+    });
+    assert!(registry
+        .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-1")
+        .unwrap_err()
+        .contains("not shared for screenshots"));
+}
+
+#[test]
+fn capture_disclosure_does_not_expand_existing_loopback_consent() {
+    let registry = BrowserRegistry::default();
+    let origin = BrowserOrigin::from_url("http://localhost:5173").unwrap();
+    let other_origin = BrowserOrigin::from_url("http://localhost:9999").unwrap();
+    registry
+        .register("browser-1", "workspace-1", origin.as_str().to_owned(), true)
+        .unwrap();
+    registry
+        .grant_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::LoopbackWorkspace,
+            &[BrowserGrantCapability::BrowserControlOrigin],
+        )
+        .unwrap();
+    registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[
+                BrowserGrantCapability::BrowserCaptureVisibleTab,
+                BrowserGrantCapability::BrowserDiagnoseOrigin,
+            ],
+        )
+        .unwrap();
+    let state = registry.lock();
+    for capability in [
+        BrowserGrantCapability::BrowserCaptureVisibleTab,
+        BrowserGrantCapability::BrowserDiagnoseOrigin,
+    ] {
+        assert!(grants_cover(
+            &state,
+            &OwnerId::local(),
+            "workspace-1",
+            &origin,
+            capability
+        ));
+        assert!(!grants_cover(
+            &state,
+            &OwnerId::local(),
+            "workspace-1",
+            &other_origin,
+            capability
+        ));
+    }
+    assert!(grants_cover(
+        &state,
+        &OwnerId::local(),
+        "workspace-1",
+        &other_origin,
+        BrowserGrantCapability::BrowserControlOrigin
+    ));
+}
+
+#[test]
+fn capture_disclosure_rejects_changed_origin_without_altering_consent() {
+    let (registry, _, origin, _, _private) = controlled_registry();
+    let before = registry.lock().grants.clone();
+    registry.lock().records.get_mut("browser-1").unwrap().url =
+        Some("https://other.example/".to_owned());
+    let error = registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[BrowserGrantCapability::BrowserCaptureVisibleTab],
+        )
+        .unwrap_err();
+    assert!(error.contains("origin changed"));
+    assert_eq!(registry.lock().grants, before);
+}
+
+#[tokio::test]
+async fn stopped_agent_cannot_activate_or_close_its_tab() {
+    let (registry, _, _, capability, _private) = controlled_registry();
+    registry.mark_agent_opened(capability, "browser-1").unwrap();
+    assert!(registry
+        .authorize_agent_close(capability, "browser-1")
+        .is_ok());
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    assert!(registry
+        .authorize_agent_close(capability, "browser-1")
+        .unwrap_err()
+        .contains("stopped"));
+    assert!(registry
+        .authorize_agent_activation(capability, "browser-1")
+        .unwrap_err()
+        .contains("stopped"));
+}
+
+#[tokio::test]
+async fn human_takeover_ends_the_opening_agents_close_authority() {
+    let (registry, _, _, capability, _private) = controlled_registry();
+    registry.mark_agent_opened(capability, "browser-1").unwrap();
+    let other = registry.issue_agent_capability("workspace-1", "Other agent");
+    assert!(registry.authorize_agent_close(other, "browser-1").is_err());
+    registry
+        .take_human_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    assert!(registry
+        .authorize_agent_close(capability, "browser-1")
+        .unwrap_err()
+        .contains("not opened"));
 }
