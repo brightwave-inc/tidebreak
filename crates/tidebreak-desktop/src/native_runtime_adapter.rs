@@ -657,7 +657,7 @@ mod tests {
         ComputerUseCall {
             request_id: Uuid::new_v4(),
             name: name.to_owned(),
-            arguments: arguments,
+            arguments,
         }
     }
 

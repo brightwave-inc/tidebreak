@@ -1620,6 +1620,7 @@ async fn execute_background_action(
             &workspace_id,
             &arguments.snapshot_id,
         );
+        #[cfg(target_os = "macos")]
         if let Some(point) = background_action_ghost_point(&raw, &arguments.action) {
             let ghost_id = Uuid::new_v4().to_string();
             if let Ok(script) = browser_ghost_script(

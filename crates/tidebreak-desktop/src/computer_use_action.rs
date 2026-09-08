@@ -114,79 +114,6 @@ pub(crate) fn emit_computer_use_action(app: &AppHandle, event: &ComputerUseActio
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dropped_requests_cancel_and_completed_requests_emit_only_once() {
-        use std::sync::{Arc, Mutex};
-        let call = tidebreak_core::computer_session::ComputerUseCall {
-            request_id: uuid::Uuid::new_v4(),
-            name: "computer_click".into(),
-            arguments: serde_json::json!({"app_id": "test.fixture"}),
-        };
-        let event = activity_for_call(
-            tidebreak_core::SessionId::new(),
-            &call,
-            ComputerUseActionSource::Native,
-        )
-        .unwrap();
-        let phases = Arc::new(Mutex::new(Vec::new()));
-        let capture = phases.clone();
-        let activity = CallActivity::with_emitter(event.clone(), move |event| {
-            capture
-                .lock()
-                .unwrap()
-                .push(serde_json::to_value(event.phase).unwrap());
-        });
-        drop(activity);
-        assert_eq!(*phases.lock().unwrap(), vec!["running", "cancelled"]);
-        phases.lock().unwrap().clear();
-        let capture = phases.clone();
-        CallActivity::with_emitter(event, move |event| {
-            capture
-                .lock()
-                .unwrap()
-                .push(serde_json::to_value(event.phase).unwrap());
-        })
-        .finish(true, None);
-        assert_eq!(*phases.lock().unwrap(), vec!["running", "completed"]);
-    }
-
-    #[test]
-    fn activity_wire_names_match_the_shared_ui_contract() {
-        let event = ComputerUseActionEvent {
-            action_id: "action-1".into(),
-            session_id: "session-1".into(),
-            source: ComputerUseActionSource::Native,
-            action: ComputerUseActionKind::Type,
-            phase: ComputerUseActionPhase::ForegroundRequired,
-            execution_mode: ComputerUseExecutionMode::Foreground,
-            coordinate_frame: ComputerUseCoordinateFrame::Screen,
-            started_at_millis: 1_000,
-            visible_until_millis: 3_000,
-            point: None,
-            viewport: None,
-            target_bounds: None,
-            browser_id: None,
-            workspace_id: None,
-            instance_id: None,
-            document_epoch: None,
-            bundle_id: Some("test.fixture".into()),
-            window_id: Some(42),
-            capture_id: None,
-        };
-        let value = serde_json::to_value(event).unwrap();
-        assert_eq!(value["phase"], "foreground_required");
-        assert_eq!(value["coordinateFrame"], "screen");
-        assert_eq!(value["executionMode"], "foreground");
-        assert_eq!(value["windowId"], 42);
-        assert!(value.get("point").is_none());
-        assert!(value.get("captureId").is_none());
-    }
-}
-
 /// Build coordinate-free activity until the executor has a verified position.
 /// Callers retain this value so completion keeps the same start timestamp.
 pub(crate) fn activity_for_call(
@@ -324,4 +251,77 @@ fn action_time_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_requests_cancel_and_completed_requests_emit_only_once() {
+        use std::sync::{Arc, Mutex};
+        let call = tidebreak_core::computer_session::ComputerUseCall {
+            request_id: uuid::Uuid::new_v4(),
+            name: "computer_click".into(),
+            arguments: serde_json::json!({"app_id": "test.fixture"}),
+        };
+        let event = activity_for_call(
+            tidebreak_core::SessionId::new(),
+            &call,
+            ComputerUseActionSource::Native,
+        )
+        .unwrap();
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let capture = phases.clone();
+        let activity = CallActivity::with_emitter(event.clone(), move |event| {
+            capture
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(event.phase).unwrap());
+        });
+        drop(activity);
+        assert_eq!(*phases.lock().unwrap(), vec!["running", "cancelled"]);
+        phases.lock().unwrap().clear();
+        let capture = phases.clone();
+        CallActivity::with_emitter(event, move |event| {
+            capture
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(event.phase).unwrap());
+        })
+        .finish(true, None);
+        assert_eq!(*phases.lock().unwrap(), vec!["running", "completed"]);
+    }
+
+    #[test]
+    fn activity_wire_names_match_the_shared_ui_contract() {
+        let event = ComputerUseActionEvent {
+            action_id: "action-1".into(),
+            session_id: "session-1".into(),
+            source: ComputerUseActionSource::Native,
+            action: ComputerUseActionKind::Type,
+            phase: ComputerUseActionPhase::ForegroundRequired,
+            execution_mode: ComputerUseExecutionMode::Foreground,
+            coordinate_frame: ComputerUseCoordinateFrame::Screen,
+            started_at_millis: 1_000,
+            visible_until_millis: 3_000,
+            point: None,
+            viewport: None,
+            target_bounds: None,
+            browser_id: None,
+            workspace_id: None,
+            instance_id: None,
+            document_epoch: None,
+            bundle_id: Some("test.fixture".into()),
+            window_id: Some(42),
+            capture_id: None,
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["phase"], "foreground_required");
+        assert_eq!(value["coordinateFrame"], "screen");
+        assert_eq!(value["executionMode"], "foreground");
+        assert_eq!(value["windowId"], 42);
+        assert!(value.get("point").is_none());
+        assert!(value.get("captureId").is_none());
+    }
 }

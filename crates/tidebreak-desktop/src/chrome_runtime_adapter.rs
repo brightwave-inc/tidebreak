@@ -35,6 +35,7 @@ const ENDPOINT_POLL: Duration = Duration::from_millis(150);
 const MAX_ENDPOINT_FILE_BYTES: u64 = 4096;
 const MAX_CACHED_CALLS: usize = 128;
 const MAX_ACTION_REQUESTS: usize = 4096;
+#[cfg(any(target_os = "macos", test))]
 const EXISTING_SETUP_URL: &str = "chrome://inspect/#remote-debugging";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
