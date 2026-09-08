@@ -24,6 +24,8 @@
 //! history.
 
 mod baseline;
+mod channel_repository_confirm;
+mod grant_kind;
 mod idens;
 mod one_approval_surface;
 mod one_journal;
@@ -93,6 +95,8 @@ impl MigratorTrait for Migrator {
             Box::new(turn_actor::TurnActor),
             Box::new(session_owner_kind::SessionOwnerKind),
             Box::new(session_acts_as::SessionActsAs),
+            Box::new(grant_kind::GrantKind),
+            Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
         ]
     }
 }

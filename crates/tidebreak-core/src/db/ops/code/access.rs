@@ -6,7 +6,10 @@
 //! module is the only place that decides which.
 
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set, TryIntoModel};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    TryIntoModel,
+};
 
 use crate::code::{Session, SessionAccessLevel, SessionId, SessionVisibility};
 use crate::error::{AgentError, Result};
@@ -301,6 +304,60 @@ pub async fn grant_session_access(
     Ok(Some(access_from_row(
         model.try_into_model().map_err(store_err)?,
     )?))
+}
+
+/// Replace every `external:<channel_kind>:` contribute row on the session
+/// with the identities the adapter sent. Other subjects are left alone.
+pub async fn replace_external_session_contributors(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: SessionId,
+    channel_kind: &str,
+    identities: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<Vec<SessionAccess>>> {
+    if !owns_session(store, owner, id).await? {
+        return Ok(None);
+    }
+    let prefix = format!("external:{channel_kind}:");
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let existing = entities::session_access::Entity::find()
+        .filter(entities::session_access::Column::SessionId.eq(id.0))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    for row in existing {
+        if row.subject.starts_with(&prefix) {
+            entities::session_access::Entity::delete_by_id((id.0, row.subject))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+        }
+    }
+    let mut kept = Vec::new();
+    for identity in identities {
+        let subject = external_subject(channel_kind, identity);
+        if !valid_access_subject(&subject) {
+            return Err(AgentError::InvalidRequest(format!(
+                "a session access subject is `principal:<key>` or \
+                 `external:<channel kind>:<id>`, at most {MAX_SUBJECT_CHARS} characters"
+            )));
+        }
+        let model = entities::session_access::ActiveModel {
+            session_id: Set(id.0),
+            subject: Set(subject),
+            level: Set(SessionAccessLevel::Contribute.as_str().to_owned()),
+            granted_by: Set(owner.as_str().to_owned()),
+            created_at: Set(now),
+        };
+        entities::session_access::Entity::insert(model.clone())
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        kept.push(access_from_row(model.try_into_model().map_err(store_err)?)?);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(kept))
 }
 
 /// Drop one subject's access. `false` when the session is not this owner's,

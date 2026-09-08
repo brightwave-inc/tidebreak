@@ -821,3 +821,52 @@ async fn remote_workspace_status_keeps_the_original_grant_after_restart_and_revo
     );
     assert_eq!(state.mints.load(Ordering::SeqCst), 1);
 }
+
+fn service_lease() -> crate::auth::GatewayAuthLease {
+    crate::auth::GatewayAuthLease::for_test(
+        crate::principal::Principal::User {
+            id: crate::principal::UserId::new(USER).unwrap(),
+            kind: crate::principal::PrincipalKind::Service,
+            role: crate::principal::Role::Member,
+        },
+        "browser-owner".into(),
+    )
+}
+
+#[tokio::test]
+async fn an_admin_approved_workspace_handshake_is_live_after_complete() {
+    let (_dir, db, runtime, _browser, base, state, owner) = setup().await;
+    let (handshake, nonce, confirm) = runtime
+        .start_workspace_handshake(&owner, "slack", "T1", "Acme Corp", Some(&service_lease()))
+        .await
+        .unwrap();
+    assert_eq!(state.approvals.load(Ordering::SeqCst), 1);
+    let (_, csrf) = runtime
+        .view_workspace_handshake(handshake.id)
+        .await
+        .unwrap()
+        .unwrap();
+    runtime
+        .approve_workspace_handshake(handshake.id, &csrf, &owner)
+        .await
+        .unwrap()
+        .unwrap();
+    let grant = runtime
+        .complete_connect_handshake(&nonce, &confirm)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert!(grant.kind.is_workspace());
+    let restarted = ExternalDelegations::new(obo(&base), db);
+    assert_eq!(
+        restarted
+            .for_grant(&owner, grant.id)
+            .await
+            .unwrap()
+            .bearer_for(&owner)
+            .await
+            .unwrap(),
+        "llm-delegated-1"
+    );
+}

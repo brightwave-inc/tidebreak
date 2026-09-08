@@ -187,7 +187,8 @@ pub use client_tools::{
 pub use code::{
     bound_subagents, classify_trigger_condition, ActsAs, Approval, ApprovalDecisionKind,
     ApprovalKind, ApprovalState, BoundedError, CapLevel, CheckpointHint, CodeBindingId,
-    CodeConnectHandshake, CodeConnectState, CodeExternalBinding, CodeExternalGrant, CodeGrantId,
+    CodeChannelRepositoryConfirm, CodeChannelRepositoryState, CodeConnectHandshake,
+    CodeConnectState, CodeExternalBinding, CodeExternalGrant, CodeGrantId, CodeGrantKind,
     CodeGrantProfile, CodeHandshakeId, CodeIncarnationId, CodePullRequestAttribution,
     CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState,
     CodePullRequestRelation, CodePullRequestState, CodeRepo, CodeSessionIncarnation,

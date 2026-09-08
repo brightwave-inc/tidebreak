@@ -14,8 +14,8 @@ use sea_orm::{
 };
 
 use crate::code::{
-    CodeConnectHandshake, CodeConnectState, CodeExternalGrant, CodeGrantId, CodeGrantProfile,
-    CodeHandshakeId,
+    CodeConnectHandshake, CodeConnectState, CodeExternalGrant, CodeGrantId, CodeGrantKind,
+    CodeGrantProfile, CodeHandshakeId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -29,6 +29,8 @@ fn handshake_from_model(
 ) -> Result<CodeConnectHandshake> {
     Ok(CodeConnectHandshake {
         id: CodeHandshakeId(model.id),
+        kind: CodeGrantKind::from_str(&model.kind)
+            .ok_or_else(|| AgentError::Store("invalid stored connect handshake kind".into()))?,
         channel_kind: model.channel_kind,
         external_identity: model.external_identity,
         workspace_identity: model.workspace_identity,
@@ -42,6 +44,7 @@ fn handshake_from_model(
             .as_deref()
             .map(OwnerId::new)
             .transpose()?,
+        approved_by: model.approved_by.as_deref().map(OwnerId::new).transpose()?,
         grant_id: model.grant_id.map(CodeGrantId),
         created_at: model.created_at,
         expires_at: model.expires_at,
@@ -63,6 +66,8 @@ pub async fn insert_connect_handshake(
     workspace_name: &str,
     avatar_url: Option<&str>,
     ttl: chrono::Duration,
+    kind: CodeGrantKind,
+    approval_owner: Option<&OwnerId>,
 ) -> Result<CodeConnectHandshake> {
     if channel_kind.trim().is_empty()
         || external_identity.trim().is_empty()
@@ -88,6 +93,7 @@ pub async fn insert_connect_handshake(
     let now = database_now(&transaction).await?;
     let handshake = CodeConnectHandshake {
         id: CodeHandshakeId::new(),
+        kind,
         channel_kind: channel_kind.to_owned(),
         external_identity: external_identity.to_owned(),
         workspace_identity: workspace_identity.to_owned(),
@@ -95,7 +101,8 @@ pub async fn insert_connect_handshake(
         workspace_name: workspace_name.to_owned(),
         avatar_url: avatar_url.map(str::to_owned),
         state: CodeConnectState::Pending,
-        approval_owner: None,
+        approval_owner: approval_owner.cloned(),
+        approved_by: None,
         grant_id: None,
         created_at: now,
         expires_at: now + ttl,
@@ -112,7 +119,9 @@ pub async fn insert_connect_handshake(
         workspace_name: Set(handshake.workspace_name.clone()),
         avatar_url: Set(handshake.avatar_url.clone()),
         state: Set(CodeConnectState::Pending.as_str().to_owned()),
-        approval_owner: Set(None),
+        approval_owner: Set(approval_owner.map(|owner| owner.as_str().to_owned())),
+        approved_by: Set(None),
+        kind: Set(kind.as_str().to_owned()),
         grant_id: Set(None),
         created_at: Set(now),
         expires_at: Set(handshake.expires_at),
@@ -365,9 +374,12 @@ pub async fn complete_connect_handshake_and_mint_grant_all_owners(
             .map_err(store_err)?;
     }
 
+    let kind = CodeGrantKind::from_str(&model.kind)
+        .ok_or_else(|| AgentError::Store("invalid stored connect handshake kind".into()))?;
     let grant = CodeExternalGrant {
         id: CodeGrantId::new(),
         owner: owner.clone(),
+        kind,
         channel_kind: model.channel_kind,
         external_identity: model.external_identity,
         workspace_identity: model.workspace_identity,
@@ -379,6 +391,7 @@ pub async fn complete_connect_handshake_and_mint_grant_all_owners(
     entities::code_external_grant::ActiveModel {
         id: Set(grant.id.0),
         owner: Set(owner.as_str().to_owned()),
+        kind: Set(kind.as_str().to_owned()),
         channel_kind: Set(grant.channel_kind.clone()),
         external_identity: Set(grant.external_identity.clone()),
         workspace_identity: Set(grant.workspace_identity.clone()),
@@ -444,6 +457,36 @@ pub async fn list_connect_grant_profiles(
         .collect())
 }
 
+/// Profiles for completed workspace grants, for the admin grants list.
+pub async fn list_workspace_grant_profiles_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodeGrantProfile>> {
+    let rows = entities::code_connect_handshake::Entity::find()
+        .filter(
+            entities::code_connect_handshake::Column::Kind.eq(CodeGrantKind::Workspace.as_str()),
+        )
+        .filter(
+            entities::code_connect_handshake::Column::State
+                .eq(CodeConnectState::Completed.as_str()),
+        )
+        .filter(entities::code_connect_handshake::Column::GrantId.is_not_null())
+        .order_by_desc(entities::code_connect_handshake::Column::CompletedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            row.grant_id.map(|grant_id| CodeGrantProfile {
+                grant_id: CodeGrantId(grant_id),
+                display_name: row.display_name,
+                workspace_name: row.workspace_name,
+                avatar_url: row.avatar_url,
+            })
+        })
+        .collect())
+}
+
 /// The completed consent that owns one grant's gateway delegation.
 pub async fn completed_connect_handshake_for_grant(
     store: &DbStore,
@@ -462,6 +505,108 @@ pub async fn completed_connect_handshake_for_grant(
         .map_err(store_err)?
         .map(handshake_from_model)
         .transpose()
+}
+
+/// An admin-approved or completed workspace handshake for a minted grant.
+/// Enrollment happens at start, so an approved workspace handshake is already
+/// the live gateway delegation.
+pub async fn live_workspace_handshake_for_grant(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+) -> Result<Option<CodeConnectHandshake>> {
+    entities::code_connect_handshake::Entity::find()
+        .filter(entities::code_connect_handshake::Column::ApprovalOwner.eq(owner.as_str()))
+        .filter(entities::code_connect_handshake::Column::GrantId.eq(grant_id.0))
+        .filter(
+            entities::code_connect_handshake::Column::Kind.eq(CodeGrantKind::Workspace.as_str()),
+        )
+        .filter(entities::code_connect_handshake::Column::State.is_in([
+            CodeConnectState::Approved.as_str(),
+            CodeConnectState::Completed.as_str(),
+        ]))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(handshake_from_model)
+        .transpose()
+}
+
+/// One workspace handshake by id, with its CSRF token, for the admin page.
+pub async fn view_workspace_handshake_all_owners(
+    store: &DbStore,
+    id: CodeHandshakeId,
+) -> Result<Option<(CodeConnectHandshake, String)>> {
+    let now = database_now(&store.conn).await?;
+    let Some(model) = entities::code_connect_handshake::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if model.kind != CodeGrantKind::Workspace.as_str()
+        || model.completed_at.is_some()
+        || model.expires_at <= now
+    {
+        return Ok(None);
+    }
+    let csrf = model.csrf.clone();
+    Ok(Some((handshake_from_model(model)?, csrf)))
+}
+
+/// An admin's approval of a workspace handshake. The nonce is not used: the
+/// service principal already owns the row, and the admin is not that owner.
+pub async fn approve_workspace_handshake_all_owners(
+    store: &DbStore,
+    id: CodeHandshakeId,
+    csrf: &str,
+    admin: &OwnerId,
+) -> Result<Option<CodeConnectHandshake>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let now = database_now(&transaction).await?;
+    let moved = entities::code_connect_handshake::Entity::update_many()
+        .col_expr(
+            entities::code_connect_handshake::Column::State,
+            sea_orm::sea_query::Expr::value(CodeConnectState::Approved.as_str()),
+        )
+        .col_expr(
+            entities::code_connect_handshake::Column::ApprovedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::code_connect_handshake::Column::ApprovedBy,
+            sea_orm::sea_query::Expr::value(Some(admin.as_str().to_owned())),
+        )
+        .filter(entities::code_connect_handshake::Column::Id.eq(id.0))
+        .filter(entities::code_connect_handshake::Column::Csrf.eq(csrf))
+        .filter(
+            entities::code_connect_handshake::Column::Kind.eq(CodeGrantKind::Workspace.as_str()),
+        )
+        .filter(
+            entities::code_connect_handshake::Column::State.eq(CodeConnectState::Pending.as_str()),
+        )
+        .filter(entities::code_connect_handshake::Column::ExpiresAt.gt(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if moved.rows_affected == 0 {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    if moved.rows_affected != 1 {
+        return Err(AgentError::Store(
+            "a workspace approval changed more than one row".into(),
+        ));
+    }
+    let updated = entities::code_connect_handshake::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store("connect handshake disappeared".into()))?;
+    let handshake = handshake_from_model(updated)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(handshake))
 }
 
 /// Revoked external consent retained for retrying gateway revocation after a restart.

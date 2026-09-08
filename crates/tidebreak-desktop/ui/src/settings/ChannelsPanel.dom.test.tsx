@@ -85,6 +85,40 @@ describe("ChannelsPanel", () => {
     );
   });
 
+  it("shows workspace grants with their channels and a revoke control", async () => {
+    const workspace: CodeGrantSnapshot = {
+      id: "6b1f9a34-0000-4000-8000-000000000009",
+      kind: "workspace",
+      channel_kind: "slack",
+      external_identity: "T-ACME",
+      display_name: "tidebreak-slack",
+      workspace_identity: "T-ACME",
+      workspace_name: "Acme Corp",
+      created_at: "2026-09-08T10:00:00Z",
+      channels: [
+        {
+          channel_id: "C1",
+          repository: "acme/tools",
+          state: "confirmed",
+          set_by_identity: "U1",
+          set_by_display: "Casey",
+        },
+      ],
+    };
+    const revokeCodeGrant = vi.fn(async () => ({
+      ...workspace,
+      revoked_at: "2026-09-08T11:00:00Z",
+    }));
+    const client = {
+      listCodeGrants: vi.fn(async () => [workspace]),
+      revokeCodeGrant,
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+    await screen.findByText("Workspace Acme Corp");
+    expect(screen.getByText(/C1 · acme\/tools \(confirmed\)/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
+  });
+
   it("says where connecting starts when nothing is connected", async () => {
     const client = {
       listCodeGrants: vi.fn(async () => []),

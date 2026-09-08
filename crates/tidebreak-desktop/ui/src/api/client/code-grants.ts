@@ -83,5 +83,28 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
         },
       );
     }
+
+    async getWorkspaceGrantPage(id: string): Promise<CodeConnectPage> {
+      return requireParsed(
+        parseCodeConnectPage(
+          await this.json(
+            `/deployment/code/grants/workspace/${encodeURIComponent(id)}`,
+            { headers: this.headers() },
+          ),
+        ),
+        "workspace grant page",
+      );
+    }
+
+    approveWorkspaceGrant(id: string, csrf: string): Promise<void> {
+      return this.json(
+        `/deployment/code/grants/workspace/${encodeURIComponent(id)}/approve`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ csrf }),
+        },
+      );
+    }
   };
 }

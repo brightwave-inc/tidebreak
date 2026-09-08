@@ -397,6 +397,18 @@ pub fn app(state: AppState) -> Router {
         .route("/diagnostics/snapshot", get(diagnostics::get_snapshot))
         .route("/diagnostics/metrics", get(diagnostics::get_metrics))
         .route("/diagnostics/export", get(diagnostics::get_export))
+        .route(
+            "/deployment/code/grants/workspace/{id}",
+            get(routes::code::view_workspace_grant),
+        )
+        .route(
+            "/deployment/code/grants/workspace/{id}/approve",
+            post(routes::code::approve_workspace_grant),
+        )
+        .route(
+            "/deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/confirm",
+            post(routes::code::confirm_workspace_channel_repository),
+        )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
     // The engine-facing browser channel. Authenticated per request by the
@@ -473,6 +485,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/external/code/sessions/{id}/reap",
             post(routes::code::external_reap),
+        )
+        .route(
+            "/external/code/sessions/{id}/access",
+            axum::routing::put(routes::code::external_session_access),
         )
         .route(
             "/external/grants/rotate",
@@ -862,6 +878,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::decide_approval),
         )
         .route("/code/grants", get(routes::code::list_grants))
+        .route(
+            "/code/grants/workspace",
+            post(routes::code::start_workspace_grant),
+        )
         .route("/code/grants/{id}/revoke", post(routes::code::revoke_grant))
         .route(
             "/code/grants/revoke-workspace",

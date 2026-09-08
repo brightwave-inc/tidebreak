@@ -1841,6 +1841,8 @@ pub struct CodeExternalGrant {
     pub id: CodeGrantId,
     /// Owner.
     pub owner: crate::OwnerId,
+    /// Person grant or workspace grant (decision 92).
+    pub kind: CodeGrantKind,
     /// Which channel family linked (for example `slack`).
     pub channel_kind: String,
     /// The channel's identity for the linked user, opaque here.
@@ -1869,6 +1871,8 @@ pub struct CodeExternalGrant {
 pub struct CodeConnectHandshake {
     /// Stable id.
     pub id: CodeHandshakeId,
+    /// Person handshake or workspace handshake (decision 92).
+    pub kind: CodeGrantKind,
     /// Which channel family is linking (for example `slack`).
     pub channel_kind: String,
     /// The channel's identity for the linking user, opaque here.
@@ -1885,8 +1889,11 @@ pub struct CodeConnectHandshake {
     pub state: CodeConnectState,
     /// The Tidebreak owner this approval surface is bound to. The first
     /// authenticated view claims it, so a CSRF token copied from one owner
-    /// cannot approve for another.
+    /// cannot approve for another. A workspace handshake binds this to the
+    /// service principal at start.
     pub approval_owner: Option<crate::OwnerId>,
+    /// The admin who approved a workspace handshake.
+    pub approved_by: Option<crate::OwnerId>,
     /// The grant minted by the completed handshake, when one exists.
     pub grant_id: Option<CodeGrantId>,
     /// Creation time.
@@ -1911,6 +1918,88 @@ pub struct CodeGrantProfile {
     /// The channel user's avatar at connect time, when the adapter supplied a
     /// safe public HTTPS URL.
     pub avatar_url: Option<String>,
+}
+
+/// Whether an adapter grant names one person or one channel workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeGrantKind {
+    /// One linked person. The historical default.
+    Person,
+    /// One Slack (or other) workspace, owned by a service principal.
+    Workspace,
+}
+
+impl CodeGrantKind {
+    /// Stable database token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Workspace => "workspace",
+        }
+    }
+
+    /// Parse a stored token. An empty or missing value is a person grant.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "" | "person" => Some(Self::Person),
+            "workspace" => Some(Self::Workspace),
+            _ => None,
+        }
+    }
+
+    /// Whether this grant covers a whole workspace.
+    #[must_use]
+    pub fn is_workspace(self) -> bool {
+        matches!(self, Self::Workspace)
+    }
+}
+
+/// One admin-gated `(channel, repository)` pair under a workspace grant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeChannelRepositoryConfirm {
+    pub grant_id: CodeGrantId,
+    pub channel_id: String,
+    pub repository: String,
+    pub set_by_identity: String,
+    pub set_by_display: String,
+    pub state: CodeChannelRepositoryState,
+    pub confirmed_by: Option<crate::OwnerId>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Where a channel-repository confirmation stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeChannelRepositoryState {
+    Pending,
+    Confirmed,
+    Superseded,
+}
+
+impl CodeChannelRepositoryState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Confirmed => "confirmed",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "confirmed" => Some(Self::Confirmed),
+            "superseded" => Some(Self::Superseded),
+            _ => None,
+        }
+    }
 }
 
 /// Where a connect handshake stands.

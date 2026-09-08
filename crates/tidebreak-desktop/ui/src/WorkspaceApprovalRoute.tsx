@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
-import { HttpError, type CodeConnectPage } from "./api";
+import { type CodeConnectPage } from "./api";
+import { connectPageFailurePhase, channelLabel } from "./ConnectApprovalRoute";
 import { Logomark } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
-type ConnectApprovalPhase =
+type WorkspaceApprovalPhase =
   | "loading"
   | "ready"
   | "approving"
@@ -16,20 +17,15 @@ type ConnectApprovalPhase =
   | "unavailable";
 
 /**
- * The connect approval a channel's connect card links to
- * (docs/slack-sessions.md, stage 2).
- *
- * Shows exactly the identity being linked — the channel workspace, the
- * display name, the avatar — and asks "is this you?". Approving mints
- * nothing by itself: the adapter's closing confirm in the channel does,
- * so a forwarded link binds nothing. A used or expired link renders its
- * refusal instead of a form.
+ * The admin approval for a workspace grant. The adapter starts the
+ * handshake; an admin says the shared identity may run channel sessions
+ * for that Slack workspace.
  */
-export function ConnectApprovalRoute() {
-  const { nonce } = useParams({ strict: false }) as { nonce: string };
+export function WorkspaceApprovalRoute() {
+  const { id } = useParams({ strict: false }) as { id: string };
   const { client } = useApp();
   const [page, setPage] = useState<CodeConnectPage | null>(null);
-  const [phase, setPhase] = useState<ConnectApprovalPhase>("loading");
+  const [phase, setPhase] = useState<WorkspaceApprovalPhase>("loading");
   const [error, setError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const approvalVersion = useRef(0);
@@ -41,7 +37,7 @@ export function ConnectApprovalRoute() {
     setPhase("loading");
     void (async () => {
       try {
-        const next = await client.getCodeConnectPage(nonce);
+        const next = await client.getWorkspaceGrantPage(id);
         if (cancelled) return;
         setPage(next);
         setPhase(next.state === "approved" ? "approved" : "ready");
@@ -53,7 +49,7 @@ export function ConnectApprovalRoute() {
       cancelled = true;
       approvalVersion.current += 1;
     };
-  }, [client, loadAttempt, nonce]);
+  }, [client, loadAttempt, id]);
 
   async function approve() {
     if (!page) return;
@@ -61,18 +57,18 @@ export function ConnectApprovalRoute() {
     setPhase("approving");
     setError(null);
     try {
-      await client.approveCodeConnect(nonce, page.csrf);
+      await client.approveWorkspaceGrant(id, page.csrf);
       if (approvalVersion.current !== version) return;
       setPhase("approved");
     } catch {
       if (approvalVersion.current !== version) return;
-      setError("The connect request could not be approved. Try again.");
+      setError("The workspace grant could not be approved. Try again.");
       setPhase("ready");
     }
   }
 
   return (
-    <ConnectApprovalView
+    <WorkspaceApprovalView
       page={page}
       phase={phase}
       error={error}
@@ -82,20 +78,7 @@ export function ConnectApprovalRoute() {
   );
 }
 
-/** Only the server's used-or-stale 404 proves that the link is dead. */
-export function connectPageFailurePhase(
-  error: unknown,
-): Extract<ConnectApprovalPhase, "invalid" | "unavailable"> {
-  return error instanceof HttpError && error.status === 404
-    ? "invalid"
-    : "unavailable";
-}
-
-/**
- * The page itself, pure so Storybook can show every state without a
- * router or a live client.
- */
-export function ConnectApprovalView({
+export function WorkspaceApprovalView({
   page,
   phase,
   error,
@@ -103,16 +86,13 @@ export function ConnectApprovalView({
   onRetry,
 }: {
   page: CodeConnectPage | null;
-  phase: ConnectApprovalPhase;
+  phase: WorkspaceApprovalPhase;
   error: string | null;
   onApprove: () => void;
   onRetry: () => void;
 }) {
-  // The same shell as the hosted sign-in screen: a person arrives here
-  // from a Slack card, often on a machine they have never opened, and the
-  // page must say whose it is before it asks "is this you?".
   return (
-    <div className="boot" aria-label="Connect approval">
+    <div className="boot" aria-label="Workspace grant approval">
       <div className="boot-brand">
         <Logomark />
         <h1>Tidebreak</h1>
@@ -120,23 +100,23 @@ export function ConnectApprovalView({
       <Card className="w-full max-w-md p-6 text-left">
         {phase === "loading" ? (
           <p className="text-sm text-muted-foreground" role="status">
-            Opening the connect request…
+            Opening the workspace grant…
           </p>
         ) : phase === "invalid" ? (
           <div className="flex flex-col gap-2">
             <h1 className="text-lg font-semibold">
-              This connect link is no longer valid
+              This workspace grant is no longer valid
             </h1>
             <p className="text-sm text-muted-foreground">
               It may have expired or already been used. Start again from the
-              channel: mention the agent and follow the fresh link it posts.
+              adapter.
             </p>
           </div>
         ) : phase === "unavailable" ? (
           <div className="flex flex-col items-start gap-3" role="alert">
             <div className="flex flex-col gap-2">
               <h1 className="text-lg font-semibold">
-                The connect request could not be opened
+                The workspace grant could not be opened
               </h1>
               <p className="text-sm text-muted-foreground">
                 The link may still be valid. Check that Tidebreak is running,
@@ -149,29 +129,25 @@ export function ConnectApprovalView({
           </div>
         ) : page ? (
           <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-3">
-              <ConnectAvatar page={page} />
-              <div className="min-w-0">
-                <h1 className="text-lg font-semibold">{page.display_name}</h1>
-                <p className="text-sm text-muted-foreground">
-                  {channelLabel(page.channel_kind)} · {page.workspace_name}
-                </p>
-              </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold">{page.workspace_name}</h1>
+              <p className="text-sm text-muted-foreground">
+                {channelLabel(page.channel_kind)} workspace
+              </p>
             </div>
             {phase === "approved" ? (
               <p className="text-sm leading-relaxed">
-                Approved. To finish connecting, return to the{" "}
-                {channelLabel(page.channel_kind)} conversation where you started
-                and select Confirm connection. This confirms that you control
-                the account.
+                Approved. Return to the adapter so it can finish connecting.
+                Channel sessions for this workspace will run as{" "}
+                {page.display_name}.
               </p>
             ) : (
               <>
                 <p className="text-sm leading-relaxed">
-                  Is this you? Approving lets this{" "}
-                  {channelLabel(page.channel_kind)} account start and steer
-                  coding sessions on your machine. If you did not ask to
-                  connect, close this page.
+                  Run channel sessions for {channelLabel(page.channel_kind)}{" "}
+                  workspace {page.workspace_name} as {page.display_name}? The
+                  shared identity&apos;s forge credential is the ceiling; you
+                  still confirm each channel&apos;s repository.
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -179,7 +155,7 @@ export function ConnectApprovalView({
                     disabled={phase === "approving"}
                     onClick={onApprove}
                   >
-                    {phase === "approving" ? "Approving…" : "Yes, this is me"}
+                    {phase === "approving" ? "Approving…" : "Approve workspace"}
                   </Button>
                 </div>
               </>
@@ -194,33 +170,4 @@ export function ConnectApprovalView({
       </Card>
     </div>
   );
-}
-
-function ConnectAvatar({ page }: { page: CodeConnectPage }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [page.avatar_url]);
-  if (!page.avatar_url || failed) {
-    return (
-      <div
-        aria-hidden
-        className="flex size-12 shrink-0 items-center justify-center rounded-full bg-muted text-lg font-medium"
-      >
-        {page.display_name.slice(0, 1).toUpperCase()}
-      </div>
-    );
-  }
-  return (
-    <img
-      src={page.avatar_url}
-      alt={`${page.display_name}'s avatar`}
-      className="size-12 shrink-0 rounded-full object-cover"
-      referrerPolicy="no-referrer"
-      decoding="async"
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
-export function channelLabel(kind: string): string {
-  return kind === "slack" ? "Slack" : kind;
 }
