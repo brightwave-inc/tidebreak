@@ -267,10 +267,15 @@ impl CodeRuntime {
                 };
                 Some(
                     self.browser_tokens
-                        .issue_with_semantic_actions(
+                        .issue_with_capabilities(
                             browser_subject,
                             bridge,
-                            runtime.supports_semantic_actions(),
+                            crate::code::browser_channel::BrowserChannelCapabilities {
+                                semantic_actions: runtime.supports_semantic_actions(),
+                                lifecycle: runtime.supports_lifecycle(),
+                                developer_diagnostics: runtime
+                                    .supports_developer_diagnostics(),
+                            },
                         )
                         .map_err(ServerError::internal)?,
                 )

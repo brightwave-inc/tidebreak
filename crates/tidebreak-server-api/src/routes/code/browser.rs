@@ -11,9 +11,11 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 
 use tidebreak_core::{
-    db, BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
-    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeWorkspaceStatus, SessionLifecycle,
+    db, BrowserActArgs, BrowserActResult, BrowserActivateArgs, BrowserCloseArgs,
+    BrowserDiagnosticsArgs, BrowserDiagnosticsResult, BrowserLifecycleResult, BrowserListResult,
+    BrowserNavigateArgs, BrowserNavigateResult, BrowserOpenArgs, BrowserOpenResult,
+    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
+    BrowserWaitArgs, BrowserWaitResult, CodeWorkspaceStatus, SessionLifecycle,
 };
 
 use crate::code::browser_channel::BrowserSubject;
@@ -111,6 +113,70 @@ pub async fn browser_act(
     runtime
         .as_ref()
         .act(&BrowserRuntimeScope::from(subject), &args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_open(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserOpenArgs>,
+) -> Result<Json<BrowserOpenResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .as_ref()
+        .open(&BrowserRuntimeScope::from(subject), &args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_close(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserCloseArgs>,
+) -> Result<Json<BrowserLifecycleResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .as_ref()
+        .close(&BrowserRuntimeScope::from(subject), &args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_activate(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserActivateArgs>,
+) -> Result<Json<BrowserLifecycleResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .as_ref()
+        .activate(&BrowserRuntimeScope::from(subject), &args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_diagnostics(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserDiagnosticsArgs>,
+) -> Result<Json<BrowserDiagnosticsResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .as_ref()
+        .diagnostics(&BrowserRuntimeScope::from(subject), &args)
         .await
         .map(Json)
         .map_err(map_runtime_error)

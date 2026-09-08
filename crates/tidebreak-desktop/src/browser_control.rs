@@ -205,6 +205,12 @@ impl BrowserDispatchResult for tidebreak_core::BrowserUploadResult {
     }
 }
 
+impl BrowserDispatchResult for tidebreak_core::BrowserDiagnosticsResult {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum BrowserAuditConfirmation {
@@ -1069,12 +1075,15 @@ impl BrowserRegistry {
 
     /// Extend every grant that already covers this browser's share target
     /// with additional capabilities the user just approved through a fresh
-    /// native disclosure. Never creates a grant: a target with no covering
-    /// consent still needs the full sharing dialog.
+    /// native disclosure. The caller passes the exact origin it displayed in
+    /// that disclosure; a tab whose share target moved on refuses. Never
+    /// creates a grant: a target with no covering consent still needs the
+    /// full sharing dialog.
     pub(crate) fn extend_browser_access(
         &self,
         browser_id: &str,
         workspace_id: &str,
+        target_origin: &BrowserOrigin,
         capabilities: &[BrowserGrantCapability],
     ) -> Result<BrowserSnapshot, String> {
         let mut state = self.lock();
@@ -1083,15 +1092,16 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, workspace_id, record)?;
-        let target = share_target_for_record(record)
-            .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())?;
+        if share_target_for_record(record).as_ref() != Some(target_origin) {
+            return Err("browser origin changed while permission was being requested".to_owned());
+        }
         let owner_id = record.owner_id.clone();
         let mut next = state.grants.clone();
         let mut extended = false;
         for grant in next.iter_mut() {
             if grant.owner_id == owner_id
                 && grant.workspace_id == workspace_id
-                && grant.scope.covers(&target)
+                && grant.scope.covers(target_origin)
             {
                 grant.capabilities.extend(capabilities.iter().copied());
                 extended = true;

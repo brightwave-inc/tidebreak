@@ -775,6 +775,11 @@ pub struct BrowserOpenResult {
     pub url: String,
     pub load_state: BrowserLoadState,
     pub document_epoch: u64,
+    /// Whether the tab is currently visible. Tabs may open in the background
+    /// so the user's cursor and focus are not disturbed; operations that
+    /// genuinely need visibility report that when they refuse.
+    #[serde(default)]
+    pub visible: bool,
 }
 
 /// Canonical arguments for [`BROWSER_CLOSE_TOOL`].
@@ -965,6 +970,7 @@ pub enum BrowserAction {
         at: Option<BrowserPoint>,
     },
     /// Fill a text input, textarea, or contenteditable with the given value.
+    /// An empty value clears the field.
     Fill { value: String },
     /// Select one `<option>` by its value attribute.
     Select { value: String },
@@ -1062,7 +1068,8 @@ impl BrowserAction {
                         .iter()
                         .all(|modifier| modifiers.iter().filter(|held| *held == modifier).count() == 1)
             }
-            Self::Fill { value } | Self::Select { value } => {
+            Self::Fill { value } => value.chars().count() <= MAX_BROWSER_ACTION_VALUE_CHARS,
+            Self::Select { value } => {
                 !value.is_empty() && value.chars().count() <= MAX_BROWSER_ACTION_VALUE_CHARS
             }
             Self::Press { key } => valid_browser_press_key(key),
@@ -1399,7 +1406,7 @@ pub fn browser_upload_tool_spec() -> ToolSpec {
 pub fn browser_open_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserOpenArgs>(
         BROWSER_OPEN_TOOL,
-        "Open a new visible Tidebreak in-app browser tab at an absolute HTTP(S) URL, shared with this agent in the current workspace. The trusted host authorizes the destination origin before loading anything and the user sees the tab immediately. Use browser_list to confirm the tab and browser_snapshot to read it.",
+        "Open a new Tidebreak in-app browser tab at an absolute HTTP(S) URL, shared with this agent in the current workspace. The trusted host authorizes the destination origin before loading anything. The tab opens in the workspace Browser panel without stealing the user's cursor or focus; the result reports whether it is visible. Use browser_list to confirm the tab and browser_snapshot to read it.",
     )
 }
 
@@ -1417,7 +1424,7 @@ pub fn browser_close_tool_spec() -> ToolSpec {
 pub fn browser_activate_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActivateArgs>(
         BROWSER_ACTIVATE_TOOL,
-        "Make one shared in-app browser tab visible and focused so screenshots and native actions can target it. The user sees the tab switch happen. Activation does not grant any new origin access.",
+        "Make one shared in-app browser tab visible and focused. Use this only when an operation genuinely needs visibility (screenshots, native input); prefer leaving tabs in the background so the user's cursor and focus are undisturbed. The user sees the tab switch happen. Activation does not grant any new origin access.",
     )
 }
 
@@ -1883,7 +1890,12 @@ mod tests {
         );
         assert_eq!(BrowserAction::Focus.value(), None);
         assert_eq!(BrowserAction::Hover { at: None }.kind(), "hover");
-        assert!(!BrowserAction::Fill {
+        // An empty fill clears the field; an empty select names no option.
+        assert!(BrowserAction::Fill {
+            value: String::new(),
+        }
+        .is_well_formed());
+        assert!(!BrowserAction::Select {
             value: String::new(),
         }
         .is_well_formed());

@@ -15,9 +15,11 @@
 use async_trait::async_trait;
 
 use tidebreak_core::{
-    BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
-    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
+    BrowserActArgs, BrowserActResult, BrowserActivateArgs, BrowserCloseArgs,
+    BrowserDiagnosticsArgs, BrowserDiagnosticsResult, BrowserLifecycleResult, BrowserListResult,
+    BrowserNavigateArgs, BrowserNavigateResult, BrowserOpenArgs, BrowserOpenResult,
+    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
+    BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
 };
 
 // ── BrowserRuntimeScope ─────────────────────────────────────────────────────
@@ -91,6 +93,22 @@ pub trait BrowserRuntime: Send + Sync {
         false
     }
 
+    /// Whether this runtime can open, close, and activate tabs for an agent.
+    ///
+    /// Advertisement only — every lifecycle request is still authorized
+    /// against the live grant and controller state at dispatch time.
+    fn supports_lifecycle(&self) -> bool {
+        false
+    }
+
+    /// Whether this runtime can surface bounded page diagnostics.
+    ///
+    /// Advertisement only; absence means the engine genuinely cannot observe
+    /// console or network activity, not that traffic was silently dropped.
+    fn supports_developer_diagnostics(&self) -> bool {
+        false
+    }
+
     /// List browser tabs visible to the session identified by `scope`.
     async fn list(
         &self,
@@ -143,6 +161,50 @@ pub trait BrowserRuntime: Send + Sync {
     ) -> Result<BrowserActResult, BrowserRuntimeError> {
         Err(BrowserRuntimeError::Unsupported(
             "trusted native semantic actions".to_owned(),
+        ))
+    }
+
+    /// Open a new shared tab at an already-granted origin within `scope`.
+    async fn open(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserOpenArgs,
+    ) -> Result<BrowserOpenResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported(
+            "agent browser lifecycle".to_owned(),
+        ))
+    }
+
+    /// Close one tab this session's agent opened.
+    async fn close(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserCloseArgs,
+    ) -> Result<BrowserLifecycleResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported(
+            "agent browser lifecycle".to_owned(),
+        ))
+    }
+
+    /// Make one shared tab visible and focused.
+    async fn activate(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserActivateArgs,
+    ) -> Result<BrowserLifecycleResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported(
+            "agent browser lifecycle".to_owned(),
+        ))
+    }
+
+    /// Read bounded page diagnostics from one authorized tab.
+    async fn diagnostics(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserDiagnosticsArgs,
+    ) -> Result<BrowserDiagnosticsResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported(
+            "page diagnostics".to_owned(),
         ))
     }
 
