@@ -378,19 +378,26 @@ impl InternalApprovalRequest {
                 }
             }
             ApprovalKind::FileWrite { paths } => {
+                // The person consents to every path, so the card names them
+                // all: the first as the path, the whole set in the summary.
+                // A set the summary cannot hold is a truncated preview, and
+                // the adapter falls back to the web link.
                 let path = paths.first().cloned().unwrap_or_default();
-                let (path, preview_truncated) = bound_preview_text(&path);
+                let (path, path_truncated) = bound_preview_text(&path);
+                let (summary, summary_truncated) = if paths.len() > 1 {
+                    let (joined, truncated) = bound_preview_text(&paths.join("\n"));
+                    (Some(format!("{} files:\n{joined}", paths.len())), truncated)
+                } else {
+                    (None, false)
+                };
                 Self::ToolUse {
                     auto_judging,
                     tool_name: "write_file".into(),
                     class: ApprovalClass::Workspace,
                     approval: ToolApprovalKind::WorkspaceMayModifyFiles,
                     grant_scopes: Vec::new(),
-                    preview: Some(ToolActionPreview::WriteFile {
-                        path,
-                        summary: None,
-                    }),
-                    preview_truncated,
+                    preview: Some(ToolActionPreview::WriteFile { path, summary }),
+                    preview_truncated: path_truncated || summary_truncated,
                 }
             }
             ApprovalKind::Network { summary } | ApprovalKind::Other { summary } => {
@@ -775,6 +782,41 @@ mod tests {
     use crate::attention::FenceReason;
     use crate::code::HarnessKind;
     use uuid::Uuid;
+
+    #[test]
+    fn a_multi_path_file_write_names_every_path_or_says_it_was_cut() {
+        let turn_id = TurnId::new();
+        let paths = vec!["a.rs".to_owned(), "b.rs".to_owned(), "c.rs".to_owned()];
+        let card =
+            InternalApprovalRequest::from_kind(&ApprovalKind::FileWrite { paths }, turn_id, false);
+        let InternalApprovalRequest::ToolUse {
+            preview: Some(ToolActionPreview::WriteFile { path, summary }),
+            preview_truncated,
+            ..
+        } = card
+        else {
+            panic!("a file write projects a write_file card");
+        };
+        assert_eq!(path, "a.rs");
+        assert_eq!(summary.as_deref(), Some("3 files:\na.rs\nb.rs\nc.rs"));
+        assert!(!preview_truncated, "three short paths fit the card");
+
+        let paths: Vec<String> = (0..64)
+            .map(|index| format!("{}/{index}.rs", "d".repeat(40)))
+            .collect();
+        let card =
+            InternalApprovalRequest::from_kind(&ApprovalKind::FileWrite { paths }, turn_id, false);
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a file write projects a write_file card");
+        };
+        assert!(
+            preview_truncated,
+            "a set the summary cannot hold is a truncated preview"
+        );
+    }
 
     #[test]
     fn event_is_internally_tagged() {
