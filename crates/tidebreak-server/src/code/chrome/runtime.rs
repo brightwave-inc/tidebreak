@@ -240,12 +240,31 @@ impl Access {
             self.cdp
                 .command_guarded(session, method, params, Arc::new(move || fence.live()));
         tokio::pin!(command);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let result = tokio::select! {
-         result=tokio::time::timeout(Duration::from_secs(15),&mut command)=>result.map_err(|_|format!("{method} timed out"))?.map_err(|error|error.0),
-         _=self.fence.connection.cancelled()=>Err("Chrome connection revoked".into()),
-         _=self.fence.session.cancelled()=>Err("Chrome session revoked".into()),
-         _=self.fence.call.cancelled()=>Err("Chrome call cancelled".into()),
-         _=async {while self.fence.live(){tokio::time::sleep(Duration::from_millis(10)).await;}}=>Err("Chrome control stopped".into()),
+            result = tokio::time::timeout_at(deadline, &mut command) => {
+                result.map_err(|_| format!("{method} timed out"))?.map_err(|error| error.0)
+            },
+            reason = async {
+                tokio::select! {
+                    _ = self.fence.connection.cancelled() => "Chrome connection revoked",
+                    _ = self.fence.session.cancelled() => "Chrome session revoked",
+                    _ = self.fence.call.cancelled() => "Chrome call cancelled",
+                    _ = async {
+                        while self.fence.live() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => "Chrome control stopped",
+                }
+            } => {
+                if method == "Page.bringToFront" {
+                    // The host holds shared foreground ownership until this
+                    // reply. A sent activation must not change focus after the
+                    // host releases that ownership on cancellation.
+                    let _ = tokio::time::timeout_at(deadline, &mut command).await;
+                }
+                Err(reason.into())
+            },
         };
         self.fence.check()?;
         result

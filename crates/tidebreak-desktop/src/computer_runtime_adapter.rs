@@ -93,6 +93,30 @@ impl ChromeJournal {
     }
 }
 
+async fn await_chrome_result(
+    computer_use: &crate::client_execution::computer_use::ComputerUseState,
+    call: &ComputerUseCall,
+    stop: &CancelToken,
+    stop_chrome: impl FnOnce(),
+    operation: impl std::future::Future<Output = ComputerUseResult>,
+) -> ComputerUseResult {
+    if call.name == tidebreak_core::CHROME_ACTIVATE_TAB_TOOL {
+        // The inner adapter cancels its prompt and queued work, then drains a
+        // sent activation under the shared foreground owner. Dropping that
+        // future here would release ownership while Chrome can still focus.
+        return operation.await;
+    }
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => unknown(call, "Chrome was stopped. Inspect the target before issuing a new action."),
+        _ = computer_use.wait_for_halt() => {
+            stop_chrome();
+            unknown(call, "Computer control was stopped. Inspect the target before issuing a new action.")
+        },
+        result = operation => result,
+    }
+}
+
 fn fingerprint(call: &ComputerUseCall) -> String {
     DocumentBlob::from_bytes(&serde_json::to_vec(call).expect("computer call is JSON"))
         .id
@@ -277,16 +301,17 @@ impl NativeRuntime for DesktopComputerRuntime {
             crate::computer_use_action::ComputerUseActionSource::Chrome,
         )
         .map(|event| crate::computer_use_action::CallActivity::start(&self.app, event));
-        let result = tokio::select! {
-            biased;
-            _ = stop.cancelled() => unknown(call, "Chrome was stopped. Inspect the target before issuing a new action."),
-            _ = host.computer_use.wait_for_halt() => {
+        let result = await_chrome_result(
+            &host.computer_use,
+            call,
+            &stop,
+            || {
                 stop.cancel();
                 self.chrome.stop_session(&active_scope);
-                unknown(call, "Computer control was stopped. Inspect the target before issuing a new action.")
             },
-            result = self.chrome.execute(&active_scope, call) => result,
-        };
+            self.chrome.execute(&active_scope, call),
+        )
+        .await;
         let result = bound_chrome_result(call, result);
         if let Some(activity) = activity {
             activity.finish(
@@ -352,6 +377,41 @@ impl NativeRuntime for DesktopComputerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn outer_chrome_runtime_retains_activation_until_the_inner_drain_finishes() {
+        let computer_use =
+            Arc::new(crate::client_execution::computer_use::ComputerUseState::default());
+        let stop = CancelToken::new();
+        let inner_stop = stop.clone();
+        let host = computer_use.clone();
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (draining, draining_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let call = ComputerUseCall {
+                request_id: Uuid::new_v4(),
+                name: tidebreak_core::CHROME_ACTIVATE_TAB_TOOL.into(),
+                arguments: serde_json::json!({"targetRef":"fixture"}),
+            };
+            await_chrome_result(&host, &call, &inner_stop, || {}, async {
+                entered.send(()).unwrap();
+                inner_stop.cancelled().await;
+                draining.send(()).unwrap();
+                release_rx.await.unwrap();
+                unknown(&call, "Activation drained after Stop")
+            })
+            .await
+        });
+        entered_rx.await.unwrap();
+        stop.cancel();
+        computer_use.stop_all(|| Ok::<_, ()>(())).unwrap();
+        draining_rx.await.unwrap();
+        assert!(!task.is_finished());
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap().text, "Activation drained after Stop");
+    }
+
     fn call() -> ComputerUseCall {
         ComputerUseCall {
             request_id: Uuid::new_v4(),

@@ -411,6 +411,22 @@ impl ComputerUseState {
         Ok(dispatch().await)
     }
 
+    /// Keep foreground ownership until the caller's operation completes. The
+    /// caller drains any dispatched protocol command before returning.
+    pub(crate) async fn dispatch_foreground_operation<T, F, Fut>(
+        &self,
+        session: SessionId,
+        dispatch: F,
+    ) -> Result<T, ()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        self.dispatch_acting(session, dispatch)
+            .await
+            .map_err(|_| ())
+    }
+
     /// Foreground WK input shares the native app input owner. Dropping its
     /// operation disarms the queued native callback and waits for an executing
     /// callback's lock before this method releases the shared dispatch gate.

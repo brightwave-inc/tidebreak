@@ -68,6 +68,57 @@ fn new_tab() -> ComputerUseCall {
 }
 
 #[tokio::test]
+async fn stop_drains_a_sent_foreground_activation_before_returning() {
+    let (service, scope, requests, replies) = connection();
+    let reply_inject = replies.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    respond(requests, replies, log.clone(), |request| {
+        if request["method"] == "Page.bringToFront" {
+            Scripted::Hold
+        } else {
+            page_reply(request)
+        }
+    });
+    let tab = service
+        .attach_existing_tab(&scope, "test", "T1")
+        .await
+        .unwrap();
+    let activation = call(
+        tidebreak_core::CHROME_ACTIVATE_TAB_TOOL,
+        json!({"targetRef":tab.target_ref}),
+    );
+    let mut task = dispatched(&service, &scope, activation.clone()).await;
+    let sent = logged(&log, |request| request["method"] == "Page.bringToFront").await;
+    service.ownership().trip();
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
+        .await
+        .is_err());
+    reply_inject
+        .send(CdpFrame::Text(
+            json!({"id":sent["id"],"result":{}}).to_string(),
+        ))
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    service.ownership().resume();
+    assert_eq!(
+        service.dispatch(&scope, &activation).await.result.outcome,
+        ComputerUseOutcome::Unknown
+    );
+    assert_eq!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn wrong_owner_and_workspace_never_reach_chrome() {
     let (service, scope, mut requests, _replies) = connection();
     for other in [
