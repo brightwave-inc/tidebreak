@@ -9,9 +9,17 @@ set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${1:?usage: scripts/computer-use-fixture/build.sh <output-directory>}"
 MAIN_SOURCE="$SOURCE_DIR/main.swift"
+EVENT_SOURCE="$SOURCE_DIR/EventStore.swift"
 INFO_SOURCE="$SOURCE_DIR/Info.plist"
 SCRIPT_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build.sh"
 REPO_ROOT="$(git -C "$SOURCE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+
+# Resolve relative paths and symlinks before the removal boundary below.
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
+if [[ -n "$REPO_ROOT" ]]; then
+    REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+fi
 
 if [[ "$OUT_DIR" == "/" || "$OUT_DIR" == "$HOME" || "$OUT_DIR" == "$SOURCE_DIR" || "$OUT_DIR" == "$REPO_ROOT" ]]; then
     echo "computer-use-fixture: refusing a broad build directory" >&2
@@ -34,7 +42,7 @@ RESOURCES_DIR="$CONTENTS/Resources"
 MARKER="$OUT_DIR/BUILD.repro.md"
 BINARY="$MACOS_DIR/ComputerUseFixture"
 
-if [[ ! -f "$MAIN_SOURCE" || ! -f "$INFO_SOURCE" ]]; then
+if [[ ! -f "$MAIN_SOURCE" || ! -f "$EVENT_SOURCE" || ! -f "$INFO_SOURCE" ]]; then
     echo "computer-use-fixture: sources are missing in $SOURCE_DIR" >&2
     exit 2
 fi
@@ -46,7 +54,7 @@ if ! command -v swiftc >/dev/null 2>&1; then
     exit 2
 fi
 
-SOURCE_HASH="$(shasum -a 256 "$MAIN_SOURCE" "$INFO_SOURCE" "$SCRIPT_SOURCE" | shasum -a 256 | awk '{print $1}')"
+SOURCE_HASH="$(shasum -a 256 "$MAIN_SOURCE" "$EVENT_SOURCE" "$INFO_SOURCE" "$SCRIPT_SOURCE" | shasum -a 256 | awk '{print $1}')"
 
 if [[ -x "$BINARY" && -f "$MARKER" ]] && grep -q "source-hash: $SOURCE_HASH" "$MARKER" 2>/dev/null; then
     echo "computer-use-fixture: up to date at $APP_DIR"
@@ -57,12 +65,13 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-swiftc -O -whole-module-optimization "$MAIN_SOURCE" -o "$BINARY"
-cp "$INFO_SOURCE" "$RESOURCES_DIR/Info.plist"
+swiftc -O -whole-module-optimization "$EVENT_SOURCE" "$MAIN_SOURCE" -o "$BINARY"
+cp "$INFO_SOURCE" "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+    codesign --force --deep --sign - "$APP_DIR"
+    codesign --verify --deep --strict "$APP_DIR"
 fi
 
 cat > "$MARKER" <<EOF
@@ -70,13 +79,13 @@ cat > "$MARKER" <<EOF
 
 - app: $APP_DIR
 - bundle id: dev.tidebreak.ComputerUseFixture
-- sources: $MAIN_SOURCE, $INFO_SOURCE
+- sources: $MAIN_SOURCE, $EVENT_SOURCE, $INFO_SOURCE
 - source-hash: $SOURCE_HASH
 - commands:
 
 \`\`\`sh
-swiftc -O -whole-module-optimization "$MAIN_SOURCE" -o "$BINARY"
-cp "$INFO_SOURCE" "$RESOURCES_DIR/Info.plist"
+swiftc -O -whole-module-optimization "$EVENT_SOURCE" "$MAIN_SOURCE" -o "$BINARY"
+cp "$INFO_SOURCE" "$CONTENTS/Info.plist"
 codesign --force --deep --sign - "$APP_DIR"
 \`\`\`
 
