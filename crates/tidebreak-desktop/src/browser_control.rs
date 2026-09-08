@@ -205,6 +205,12 @@ impl BrowserDispatchResult for tidebreak_core::BrowserUploadResult {
     }
 }
 
+impl BrowserDispatchResult for tidebreak_core::BrowserDiagnosticsResult {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum BrowserAuditConfirmation {
