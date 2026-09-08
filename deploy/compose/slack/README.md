@@ -17,7 +17,15 @@ for how the adapter behaves once it is up.
 - `postgres`: the machine's store.
 - `slack-adapter`: `ghcr.io/brightwave-inc/tidebreak-slack-adapter` (tags
   `v<version>`), listening on container port 8080, published at
-  `127.0.0.1:8081`.
+  `127.0.0.1:8081`. Every tag is signed keyless with Sigstore; to verify a
+  pull before you run it, check that the signature names the adapter's
+  release workflow:
+
+  ```sh
+  cosign verify ghcr.io/brightwave-inc/tidebreak-slack-adapter:v<version> \
+    --certificate-identity-regexp '^https://github\.com/brightwave-inc/model-gateway/\.github/workflows/release\.yml@' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
 - `adapter-postgres`: the adapter's own store. The adapter is a shared,
   stateful service; do not point it at the machine's database.
 
