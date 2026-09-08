@@ -62,6 +62,7 @@ fn engine() -> BrowserEngineDescriptor {
             semantic_snapshot: true,
             semantic_actions: false,
             screenshot: true,
+            developer_diagnostics: true,
             cross_origin_frames: false,
             profile_reset: true,
         },
