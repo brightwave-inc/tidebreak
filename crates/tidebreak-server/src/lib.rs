@@ -1359,6 +1359,7 @@ async fn bind_inner(
             state.clone(),
             runtime.db.clone(),
             runtime.bus.clone(),
+            sandbox_spawn_execution_location,
         )));
     // A chat is a session on the one journal: every event the lane
     // publishes reaches the session's channel too.

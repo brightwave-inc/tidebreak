@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tidebreak_core::db::DbStore;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
+use tidebreak_core::{
+    AgentRunExecutionLocation, CapLevel, HarnessCaps, HarnessKind, ReasoningEffort,
+};
 use tidebreak_harness::{
     HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, HostEnv, ListedHarnessModel,
     SessionSpec,
@@ -36,7 +38,12 @@ pub struct InternalAdapter {
 }
 
 impl InternalAdapter {
-    pub fn new(state: AppState, db: Arc<DbStore>, bus: Arc<CodeEventBus>) -> Self {
+    pub fn new(
+        state: AppState,
+        db: Arc<DbStore>,
+        bus: Arc<CodeEventBus>,
+        sandbox_spawn_execution_location: AgentRunExecutionLocation,
+    ) -> Self {
         let driver = LegDriver::new(
             state.store.clone(),
             state.resolver.clone(),
@@ -52,7 +59,10 @@ impl InternalAdapter {
             state.queued_turn_wake.clone(),
             state.agent_config.clone(),
             Some(state.config.data_dir.join("scratch")),
-            LegDriverConfig::default(),
+            LegDriverConfig {
+                sandbox_spawn_execution_location,
+                ..LegDriverConfig::default()
+            },
         )
         .with_blobs(state.blobs.clone())
         .with_blob_write_locks(state.blob_writes.clone())
