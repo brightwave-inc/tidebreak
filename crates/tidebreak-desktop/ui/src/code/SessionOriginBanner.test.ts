@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { externalThreadUrl } from "./SessionOriginBanner";
+import {
+  externalThreadUrl,
+  sessionOriginGroupLabel,
+  slackConversationKind,
+} from "./SessionOriginBanner";
 
 describe("externalThreadUrl", () => {
   it("derives the Slack permalink from a thread key", () => {
@@ -38,6 +42,25 @@ describe("externalThreadUrl", () => {
     expect(
       externalThreadUrl({ channel_kind: "slack", external_key }),
     ).toBeNull();
+  });
+
+  it("names Slack DM and channel groups from the same key the banner splits", () => {
+    expect(slackConversationKind("T0400000:D0898765:dm2")).toBe("dm");
+    expect(slackConversationKind("T0400000:C0812345:1724900000.123456")).toBe(
+      "channel",
+    );
+    expect(
+      sessionOriginGroupLabel({
+        channel_kind: "slack",
+        external_key: "T0400000:D0898765:dm2",
+      }),
+    ).toBe("Slack DM");
+    expect(
+      sessionOriginGroupLabel({
+        channel_kind: "slack",
+        external_key: "T0400000:C0812345:1724900000.123456",
+      }),
+    ).toBe("Slack channel");
   });
 
   it("yields no link for another channel family", () => {

@@ -878,6 +878,26 @@ export const Rail: Story = {
   ),
 };
 
+function OriginGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1" data-testid="rail-origin-group">
+      <div
+        className="truncate px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90"
+        title={label}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function StatusGroup({
   rank,
   count,
@@ -987,6 +1007,79 @@ export const GroupedByStatus: Story = {
           workspace={{ ...codeWorkspace, id: "ws-e", title: "Empty workspace" }}
         />
       </StatusGroup>
+    </div>
+  ),
+};
+
+/** Local, Slack DM, and Slack channel sessions as three rail groups. */
+export const RailLocalDmAndChannel: Story = {
+  render: (args) => (
+    <div className="flex flex-col">
+      <OriginGroup label="Local">
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-local",
+            title: "Local thread",
+          }}
+        />
+      </OriginGroup>
+      <OriginGroup label="Slack channel">
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-channel",
+            title: "Channel thread",
+          }}
+          session={{
+            ...codeSession,
+            workspace_id: "ws-channel",
+            external_origin: {
+              channel_kind: "slack",
+              external_key: "T0400000:C0812345:1724900000.123456",
+            },
+          }}
+        />
+      </OriginGroup>
+      <OriginGroup label="Slack DM">
+        <WorkspaceCard
+          {...args}
+          workspace={{ ...codeWorkspace, id: "ws-dm", title: "DM thread" }}
+          session={{
+            ...codeSession,
+            workspace_id: "ws-dm",
+            external_origin: {
+              channel_kind: "slack",
+              external_key: "T0400000:D0898765:dm2",
+            },
+          }}
+        />
+      </OriginGroup>
+    </div>
+  ),
+};
+
+/** An empty rail has no origin groups. */
+export const RailEmpty: Story = {
+  render: () => (
+    <div className="flex min-h-0 flex-col gap-1 px-1 py-2">
+      <p className="text-muted-foreground px-2 py-3 text-sm">
+        No workspaces yet.
+      </p>
+    </div>
+  ),
+};
+
+/** One local session stays a single unlabeled list. */
+export const RailSingleGroup: Story = {
+  render: (args) => (
+    <div className="flex flex-col gap-1">
+      <WorkspaceCard
+        {...args}
+        workspace={{ ...codeWorkspace, title: "Only local thread" }}
+      />
     </div>
   ),
 };

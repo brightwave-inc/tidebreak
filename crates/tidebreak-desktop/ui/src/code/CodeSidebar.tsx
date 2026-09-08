@@ -129,7 +129,13 @@ export function CodeSidebar() {
 
   useEffect(() => connectCodeUpdates(client), [client]);
 
-  const groups = arrangeWorkspaces(prefs.sortMode, repos, workspaces, digests);
+  const groups = arrangeWorkspaces(
+    prefs.sortMode,
+    repos,
+    workspaces,
+    digests,
+    sessions,
+  );
   const canOpenWorktree = canOpenLocalCodeWorktree();
   const selectedWorkspaceIds = useCodeUiStore(
     (state) => state.selectedWorkspaceIds,
@@ -266,7 +272,20 @@ export function CodeSidebar() {
         }}
       >
         {groups.map((group) => (
-          <div key={group.key} className="flex flex-col gap-1">
+          <div
+            key={group.key}
+            className="flex flex-col gap-1"
+            data-testid={
+              group.key === "local" || group.key.includes(":")
+                ? "rail-origin-group"
+                : undefined
+            }
+            data-origin={
+              group.key === "local" || group.key.includes(":")
+                ? group.key
+                : undefined
+            }
+          >
             {group.label &&
               (isWorkspaceStatusRank(group.key) ? (
                 <div className="flex items-center gap-1.5 px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90">

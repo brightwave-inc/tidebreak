@@ -34,12 +34,17 @@ export function stepWorkspaceId(
 
 /** The rail's workspaces in the order it draws them, groups flattened. */
 export function railWorkspaceIds(): string[] {
-  const { repos, workspaces } = useCodeCatalogStore.getState();
+  const { repos, workspaces, sessionsByWorkspace } =
+    useCodeCatalogStore.getState();
   const { sortMode } = useCodeUiStore.getState().railPrefs;
   const digests = workspaceDigests(useCodeUpdatesStore.getState());
-  return arrangeWorkspaces(sortMode, repos, workspaces, digests).flatMap(
-    (group) => group.workspaces.map((workspace) => workspace.id),
-  );
+  return arrangeWorkspaces(
+    sortMode,
+    repos,
+    workspaces,
+    digests,
+    sessionsByWorkspace,
+  ).flatMap((group) => group.workspaces.map((workspace) => workspace.id));
 }
 
 /** The workspace a rail step lands on, or `null` when there is nowhere to go. */
