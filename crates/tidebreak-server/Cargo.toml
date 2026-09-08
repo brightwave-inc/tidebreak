@@ -15,6 +15,8 @@ doctest = false
 workspace = true
 
 [features]
+# Desktop credential storage is enabled by the embedding client.
+keychain = ["tidebreak-core/keychain"]
 # Compile the PostgreSQL driver in, so a self-host boot can open the store
 # `TIDEBREAK_DATABASE_URL` names. Off by default: the desktop profile is
 # SQLite-only and the driver is a heavy build-time dependency.
@@ -30,13 +32,7 @@ tidebreak-code-delivery = { path = "../tidebreak-code-delivery" }
 tidebreak-code-remote = { path = "../tidebreak-code-remote" }
 tidebreak-harness = { path = "../tidebreak-harness" }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
-# Default features on purpose: the server wants exactly core's default set
-# (`sqlite`, `tools`, `keychain`, `blob-fs`), and asking for the parts with
-# `default-features = false` would drop the `default` pseudo-feature that a
-# `--workspace` build (where core is its own build root) turns on — producing
-# a second, byte-identical core rlib. Leaner dependents still say
-# `default-features = false`; feature unification ORs `default` back in
-# whenever the server is in the graph.
+# Core defaults provide SQLite, tools, and local blobs without an OS keychain.
 tidebreak-core = { path = "../tidebreak-core" }
 tidebreak-egress = { path = "../tidebreak-egress" }
 tidebreak-gateway-runtime = { path = "../tidebreak-gateway-runtime" }

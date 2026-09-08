@@ -160,6 +160,86 @@ afterEach(() => {
 });
 
 describe("CodeSidebar", () => {
+  it("opens a conversation without a workspace from its live rail row", async () => {
+    client.openCodeUpdates.mockImplementationOnce((onNotice) => {
+      queueMicrotask(() =>
+        onNotice({
+          type: "snapshot",
+          sessions: [
+            {
+              workspace: null,
+              session: "internal-1",
+              can_open_chat: true,
+              kind: "interactive",
+              harness_kind: "internal",
+              lifecycle: "running",
+              attention: { state: { type: "working" }, source: "lifecycle" },
+              title: "Research feedback",
+              turn_count: 1,
+            },
+          ],
+        }),
+      );
+      return {
+        close() {},
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as WebSocket;
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Research feedback, Agent working",
+      }),
+    );
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/internal-1"),
+    );
+  });
+
+  it("does not link shared internal sessions to the owner-only chat route", async () => {
+    useCodeUpdatesStore.setState({
+      conversationsWithoutWorkspace: {
+        shared: {
+          workspace: null,
+          session: "shared",
+          can_open_chat: false,
+          kind: "interactive",
+          lifecycle: "running",
+          attention: { state: { type: "working" }, source: "lifecycle" },
+          title: "Shared conversation",
+          turn_count: 1,
+        },
+        legacy: {
+          workspace: null,
+          session: "legacy",
+          kind: "interactive",
+          lifecycle: "running",
+          attention: { state: { type: "working" }, source: "lifecycle" },
+          title: "Legacy conversation",
+          turn_count: 1,
+        },
+      },
+    });
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    expect(
+      screen.queryByRole("button", { name: /Shared conversation/ }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Legacy conversation/ }),
+    ).toBeNull();
+  });
+
   it("renders the code rail without chat stores initialized", async () => {
     await renderWithRouter(
       <AppContextProvider value={app}>

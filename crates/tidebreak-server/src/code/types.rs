@@ -1783,6 +1783,10 @@ pub struct CodeTerminalActivityNotice {
 pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
+    /// Whether this viewer can open the owner-scoped chat route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub can_open_chat: Option<bool>,
     pub session: tidebreak_core::SessionId,
     pub kind: SessionKind,
     /// Engine identity for list surfaces that collapse several sessions into
@@ -1850,6 +1854,7 @@ impl From<crate::code::bus::SessionDigest> for SessionDigest {
     fn from(digest: crate::code::bus::SessionDigest) -> Self {
         Self {
             workspace: digest.workspace,
+            can_open_chat: Some(digest.can_open_chat),
             session: digest.session,
             kind: digest.kind,
             harness_kind: Some(digest.harness_kind),

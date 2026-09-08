@@ -889,7 +889,7 @@ function WorkspaceActivityLine({
  * that is alive but parked on something else: a bot for subagents and a
  * radar for a monitor, both in the live tone with the live pulse.
  */
-function SessionStateGlyph({
+export function SessionStateGlyph({
   digest,
   pr,
 }: {

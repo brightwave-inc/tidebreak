@@ -16,12 +16,17 @@ workspace = true
 name = "tidebreak"
 path = "src/main.rs"
 
+[features]
+default = ["keychain"]
+# Normal CLI builds share persistent desktop credentials. Self-host builds opt out.
+keychain = ["tidebreak-core/keychain", "tidebreak-server/keychain"]
+
 [dependencies]
 # `default-features = false`: the CLI directly needs config/contracts plus the
 # built-in file tools for `tidebreak mcp`. `sqlite` is on so `tidebreak folder`
 # can open the product store beside a running server without embedding one
-# (and without taking `tidebreak.lock`). Keychain and blob-fs still come only
-# through `tidebreak-server`.
+# (and without taking `tidebreak.lock`). The keychain feature owns credentials;
+# blob-fs comes through `tidebreak-server`.
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["tools", "sqlite"] }
 # `tidebreak folder …` decides local command reach exactly as the desktop does,
 # so an operator-provisioned folder carries the same grants on the same host.

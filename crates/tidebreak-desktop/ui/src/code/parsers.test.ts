@@ -928,6 +928,16 @@ describe("pull request state in live updates", () => {
     ).toEqual({ type: "snapshot", sessions: [digest] });
   });
 
+  it("preserves chat-route availability and rejects malformed values", () => {
+    for (const can_open_chat of [true, false]) {
+      const input = { ...digest, workspace: null, can_open_chat };
+      expect(parseCodeSessionDigest(input)).toEqual(input);
+    }
+    expect(
+      parseCodeSessionDigest({ ...digest, can_open_chat: "true" }),
+    ).toBeNull();
+  });
+
   it("keeps a digest whose session binds no workspace", () => {
     const orphan = { ...digest, workspace: null };
     expect(parseCodeSessionDigest(orphan)).toEqual(orphan);

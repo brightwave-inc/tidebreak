@@ -15,6 +15,8 @@ doctest = false
 workspace = true
 
 [features]
+# Desktop credential storage is enabled by the embedding client.
+keychain = ["tidebreak-core/keychain", "tidebreak-server-core/keychain"]
 postgres = ["tidebreak-server-core/postgres"]
 
 [dependencies]

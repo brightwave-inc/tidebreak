@@ -4353,6 +4353,7 @@ export function parseCodeSessionDigest(
     !isRecord(value) ||
     !onlyKeys<WireCodeSessionDigest>(value, [
       "workspace",
+      "can_open_chat",
       "session",
       "kind",
       "harness_kind",
@@ -4373,6 +4374,8 @@ export function parseCodeSessionDigest(
       "recap",
     ]) ||
     !nullableWireId(value.workspace) ||
+    (value.can_open_chat !== undefined &&
+      typeof value.can_open_chat !== "boolean") ||
     !wireId(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
     (value.harness_kind !== undefined &&
@@ -4405,6 +4408,9 @@ export function parseCodeSessionDigest(
   if (value.subagents !== undefined && !subagents) return null;
   return {
     workspace: value.workspace,
+    ...(value.can_open_chat !== undefined
+      ? { can_open_chat: value.can_open_chat }
+      : {}),
     session: value.session,
     kind: value.kind,
     ...(value.harness_kind !== undefined

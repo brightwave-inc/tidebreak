@@ -480,6 +480,11 @@ jobs:
           save-if: false
       - name: desktop tests
         run: cargo test -p tidebreak-desktop --locked
+      - name: Desktop credential integration tests
+        run: |
+          cargo test -p tidebreak-cli --locked setup::tests
+          cargo test -p tidebreak-server --features keychain --locked tests::listener
+          cargo test -p tidebreak-core --features keychain --locked keychain
 
   windows-check:
     name: Windows cargo check
@@ -653,7 +658,7 @@ jobs:
       # runner's real Credential Manager.
       - name: Credential Manager round trip
         run: >-
-          cargo test --target x86_64-pc-windows-msvc
+          cargo test --target x86_64-pc-windows-msvc --features keychain
           -p tidebreak-core --lib keychain --locked -- --ignored
 
   test:
@@ -717,10 +722,12 @@ jobs:
       # rerunning the whole workspace the way the old shell retry loop did.
       # nextest does not run doctests; the workspace has none, and one added
       # later must move its assertion into a unit test to be covered here.
+      - name: Check headless dependency graph
+        run: bash scripts/check-headless-dependencies.sh
       - name: headless tests
         run: >-
           cargo nextest run --workspace --exclude tidebreak-desktop
-          --locked --retries 2 --partition count:${{ matrix.part }}/3
+          --locked --retries 2 --partition count:${{ matrix.part }}/3 --no-default-features
 
   test-aggregate:
     name: test

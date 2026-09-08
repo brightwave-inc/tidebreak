@@ -81,6 +81,7 @@ mod documents;
 mod gateway_drafts;
 mod image_attachment;
 mod lifecycle;
+#[cfg(feature = "keychain")]
 mod listener;
 mod memory;
 mod outputs;

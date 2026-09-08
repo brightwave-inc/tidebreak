@@ -15,7 +15,7 @@ doctest = false
 workspace = true
 
 [features]
-default = ["sqlite", "keychain", "tools", "blob-fs"]
+default = ["sqlite", "tools", "blob-fs"]
 # The default SeaORM-backed Store with the SQLite driver. Turn off
 # (`default-features = false`) to depend on just the trait contracts.
 sqlite = [

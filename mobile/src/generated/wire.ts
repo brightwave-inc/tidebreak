@@ -4800,7 +4800,11 @@ export type SessionDigest = {
 /**
  * `None` for a session that binds no workspace.
  */
-workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
+workspace: WorkspaceId | null,
+/**
+ * Whether this viewer can open the owner-scoped chat route.
+ */
+can_open_chat?: boolean, session: SessionId, kind: SessionKind,
 /**
  * Engine identity for list surfaces that collapse several sessions into
  * one workspace row. Optional on the wire so a desktop can still read a
