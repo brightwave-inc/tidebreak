@@ -25,6 +25,7 @@ import {
   workspaceDigest,
   type CodeUpdatesState,
 } from "./CodeUpdatesStore";
+import { useRefreshSignals } from "../RefreshSignals";
 import { useCodeUiStore } from "./CodeUiStore";
 
 vi.mock("sonner", () => ({
@@ -56,6 +57,7 @@ function digest(overrides: Partial<CodeSessionDigest> = {}): CodeSessionDigest {
 
 const EMPTY_STATE: CodeUpdatesState = {
   conversationsByWorkspace: {},
+  conversationsWithoutWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
   cloneTracking: {},
@@ -697,5 +699,70 @@ describe("turn rewrite notices", () => {
       sessions: [digest()],
     });
     expect(snapped.turnRewrites).toEqual({});
+  });
+});
+
+describe("conversations without a workspace", () => {
+  it("keeps snapshots and live settlements, and removes absent sessions on reconnect", () => {
+    const session = digest({ workspace: null, harness_kind: "internal" });
+    const snapshot = reduceCodeUpdates(EMPTY_STATE, {
+      type: "snapshot",
+      sessions: [session],
+    });
+    expect(snapshot.conversationsWithoutWorkspace[session.session]).toEqual(
+      session,
+    );
+    expect(snapshot.conversationsByWorkspace).toEqual({});
+    const settled = reduceCodeUpdates(snapshot, {
+      type: "digest",
+      digest: { ...session, lifecycle: "ended" },
+    });
+    expect(
+      settled.conversationsWithoutWorkspace[session.session].lifecycle,
+    ).toBe("ended");
+    expect(
+      reduceCodeUpdates(settled, { type: "snapshot", sessions: [] })
+        .conversationsWithoutWorkspace,
+    ).toEqual({});
+  });
+
+  it.each(["idle", "done_unreviewed", "needs_you"] as const)(
+    "refreshes notifications when a workspace-less turn settles as %s",
+    (state) => {
+      const before = useRefreshSignals.getState().notifications;
+      const session = digest({ workspace: null });
+      useCodeUpdatesStore
+        .getState()
+        .apply({ type: "snapshot", sessions: [session] });
+      useCodeUpdatesStore.getState().apply({
+        type: "digest",
+        digest: {
+          ...session,
+          attention: {
+            state:
+              state === "needs_you"
+                ? {
+                    type: state,
+                    prompt: "Provider failed",
+                    source: "structured",
+                  }
+                : { type: state },
+            source: "lifecycle",
+          },
+        },
+      });
+      expect(useRefreshSignals.getState().notifications).toBe(before + 1);
+    },
+  );
+
+  it("never promotes workspace-less watches into conversation rows", () => {
+    const watch = digest({ workspace: null, kind: "watch" });
+    expect(
+      reduceCodeUpdates(EMPTY_STATE, { type: "snapshot", sessions: [watch] })
+        .conversationsWithoutWorkspace,
+    ).toEqual({});
+    expect(
+      reduceCodeUpdates(EMPTY_STATE, { type: "digest", digest: watch }),
+    ).toEqual(EMPTY_STATE);
   });
 });

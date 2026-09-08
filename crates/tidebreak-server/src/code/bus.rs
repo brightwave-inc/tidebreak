@@ -49,6 +49,8 @@ const UPDATES_BUFFER: usize = 256;
 pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
+    /// Whether this viewer can open the owner-scoped chat route.
+    pub can_open_chat: bool,
     pub session: SessionId,
     pub kind: SessionKind,
     /// Engine identity for list surfaces that collapse several sessions into

@@ -1767,6 +1767,75 @@ async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
     );
 }
 
+#[tokio::test]
+async fn a_workspace_less_terminal_event_uses_the_chat_notification_and_dedupe_key() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::WorkspaceId,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::session::Column::HarnessKind,
+            sea_orm::sea_query::Expr::value("internal"),
+        )
+        .col_expr(
+            entities::session::Column::Title,
+            sea_orm::sea_query::Expr::value("Research notes"),
+        )
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    for (event, kind) in [
+        (
+            Event::TurnCompleted {
+                usage: Default::default(),
+                checkpoint: None,
+                stop_reason: None,
+            },
+            crate::NotificationKind::AgentCompleted,
+        ),
+        (
+            Event::TurnFailed {
+                error: crate::code::BoundedError {
+                    message: "provider failed".into(),
+                },
+                detail: None,
+            },
+            crate::NotificationKind::AgentFailed,
+        ),
+    ] {
+        append_event_with_notification(&store, &owner, session_id, 0, turn_id, &event)
+            .await
+            .unwrap();
+        store
+            .record_work_turn_notification(session_id, turn_id, kind)
+            .await
+            .unwrap();
+    }
+    let notifications = store
+        .list_notifications_scoped(&owner, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(notifications.len(), 2);
+    for notification in notifications {
+        assert_eq!(
+            notification.context,
+            crate::NotificationContext::Chat {
+                chat_id: session_id
+            }
+        );
+        assert!(notification.title.starts_with("Research notes "));
+    }
+    assert!(store
+        .list_notifications_scoped(&OwnerId::new("other").unwrap(), None, 50)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 /// Archive marks the row Ended without bumping spawn_epoch. A same-epoch
 /// worker persist of Running or Idle must not revive it, or a late write
 /// leaves an archived workspace with a live-looking session (and pid).

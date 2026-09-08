@@ -1,13 +1,19 @@
 //! End-to-end smoke test of the `tidebreak` process surface.
 
+#[cfg(feature = "keychain")]
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(feature = "keychain")]
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
+#[cfg(feature = "keychain")]
+use std::process::Child;
+use std::process::{Command, Stdio};
 
 /// Kills the daemon on drop — including on an assertion panic, since
 /// `std::process::Child` does not reap on its own.
+#[cfg(feature = "keychain")]
 struct Reaper(Child);
 
+#[cfg(feature = "keychain")]
 impl Drop for Reaper {
     fn drop(&mut self) {
         self.0.kill().ok();
@@ -15,13 +21,16 @@ impl Drop for Reaper {
     }
 }
 
+#[cfg(feature = "keychain")]
 #[test]
 fn serve_announces_its_address_and_answers_health() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
         .arg("serve")
+        .env("TIDEBREAK_PROFILE", "desktop")
         .env("TIDEBREAK_DATA_DIR", dir.path())
         .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_LISTEN_ADDR")
         .env_remove("TIDEBREAK_MCP_CONFIG")
         .env_remove("ANTHROPIC_API_KEY")
         .stdout(Stdio::piped())
@@ -56,4 +65,40 @@ fn serve_announces_its_address_and_answers_health() {
 
     assert!(response.contains("200 OK"), "response: {response}");
     assert!(response.trim_end().ends_with("ok"), "response: {response}");
+}
+
+/// A headless binary must reject desktop startup before it opens local storage.
+#[cfg(not(feature = "keychain"))]
+#[test]
+fn serve_without_keychain_rejects_desktop_before_opening_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .arg("serve")
+        .env("TIDEBREAK_PROFILE", "desktop")
+        .env("TIDEBREAK_DATA_DIR", dir.path())
+        .env_remove("TIDEBREAK_LISTEN_ADDR")
+        .env_remove("TIDEBREAK_MCP_CONFIG")
+        .env_remove("TIDEBREAK_VAULT_ADDR")
+        .env_remove("TIDEBREAK_VAULT_TOKEN_FILE")
+        .env_remove("TIDEBREAK_VAULT_MOUNT")
+        .env_remove("TIDEBREAK_VAULT_PATH")
+        .env_remove("TIDEBREAK_VAULT_NAMESPACE")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run headless tidebreak serve");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("keychain feature"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("TIDEBREAK_PROFILE=self_host"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "refused server must not announce a listener"
+    );
+    assert!(!dir.path().join("tidebreak.lock").exists());
+    assert!(!dir.path().join("tidebreak.db").exists());
 }

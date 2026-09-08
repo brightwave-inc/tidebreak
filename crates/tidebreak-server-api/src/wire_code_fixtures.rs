@@ -239,6 +239,7 @@ fn queued_turn() -> QueuedTurn {
 
 fn digest() -> SessionDigest {
     SessionDigest {
+        can_open_chat: None,
         workspace: Some(workspace_id()),
         session: session_id(),
         kind: SessionKind::Interactive,
@@ -268,6 +269,7 @@ fn digest() -> SessionDigest {
 /// The in-process engine's session binds no workspace (decision 0048 step 5).
 fn internal_digest() -> SessionDigest {
     SessionDigest {
+        can_open_chat: None,
         workspace: None,
         session: SessionId(id(0x22)),
         harness_kind: Some(HarnessKind::Internal),

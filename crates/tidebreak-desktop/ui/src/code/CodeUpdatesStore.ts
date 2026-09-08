@@ -65,6 +65,8 @@ export type CodeUpdatesState = {
    * conversation tabs.
    */
   conversationsByWorkspace: DigestsByWorkspace;
+  /** Conversations that open through the chat route. */
+  conversationsWithoutWorkspace: Record<string, CodeSessionDigest>;
   /**
    * Watch digests, keyed workspace → session. Children beside the
    * conversations, never among them — ADR 0050's rule, kept by construction:
@@ -128,6 +130,7 @@ export type CodeUpdatesAction =
 
 const EMPTY: CodeUpdatesState = {
   conversationsByWorkspace: {},
+  conversationsWithoutWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
   cloneTracking: {},
@@ -152,23 +155,40 @@ export function reduceCodeUpdates(
       // rewriting onto a turn snapshot that already stored the rewrite.
       const conversationsByWorkspace: DigestsByWorkspace = {};
       const childrenByWorkspace: DigestsByWorkspace = {};
+      const conversationsWithoutWorkspace: Record<string, CodeSessionDigest> =
+        {};
       for (const digest of action.sessions) {
         const map =
           digest.kind === "watch"
             ? childrenByWorkspace
             : conversationsByWorkspace;
-        // A digest for a session with no workspace has no rail row yet.
-        if (digest.workspace === null) continue;
+        if (digest.workspace === null) {
+          if (digest.kind !== "watch") {
+            conversationsWithoutWorkspace[digest.session] = digest;
+          }
+          continue;
+        }
         (map[digest.workspace] ??= {})[digest.session] = digest;
       }
       return {
         ...state,
         conversationsByWorkspace,
+        conversationsWithoutWorkspace,
         childrenByWorkspace,
         turnRewrites: {},
       };
     }
     case "digest": {
+      if (action.digest.workspace === null) {
+        if (action.digest.kind === "watch") return state;
+        return {
+          ...state,
+          conversationsWithoutWorkspace: {
+            ...state.conversationsWithoutWorkspace,
+            [action.digest.session]: action.digest,
+          },
+        };
+      }
       if (action.digest.kind === "watch") {
         return {
           ...state,
@@ -838,12 +858,18 @@ function maybeBumpAgentNotifications(
   previous: CodeUpdatesState,
   digest: CodeSessionDigest,
 ): void {
-  if (digest.kind === "watch" || digest.workspace === null) return;
-  const prior =
-    previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
-      ?.attention;
+  if (digest.kind === "watch") return;
+  const prior = (
+    digest.workspace === null
+      ? previous.conversationsWithoutWorkspace[digest.session]
+      : previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
+  )?.attention;
   const wasWorking = prior?.state.type === "working";
-  const settled = digest.attention.state.type === "idle";
+  const settled =
+    digest.attention.state.type === "idle" ||
+    digest.attention.state.type === "done_unreviewed" ||
+    (digest.lifecycle !== "running" &&
+      digest.attention.state.type === "needs_you");
   if (wasWorking && settled) {
     useRefreshSignals.getState().signal("notifications");
   }

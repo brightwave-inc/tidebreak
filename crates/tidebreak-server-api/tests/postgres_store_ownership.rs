@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use sea_orm::sqlx::{Connection, PgConnection};
-use tidebreak_core::{Config, KeychainSecretProvider, Profile};
+use tidebreak_core::{Config, Profile};
 
 const ADMIN_TOKEN: &str = "store-owner-test-token-padded-to-32";
 const OWNERSHIP_APPLICATION_NAME: &str = "tidebreak-store-owner";
@@ -52,7 +52,6 @@ async fn postgres_store_ownership_is_exclusive_and_outlives_a_dead_owner() {
         Err(_) => return,
     };
     let _database_url = EnvRestore::set("TIDEBREAK_DATABASE_URL", &url);
-    KeychainSecretProvider::use_mock();
 
     let first_dir = tempfile::tempdir().expect("first data dir");
     let second_dir = tempfile::tempdir().expect("second data dir");

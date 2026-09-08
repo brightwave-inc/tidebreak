@@ -558,7 +558,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   );
   assert.match(
     testPartitions,
-    /cargo nextest run --workspace --exclude tidebreak-desktop\n\s+--locked --retries 2 --partition count:\$\{\{ matrix\.part \}\}\/3/,
+    /cargo nextest run --workspace --exclude tidebreak-desktop\n\s+--locked --retries 2 --partition count:\$\{\{ matrix\.part \}\}\/3 --no-default-features/,
   );
   assert.match(testAggregate, /name: test\n/);
   assert.match(testAggregate, /needs: \[changes, test\]/);

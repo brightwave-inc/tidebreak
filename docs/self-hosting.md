@@ -11,6 +11,11 @@ This guide covers running that deployment from the packaging in
 `deploy/self-host/`. It describes only behavior verified in the code on this
 branch; where something is not built yet, it says so.
 
+The self-host Docker image builds the CLI with `--no-default-features` and
+`tidebreak-server/postgres`. It excludes the OS keychain and its Linux D-Bus
+dependencies. Standard CLI and desktop builds keep persistent OS credentials.
+A build without `keychain` refuses the desktop profile at startup.
+
 ## What the self-host profile is
 
 Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:

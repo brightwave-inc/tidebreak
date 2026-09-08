@@ -73,15 +73,13 @@ ARG CARGO_PROFILE=release
 # Debug info is dead weight in a container and triples the dev binary.
 ENV CARGO_PROFILE_DEV_DEBUG=0
 
-# `--features tidebreak-server/postgres` reaches through the CLI into the
-# server crate's feature, because the feature lives there and the CLI takes
-# tidebreak-server with default features. Without it the self-host boot has no
-# PostgreSQL driver compiled in. The binary lands in `/out` so the runtime
-# stage copies one path whichever profile built it (cargo writes `dev` to
-# `target/debug`).
+# PostgreSQL and object storage support come from the server's postgres feature.
+# Disable CLI defaults to exclude desktop credential storage from this image.
+# The binary lands in `/out` so the runtime stage copies one path whichever
+# profile built it (cargo writes `dev` to `target/debug`).
 RUN set -eu; \
     cargo build --profile "${CARGO_PROFILE}" --locked -p tidebreak-cli -p tidebreak-supervised-agent \
-        --features tidebreak-server/postgres; \
+        --no-default-features --features tidebreak-server/postgres; \
     case "${CARGO_PROFILE}" in dev) target_dir=debug ;; *) target_dir="${CARGO_PROFILE}" ;; esac; \
     install -D "target/${target_dir}/tidebreak" /out/tidebreak; \
     install -D "target/${target_dir}/tidebreak-supervised-agent" /out/tidebreak-supervised-agent

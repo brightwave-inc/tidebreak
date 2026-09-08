@@ -18,7 +18,7 @@ use tidebreak_core::db::code::{
 use tidebreak_core::{
     preview_formatting_character, ApprovalState, Attention, AttentionSource, AttentionState,
     CodeSubagentStatus, DbStore, Event, OwnerId, Session, SessionActivity, SessionId, SessionKind,
-    SessionLifecycle, ToolDetail, TurnStatus, WorkspaceId,
+    SessionLifecycle, Store, ToolDetail, TurnStatus, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -368,7 +368,9 @@ pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
         }
     };
     for reader in digest_readers(db, bus, session).await {
-        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(digest.clone())));
+        let mut visible = digest.clone();
+        visible.can_open_chat &= reader == session.owner;
+        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(visible)));
     }
 }
 
@@ -447,7 +449,9 @@ pub async fn list_accessible_digests(
     let mut out = Vec::new();
     for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
         if session.lifecycle != SessionLifecycle::Ended {
-            out.push(build_digest(db, &session).await?);
+            let mut digest = build_digest(db, &session).await?;
+            digest.can_open_chat &= principal == &session.owner;
+            out.push(digest);
         }
     }
     Ok(out)
@@ -525,14 +529,21 @@ async fn build_digest(
     } else {
         turns.into_iter().rev().find_map(|turn| turn.narrative)
     };
-    // A session with no workspace is titled by its conversation, which
-    // nothing names yet; the client falls back to its own label.
+    // Internal sessions share their title with the chat route.
     let (title, pr_state) = match workspace {
         Some(workspace) => (workspace.title, workspace.pr),
-        None => (String::new(), None),
+        None => (
+            db.get_chat_scoped(&session.owner, session.id)
+                .await?
+                .and_then(|chat| chat.title)
+                .unwrap_or_default(),
+            None,
+        ),
     };
     Ok(SessionDigest {
         workspace: session.workspace_id,
+        can_open_chat: session.workspace_id.is_none()
+            && session.harness_kind == tidebreak_core::HarnessKind::Internal,
         session: session.id,
         kind: session.kind,
         harness_kind: session.harness_kind,
@@ -752,6 +763,79 @@ mod tests {
     use tidebreak_core::{
         should_replace, CodeSubagentSummary, FenceReason, SessionKind, ToolOutcome, WorkspaceId,
     };
+
+    #[tokio::test]
+    async fn workspace_less_digest_uses_its_conversation_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("digest.db").display()
+        ))
+        .await
+        .unwrap();
+        let mut session = session_with(auto_working());
+        session.workspace_id = None;
+        session.harness_kind = tidebreak_core::HarnessKind::Internal;
+        tidebreak_core::db::code::insert_session(&db, &session)
+            .await
+            .unwrap();
+        db.set_chat_title(session.id, Some("Research notes".into()))
+            .await
+            .unwrap();
+        let digest = build_digest(&db, &session).await.unwrap();
+        assert_eq!(digest.title, "Research notes");
+        assert_eq!(digest.workspace, None);
+        assert_eq!(digest.session, session.id);
+        assert!(digest.can_open_chat);
+        let reader = OwnerId::new("reader").unwrap();
+        tidebreak_core::db::code::grant_session_access(
+            &db,
+            &session.owner,
+            session.id,
+            "principal:reader",
+            tidebreak_core::SessionAccessLevel::View,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(list_accessible_digests(&db, &session.owner).await.unwrap()[0].can_open_chat);
+        let shared = list_accessible_digests(&db, &reader).await.unwrap();
+        assert_eq!(shared.len(), 1);
+        assert!(!shared[0].can_open_chat);
+        let bus = CodeEventBus::default();
+        let mut owner_updates = bus.subscribe_updates(&session.owner);
+        let mut reader_updates = bus.subscribe_updates(&reader);
+        emit_digest(&db, &bus, &session).await;
+        assert!(
+            matches!(owner_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if digest.can_open_chat)
+        );
+        assert!(
+            matches!(reader_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if !digest.can_open_chat)
+        );
+        session.visibility = tidebreak_core::SessionVisibility::Deployment;
+        tidebreak_core::db::code::set_session_visibility(
+            &db,
+            &session.owner,
+            session.id,
+            session.visibility,
+        )
+        .await
+        .unwrap();
+        let public_reader = OwnerId::new("public-reader").unwrap();
+        let public = list_accessible_digests(&db, &public_reader).await.unwrap();
+        assert_eq!(public.len(), 1);
+        assert!(!public[0].can_open_chat);
+        let mut public_updates = bus.subscribe_updates(&public_reader);
+        emit_digest(&db, &bus, &session).await;
+        assert!(
+            matches!(public_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if !digest.can_open_chat)
+        );
+
+        let mut foreign = session.clone();
+        foreign.owner = OwnerId::new("other").unwrap();
+        assert_eq!(build_digest(&db, &foreign).await.unwrap().title, "");
+    }
 
     fn auto_working() -> Attention {
         Attention::working(AttentionSource::Lifecycle)

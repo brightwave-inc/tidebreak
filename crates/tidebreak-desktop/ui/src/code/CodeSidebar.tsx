@@ -32,6 +32,7 @@ import { FOCUS_RING, HOVER_TINT, RAIL_ICON_BUTTON } from "./interactive";
 import { findCodeTerminalTab } from "./codeChrome";
 import { canOpenLocalCodeWorktree } from "./codeWorktreeHost";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
+import { WorkspaceLessSessionRow } from "./WorkspaceLessSessionRow";
 import { RailSettingsMenu } from "./RailSettingsMenu";
 import {
   useWorkspaceCardCommands,
@@ -91,8 +92,14 @@ export function CodeSidebar() {
   const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const digests = useWorkspaceDigests();
+  const conversationsWithoutWorkspace = useCodeUpdatesStore(
+    (state) => state.conversationsWithoutWorkspace,
+  );
   const childrenByWorkspace = useCodeUpdatesStore(
     (state) => state.childrenByWorkspace,
+  );
+  const chatConversations = Object.values(conversationsWithoutWorkspace).filter(
+    (digest) => digest.can_open_chat === true,
   );
   const newWorkspaceOpen = useCodeUiStore((state) => state.newWorkspaceOpen);
   const newWorkspaceRepoId = useCodeUiStore(
@@ -271,6 +278,25 @@ export function CodeSidebar() {
           }
         }}
       >
+        {chatConversations.length > 0 && (
+          <section aria-label="Conversations" className="flex flex-col gap-1">
+            <div className="px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground">
+              Conversations
+            </div>
+            {chatConversations.map((digest) => (
+              <WorkspaceLessSessionRow
+                key={digest.session}
+                digest={digest}
+                onOpen={(sessionId) =>
+                  void navigate({
+                    to: "/c/$chatId",
+                    params: { chatId: sessionId },
+                  })
+                }
+              />
+            ))}
+          </section>
+        )}
         {groups.map((group) => (
           <div
             key={group.key}

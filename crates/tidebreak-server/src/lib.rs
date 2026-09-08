@@ -193,9 +193,11 @@ use tidebreak_core::{
     validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
     BundledSecretProvider, CachingSecretProvider, Config, CreateAppTool, DbStore, FsBlobStore,
-    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
-    ToolRegistry, WriteFile,
+    ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
+
+#[cfg(feature = "keychain")]
+use tidebreak_core::KeychainSecretProvider;
 
 /// Public contract for desktop browser adapters. The desktop implements
 /// [`BrowserRuntime`] behind an `Arc` and installs it with
@@ -856,8 +858,9 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// restart. Its misses re-ask the store instead; an absent item answers
 /// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
 enum CredentialStoragePlan {
+    #[cfg(feature = "keychain")]
     Desktop(Option<String>),
-    Vault(vault_secrets::ValidatedVaultConfig),
+    Vault(Box<vault_secrets::ValidatedVaultConfig>),
     UnavailableSelfHost,
 }
 
@@ -868,13 +871,18 @@ fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
         ));
     }
     match config.profile {
+        #[cfg(feature = "keychain")]
         Profile::Desktop => Ok(CredentialStoragePlan::Desktop(
             config.keychain_service.clone(),
         )),
+        #[cfg(not(feature = "keychain"))]
+        Profile::Desktop => Err(AgentError::config(
+            "the desktop profile requires a build with the keychain feature; use TIDEBREAK_PROFILE=self_host for a headless build",
+        )),
         Profile::SelfHost => match &config.vault_secrets {
-            Some(vault) => Ok(CredentialStoragePlan::Vault(
+            Some(vault) => Ok(CredentialStoragePlan::Vault(Box::new(
                 vault_secrets::VaultSecretProvider::validate(vault)?,
-            )),
+            ))),
             None => Ok(CredentialStoragePlan::UnavailableSelfHost),
         },
         _ => Err(AgentError::config(
@@ -885,12 +893,13 @@ fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
 
 fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
     let storage: Arc<dyn SecretProvider> = match plan {
+        #[cfg(feature = "keychain")]
         CredentialStoragePlan::Desktop(keychain_service) => Arc::new(match keychain_service {
             Some(service) => KeychainSecretProvider::with_service(service),
             None => KeychainSecretProvider::new(),
         }),
         CredentialStoragePlan::Vault(config) => {
-            Arc::new(vault_secrets::VaultSecretProvider::new(config))
+            Arc::new(vault_secrets::VaultSecretProvider::new(*config))
         }
         CredentialStoragePlan::UnavailableSelfHost => {
             Arc::new(vault_secrets::UnavailableSelfHostSecretProvider)
@@ -982,6 +991,20 @@ mod profile_secret_tests {
             .to_string();
         assert!(error.contains("desktop profile"));
         assert!(error.contains("OS keychain"));
+    }
+
+    #[cfg(not(feature = "keychain"))]
+    #[test]
+    fn headless_build_rejects_desktop_before_opening_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config::desktop(directory.path());
+        let error = match credential_storage_plan(&config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("headless build accepted desktop credentials"),
+        };
+        assert!(error.contains("keychain feature"));
+        assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]

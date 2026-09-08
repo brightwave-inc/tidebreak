@@ -99,30 +99,35 @@ async fn append_event_inner(
                 session.id, session.kind
             ))
         })?;
-        // A session with no workspace mints no notification yet: the record
-        // names the workspace the turn ran in, and one without a workspace
-        // has nothing to name until the entity merge reshapes it.
-        if let Some(workspace_id) = session
-            .workspace_id
-            .map(WorkspaceId)
-            .filter(|_| crate::code_session_mints_notification(session_kind))
-        {
-            let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
-                .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
-                .one(&transaction)
-                .await
-                .map_err(store_err)?
-                .map(|workspace| workspace.title);
-            super::super::notification::record_code_turn_notification_on(
-                &transaction,
-                owner,
-                session_id,
-                workspace_id,
-                turn_id,
-                workspace_title.as_deref(),
-                kind,
-            )
-            .await?;
+        if crate::code_session_mints_notification(session_kind) {
+            if let Some(workspace_id) = session.workspace_id.map(WorkspaceId) {
+                let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
+                    .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+                    .one(&transaction)
+                    .await
+                    .map_err(store_err)?
+                    .map(|workspace| workspace.title);
+                super::super::notification::record_code_turn_notification_on(
+                    &transaction,
+                    owner,
+                    session_id,
+                    workspace_id,
+                    turn_id,
+                    workspace_title.as_deref(),
+                    kind,
+                )
+                .await?;
+            } else {
+                // Internal sessions open through the chat route. Share its
+                // dedupe key so a native terminal write cannot mint a second row.
+                super::super::notification::record_work_turn_notification_on(
+                    &transaction,
+                    session_id,
+                    turn_id,
+                    kind,
+                )
+                .await?;
+            }
         }
     }
     transaction.commit().await.map_err(store_err)?;

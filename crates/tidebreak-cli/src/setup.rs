@@ -750,7 +750,7 @@ fn providers_json(providers: &[crate::api::wire::ProviderInfo]) -> Vec<serde_jso
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "keychain"))]
 mod tests {
     use super::*;
     use tidebreak_core::Config;
