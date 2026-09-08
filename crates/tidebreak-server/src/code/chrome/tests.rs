@@ -648,13 +648,20 @@ async fn screenshot_refits_capture_scale_to_the_transport_budget() {
 }
 
 #[tokio::test]
-async fn nested_frame_click_sums_every_ancestor_offset() {
+async fn nested_frame_click_uses_the_innermost_owner_in_one_session() {
     let (service, scope, log) =
         scripted_connection(|request| match request["method"].as_str().unwrap_or("") {
             "Page.getFrameTree" => Scripted::Result(json!({"frameTree":{
                 "frame":{"id":"F1","loaderId":"L1","url":PAGE_URL},
                 "childFrames":[{"frame":{"id":"F2","loaderId":"L2","url":PAGE_URL},
                     "childFrames":[{"frame":{"id":"F3","loaderId":"L3","url":PAGE_URL}}]}]}})),
+            "DOM.getFrameOwner" => Scripted::Result(json!({"backendNodeId":
+                if request["params"]["frameId"] == "F3" { 13 } else { 12 }
+            })),
+            "DOM.getBoxModel" => Scripted::Result(json!({"model":{"content":
+                if request["params"]["backendNodeId"] == 13 { json!([150.0,180.0]) }
+                else { json!([100.0,120.0]) }
+            }})),
             "Runtime.evaluate" => {
                 let expression = request["params"]["expression"].as_str().unwrap_or("");
                 if expression.contains("\"prefix\"") {
@@ -680,8 +687,8 @@ async fn nested_frame_click_sums_every_ancestor_offset() {
         result.text
     );
     let moved = logged(&log, |request| mouse_event(request, "mouseMoved")).await;
-    assert_eq!(moved["params"]["x"], 210.0);
-    assert_eq!(moved["params"]["y"], 120.0);
+    assert_eq!(moved["params"]["x"], 160.0);
+    assert_eq!(moved["params"]["y"], 200.0);
     let owners = log
         .lock()
         .unwrap()
@@ -689,5 +696,173 @@ async fn nested_frame_click_sums_every_ancestor_offset() {
         .filter(|request| request["method"] == "DOM.getFrameOwner")
         .map(|request| request["params"]["frameId"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert!(owners.contains(&"F3".to_owned()) && owners.contains(&"F2".to_owned()));
+    assert_eq!(
+        owners,
+        ["F3", "F3"],
+        "each probe uses the owner box that already includes F2's offset"
+    );
+}
+
+#[tokio::test]
+async fn nested_cross_session_click_adds_one_owner_per_session_boundary() {
+    let (service, scope, requests, replies) = connection();
+    // Actual Chrome omits the out-of-process frame from the parent tree.
+    // Its own tree supplies parentId, even when its URL is still loading
+    // when the attach event arrives.
+    replies
+        .send(CdpFrame::Text(
+            json!({
+                "method":"Target.attachedToTarget", "sessionId":"S1",
+                "params":{"sessionId":"S2","targetInfo":{"targetId":"F3","type":"iframe"}}
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    respond(requests, replies, log.clone(), |request| {
+        match request["method"].as_str().unwrap_or("") {
+            "Page.getFrameTree" if request["sessionId"] == "S2" => {
+                Scripted::Result(json!({"frameTree":{
+                    "frame":{"id":"F3","parentId":"F2","loaderId":"L3","url":PAGE_URL},
+                    "childFrames":[{"frame":{"id":"F4","loaderId":"L4","url":PAGE_URL}}]
+                }}))
+            }
+            "Page.getFrameTree" => Scripted::Result(json!({"frameTree":{
+                "frame":{"id":"F1","loaderId":"L1","url":PAGE_URL},
+                "childFrames":[{"frame":{"id":"F2","loaderId":"L2","url":PAGE_URL}}]
+            }})),
+            "DOM.getFrameOwner" => Scripted::Result(json!({"backendNodeId":
+                match request["params"]["frameId"].as_str().unwrap() {
+                    "F4" => 14,
+                    "F3" => 13,
+                    _ => 12,
+                }
+            })),
+            "DOM.getBoxModel" => Scripted::Result(json!({"model":{"content":
+                match request["params"]["backendNodeId"].as_u64().unwrap() {
+                    14 => json!([30.0,40.0]),
+                    13 => json!([150.0,180.0]),
+                    _ => json!([100.0,120.0]),
+                }
+            }})),
+            "Runtime.evaluate" => {
+                let expression = request["params"]["expression"].as_str().unwrap_or("");
+                if expression.contains("\"prefix\"") {
+                    let nodes = if expression.contains("\"frame\":\"F4\"") {
+                        json!([fixture_node("n-3-0", "F4")])
+                    } else {
+                        json!([])
+                    };
+                    Scripted::Result(json!({"result":{"value":{"truncated":false,"nodes":nodes}}}))
+                } else {
+                    page_reply(request)
+                }
+            }
+            _ => page_reply(request),
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-3-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    let moved = logged(&log, |request| mouse_event(request, "mouseMoved")).await;
+    assert_eq!(
+        moved["sessionId"], "S1",
+        "mouse input reaches the top session"
+    );
+    assert_eq!(moved["params"]["x"], 190.0);
+    assert_eq!(moved["params"]["y"], 240.0);
+    let owners = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "DOM.getFrameOwner")
+        .map(|request| {
+            (
+                request["params"]["frameId"].as_str().unwrap().to_owned(),
+                request["sessionId"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        [
+            ("F4".into(), "S2".into()),
+            ("F3".into(), "S1".into()),
+            ("F4".into(), "S2".into()),
+            ("F3".into(), "S1".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn unresolved_cross_session_parent_refuses_before_mouse_input() {
+    for parent_id in [None, Some("missing"), Some("F2")] {
+        let (service, scope, requests, replies) = connection();
+        replies
+            .send(CdpFrame::Text(
+                json!({
+                    "method":"Target.attachedToTarget", "sessionId":"S1",
+                    "params":{"sessionId":"S2","targetInfo":{"targetId":"F2","type":"iframe"}}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        respond(
+            requests,
+            replies,
+            log.clone(),
+            move |request| match request["method"].as_str().unwrap_or("") {
+                "Page.getFrameTree" if request["sessionId"] == "S2" => Scripted::Result(json!({
+                    "frameTree":{"frame":{"id":"F2","parentId":parent_id,"loaderId":"L2","url":PAGE_URL}}
+                })),
+                "Runtime.evaluate" => {
+                    let expression = request["params"]["expression"].as_str().unwrap_or("");
+                    if expression.contains("\"prefix\"") {
+                        let nodes = if expression.contains("\"frame\":\"F2\"") {
+                            json!([fixture_node("n-1-0", "F2")])
+                        } else {
+                            json!([])
+                        };
+                        Scripted::Result(
+                            json!({"result":{"value":{"truncated":false,"nodes":nodes}}}),
+                        )
+                    } else {
+                        page_reply(request)
+                    }
+                }
+                _ => page_reply(request),
+            },
+        );
+        let (target, snapshot) = controlled_tab(&service, &scope).await;
+        let result = service
+            .dispatch(
+                &scope,
+                &act(&target, &snapshot, "n-1-0", json!({"type":"click"})),
+            )
+            .await
+            .result;
+        assert_ne!(result.outcome, ComputerUseOutcome::Completed);
+        assert!(
+            result.text.contains("frame position cannot be resolved"),
+            "{}",
+            result.text
+        );
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "Input.dispatchMouseEvent"));
+    }
 }

@@ -110,8 +110,8 @@ struct Frame {
     loader: String,
     url: String,
     name: String,
-    /// Embedding frame id when the snapshot walk established it; `None` for
-    /// the top frame and for child-session roots with unknown parentage.
+    /// Embedding frame id from the tree or CDP's parentId on a child-session
+    /// root. A missing parent is valid only for the top frame.
     parent: Option<String>,
 }
 #[derive(Clone)]
@@ -319,7 +319,9 @@ impl Access {
                 loader: frame["loaderId"].as_str().unwrap_or("").into(),
                 url: url.into(),
                 name: frame["name"].as_str().unwrap_or("").into(),
-                parent: parent_id.map(str::to_owned),
+                parent: parent_id
+                    .or_else(|| frame["parentId"].as_str())
+                    .map(str::to_owned),
             });
             if let Some(children) = value["childFrames"].as_array() {
                 for child in children {
@@ -1190,6 +1192,7 @@ impl ChromeComputerUseService {
             .ok_or("Chrome node ref is absent from this snapshot")?;
         self.checked_snapshot(access, tab, &snapshot.id, snapshot.epoch)
             .await?;
+        let offsets = frame_offset_chain(snapshot, frame)?;
         options["snapshot"] = json!(snapshot.id);
         options["ref"] = json!(reference);
         let result = access
@@ -1211,32 +1214,21 @@ impl ChromeComputerUseService {
         let mut y = result["y"]
             .as_f64()
             .ok_or("Chrome target has no y coordinate")?;
-        // Input coordinates dispatch in top-frame space, so a framed target
-        // needs every ancestor frame owner's offset, not just the immediate
-        // one. Refuse when the chain to the top frame is unknown rather than
-        // risking a misplaced click in a different element.
-        let mut current = frame.clone();
-        for _ in 0..snapshot.frames.len() {
-            if current == snapshot.frames[0].id {
-                break;
-            }
-            let parent = snapshot
-                .frames
-                .iter()
-                .find(|f| f.id == current)
-                .and_then(|f| f.parent.as_ref())
-                .and_then(|parent| snapshot.frames.iter().find(|f| &f.id == parent))
-                .ok_or("Chrome target is inside a nested frame whose position cannot be resolved; take a fresh snapshot")?;
+        // DOM box coordinates use the root viewport of the queried CDP
+        // session. Add the target frame's owner once, then add only the
+        // owners that cross into an ancestor session. Same-session ancestor
+        // offsets are already included in the innermost owner's box.
+        for (owner_frame, owner_session) in offsets {
             let owner = access
                 .command(
-                    Some(&parent.cdp_session),
+                    Some(owner_session),
                     "DOM.getFrameOwner",
-                    json!({"frameId":current}),
+                    json!({"frameId":owner_frame}),
                 )
                 .await?;
             let bounds = access
                 .command(
-                    Some(&parent.cdp_session),
+                    Some(owner_session),
                     "DOM.getBoxModel",
                     json!({"backendNodeId":owner["backendNodeId"]}),
                 )
@@ -1247,13 +1239,6 @@ impl ChromeComputerUseService {
             y += bounds["model"]["content"][1]
                 .as_f64()
                 .ok_or("Chrome frame offset is unavailable")?;
-            current = parent.id.clone();
-        }
-        if current != snapshot.frames[0].id {
-            return Err(
-                "Chrome target is inside a nested frame whose position cannot be resolved; take a fresh snapshot"
-                    .into(),
-            );
         }
         Ok((x, y))
     }
@@ -1529,10 +1514,58 @@ impl ChromeComputerUseService {
         })
     }
 }
+/// Identify owner boxes whose session-relative offsets reach the top viewport.
+/// The whole chain is validated before a caller sends any geometry commands.
+fn frame_offset_chain<'a>(
+    snapshot: &'a Snapshot,
+    frame_id: &str,
+) -> Result<Vec<(&'a str, &'a str)>, String> {
+    const UNRESOLVED: &str =
+        "Chrome target frame position cannot be resolved; take a fresh snapshot";
+    let top = snapshot.frames.first().ok_or(UNRESOLVED)?;
+    if top.parent.is_some() {
+        return Err(UNRESOLVED.into());
+    }
+    let frames = snapshot
+        .frames
+        .iter()
+        .map(|frame| (frame.id.as_str(), frame))
+        .collect::<HashMap<_, _>>();
+    if frames.len() != snapshot.frames.len() {
+        return Err(UNRESOLVED.into());
+    }
+    let mut current = *frames.get(frame_id).ok_or(UNRESOLVED)?;
+    let mut seen = HashSet::new();
+    let mut offsets = Vec::new();
+    // No coordinate system owns the local target point until its first
+    // owner box translates it into the queried session's root viewport.
+    let mut coordinate_session = None;
+    while current.id != top.id {
+        if !seen.insert(current.id.as_str()) {
+            return Err(UNRESOLVED.into());
+        }
+        let parent = current
+            .parent
+            .as_deref()
+            .and_then(|id| frames.get(id).copied())
+            .ok_or(UNRESOLVED)?;
+        if coordinate_session != Some(parent.cdp_session.as_str()) {
+            offsets.push((current.id.as_str(), parent.cdp_session.as_str()));
+            coordinate_session = Some(parent.cdp_session.as_str());
+        }
+        current = parent;
+    }
+    Ok(offsets)
+}
+
 fn ensure_same_document(before: &[Frame], after: &[Frame]) -> Result<(), String> {
     if before.len() != after.len()
         || before.iter().zip(after).any(|(a, b)| {
-            a.id != b.id || a.loader != b.loader || a.url != b.url || a.cdp_session != b.cdp_session
+            a.id != b.id
+                || a.loader != b.loader
+                || a.url != b.url
+                || a.cdp_session != b.cdp_session
+                || a.parent != b.parent
         })
     {
         Err("Chrome document or frame changed; take a fresh snapshot".into())
