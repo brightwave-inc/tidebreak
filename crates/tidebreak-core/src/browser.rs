@@ -605,6 +605,8 @@ pub enum BrowserActStatus {
     UnsupportedFrame,
     /// The action or target type is not supported by this engine.
     UnsupportedNative,
+    /// This action needs separately approved foreground native input.
+    RequiresForeground,
     /// The action value was rejected (too long, invalid option, etc.).
     InvalidValue,
     /// Another element is covering the target.
@@ -613,6 +615,31 @@ pub enum BrowserActStatus {
     EngineFailure,
     /// The wait or action timed out.
     Timeout,
+}
+
+/// Whether an action may take keyboard focus in Tidebreak.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserExecutionMode {
+    /// Use synthetic DOM input without acquiring native keyboard focus.
+    #[default]
+    Background,
+    /// Use native input after separate approval to take keyboard focus.
+    Foreground,
+}
+
+/// The input mechanism used by an action. DOM events are synthetic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserInputMethod {
+    Dom,
+    /// Older action results use native input and omit this field.
+    #[default]
+    Native,
+}
+
+fn legacy_browser_execution_mode() -> BrowserExecutionMode {
+    BrowserExecutionMode::Foreground
 }
 
 /// Model-facing result of [`BROWSER_ACT_TOOL`].
@@ -625,6 +652,10 @@ pub struct BrowserActResult {
     #[serde(rename = "ref")]
     pub target_ref: String,
     pub action: String,
+    #[serde(default = "legacy_browser_execution_mode")]
+    pub execution_mode: BrowserExecutionMode,
+    #[serde(default)]
+    pub input_method: BrowserInputMethod,
     pub status: BrowserActStatus,
     pub message: String,
     pub requires_resnapshot: bool,
@@ -654,6 +685,10 @@ pub struct BrowserActArgs {
     pub target_ref: String,
     /// The semantic action to perform.
     pub action: BrowserAction,
+    /// Background uses synthetic DOM input and preserves native focus. For
+    /// native input, request foreground and approve the focus disclosure.
+    #[serde(default)]
+    pub execution_mode: BrowserExecutionMode,
 }
 
 /// One logical Tidebreak resource that the native browser executor may attach.
@@ -1388,7 +1423,7 @@ pub fn browser_screenshot_tool_spec() -> ToolSpec {
 pub fn browser_act_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActArgs>(
         BROWSER_ACT_TOOL,
-        "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. This tool is available only when the browser engine can synthesise trusted native input. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
+        "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. By default, execution_mode is background: bounded synthetic DOM actions preserve native keyboard focus. Results report executionMode and inputMethod. DOM events are not trusted input; CSS hover, keys, drag, and native controls may require foreground mode. Foreground input requires separate approval to take keyboard focus for that action. Never silently retry a DOM action as native input. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
     )
 }
 
@@ -1442,6 +1477,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn actions_default_to_background_and_reject_unrecognized_modes() {
+        let request = json!({
+            "browser_id": "browser-1", "snapshot_id": "snapshot-1", "document_epoch": 1,
+            "ref": "@e1", "action": { "type": "click" },
+        });
+        assert_eq!(
+            serde_json::from_value::<BrowserActArgs>(request.clone())
+                .unwrap()
+                .execution_mode,
+            BrowserExecutionMode::Background
+        );
+        let mut foreground = request.clone();
+        foreground["execution_mode"] = json!("foreground");
+        assert_eq!(
+            serde_json::from_value::<BrowserActArgs>(foreground)
+                .unwrap()
+                .execution_mode,
+            BrowserExecutionMode::Foreground
+        );
+        let mut invalid = request;
+        invalid["execution_mode"] = json!("auto");
+        assert!(!validate_browser_act_arguments(&invalid));
+    }
+
+    #[test]
+    fn old_action_results_remain_native_and_new_results_report_input_method() {
+        let legacy = json!({
+            "browserId": "browser-1", "snapshotId": "snapshot-1", "documentEpoch": 1,
+            "ref": "@e1", "action": "click", "status": "ok", "message": "done",
+            "requiresResnapshot": true,
+        });
+        let mut result: BrowserActResult = serde_json::from_value(legacy).unwrap();
+        assert_eq!(result.execution_mode, BrowserExecutionMode::Foreground);
+        assert_eq!(result.input_method, BrowserInputMethod::Native);
+        result.execution_mode = BrowserExecutionMode::Background;
+        result.input_method = BrowserInputMethod::Dom;
+        result.status = BrowserActStatus::RequiresForeground;
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["executionMode"], "background");
+        assert_eq!(json["inputMethod"], "dom");
+        assert_eq!(json["status"], "requires_foreground");
+    }
 
     #[test]
     fn browser_contract_validates_ids_urls_and_snapshot_bounds() {

@@ -445,6 +445,8 @@ function resolveAction(doc, request, { registerTarget = true } = {}) {
   const script = actionMatch[1]
     .replace("__TARGET_IDENTITY_STORE__", identityStoreMatch[1])
     .replace("__SENSITIVE_FIELD_POLICY__", policyMatch[1])
+    .replace("/*__RESOLVED_ACTION__*/", request.inputMethod === "dom"
+      ? semanticsSource.match(/const BACKGROUND_DOM_ACTION_SCRIPT: &str = r#"([\s\S]*?)"#;/)[1] : "")
     .replace("__PAYLOAD__", JSON.stringify(request));
   const execute = new Function("document", "window", "location", `return (${script});`);
   return JSON.parse(execute(doc, doc.defaultView, { href: "https://fixture.invalid/" }));
@@ -1234,4 +1236,148 @@ test("canvas snapshots expose a ref and native coordinate actions", () => {
   for (const action of ["click", "hover", "right_click", "double_click", "drag", "scroll", "key_chord"]) {
     assert.ok(snapshot.nodes[0].actions.includes(action), action);
   }
+});
+
+
+function backgroundFixture(element) {
+  const doc = documentFor(element);
+  const editor = { name: "Tidebreak editor" };
+  doc.activeElement = editor;
+  doc.hasFocus = () => false;
+  const events = [];
+  doc.defaultView.Event = class {
+    constructor(type, options) { this.type = type; Object.assign(this, options); this.isTrusted = false; }
+  };
+  doc.defaultView.MouseEvent = doc.defaultView.Event;
+  element.dispatchEvent = event => { events.push(event); return true; };
+  element.focus = () => assert.fail("background input must not acquire keyboard focus");
+  return { doc, editor, events };
+}
+
+for (const type of [FixtureInput, FixtureTextArea, FixtureSelect]) {
+  Object.defineProperty(type.prototype, "value", {
+    configurable: true,
+    get() { return this._value ?? ""; },
+    set(value) { this._value = String(value); },
+  });
+}
+Object.defineProperty(FixtureInput.prototype, "checked", {
+  configurable: true,
+  get() { return Boolean(this._checked); },
+  set(value) { this._checked = Boolean(value); },
+});
+
+test("background clicks use synthetic target coordinates and preserve editor focus", () => {
+  const element = button();
+  const { doc, editor, events } = backgroundFixture(element);
+  const request = { ...payload({ action: { type: "click" } }), inputMethod: "dom", points: [{ x: 12, y: 18 }] };
+  const result = resolveAction(doc, request);
+  assert.equal(result.status, "ready");
+  assert.equal(result.inputDispatched, true);
+  assert.match(result.message, /Synthetic DOM click/);
+  assert.deepEqual(events.map(event => [event.type, event.clientX, event.clientY, event.isTrusted]), [["click", 32, 48, false]]);
+  assert.equal(doc.activeElement, editor);
+});
+
+test("background fill and clearing preserve editor focus and report synthetic input", () => {
+  for (const value of ["new text", ""]) {
+    const element = textControl();
+    const { doc, editor, events } = backgroundFixture(element);
+    const request = { ...fillPayload(element), inputMethod: "dom", action: { type: "fill", value } };
+    const result = resolveAction(doc, request);
+    assert.equal(result.status, "ready");
+    assert.equal(element.value, value);
+    assert.deepEqual(events.map(event => [event.type, event.isTrusted]), [["input", false], ["change", false]]);
+    assert.equal(doc.activeElement, editor);
+  }
+});
+
+test("background selects set popup values without opening a native menu", () => {
+  const element = selectControl({ size: 1 });
+  const { doc, editor, events } = backgroundFixture(element);
+  const request = { ...keyboardPayload(element, { type: "select", value: "two" }, "acquire"), inputMethod: "dom" };
+  const result = resolveAction(doc, request);
+  assert.equal(result.status, "ready");
+  assert.equal(element.value, "two");
+  assert.deepEqual(events.map(event => event.type), ["input", "change"]);
+  assert.equal(doc.activeElement, editor);
+});
+
+test("background hover reports synthetic events without native CSS hover claims", () => {
+  const element = button();
+  const { doc, editor, events } = backgroundFixture(element);
+  const result = resolveAction(doc, { ...payload({ action: { type: "hover" } }), inputMethod: "dom" });
+  assert.equal(result.status, "ready");
+  assert.match(result.message, /CSS hover and trusted pointer events require foreground input/);
+  assert.deepEqual(events.map(event => event.type), ["mouseover", "mouseenter", "mousemove"]);
+  assert.equal(doc.activeElement, editor);
+});
+
+test("background scroll operates the page without calling focus", () => {
+  const element = button();
+  const { doc, editor } = backgroundFixture(element);
+  const calls = [];
+  doc.documentElement.scrollBy = options => calls.push(options);
+  element.scrollIntoView = options => calls.push(options);
+  assert.equal(resolveAction(doc, { ...payload({ action: { type: "scroll", deltaX: 0, deltaY: 120 } }), inputMethod: "dom" }).status, "ready");
+  assert.equal(resolveAction(doc, { ...payload({ action: { type: "scroll_into_view" } }), inputMethod: "dom" }).status, "ready");
+  assert.deepEqual(calls, [{ left: 0, top: 120, behavior: "instant" }, { block: "center", inline: "center", behavior: "instant" }]);
+  assert.equal(doc.activeElement, editor);
+});
+
+test("background dispatch refuses replaced, covered, and newly sensitive fields before events", () => {
+  for (const changed of ["replaced", "covered", "sensitive"]) {
+    const element = textControl();
+    const { doc, events } = backgroundFixture(element);
+    const request = { ...fillPayload(element), inputMethod: "dom" };
+    resolveAction(doc, request);
+    events.length = 0;
+    element.value = "before replacement";
+    if (changed === "replaced") doc.querySelector = () => textControl();
+    if (changed === "covered") doc.elementFromPoint = () => button();
+    if (changed === "sensitive") element.setAttribute("autocomplete", "one-time-code");
+    const result = resolveAction(doc, request, { registerTarget: false });
+    assert.notEqual(result.status, "ready", changed);
+    assert.equal(events.length, 0, changed);
+  }
+});
+
+
+test("background checked state reports page rejection after synthetic input", () => {
+  for (const reject of [false, true]) {
+    const element = textControl({ type: "checkbox" });
+    const { doc, editor, events } = backgroundFixture(element);
+    const request = {
+      ...fillPayload(element),
+      inputMethod: "dom",
+      action: { type: "check", checked: true },
+    };
+    request.fingerprint.role = "checkbox";
+    element.dispatchEvent = event => {
+      events.push(event);
+      if (reject && event.type === "change") element.checked = false;
+      return true;
+    };
+    const result = resolveAction(doc, request);
+    assert.equal(result.status, reject ? "invalid_value" : "ready");
+    assert.equal(result.inputDispatched, true);
+    assert.equal(element.checked, !reject);
+    assert.deepEqual(events.map(event => event.type), ["input", "change"]);
+    assert.equal(doc.activeElement, editor);
+  }
+});
+
+test("background fill reports page rejection and requires inspection before another action", () => {
+  const element = textControl();
+  const { doc, events } = backgroundFixture(element);
+  element.dispatchEvent = event => {
+    events.push(event);
+    if (event.type === "change") element.value = "page restored value";
+    return true;
+  };
+  const result = resolveAction(doc, { ...fillPayload(element), inputMethod: "dom" });
+  assert.equal(result.status, "invalid_value");
+  assert.equal(result.inputDispatched, true);
+  assert.match(result.message, /Inspect it before another action/);
+  assert.equal(element.value, "page restored value");
 });
