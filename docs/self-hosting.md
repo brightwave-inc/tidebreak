@@ -336,6 +336,151 @@ The stack publishes `127.0.0.1:8080` deliberately. Nothing in
 `docker-compose.yml` terminates TLS, and the database port is not published
 at all.
 
+## Run the Slack adapter beside this machine
+
+The adapter is a shared, stateful service. It is not part of the server
+image. You run it next to a standalone machine when you want mentions and
+DMs in your own Slack app to drive sessions on that machine. The public
+image is `ghcr.io/brightwave-inc/tidebreak-slack-adapter` (tags `v<version>`).
+It listens on 8080. It needs its own PostgreSQL (`DATABASE_URL`), a
+token-sealing key, Slack credentials, and a machine directory. It does not
+need Model Gateway variables.
+
+A Compose example that starts the machine, PostgreSQL, the adapter, and the
+adapter's database lives in
+[`deploy/compose/slack/`](../deploy/compose/slack/). Use that directory; do
+not bolt the adapter onto `deploy/self-host/` without giving it its own
+store.
+
+### Slack app to import
+
+Create a Slack app from a manifest. Give the bot scopes that let it read
+mentions and DMs, post in threads, add and read reactions, and read channel
+membership. Point the Events API request URL and the slash-command request
+URL at the adapter's public origin — not at the machine. Fill the exact
+paths from the adapter image you pin; they are not defined in this
+repository.
+
+A sketch (replace the host and the request paths):
+
+```yaml
+display_information:
+  name: Tidebreak
+features:
+  bot_user:
+    display_name: Tidebreak
+    always_online: true
+  slash_commands:
+    - command: /tidebreak
+      url: https://<your adapter host>/<slash-command path>
+      description: Help, repository defaults, and session commands
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - im:history
+      - im:read
+      - im:write
+      - chat:write
+      - reactions:read
+      - reactions:write
+      - channels:read
+      - groups:read
+      - mpim:read
+settings:
+  event_subscriptions:
+    request_url: https://<your adapter host>/<events path>
+    bot_events:
+      - app_mention
+      - message.im
+      - member_joined_channel
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+```
+
+The adapter receives events and slash commands over the HTTPS request URLs
+above; it does not use socket mode, so no app-level token is needed.
+
+Put `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` in `slack.env` beside the
+Compose file. Keep that file off the machine's `.env` so a restart of one
+side does not leak the other's secrets.
+
+### Bootstrap bearer the machine expects
+
+The connect handshake is not anonymous. Set
+`TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` on the machine to one or more
+32–512 character bearers (comma-separated). Generate one with
+`openssl rand -hex 32`. The adapter sends that bearer only to start
+connect. Leave the variable unset and the machine refuses connect start.
+
+Put the same value in the machine directory as `bootstrap_token`. To rotate
+without downtime, add the new value on the machine, move the adapter, then
+remove the old value.
+
+### Service line for channel sessions
+
+Channel sessions need a durable owner that never signs in. In the token
+file, add a `service` line
+([decision 0089](decisions/0089-service-principals.md)):
+
+```text
+alice  <person token>   admin
+slack  <service token>  service
+```
+
+A service line does not satisfy the "at least one admin" check. Do not
+combine `admin` and `service` on one line.
+
+### Machine directory (file or environment)
+
+The adapter finds your machine from a JSON directory of this shape:
+
+```json
+{
+  "machines": {
+    "<ref>": {
+      "kind": "standalone",
+      "base_url": "http://tidebreak:8080",
+      "public_url": "https://<your machine host>",
+      "bootstrap_token": "<the bearer the machine lists in TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS>"
+    }
+  },
+  "defaults": {
+    "<Slack workspace id>": "<ref>"
+  }
+}
+```
+
+`base_url` is how the adapter reaches the machine on the Compose network.
+`public_url` is how a person opens the machine in a browser to approve the
+workspace grant.
+
+Pass that document in either of two ways:
+
+- **File.** Mount it into the adapter container and point
+  `SLACK_ADAPTER_MACHINES_FILE` at it, as the Compose example does with
+  `./machines.json`. Adapter images from gateway release v0.1.0-alpha.195
+  read the file.
+- **Environment.** Set `SLACK_ADAPTER_MACHINES` to the same JSON string.
+
+`GET /health/setup` on the adapter reports `ready` and `missing`. Use it
+before you install the Slack app.
+
+### Approve the workspace grant
+
+After a first mention, the adapter starts a connect handshake. Open the
+machine in a browser at `TIDEBREAK_PUBLIC_URL`, sign in as an
+administrator, and approve the Slack workspace grant on that page. The
+approval names the workspace being linked. Until you approve it, channel
+sessions do not run.
+
+`/tidebreak help` lists the command surface once the grant is live. Set a
+channel default with `/tidebreak repo set owner/name` so a mention can
+choose a repository without a `repo:` directive. See
+[Slack sessions](slack-sessions.md) for identity, repository choice, and
+commands.
+
 ## What the image provides
 
 Code mode runs agents on the machine, so the image carries the tools it

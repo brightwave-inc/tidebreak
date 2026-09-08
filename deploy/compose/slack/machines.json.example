@@ -1,0 +1,13 @@
+{
+  "machines": {
+    "standalone": {
+      "kind": "standalone",
+      "base_url": "http://tidebreak:8080",
+      "public_url": "https://<your machine host>",
+      "bootstrap_token": "<the bearer the machine lists in TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS>"
+    }
+  },
+  "defaults": {
+    "<Slack workspace id>": "standalone"
+  }
+}
