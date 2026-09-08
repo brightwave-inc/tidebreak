@@ -205,8 +205,6 @@ pub struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
-    /// Hosted execution keeps untrusted engines outside this server process.
-    sandbox_only_execution: bool,
     /// The mode a channel-bound session takes on this machine's engine when
     /// the channel names none, and the most permissive mode a channel may
     /// name (decision 88). Both default to `ask`.
@@ -478,7 +476,6 @@ impl CodeRuntime {
             harness_llm,
             gateway_runtime: None,
             remote: None,
-            sandbox_only_execution: false,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -640,7 +637,6 @@ impl CodeRuntime {
             harness_llm: None,
             gateway_runtime: None,
             remote: None,
-            sandbox_only_execution: false,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -751,21 +747,6 @@ impl CodeRuntime {
     #[must_use]
     pub fn external_permission_policy(&self) -> ExternalPermissionPolicy {
         self.external_permission
-    }
-
-    pub fn with_sandbox_only_execution(mut self) -> Self {
-        self.sandbox_only_execution = true;
-        self
-    }
-
-    fn require_machine_execution(&self) -> Result<(), ServerError> {
-        if self.sandbox_only_execution {
-            return Err(ServerError::conflict_kind(
-                "sandbox_session_required",
-                "this hosted deployment runs agents in isolated sandboxes; start a new sandbox session",
-            ));
-        }
-        Ok(())
     }
 
     /// The remote-session context, when this deployment configured one.

@@ -153,7 +153,6 @@ impl CodeRuntime {
                 "this session runs in a sandbox and cannot attach a local worker",
             ));
         }
-        self.require_machine_execution()?;
         let mut session = session;
         let workspace = self.session_workspace(&session).await?;
         if workspace
@@ -677,50 +676,6 @@ mod tests {
         let recovered = runtime.get_session(&owner, session.id).await.unwrap();
         assert_eq!(recovered.spawn_epoch, session.spawn_epoch);
         assert_eq!(recovered.lifecycle, SessionLifecycle::Idle);
-    }
-
-    #[tokio::test]
-    async fn sandbox_only_execution_refuses_existing_machine_sessions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let runtime = scripted_runtime(tmp.path())
-            .await
-            .with_sandbox_only_execution();
-        let owner = OwnerId::local();
-        let mut session = workspaceless_session(&owner, HarnessKind::ClaudeCode);
-        session.lifecycle = SessionLifecycle::Idle;
-        insert_session(&runtime.db, &session).await.unwrap();
-
-        let error = runtime
-            .attach_and_spawn_worker(session.clone())
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), "sandbox_session_required");
-        let outcome = runtime
-            .submit_turn(
-                &owner,
-                session.id,
-                "run locally".into(),
-                None,
-                None,
-                Vec::new(),
-                None,
-            )
-            .await;
-        let error = match outcome {
-            Err(error) => error,
-            Ok(_) => panic!("a hosted machine session accepted local execution"),
-        };
-        assert_eq!(error.kind(), "sandbox_session_required");
-        runtime.recover().await.unwrap();
-        assert!(!runtime.has_worker(session.id));
-        assert_eq!(
-            runtime
-                .get_session(&owner, session.id)
-                .await
-                .unwrap()
-                .execution_location,
-            tidebreak_core::ExecutionLocation::Machine
-        );
     }
 
     /// A worker still on another file than the channel selects is respawned

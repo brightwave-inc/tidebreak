@@ -477,15 +477,19 @@ A session runs where the deployment can run it
 The machine chooses an execution location once, at external
 get-or-create, from what it has: a gateway sandbox when a sandbox
 runtime is configured, else its own engine on a worktree under its
-worktree root. The location is stored on the session, reported on the
-snapshot and the external event stream, and never changes. The machine
-engine is the floor, not an interim path: a deployment without a
-gateway, and a gateway deployment without a configured runtime, runs
-Slack sessions the way it already runs desktop, mobile, and `agent-mcp`
-sessions. An earlier version of this page refused to ship Slack on the
-machine engine; the refusal rested on the sandbox being the only thing
-that made unattended `Allow` safe, and the answer is not to withhold
-sessions but to withhold `Allow`.
+worktree root. That default is for external sessions only. Desktop,
+mobile, and `agent-mcp` sessions on the same machine keep machine
+execution. The location is stored on the session, reported on the
+snapshot and the external event stream, and never changes. After
+create, `execution_location` is the only dispatch rule: a later
+message, including one typed on the web, follows the stored location.
+The machine engine is the floor, not an interim path: a deployment
+without a gateway, and a gateway deployment without a configured
+runtime, runs Slack sessions the way it already runs desktop, mobile,
+and `agent-mcp` sessions. An earlier version of this page refused to
+ship Slack on the machine engine; the refusal rested on the sandbox
+being the only thing that made unattended `Allow` safe, and the answer
+is not to withhold sessions but to withhold `Allow`.
 
 Permission mode follows the location. Inside a sandbox the engine is
 `Allow`; confinement is the permission boundary

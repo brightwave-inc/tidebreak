@@ -1666,7 +1666,6 @@ impl CodeRuntime {
                 "this workspace's engine runs in a remote sandbox; there is no host worktree",
             ));
         }
-        self.require_machine_execution()?;
         if !std::path::Path::new(&workspace.worktree_path).exists() {
             return Err(ServerError::not_found("workspace worktree is gone"));
         }
