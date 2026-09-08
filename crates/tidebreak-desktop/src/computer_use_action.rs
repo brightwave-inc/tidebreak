@@ -159,7 +159,7 @@ pub(crate) fn activity_for_call(
     call: &tidebreak_core::computer_session::ComputerUseCall,
     source: ComputerUseActionSource,
 ) -> Option<ComputerUseActionEvent> {
-    let action_name = if call.name == "chrome_act" {
+    let action_name = if matches!(call.name.as_str(), "chrome_act" | "browser_act") {
         call.arguments.get("action")?.get("type")?.as_str()?
     } else {
         call.name.strip_prefix("computer_")?
@@ -168,8 +168,8 @@ pub(crate) fn activity_for_call(
         "click" | "check" | "select" => ComputerUseActionKind::Click,
         "double_click" => ComputerUseActionKind::DoubleClick,
         "type_text" | "type" | "fill" => ComputerUseActionKind::Type,
-        "key_press" | "press" => ComputerUseActionKind::Key,
-        "scroll" => ComputerUseActionKind::Scroll,
+        "key_press" | "press" | "key_chord" => ComputerUseActionKind::Key,
+        "scroll" | "scroll_into_view" => ComputerUseActionKind::Scroll,
         "drag" => ComputerUseActionKind::Drag,
         "hover" | "focus_window" | "resize_window" | "launch_app" | "return_to_tidebreak" => {
             ComputerUseActionKind::Move

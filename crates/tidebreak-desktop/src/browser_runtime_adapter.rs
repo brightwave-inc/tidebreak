@@ -137,14 +137,47 @@ impl BrowserRuntime for DesktopBrowserRuntime {
         args: &BrowserActArgs,
     ) -> Result<BrowserActResult, BrowserRuntimeError> {
         let capability_id = self.sessions.capability_for(&self.registry, scope)?;
-        crate::browser_semantics::browser_native_act(
+        let call = tidebreak_core::computer_session::ComputerUseCall {
+            request_id: Uuid::new_v4(),
+            name: "browser_act".into(),
+            arguments: serde_json::to_value(args).expect("browser arguments serialize"),
+        };
+        let mut activity = crate::computer_use_action::activity_for_call(
+            scope.session,
+            &call,
+            crate::computer_use_action::ComputerUseActionSource::Browser,
+        );
+        if let Some(event) = &mut activity {
+            event.browser_id = Some(args.browser_id.clone());
+            event.workspace_id = Some(scope.workspace.to_string());
+            event.document_epoch = Some(args.document_epoch);
+            crate::computer_use_action::emit_computer_use_action(&self.app, event);
+        }
+        let result = crate::browser_semantics::browser_native_act(
             &self.app,
             &self.registry,
             capability_id,
             args.clone(),
         )
         .await
-        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+        .map_err(|error| map_native_error(Some(&args.browser_id), error));
+        if let Some(activity) = activity {
+            let success = result
+                .as_ref()
+                .is_ok_and(|result| result.status == tidebreak_core::BrowserActStatus::Ok);
+            let error_code = match &result {
+                Ok(result)
+                    if result.status == tidebreak_core::BrowserActStatus::RequiresForeground =>
+                {
+                    Some("requires_foreground")
+                }
+                _ => None,
+            };
+            crate::computer_use_action::finish_call_activity(
+                &self.app, activity, success, error_code,
+            );
+        }
+        result
     }
 
     async fn open(
