@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     computer_use::{
-        AxTree, CaptureTarget, ControlMeta, ElementTarget, PermissionStatus, WaitObservation,
-        WindowInfo,
+        AxTree, CaptureTarget, ControlMeta, ElementTarget, ExecutionMode, PermissionStatus,
+        WaitObservation, WindowInfo,
     },
     set_of_marks::Mark,
     AppId, Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId,
@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -485,6 +485,11 @@ pub enum OperationRequest {
         button: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         click_count: Option<u32>,
+        /// Absent on the wire means background — the canonical default. Every
+        /// control op carries this; the trusted desktop only sends
+        /// `foreground` after its own separate takeover approval.
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Type text into the targeted element (or the app's focused field).
     /// Gated like [`OperationRequest::CuClick`].
@@ -492,6 +497,8 @@ pub enum OperationRequest {
         bundle_id: String,
         text: String,
         target: ElementTargetWire,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Press a key, optionally with chord modifiers, in one app.
     CuKeyPress {
@@ -499,6 +506,8 @@ pub enum OperationRequest {
         key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modifiers: Option<Vec<String>>,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Scroll the targeted element or point by a pixel delta.
     CuScroll {
@@ -508,19 +517,29 @@ pub enum OperationRequest {
         dx: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dy: Option<f64>,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Bring an app (optionally one window of it) to the front.
     CuFocusWindow {
         bundle_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<u32>,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Launch the registered app for `bundle_id`. No executable/path/args.
-    CuLaunchApp { bundle_id: String },
+    CuLaunchApp {
+        bundle_id: String,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
+    },
     /// Move the pointer over an element or confined point without pressing.
     CuHover {
         bundle_id: String,
         target: ElementTargetWire,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Press at `from`, drag through bounded steps, release at `to`.
     CuDrag {
@@ -529,6 +548,8 @@ pub enum OperationRequest {
         to: ElementTargetWire,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Resize one window of the app to a width/height in logical points.
     CuResizeWindow {
@@ -537,6 +558,8 @@ pub enum OperationRequest {
         window_id: Option<u32>,
         width: f64,
         height: f64,
+        #[serde(default)]
+        execution_mode: ExecutionMode,
     },
     /// Pause the agent's loop, bounded by the broker. Never reaches the
     /// native helper.
@@ -729,6 +752,11 @@ pub enum ErrorCode {
     /// Distinct from [`ErrorCode::Denied`]: the remedy is to back off, never a
     /// per-app consent card.
     Yielded,
+    /// A background-mode control op could not be performed without taking over
+    /// the user's focus or pointer, and nothing ran. Not retryable: the agent
+    /// must surface it, and a foreground re-issue is a deliberate escalation
+    /// that needs the user's separate takeover approval — never automatic.
+    RequiresForeground,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.
@@ -1337,12 +1365,30 @@ mod tests {
                 ..Default::default()
             },
             duration_ms: Some(250),
+            execution_mode: ExecutionMode::Foreground,
         };
         let encoded = serde_json::to_value(&request).unwrap();
         assert_eq!(encoded["operation"], "cu_drag");
+        assert_eq!(encoded["payload"]["execution_mode"], "foreground");
         assert_eq!(
             serde_json::from_value::<OperationRequest>(encoded).unwrap(),
             request
+        );
+
+        // A control payload without the field is background — the canonical
+        // default survives the wire, so an older caller cannot accidentally
+        // request a takeover.
+        let decoded: OperationRequest = serde_json::from_value(serde_json::json!({
+            "operation": "cu_launch_app",
+            "payload": { "bundle_id": "com.example.app" }
+        }))
+        .unwrap();
+        assert_eq!(
+            decoded,
+            OperationRequest::CuLaunchApp {
+                bundle_id: "com.example.app".to_owned(),
+                execution_mode: ExecutionMode::Background,
+            }
         );
 
         let condition = OperationRequest::CuWaitCondition {

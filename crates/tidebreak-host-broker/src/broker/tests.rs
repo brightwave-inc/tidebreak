@@ -4469,6 +4469,9 @@ struct StubCuBackend {
     wait_conditions: Mutex<Vec<(String, WaitCondition)>>,
     capture_png: Vec<u8>,
     fail_click: Mutex<Option<BackendErrorKind>>,
+    /// (op, mode) for every control dispatch, so tests can assert the broker
+    /// hands the backend the mode the wire carried (background by default).
+    modes: Mutex<Vec<(&'static str, ExecutionMode)>>,
 }
 
 impl StubCuBackend {
@@ -4529,6 +4532,14 @@ impl StubCuBackend {
 
     fn wait_conditions(&self) -> Vec<(String, WaitCondition)> {
         self.wait_conditions.lock().unwrap().clone()
+    }
+
+    fn modes(&self) -> Vec<(&'static str, ExecutionMode)> {
+        self.modes.lock().unwrap().clone()
+    }
+
+    fn note_mode(&self, op: &'static str, mode: ExecutionMode) {
+        self.modes.lock().unwrap().push((op, mode));
     }
 
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
@@ -4627,6 +4638,7 @@ impl ComputerUseBackend for StubCuBackend {
         target: &ElementTarget,
         _button: Option<&str>,
         _click_count: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         if let Some(kind) = *self.fail_click.lock().unwrap() {
             return Err(BackendError {
@@ -4638,10 +4650,12 @@ impl ComputerUseBackend for StubCuBackend {
             .lock()
             .unwrap()
             .push((bundle_id.to_owned(), target.element_id.clone()));
+        self.note_mode("click", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4650,12 +4664,15 @@ impl ComputerUseBackend for StubCuBackend {
         _bundle_id: &str,
         text: &str,
         _target: &ElementTarget,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.typed.lock().unwrap().push(text.to_owned());
+        self.note_mode("type_text", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4664,12 +4681,15 @@ impl ComputerUseBackend for StubCuBackend {
         _bundle_id: &str,
         key: &str,
         _modifiers: Option<&[String]>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.keys.lock().unwrap().push(key.to_owned());
+        self.note_mode("key_press", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4679,12 +4699,15 @@ impl ComputerUseBackend for StubCuBackend {
         _target: &ElementTarget,
         _dx: Option<f64>,
         _dy: Option<f64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.scrolled.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("scroll", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4692,30 +4715,46 @@ impl ComputerUseBackend for StubCuBackend {
         &self,
         bundle_id: &str,
         _window_id: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.focused.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("focus_window", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
-    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError> {
+    fn launch_app(
+        &self,
+        bundle_id: &str,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
         self.launched.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("launch_app", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
-    fn hover(&self, bundle_id: &str, _target: &ElementTarget) -> Result<ControlMeta, BackendError> {
+    fn hover(
+        &self,
+        bundle_id: &str,
+        _target: &ElementTarget,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
         self.hovered.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("hover", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4725,12 +4764,15 @@ impl ComputerUseBackend for StubCuBackend {
         _from: &ElementTarget,
         _to: &ElementTarget,
         _duration_ms: Option<u64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.dragged.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("drag", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: true,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4740,15 +4782,18 @@ impl ComputerUseBackend for StubCuBackend {
         _window_id: Option<u32>,
         width: f64,
         height: f64,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.resized
             .lock()
             .unwrap()
             .push((bundle_id.to_owned(), width, height));
+        self.note_mode("resize_window", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
         })
     }
 
@@ -4866,6 +4911,7 @@ impl CuFixture {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         })
     }
 }
@@ -4889,6 +4935,7 @@ fn native_primitives_authorize_as_control_and_reach_the_backend() {
     fixture
         .operate(OperationRequest::CuLaunchApp {
             bundle_id: "com.example.app".to_owned(),
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
@@ -4899,6 +4946,7 @@ fn native_primitives_authorize_as_control_and_reach_the_backend() {
                 y: Some(20.0),
                 ..Default::default()
             },
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
@@ -4915,6 +4963,7 @@ fn native_primitives_authorize_as_control_and_reach_the_backend() {
                 ..Default::default()
             },
             duration_ms: Some(250),
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
@@ -4923,6 +4972,7 @@ fn native_primitives_authorize_as_control_and_reach_the_backend() {
             window_id: Some(7),
             width: 900.0,
             height: 700.0,
+            execution_mode: Default::default(),
         })
         .unwrap();
 
@@ -4973,22 +5023,26 @@ fn read_grants_never_cover_launch_hover_drag_or_resize() {
     for request in [
         OperationRequest::CuLaunchApp {
             bundle_id: "com.example.app".to_owned(),
+            execution_mode: Default::default(),
         },
         OperationRequest::CuHover {
             bundle_id: "com.example.app".to_owned(),
             target: ElementTargetWire::default(),
+            execution_mode: Default::default(),
         },
         OperationRequest::CuDrag {
             bundle_id: "com.example.app".to_owned(),
             from: ElementTargetWire::default(),
             to: ElementTargetWire::default(),
             duration_ms: None,
+            execution_mode: Default::default(),
         },
         OperationRequest::CuResizeWindow {
             bundle_id: "com.example.app".to_owned(),
             window_id: None,
             width: 100.0,
             height: 100.0,
+            execution_mode: Default::default(),
         },
     ] {
         let error = operate(&fixture.broker.operator(), context, request).unwrap_err();
@@ -5018,6 +5072,7 @@ fn new_control_ops_are_blocklist_gated_and_bounded() {
     let error = fixture
         .operate(OperationRequest::CuLaunchApp {
             bundle_id: "com.apple.SecurityAgent".to_owned(),
+            execution_mode: Default::default(),
         })
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Denied);
@@ -5030,6 +5085,7 @@ fn new_control_ops_are_blocklist_gated_and_bounded() {
             from: ElementTargetWire::default(),
             to: ElementTargetWire::default(),
             duration_ms: Some(10_001),
+            execution_mode: Default::default(),
         })
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidRequest);
@@ -5039,6 +5095,7 @@ fn new_control_ops_are_blocklist_gated_and_bounded() {
             window_id: None,
             width: 10_001.0,
             height: 1.0,
+            execution_mode: Default::default(),
         })
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidRequest);
@@ -5280,6 +5337,7 @@ fn a_commit_shaped_key_press_is_held_for_confirmation() {
             bundle_id: "com.example.app".to_owned(),
             key: "d".to_owned(),
             modifiers: Some(vec!["cmd".to_owned(), "shift".to_owned()]),
+            execution_mode: Default::default(),
         })
         .unwrap();
     let OperationResult::CuNeedsConfirmation(confirmation) = held else {
@@ -5309,6 +5367,7 @@ fn a_plain_navigation_key_proceeds_without_a_confirmation() {
             bundle_id: "com.example.app".to_owned(),
             key: "left".to_owned(),
             modifiers: None,
+            execution_mode: Default::default(),
         })
         .unwrap();
     assert!(matches!(result, OperationResult::CuKeyPress(_)));
@@ -5403,6 +5462,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap_err();
@@ -5453,6 +5513,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap_err();
@@ -5475,6 +5536,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap();
@@ -5720,6 +5782,7 @@ fn every_computer_use_op_lands_in_the_audit_trail_desensitized() {
             bundle_id: "com.example.app".to_owned(),
             key: "return".to_owned(),
             modifiers: None,
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
@@ -6020,12 +6083,14 @@ fn scroll_and_focus_record_intent_before_act() {
             target: ElementTargetWire::default(),
             dx: None,
             dy: Some(40.0),
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
         .operate(OperationRequest::CuFocusWindow {
             bundle_id: "com.example.app".to_owned(),
             window_id: Some(7),
+            execution_mode: Default::default(),
         })
         .unwrap();
     assert_eq!(fixture.backend.scrolls(), ["com.example.app"]);
@@ -6084,10 +6149,12 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
             target: ElementTargetWire::default(),
             dx: None,
             dy: Some(40.0),
+            execution_mode: Default::default(),
         },
         OperationRequest::CuFocusWindow {
             bundle_id: "com.example.app".to_owned(),
             window_id: Some(7),
+            execution_mode: Default::default(),
         },
     ] {
         let error = operate(&broker.operator(), context, request).unwrap_err();
