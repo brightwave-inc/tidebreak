@@ -67,12 +67,13 @@ The fixture directory may also be provided as
 }
 ```
 
-Events: `submission`, `dropdown_selection`, `checkbox_toggle`, `hover_status`,
-`drag_started`, `drag_dropped`, `delayed_status`, `window_resized`,
+Events: `launch_ready`, `submission`, `text_entry`, `dropdown_selection`,
+`checkbox_toggle`, `hover_status`, `drag_started`, `drag_dropped`, `scroll`,
+`delayed_status`, `window_resized`,
 `second_window_opened`, `second_window_closed`, `reset_requested`,
-`reset_completed`, `launch_ready`, `state_snapshot`. Reusing a sequence number
-or writing an event that did not happen are acceptance failures, so re-running
-the smoke on the same fixture directory is not a shortcut.
+`state_snapshot`. Reusing a sequence number or writing an event that did not
+happen are acceptance failures, so re-running the smoke on the same fixture
+directory is not a shortcut.
 
 ## Evidence distinction
 
