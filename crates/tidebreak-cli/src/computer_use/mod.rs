@@ -15,6 +15,7 @@
 //! (Grok's `read_file` vision path) can read the actual pixels. Base-64
 //! image data never enters model-facing text or stdout JSON.
 
+use crate::image_output::write_image_private;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -912,53 +913,6 @@ pub(crate) async fn run_computer(command: ComputerCommand) -> Result<()> {
             .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
     );
     Ok(())
-}
-
-/// Write PNG bytes to `path` privately: created 0600 on Unix, replaced
-/// atomically via a same-directory temp file, never following a symlink at
-/// the destination.
-fn write_image_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(AgentError::msg("--output path is a symlink"));
-        }
-    }
-    let tmp = parent.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("computer-image"),
-        Uuid::new_v4().simple()
-    ));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|error| AgentError::msg(format!("could not create image file: {error}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| AgentError::msg(format!("could not set image mode: {error}")))?;
-        }
-        file.write_all(bytes)
-            .map_err(|error| AgentError::msg(format!("could not write image file: {error}")))?;
-        file.sync_all()
-            .map_err(|error| AgentError::msg(format!("could not sync image file: {error}")))?;
-        drop(file);
-        std::fs::rename(&tmp, path)
-            .map_err(|error| AgentError::msg(format!("could not install image file: {error}")))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
 }
 
 #[cfg(test)]

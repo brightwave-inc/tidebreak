@@ -112,6 +112,7 @@ mod diagnostics;
 mod event_stream;
 mod folder;
 mod folder_executor;
+mod image_output;
 mod outputs;
 mod print;
 mod setup;

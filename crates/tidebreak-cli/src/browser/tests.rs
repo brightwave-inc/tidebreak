@@ -1069,6 +1069,49 @@ fn screenshot_output_attaches_pixels_without_serializing_base64() {
 }
 
 #[test]
+fn screenshot_file_replaces_public_files_privately_and_refuses_symlinks() {
+    let result = BrowserScreenshotResult {
+        browser_id: "browser-1".into(),
+        snapshot_id: "snapshot-1".into(),
+        document_epoch: 4,
+        image_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
+        mime_type: "image/png".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("screenshot.png");
+    std::fs::write(&path, b"old image").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let receipt = write_screenshot_output(&result, &path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(receipt.byte_len, bytes.len() as u64);
+    assert_eq!(bytes, decode_and_fit_screenshot(&result).unwrap().bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.path().join("linked.png");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(write_screenshot_output(&result, &link).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        if cfg!(unix) { 2 } else { 1 }
+    );
+}
+
+#[test]
 fn screenshot_output_rejects_mismatched_or_invalid_png_data() {
     let mismatched = BrowserScreenshotResult {
         browser_id: "browser-1".to_string(),

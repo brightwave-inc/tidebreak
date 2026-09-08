@@ -2242,26 +2242,12 @@ fn write_screenshot_output(
     result: &BrowserScreenshotResult,
     path: &std::path::Path,
 ) -> std::result::Result<ScreenshotFileReceipt, ClientFailure> {
-    use std::io::Write as _;
-
     let fitted = decode_and_fit_screenshot(result)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| ClientFailure::ToolFailed {
-            detail: format!("could not open screenshot output file: {error}"),
-        })?;
-    file.write_all(&fitted.bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| ClientFailure::ToolFailed {
+    crate::image_output::write_image_private(path, &fitted.bytes).map_err(|error| {
+        ClientFailure::ToolFailed {
             detail: format!("could not write screenshot output file: {error}"),
-        })?;
+        }
+    })?;
     Ok(ScreenshotFileReceipt {
         browser_id: result.browser_id.clone(),
         snapshot_id: result.snapshot_id.clone(),
