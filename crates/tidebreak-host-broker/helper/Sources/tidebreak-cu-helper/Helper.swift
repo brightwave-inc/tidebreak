@@ -56,11 +56,18 @@ enum CaptureTargetKind: String, Decodable {
     case app
 }
 
+enum ExecutionMode: String, Codable {
+    case background
+    case foreground
+}
+
 /// A single helper request. All operation parameters are optional and validated
 /// per-op; an absent required field yields a structured `invalid_request` error
 /// rather than a crash.
 struct HelperRequest: Decodable {
     let op: HelperOp
+    /// Background is the default. Foreground requires explicit caller consent.
+    let executionMode: ExecutionMode?
     /// Broker-owned cancellation generation for this operation.
     let cancelPath: String?
     let cancelGeneration: String?
@@ -161,6 +168,7 @@ enum HelperErrorCode: String, Encodable {
     /// The helper requires macOS 14+; the host is older. Explicit, so the
     /// broker reports an unsupported build rather than a generic failure.
     case unsupported = "unsupported"
+    case requiresForeground = "requires_foreground"
 }
 
 struct HelperError: Error {
@@ -174,7 +182,7 @@ struct HelperError: Error {
 struct CUHelper {
     @MainActor
     static func main() async {
-        _ = NSApplication.shared
+        NSApplication.shared.setActivationPolicy(.prohibited)
         // Native helper APIs require macOS 14. The host broker still runs on
         // older macOS; only this computer-use surface is unsupported.
         if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 14 {

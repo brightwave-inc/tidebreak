@@ -20,6 +20,7 @@ enum Control {
     /// AX targeting was not available and a coordinate/keystroke synthesis was
     /// used instead — useful signal for the agent.
     struct Result: Encodable {
+        let executionMode: ExecutionMode
         let success: Bool
         let usedFallback: Bool
         let detail: String?
@@ -154,9 +155,37 @@ enum Control {
         try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
-        try activateAndWait(app, request: request)
+        try prepareForInput(app, request: request)
         let button = request.button ?? "left"
         let count = request.clickCount ?? 1
+
+        if request.executionMode != .foreground {
+            guard button == "left", count == 1 else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "background clicks support a single Accessibility press")
+            }
+            let element: AXUIElement
+            if request.elementId != nil {
+                element = try resolveElement(app: app, request: request)
+            } else {
+                element = try resolveBackgroundPoint(app: app, request: request)
+            }
+            let role = AXTree.copyString(element, kAXRoleAttribute as CFString)
+            guard role != kAXPopUpButtonRole, role != kAXMenuItemRole else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "native menu interaction requires foreground computer use")
+            }
+            try ensureNotCancelled(request)
+            guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "the target has no supported background press action")
+            }
+            return Result(
+                executionMode: .background, success: true, usedFallback: false, detail: "AXPress")
+        }
 
         if request.elementId != nil {
             let element = try resolveElement(app: app, request: request)
@@ -165,7 +194,9 @@ enum Control {
             if button == "left", count <= 1 {
                 try ensureNotCancelled(request)
                 if AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
-                    return Result(success: true, usedFallback: false, detail: "AXPress")
+                    return Result(
+                        executionMode: request.executionMode ?? .background, success: true,
+                        usedFallback: false, detail: "AXPress")
                 }
             }
             // Right / double / AXPress-unsupported → synthesize at the element's
@@ -174,9 +205,12 @@ enum Control {
                 throw HelperError(
                     code: .operationFailed, message: "element has no on-screen frame to click")
             }
-            try ensurePointInApp(center, app: app)
-            try postMouseClick(at: center, button: button, clickCount: count, request: request)
-            return Result(success: true, usedFallback: true, detail: "synthesized \(button) click")
+            try ensurePointInApp(center, app: app, request: request)
+            try postMouseClick(
+                at: center, button: button, clickCount: count, app: app, request: request)
+            return Result(
+                executionMode: request.executionMode ?? .background, success: true,
+                usedFallback: true, detail: "synthesized \(button) click")
         }
 
         guard let point = explicitPoint(request) else {
@@ -184,9 +218,11 @@ enum Control {
         }
         // A raw point is global; confine it to the granted app's windows so a
         // click cannot land on another app's (or Tidebreak's own) surface.
-        try ensurePointInApp(point, app: app)
-        try postMouseClick(at: point, button: button, clickCount: count, request: request)
-        return Result(success: true, usedFallback: true, detail: "synthesized click at point")
+        try ensurePointInApp(point, app: app, request: request)
+        try postMouseClick(at: point, button: button, clickCount: count, app: app, request: request)
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
+            detail: "synthesized click at point")
     }
 
     static func typeText(_ request: HelperRequest) throws -> Result {
@@ -195,6 +231,34 @@ enum Control {
         try ensureNoSystemDialogFrontmost()
         guard let text = request.text else {
             throw HelperError(code: .invalidRequest, message: "type_text requires text")
+        }
+
+        if request.executionMode != .foreground {
+            guard request.elementId != nil else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "background typing requires an Accessibility text element")
+            }
+            let element = try resolveElement(app: app, request: request)
+            try ensureNotCancelled(request)
+            guard
+                AXUIElementSetAttributeValue(
+                    element, kAXValueAttribute as CFString, text as CFString) == .success
+            else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "the text element does not support a background value update")
+            }
+            guard let value = AXTree.copyAttr(element, kAXValueAttribute as CFString),
+                CFGetTypeID(value) == CFStringGetTypeID(), value as! String == text
+            else {
+                throw HelperError(
+                    code: .operationFailed,
+                    message: "the text element did not retain the requested value")
+            }
+            return Result(
+                executionMode: .background, success: true, usedFallback: false,
+                detail: "verified AXValue")
         }
 
         if request.elementId != nil {
@@ -210,23 +274,30 @@ enum Control {
                 element, kAXValueAttribute as CFString, text as CFString)
                 == .success
             {
-                return Result(success: true, usedFallback: false, detail: "set AXValue")
+                return Result(
+                    executionMode: request.executionMode ?? .background, success: true,
+                    usedFallback: false, detail: "set AXValue")
             }
             // Synthesized keystrokes go to the frontmost app, not the element's
             // PID, and setting AXFocused does not reliably foreground the app —
             // bring it forward first (as keyPress and the no-element path below
             // do) so the text cannot land in a different window.
-            try activateAndWait(app, request: request)
-            try typeUnicode(text, request: request)
-            return Result(success: true, usedFallback: true, detail: "synthesized keystrokes")
+            try prepareForInput(app, request: request)
+            try typeUnicode(text, app: app, request: request)
+            return Result(
+                executionMode: request.executionMode ?? .background, success: true,
+                usedFallback: true, detail: "synthesized keystrokes")
         }
 
-        try activateAndWait(app, request: request)
-        try typeUnicode(text, request: request)
-        return Result(success: true, usedFallback: true, detail: "synthesized keystrokes")
+        try prepareForInput(app, request: request)
+        try typeUnicode(text, app: app, request: request)
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
+            detail: "synthesized keystrokes")
     }
 
     static func keyPress(_ request: HelperRequest) throws -> Result {
+        try requireForeground(request, operation: "key_press")
         try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
@@ -237,12 +308,12 @@ enum Control {
             throw HelperError(code: .invalidRequest, message: "unknown key: \(keyName)")
         }
         // A chord targets the focused app, so bring it forward first.
-        try activateAndWait(app, request: request)
+        try prepareForInput(app, request: request)
         // A real event source (not nil) delivers far more reliably than a fresh
         // nil source. With a nil source, apps that read modifier/key state from
         // the session (Electron, browsers) intermittently drop synthesized
         // chords and the bare Return that submits a field.
-        let source = CGEventSource(stateID: .combinedSessionState)
+        let source = eventSource(request)
         let modifiers = resolveModifiers(request.modifiers ?? [])
         guard
             let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
@@ -300,25 +371,27 @@ enum Control {
         var pressedModifiers = 0
         var keyIsDown = false
         defer {
-            if keyIsDown { up.post(tap: .cghidEventTap) }
+            if keyIsDown { post(up, app: app, request: request) }
             for modUp in modifierUps.suffix(pressedModifiers) {
-                modUp.post(tap: .cghidEventTap)
+                post(modUp, app: app, request: request)
             }
         }
         for modDown in modifierDowns {
             try ensureNotCancelled(request)
-            modDown.post(tap: .cghidEventTap)
+            post(modDown, app: app, request: request)
             pressedModifiers += 1
         }
         if !modifiers.isEmpty { usleep(keyPressHoldMicros) }
         try ensureNotCancelled(request)
-        down.post(tap: .cghidEventTap)
+        post(down, app: app, request: request)
         keyIsDown = true
         usleep(keyPressHoldMicros)
         try ensureNotCancelled(request)
-        up.post(tap: .cghidEventTap)
+        post(up, app: app, request: request)
         keyIsDown = false
-        return Result(success: true, usedFallback: false, detail: "key \(keyName)")
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: false,
+            detail: "key \(keyName)")
     }
 
     static func scroll(_ request: HelperRequest) throws -> Result {
@@ -328,16 +401,21 @@ enum Control {
         let dx = request.dx ?? 0
         let dy = request.dy ?? 0
 
-        try activateAndWait(app, request: request)
+        if request.executionMode != .foreground {
+            return try scrollAccessibility(app: app, request: request)
+        }
+        try prepareForInput(app, request: request)
         let point: CGPoint
         if request.elementId != nil || explicitPoint(request) != nil {
             point = try resolveTargetPoint(app: app, request: request)
-        } else if let cursor = CGEvent(source: nil)?.location {
+        } else if request.executionMode == .foreground, let cursor = CGEvent(source: nil)?.location
+        {
             point = cursor
         } else {
-            throw HelperError(code: .operationFailed, message: "could not locate the pointer")
+            throw HelperError(
+                code: .operationFailed, message: "background scrolling requires element_id or x/y")
         }
-        try ensurePointInApp(point, app: app)
+        try ensurePointInApp(point, app: app, request: request)
         guard dx.isFinite, dy.isFinite else {
             throw HelperError(code: .invalidRequest, message: "scroll deltas must be finite")
         }
@@ -357,19 +435,21 @@ enum Control {
         }
         guard
             let move = CGEvent(
-                mouseEventSource: CGEventSource(stateID: .combinedSessionState),
+                mouseEventSource: eventSource(request),
                 mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
         else {
             throw HelperError(
                 code: .operationFailed, message: "could not position the pointer for scrolling")
         }
         try ensureNotCancelled(request)
-        move.post(tap: .cghidEventTap)
+        post(move, app: app, request: request)
         usleep(20_000)
         event.location = point
         try ensureNotCancelled(request)
-        event.post(tap: .cghidEventTap)
-        return Result(success: true, usedFallback: true, detail: "scroll dx \(dx) dy \(dy)")
+        post(event, app: app, request: request)
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
+            detail: "scroll dx \(dx) dy \(dy)")
     }
 
     /// Positive API deltas move content down/right; CG wheel deltas use the opposite sign.
@@ -378,6 +458,7 @@ enum Control {
     }
 
     static func focusWindow(_ request: HelperRequest) throws -> Result {
+        try requireForeground(request, operation: "focus_window")
         try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
@@ -385,9 +466,11 @@ enum Control {
         // bare async activate() loses the race against a just-activated window,
         // so wait for the app to actually become frontmost before reporting
         // success.
-        try activateAndWait(app, request: request)
+        try prepareForInput(app, request: request)
         guard let windowId = request.windowId else {
-            return Result(success: true, usedFallback: false, detail: "focused app")
+            return Result(
+                executionMode: request.executionMode ?? .background, success: true,
+                usedFallback: false, detail: "focused app")
         }
         guard
             windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier)
@@ -415,7 +498,9 @@ enum Control {
             if let focused = AXTree.copyAttr(appElement, kAXFocusedWindowAttribute as CFString),
                 CFGetTypeID(focused) == AXUIElementGetTypeID(), CFEqual(focused, window)
             {
-                return Result(success: true, usedFallback: false, detail: "verified focused window")
+                return Result(
+                    executionMode: request.executionMode ?? .background, success: true,
+                    usedFallback: false, detail: "verified focused window")
             }
             usleep(20_000)
         } while ProcessInfo.processInfo.systemUptime < deadline
@@ -434,16 +519,19 @@ enum Control {
         if let running = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleId && !$0.isTerminated
         }) {
-            try activateAndWait(running, request: request)
+            try prepareForInput(running, request: request)
             return Result(
-                success: true, usedFallback: false, detail: "activated running \(bundleId)")
+                executionMode: request.executionMode ?? .background,
+                success: true, usedFallback: false,
+                detail: request.executionMode == .foreground
+                    ? "activated running \(bundleId)" : "application is already running")
         }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
             throw HelperError(
                 code: .notFound, message: "registered application \(bundleId) not found")
         }
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
+        configuration.activates = request.executionMode == .foreground
         try ensureNotCancelled(request)
         let app = try await NSWorkspace.shared.openApplication(
             at: url, configuration: configuration)
@@ -451,21 +539,24 @@ enum Control {
             throw HelperError(
                 code: .operationFailed, message: "the requested application did not start")
         }
-        return Result(success: true, usedFallback: false, detail: "launched \(bundleId)")
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: false,
+            detail: "launched \(bundleId)")
     }
 
     /// Move the pointer over an element or confined coordinate point without
     /// pressing.
     static func hover(_ request: HelperRequest) throws -> Result {
+        try requireForeground(request, operation: "hover")
         try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
-        try activateAndWait(app, request: request)
+        try prepareForInput(app, request: request)
         let point = try resolveTargetPoint(app: app, request: request)
-        try ensurePointInApp(point, app: app)
+        try ensurePointInApp(point, app: app, request: request)
         guard
             let move = CGEvent(
-                mouseEventSource: CGEventSource(stateID: .combinedSessionState),
+                mouseEventSource: eventSource(request),
                 mouseType: .mouseMoved,
                 mouseCursorPosition: point, mouseButton: .left)
         else {
@@ -473,19 +564,22 @@ enum Control {
                 code: .operationFailed, message: "could not synthesize pointer movement")
         }
         try ensureNotCancelled(request)
-        move.post(tap: .cghidEventTap)
+        post(move, app: app, request: request)
         usleep(50_000)
-        return Result(success: true, usedFallback: true, detail: "posted pointer movement")
+        return Result(
+            executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
+            detail: "posted pointer movement")
     }
 
     /// Press, drag through a bounded number of steps, and release. Both
     /// endpoints are resolved and confined before the first mouse-down, so a
     /// mid-drag test cannot leave a different app holding the button.
     static func drag(_ request: HelperRequest) throws -> Result {
+        try requireForeground(request, operation: "drag")
         try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
-        try activateAndWait(app, request: request)
+        try prepareForInput(app, request: request)
         let from = try resolveTargetPoint(app: app, request: request, prefix: "from")
         let to = try resolveTargetPoint(app: app, request: request, prefix: "to")
         let points = dragPoints(from: from, to: to, durationMs: request.durationMs)
@@ -500,7 +594,7 @@ enum Control {
                 message: "the drag path leaves the granted app")
         }
         guard
-            let source = CGEventSource(stateID: .combinedSessionState),
+            let source = eventSource(request),
             let down = CGEvent(
                 mouseEventSource: source, mouseType: .leftMouseDown,
                 mouseCursorPosition: from, mouseButton: .left),
@@ -527,29 +621,31 @@ enum Control {
         try ensureNotCancelled(request)
         try deliverDrag(
             count: moves.count,
-            press: { down.post(tap: .cghidEventTap) },
+            press: { post(down, app: app, request: request) },
             move: { index in
                 try ensureNotCancelled(request)
                 try ensureNoSystemDialogFrontmost()
                 guard
-                    NSWorkspace.shared.frontmostApplication?.processIdentifier
-                        == app.processIdentifier
+                    request.executionMode != .foreground
+                        || NSWorkspace.shared.frontmostApplication?.processIdentifier
+                            == app.processIdentifier
                 else {
                     throw HelperError(
                         code: .yielded, message: "the granted app lost focus during drag")
                 }
-                try ensurePointInApp(points[index], app: app)
+                try ensurePointInApp(points[index], app: app, request: request)
                 moves[index].timestamp = DispatchTime.now().uptimeNanoseconds
-                moves[index].post(tap: .cghidEventTap)
+                post(moves[index], app: app, request: request)
                 lastPoint = points[index]
             },
             release: {
                 up.location = lastPoint
                 up.timestamp = DispatchTime.now().uptimeNanoseconds
-                up.post(tap: .cghidEventTap)
+                post(up, app: app, request: request)
             },
             pause: { Thread.sleep(forTimeInterval: interval) })
         return Result(
+            executionMode: request.executionMode ?? .background,
             success: true, usedFallback: true, detail: "posted drag with \(points.count) movements")
     }
 
@@ -644,7 +740,9 @@ enum Control {
         repeat {
             try ensureNotCancelled(request)
             if let frame = AXTree.copyFrame(candidate), sizeMatches(frame: frame, requested: size) {
-                return Result(success: true, usedFallback: false, detail: "verified resized window")
+                return Result(
+                    executionMode: request.executionMode ?? .background, success: true,
+                    usedFallback: false, detail: "verified resized window")
             }
             usleep(20_000)
         } while ProcessInfo.processInfo.systemUptime < deadline
@@ -1057,13 +1155,26 @@ enum Control {
                 code: .invalidRequest, message: "target requires element_id or x/y")
         }
         let point = CGPoint(x: x, y: y)
-        try ensurePointInApp(point, app: app)
+        try ensurePointInApp(point, app: app, request: request)
         return point
     }
 
     /// Hit-test through Accessibility to ignore click-through overlays while
     /// refusing any pointer target owned by another app.
-    private static func ensurePointInApp(_ point: CGPoint, app: NSRunningApplication) throws {
+    private static func ensurePointInApp(
+        _ point: CGPoint, app: NSRunningApplication, request: HelperRequest
+    ) throws {
+        if request.executionMode != .foreground {
+            guard
+                pointBelongsToApp(
+                    point, pid: app.processIdentifier,
+                    windows: windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier))
+            else {
+                throw HelperError(
+                    code: .targetOutsideApp, message: "the target point is outside the granted app")
+            }
+            return
+        }
         guard point.x.isFinite, point.y.isFinite else {
             throw HelperError(code: .invalidRequest, message: "target coordinates must be finite")
         }
@@ -1089,6 +1200,142 @@ enum Control {
     static func pointBelongsToApp(_ point: CGPoint, pid: pid_t, windows: [AppWindow]) -> Bool {
         guard point.x.isFinite, point.y.isFinite else { return false }
         return windows.first(where: { $0.frame.contains(point) })?.ownerPid == pid
+    }
+
+    static func requireForeground(_ request: HelperRequest, operation: String) throws {
+        guard request.executionMode == .foreground else {
+            throw HelperError(
+                code: .requiresForeground,
+                message: "\(operation) requires foreground computer use; no input was sent")
+        }
+    }
+
+    private static func eventSource(_ request: HelperRequest) -> CGEventSource? {
+        CGEventSource(stateID: .combinedSessionState)
+    }
+
+    private static func post(_ event: CGEvent, app: NSRunningApplication, request: HelperRequest) {
+        // Every synthesized-input entry point rejects background before it reaches this function.
+        precondition(request.executionMode == .foreground)
+        event.post(tap: .cghidEventTap)
+    }
+
+    private static func resolveBackgroundPoint(app: NSRunningApplication, request: HelperRequest)
+        throws -> AXUIElement
+    {
+        guard let point = explicitPoint(request), point.x.isFinite, point.y.isFinite else {
+            throw HelperError(
+                code: .invalidRequest, message: "background click requires an element or finite x/y"
+            )
+        }
+        let application = AXTree.appElement(for: app.processIdentifier)
+        var element: AXUIElement?
+        let error = AXUIElementCopyElementAtPosition(
+            application, Float(point.x), Float(point.y), &element)
+        var owner: pid_t = 0
+        guard error == .success, let element, AXUIElementGetPid(element, &owner) == .success,
+            owner == app.processIdentifier
+        else {
+            throw HelperError(
+                code: .requiresForeground,
+                message: "the coordinate has no background Accessibility target")
+        }
+        return element
+    }
+
+    static func backgroundScrollPosition(current: Double, delta: Double) -> Double {
+        min(1, max(0, current + (delta > 0 ? 0.1 : -0.1)))
+    }
+
+    private static func scrollAccessibility(app: NSRunningApplication, request: HelperRequest)
+        throws -> Result
+    {
+        let dx = request.dx ?? 0
+        let dy = request.dy ?? 0
+        guard dx.isFinite, dy.isFinite else {
+            throw HelperError(code: .invalidRequest, message: "scroll deltas must be finite")
+        }
+        guard request.elementId != nil else {
+            throw HelperError(
+                code: .requiresForeground,
+                message: "background scrolling requires an Accessibility scroll element")
+        }
+        var element = try resolveElement(app: app, request: request)
+        for _ in 0..<25 {
+            if AXTree.copyString(element, kAXRoleAttribute as CFString) == kAXScrollAreaRole {
+                break
+            }
+            guard let parent = AXTree.copyAttr(element, kAXParentAttribute as CFString),
+                CFGetTypeID(parent) == AXUIElementGetTypeID()
+            else { break }
+            element = parent as! AXUIElement
+        }
+        var actions: [(AXUIElement, CFString?, Double?)] = []
+        for (delta, attribute) in [
+            (dx, kAXHorizontalScrollBarAttribute), (dy, kAXVerticalScrollBarAttribute),
+        ] {
+            if delta == 0 { continue }
+            guard let value = AXTree.copyAttr(element, attribute as CFString),
+                CFGetTypeID(value) == AXUIElementGetTypeID()
+            else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "the scroll element has no background scrollbar")
+            }
+            let bar = value as! AXUIElement
+            let action = (delta > 0 ? kAXIncrementAction : kAXDecrementAction) as CFString
+            var names: CFArray?
+            if AXUIElementCopyActionNames(bar, &names) == .success,
+                (names as? [String])?.contains(action as String) == true
+            {
+                actions.append((bar, action, nil))
+                continue
+            }
+            var settable = DarwinBoolean(false)
+            guard
+                AXUIElementIsAttributeSettable(bar, kAXValueAttribute as CFString, &settable)
+                    == .success,
+                settable.boolValue,
+                let current = AXTree.copyAttr(bar, kAXValueAttribute as CFString) as? NSNumber,
+                current.doubleValue >= 0, current.doubleValue <= 1
+            else {
+                throw HelperError(
+                    code: .requiresForeground,
+                    message: "the scrollbar does not support background scrolling")
+            }
+            let next = backgroundScrollPosition(current: current.doubleValue, delta: delta)
+            actions.append((bar, nil, next))
+        }
+        for (bar, action, value) in actions {
+            try ensureNotCancelled(request)
+            if let action {
+                guard AXUIElementPerformAction(bar, action) == .success else {
+                    throw HelperError(
+                        code: .operationFailed,
+                        message: "the scrollbar rejected its Accessibility action")
+                }
+            } else if let value {
+                guard
+                    AXUIElementSetAttributeValue(
+                        bar, kAXValueAttribute as CFString, NSNumber(value: value)) == .success,
+                    let actual = AXTree.copyAttr(bar, kAXValueAttribute as CFString) as? NSNumber,
+                    abs(actual.doubleValue - value) < 0.001
+                else {
+                    throw HelperError(
+                        code: .operationFailed,
+                        message: "the scrollbar did not retain its requested position")
+                }
+            }
+        }
+        return Result(
+            executionMode: .background, success: true, usedFallback: false,
+            detail: "AX scrollbar step; the app determines the scroll distance")
+    }
+
+    private static func prepareForInput(_ app: NSRunningApplication, request: HelperRequest) throws
+    {
+        try ensureNotCancelled(request)
+        if request.executionMode == .foreground { try activateAndWait(app, request: request) }
     }
 
     // MARK: - Activation
@@ -1131,22 +1378,25 @@ enum Control {
     // MARK: - CGEvent synthesis
 
     private static func postMouseClick(
-        at point: CGPoint, button: String, clickCount: Int, request: HelperRequest
+        at point: CGPoint, button: String, clickCount: Int, app: NSRunningApplication,
+        request: HelperRequest
     ) throws {
-        try postMouseSequence(at: point, button: button, clickCount: clickCount, request: request)
+        try postMouseSequence(
+            at: point, button: button, clickCount: clickCount, app: app, request: request)
     }
 
     /// Post a single-target click sequence with the same combined session
     /// source hover/drag use, so Electron-style apps see mouse state coherently.
     private static func postMouseSequence(
-        at point: CGPoint, button: String, clickCount: Int, request: HelperRequest
+        at point: CGPoint, button: String, clickCount: Int, app: NSRunningApplication,
+        request: HelperRequest
     ) throws {
         let (downType, upType, cgButton): (CGEventType, CGEventType, CGMouseButton) =
             button == "right"
             ? (.rightMouseDown, .rightMouseUp, .right)
             : (.leftMouseDown, .leftMouseUp, .left)
         let count = max(1, min(clickCount, 3))
-        let source = CGEventSource(stateID: .combinedSessionState)
+        let source = eventSource(request)
         for click in 1...count {
             try ensureNotCancelled(request)
             guard
@@ -1164,8 +1414,8 @@ enum Control {
                 down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
                 up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
             }
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            post(down, app: app, request: request)
+            post(up, app: app, request: request)
         }
     }
 
@@ -1200,7 +1450,9 @@ enum Control {
     /// carrying all of its UTF-16 units, so a non-BMP character (an emoji, CJK
     /// ext-B) is never split into a lone, unpaired surrogate that the receiving
     /// app would drop or replace with U+FFFD.
-    private static func typeUnicode(_ text: String, request: HelperRequest) throws {
+    private static func typeUnicode(
+        _ text: String, app: NSRunningApplication, request: HelperRequest
+    ) throws {
         let units = Array(text.utf16)
         guard units.count <= maxSynthesizedTypeUnits else {
             throw HelperError(
@@ -1211,11 +1463,13 @@ enum Control {
         }
         // One event source for the whole burst gives steadier ordering than a
         // fresh nil source per event.
-        let source = CGEventSource(stateID: .combinedSessionState)
+        let source = eventSource(request)
         for grapheme in text {
             try ensureNotCancelled(request)
             try ensureNoSystemDialogFrontmost()
-            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == request.bundleId
+            guard
+                request.executionMode != .foreground
+                    || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == request.bundleId
             else {
                 throw HelperError(
                     code: .yielded, message: "the granted app lost focus while typing")
@@ -1234,8 +1488,8 @@ enum Control {
                 up.keyboardSetUnicodeString(
                     stringLength: length, unicodeString: buffer.baseAddress!)
             }
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            post(down, app: app, request: request)
+            post(up, app: app, request: request)
             usleep(perKeystrokeDelayMicros)
         }
     }
