@@ -49,6 +49,7 @@ mod code_worktree;
 mod command_parity;
 mod computer_runtime_adapter;
 mod computer_use_action;
+mod computer_use_permissions;
 mod deep_link;
 mod deliverables;
 mod documents;
@@ -888,6 +889,9 @@ pub fn run() {
             node_install::install_node_runtime,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
+            computer_use_permissions::computer_use_permission_status,
+            computer_use_permissions::request_computer_use_permissions,
+            computer_use_permissions::open_computer_use_permission_settings,
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,

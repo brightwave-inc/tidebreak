@@ -23,6 +23,8 @@ const grantFolderCapability = vi.hoisted(() =>
   vi.fn<() => Promise<boolean | null>>(),
 );
 vi.mock("../host", () => ({
+  hasNativeHost: () => false,
+  attachedRemotely: () => false,
   listCapabilityConsents,
   revokeCapabilityConsent,
   listConnectedFolders,

@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import { ComputerUsePermissionsSection } from "./ComputerUsePermissionsSection";
 
 import type {
   ApiClient,
@@ -594,6 +595,7 @@ export function PermissionsPanel({
       description="What the agent can do without asking. Revoke anything to be asked again."
       busy={statements === null}
     >
+      <ComputerUsePermissionsSection />
       {body}
     </SettingsPanel>
   );
