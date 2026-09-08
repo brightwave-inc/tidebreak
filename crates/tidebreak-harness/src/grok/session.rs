@@ -626,6 +626,7 @@ impl GrokSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         // The engine writes its session directory as it starts, so from here
@@ -1379,6 +1380,7 @@ exit 0
                     binary: Some(binary),
                     sink,
                     browser: None,
+                    native: None,
                 },
                 "1.0.13".into(),
             )

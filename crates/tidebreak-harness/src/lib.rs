@@ -689,6 +689,64 @@ impl BrowserChannelSpec {
     }
 }
 
+/// Session-private native computer-use capability-file path.
+///
+/// The desktop native runtime writes a short-lived JSON capability file at
+/// `capability_file` and the server injects only that path through
+/// `TIDEBREAK_NATIVE_CAPFILE` before the engine child is spawned. No token,
+/// URL, ambient app credential, or other secret enters argv, logs, approval
+/// previews, or persisted session metadata. The CLI bridge reads the file
+/// once at startup and the runtime revokes it when the session ends.
+///
+/// `bridge_command` is the absolute path to the trusted CLI executable the
+/// engine's MCP server or CLI fallback invokes to reach the native channel.
+/// It carries no secret and is safe to serialize into engine config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NativeChannelSpec {
+    /// Absolute path to the session-private capability file.
+    pub capability_file: std::path::PathBuf,
+    /// Absolute path to the trusted bridge executable (the `tidebreak` CLI
+    /// sidecar).
+    pub bridge_command: std::path::PathBuf,
+}
+
+impl NativeChannelSpec {
+    /// Adapter-owned environment key injected into every engine child.
+    /// Adapters reject `TIDEBREAK_` keys from settings and the harness
+    /// child-env filter strips the same namespace, so the bridge path is
+    /// injected last and wins.
+    pub const ENV_KEY: &'static str = "TIDEBREAK_NATIVE_CAPFILE";
+
+    /// Construct from both required halves.
+    #[must_use]
+    pub fn new(capability_file: std::path::PathBuf, bridge_command: std::path::PathBuf) -> Self {
+        Self {
+            capability_file,
+            bridge_command,
+        }
+    }
+
+    /// The trusted bridge executable path.
+    #[must_use]
+    pub fn bridge_command(&self) -> &std::path::Path {
+        &self.bridge_command
+    }
+
+    /// Inject the capability-file path as the final environment value on a
+    /// Tokio engine command.
+    pub fn inject_env_tokio(&self, cmd: &mut tokio::process::Command) {
+        let (key, value) = self.env_pair();
+        cmd.env(key, value);
+    }
+
+    /// Return the exact key/value pair adapters inject into engine children.
+    #[must_use]
+    pub fn env_pair(&self) -> (&'static str, &std::ffi::OsStr) {
+        (Self::ENV_KEY, self.capability_file.as_os_str())
+    }
+}
+
 /// What an adapter needs to spawn or connect one session.
 pub struct SessionSpec {
     /// Principal the session acts for. An in-process engine resolves its
@@ -744,6 +802,10 @@ pub struct SessionSpec {
     /// produced a session-private capability file. `None` preserves the
     /// existing behavior: no browser tools are advertised or injected.
     pub browser: Option<BrowserChannelSpec>,
+    /// Native computer-use channel wiring, when the desktop native runtime
+    /// has produced a session-private capability file. `None` preserves the
+    /// existing behavior: no native tools are advertised or injected.
+    pub native: Option<NativeChannelSpec>,
 }
 
 /// Receives normalized events as the engine stream is parsed.

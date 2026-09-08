@@ -9,6 +9,8 @@ pub mod approval_sweep;
 pub mod attention;
 pub mod browser_channel;
 pub mod browser_runtime;
+pub mod native_channel;
+pub mod native_runtime;
 pub mod bus;
 pub mod checkpoint;
 pub mod ci_logs;
