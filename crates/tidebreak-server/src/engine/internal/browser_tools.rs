@@ -373,7 +373,11 @@ impl ToolFailure {
         };
         Self {
             category,
-            message: format!("({kind}) {}", scrub_server_message(message)),
+            message: format!(
+                "({}) {}",
+                scrub_server_message(kind),
+                scrub_server_message(message)
+            ),
         }
     }
 }
@@ -1091,43 +1095,11 @@ mod tests {
             )
     }
 
-    /// Bind a loopback listener the local network policy can actually route.
-    ///
-    /// CI routes any loopback port, so the ephemeral bind wins there. The
-    /// coding sandbox routes exactly one reserved port (15003); when another
-    /// suite already holds it there is nothing this process can bind and
-    /// reach, so the caller skips instead of reporting a false failure.
-    async fn routable_listener() -> Option<tokio::net::TcpListener> {
-        for candidate in [0u16, 15003] {
-            let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await else {
-                continue;
-            };
-            let port = listener.local_addr().unwrap().port();
-            let probe = tokio::time::timeout(
-                Duration::from_secs(2),
-                tokio::net::TcpStream::connect(("127.0.0.1", port)),
-            )
-            .await;
-            if matches!(probe, Ok(Ok(_))) {
-                return Some(listener);
-            }
-        }
-        None
-    }
-
-    /// One live-loopback test covers transport, image, gating-at-dispatch,
-    /// and privacy together: environments that route only one loopback port
-    /// must not have parallel tests each try to bind it.
     #[tokio::test]
     async fn the_channel_round_trips_results_and_images_over_loopback() {
         let token = test_token();
         let token_for_server = token.clone();
-        let Some(listener) = routable_listener().await else {
-            eprintln!(
-                "skipping: this sandbox cannot route a loopback port for the fake browser channel"
-            );
-            return;
-        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
             "http://127.0.0.1:{}/code/browser",
             listener.local_addr().unwrap().port()

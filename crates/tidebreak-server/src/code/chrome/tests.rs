@@ -552,7 +552,14 @@ async fn screenshot_refits_capture_scale_to_the_transport_budget() {
     let (service, scope, log) = scripted_connection(move |request| {
         if request["method"] == "Page.captureScreenshot" {
             let attempt = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            let mut bytes = Vec::new();
+            let pixels = image::RgbaImage::from_pixel(320, 240, image::Rgba([0, 0, 0, 255]));
+            image::DynamicImage::ImageRgba8(pixels)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
             bytes.resize(if attempt == 0 { 2_000_000 } else { 200_000 }, 0);
             Scripted::Result(
                 json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes)}),
@@ -585,8 +592,8 @@ async fn screenshot_refits_capture_scale_to_the_transport_budget() {
     assert!(scales[1] < scales[0], "{scales:?}");
     let width = result.data["width"].as_f64().unwrap();
     let height = result.data["height"].as_f64().unwrap();
-    assert!(width < 800.0 && width > 0.0, "{width}");
-    assert!((width / height - 800.0 / 600.0).abs() < 0.01);
+    // Report the delivered PNG pixels, including any Chrome device scale.
+    assert_eq!((width, height), (320.0, 240.0));
 }
 
 #[tokio::test]

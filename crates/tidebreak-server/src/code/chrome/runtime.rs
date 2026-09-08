@@ -1129,8 +1129,17 @@ impl ChromeComputerUseService {
             if bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES
                 && encoded.len() <= MAX_BROWSER_SCREENSHOT_FRAME_BYTES
             {
+                let (delivered_width, delivered_height) = image::ImageReader::with_format(
+                    std::io::Cursor::new(&bytes),
+                    image::ImageFormat::Png,
+                )
+                .into_dimensions()
+                .map_err(|_| "Chrome screenshot has invalid PNG dimensions")?;
+                if delivered_width == 0 || delivered_height == 0 {
+                    return Err("Chrome screenshot has empty dimensions".into());
+                }
                 return Ok((
-                    json!({"targetRef":args.target_ref,"snapshotId":args.snapshot_id,"documentEpoch":args.document_epoch,"mimeType":"image/png","width":(width*scale).round(),"height":(height*scale).round()}),
+                    json!({"targetRef":args.target_ref,"snapshotId":args.snapshot_id,"documentEpoch":args.document_epoch,"mimeType":"image/png","width":delivered_width,"height":delivered_height}),
                     vec![ComputerUseImage {
                         mime_type: "image/png".into(),
                         base64: encoded.into(),
