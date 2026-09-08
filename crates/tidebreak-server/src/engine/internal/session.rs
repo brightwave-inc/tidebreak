@@ -21,8 +21,8 @@ use tidebreak_core::{
     TurnStatus, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
-    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ParkWait, ResumeInput,
-    SessionSpec, TurnInput, TurnOutcome,
+    ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError, HarnessSession,
+    NativeChannelSpec, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 
 use crate::code::bus::CodeEventBus;
@@ -40,9 +40,10 @@ pub(super) struct InternalSession {
     #[allow(dead_code)]
     session_id: SessionId,
     chat_id: SessionId,
-    /// Session-native computer-use tools built from the session's capability
-    /// file (decision 93). Empty when the session holds no native channel.
-    native_tools: Vec<Arc<dyn tidebreak_core::Tool>>,
+    /// Session-scoped computer-use tools built from the session's capability
+    /// files (decision 94): the native channel's tools followed by the in-app
+    /// browser channel's. Empty when the session holds neither channel.
+    session_tools: Vec<Arc<dyn tidebreak_core::Tool>>,
     active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals acknowledged through [`HarnessSession::decide`].
     decided: Mutex<HashSet<CallId>>,
@@ -62,6 +63,28 @@ struct ActivePark {
 
 fn store_error(error: tidebreak_core::AgentError) -> HarnessError {
     HarnessError::Other(format!("engine store: {error}"))
+}
+
+/// Build the session-scoped tool surface from the channels the spec carries:
+/// native computer-use tools first, then the in-app browser channel's. Each
+/// channel is optional and independent; a capability file the engine cannot
+/// read or trust fails the launch rather than silently dropping the channel.
+fn build_session_tools(
+    native: Option<&NativeChannelSpec>,
+    browser: Option<&BrowserChannelSpec>,
+) -> Result<Vec<Arc<dyn tidebreak_core::Tool>>, HarnessError> {
+    let mut tools = match native {
+        Some(native) => super::native_tools::native_session_tools(native)
+            .map_err(|error| HarnessError::Other(format!("native channel: {error}")))?,
+        None => Vec::new(),
+    };
+    if let Some(browser) = browser {
+        tools.extend(
+            super::browser_tools::browser_session_tools(browser)
+                .map_err(|error| HarnessError::Other(format!("browser channel: {error}")))?,
+        );
+    }
+    Ok(tools)
 }
 
 impl InternalSession {
@@ -113,15 +136,11 @@ impl InternalSession {
             .ensure_foreground_agent_run(chat_id)
             .await
             .map_err(store_error)?;
-        // The native channel is the same token-scoped authority every
-        // external harness gets; ignoring it silently would advertise a
-        // capability the session cannot use. A channel the engine cannot
-        // read fails the launch instead.
-        let native_tools = match spec.native.as_ref() {
-            Some(native) => super::native_tools::native_session_tools(native)
-                .map_err(|error| HarnessError::Other(format!("native channel: {error}")))?,
-            None => Vec::new(),
-        };
+        // The native and browser channels are the same token-scoped
+        // authority every external harness gets; ignoring either silently
+        // would advertise a capability the session cannot use. A channel the
+        // engine cannot read fails the launch instead.
+        let session_tools = build_session_tools(spec.native.as_ref(), spec.browser.as_ref())?;
         let session = Self {
             state,
             db,
@@ -131,7 +150,7 @@ impl InternalSession {
             owner: spec.owner,
             session_id: spec.session_id,
             chat_id,
-            native_tools,
+            session_tools,
             active: Mutex::new(None),
             decided: Mutex::new(HashSet::new()),
         };
@@ -556,7 +575,7 @@ impl InternalSession {
         loop {
             let outcome = self
                 .driver
-                .run_turn(turn, lease_token, &self.native_tools)
+                .run_turn(turn, lease_token, &self.session_tools)
                 .await
                 .map_err(|error| HarnessError::Other(error.to_string()))?;
             match outcome {
@@ -775,6 +794,61 @@ impl HarnessSession for InternalSession {
 mod tests {
     use super::*;
     use tidebreak_core::AgentRunId;
+
+    /// The browser channel is no longer ignored: a spec carrying one yields
+    /// its session tools next to the native channel's, and a channel the
+    /// engine cannot trust fails instead of silently dropping tools.
+    #[test]
+    fn session_tools_come_from_both_channels_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = std::path::PathBuf::from("/usr/local/bin/tidebreak");
+        let native_capfile = dir.path().join("native-cap.json");
+        std::fs::write(
+            &native_capfile,
+            format!(
+                r#"{{"version":1,"endpoint":"http://127.0.0.1:15003/code/native","token":"tbreak_nt_{}"}}"#,
+                uuid::Uuid::new_v4()
+            ),
+        )
+        .unwrap();
+        let browser_capfile = dir.path().join("browser-cap.json");
+        std::fs::write(
+            &browser_capfile,
+            format!(
+                r#"{{"version":1,"endpoint":"http://127.0.0.1:15003/code/browser","token":"tbreak_bt_{}","semantic_actions":true,"lifecycle":true,"developer_diagnostics":true}}"#,
+                uuid::Uuid::new_v4()
+            ),
+        )
+        .unwrap();
+        let native = NativeChannelSpec::new(native_capfile, bridge.clone());
+        let browser = BrowserChannelSpec::new(browser_capfile, bridge.clone());
+
+        assert!(build_session_tools(None, None).unwrap().is_empty());
+
+        let browser_only = build_session_tools(None, Some(&browser)).unwrap();
+        assert!(!browser_only.is_empty());
+        assert!(browser_only
+            .iter()
+            .all(|tool| tool.spec().name.starts_with("browser_")));
+
+        let both = build_session_tools(Some(&native), Some(&browser)).unwrap();
+        let native_count = build_session_tools(Some(&native), None).unwrap().len();
+        assert_eq!(both.len(), native_count + browser_only.len());
+        assert!(both[native_count..]
+            .iter()
+            .all(|tool| tool.spec().name.starts_with("browser_")));
+
+        let bad_capfile = dir.path().join("bad-cap.json");
+        std::fs::write(&bad_capfile, "{").unwrap();
+        let error = match build_session_tools(
+            Some(&native),
+            Some(&BrowserChannelSpec::new(bad_capfile, bridge)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an unreadable browser channel must fail the launch"),
+        };
+        assert!(error.to_string().contains("browser channel"));
+    }
 
     #[test]
     fn client_and_agent_waits_map_to_adapter_parks() {
