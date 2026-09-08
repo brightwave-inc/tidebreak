@@ -104,6 +104,18 @@ node scripts/computer-use-native-smoke.mjs \
   --app-path "$fixture_dir/ComputerUseFixture.app"
 ```
 
+The runner explicitly requests foreground mode for launch, focus, clicks, typing,
+keys, hover, drag, scroll, and resize. Review the normal per-app control and
+foreground prompts before approving each scope. A refusal, Stop, or
+`requires_foreground` result ends the run without retrying. Reads and captures
+keep their separate grants. This smoke does not qualify background focus or
+pointer retention.
+
+The runner uses `computer <tool> --json '<arguments>'`. For capture, it adds
+`--output` and checks the returned `image_file`, fresh PNG bytes, and metadata.
+Set `TIDEBREAK_NATIVE_CAPFILE` to the capability file issued by the genuine
+Code session before running the command. Do not create a replacement capability.
+
 The runner never infers a pass from compile, from a helper success string, or
 from a screenshot that happens to exist. Each act is followed by the fixture's
 own atomic JSON evidence: exactly one submission record, a dropdown and

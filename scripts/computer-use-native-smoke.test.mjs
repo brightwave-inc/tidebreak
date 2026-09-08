@@ -119,7 +119,7 @@ function nativeFixture(options = {}) {
     calls.push([name, args]);
     switch (name) {
       case "computer_launch_app":
-        assert.deepEqual(Object.keys(args), ["app_id"], "launch only accepts a registered bundle id");
+        assert.deepEqual(args, { execution_mode: "foreground", app_id: APP_ID }, "launch requests foreground control of the registered fixture");
         if (options.failLaunch) throw new Error("launch rejected");
         return { outcome: "completed" };
       case "computer_list_windows":
@@ -303,6 +303,64 @@ test("the adapter requires an absolute bundled binary and hides raw CLI output",
     /computer_list_windows failed/,
   );
 });
+
+test("the CLI adapter passes JSON arguments and the requested image output path", async () => {
+  const calls = [];
+  const argumentsJson = { app_id: APP_ID, annotate: false };
+  const call = cliCall("/Fixture/Tidebreak", {}, async (binary, argv, options) => {
+    calls.push({ binary, argv, options });
+    return { stdout: JSON.stringify({ outcome: "completed", image_count: 1, image_file: "/Fixture/capture.png" }) };
+  });
+  const result = await call("computer_capture_screen", argumentsJson, { output: "/Fixture/capture.png" });
+  assert.deepEqual(calls[0].argv, ["computer", "computer_capture_screen", "--json", JSON.stringify(argumentsJson), "--output", "/Fixture/capture.png"]);
+  assert.equal(result.image_file, "/Fixture/capture.png");
+  await call("computer_list_windows", { app_id: APP_ID });
+  assert.deepEqual(calls[1].argv, ["computer", "computer_list_windows", "--json", JSON.stringify({ app_id: APP_ID })]);
+});
+
+test("CLI screenshot files qualify only after their bytes and fixture change are checked", async () => {
+  const fixture = nativeFixture();
+  const original = fixture.call;
+  const outputs = [];
+  fixture.call = async (name, args, options) => {
+    if (name !== "computer_capture_screen") return original(name, args);
+    assert.ok(options?.output, "the runner must request an image file from the CLI");
+    outputs.push(options.output);
+    await writeFile(options.output, fakePng(640, 480, fixture.state.submission_count));
+    return { outcome: "completed", images: [], image_count: 1, image_file: options.output };
+  };
+  const report = await runNativeSmoke(smokeOptions(fixture));
+  assert.equal(report.status, "passed");
+  assert.deepEqual(report.screenshots.map((image) => image.screenshot), outputs);
+  assert.notEqual(report.screenshots[0].sha256, report.screenshots[1].sha256);
+});
+
+test("every acting request chooses foreground while reads omit execution mode", async () => {
+  const fixture = nativeFixture();
+  const report = await runNativeSmoke(smokeOptions(fixture));
+  const reads = new Set(["computer_list_windows", "computer_read_app_content", "computer_capture_screen", "computer_wait"]);
+  for (const [name, args] of fixture.calls) {
+    assert.equal(args.execution_mode, reads.has(name) ? undefined : "foreground", name);
+  }
+  assert.equal(report.execution_mode, "foreground");
+});
+
+for (const errorCode of ["requires_foreground", "denied", "stopped_by_user"]) {
+  test(errorCode + " stops the smoke without retrying or continuing", async () => {
+    const fixture = nativeFixture();
+    const original = fixture.call;
+    const calls = [];
+    fixture.call = async (name, args, options) => {
+      calls.push([name, args]);
+      if (name === "computer_hover") return { outcome: "rejected", error_code: errorCode, message: "fixture refusal" };
+      return original(name, args, options);
+    };
+    await assert.rejects(runNativeSmoke(smokeOptions(fixture)), new RegExp("computer_hover failed: " + errorCode));
+    assert.equal(calls.filter(([name]) => name === "computer_hover").length, 1);
+    assert.equal(calls.at(-1)[0], "computer_hover");
+    assert.equal(fixture.state.drag_dropped, false);
+  });
+}
 
 test("fixture event files must be dense, ordered, and correctly run-tagged", async () => {
   const root = join(resolve(tmpdir()), "cu-events-" + randomUUID());

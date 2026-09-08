@@ -164,14 +164,21 @@ function pngDimensions(bytes) {
 }
 
 async function saveScreenshot(call, fixtureDir, runID, name) {
+  const metaDir = resolve(fixtureDir, "screenshots", runID);
+  await mkdir(metaDir, { recursive: true });
+  const file = resolve(metaDir, name);
   const requestedAt = Date.now();
   const result = unwrapResult(
-    await call("computer_capture_screen", { app_id: APP_ID, annotate: false }),
+    await call("computer_capture_screen", { app_id: APP_ID, annotate: false }, { output: file }),
     "computer_capture_screen",
   );
   const images = result.images ?? result.data?.images ?? [];
-  assert.ok(images.length > 0, "capture must return at least one image");
-  const image = images[0];
+  const image = result.image_file ? { path: result.image_file, mime_type: "image/png" } : images[0];
+  assert.ok(image, "capture must return an image file or image bytes");
+  if (result.image_file) {
+    assert.equal(resolve(result.image_file), file, "CLI capture must name the requested output file");
+    assert.ok(result.image_count > 0, "CLI capture must report a delivered image");
+  }
   let bytes;
   if (typeof image.path === "string" && image.path) {
     const file = await stat(image.path);
@@ -192,10 +199,7 @@ async function saveScreenshot(call, fixtureDir, runID, name) {
     "captured screenshot exceeds " + MAX_SCREENSHOT_BYTES + " bytes",
   );
   const dimensions = pngDimensions(bytes);
-  const metaDir = resolve(fixtureDir, "screenshots", runID);
-  await mkdir(metaDir, { recursive: true });
-  const file = resolve(metaDir, name);
-  await writeFile(file, bytes);
+  if (!result.image_file) await writeFile(file, bytes, { mode: 0o600 });
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const metadata = {
     screenshot: file,
@@ -207,7 +211,7 @@ async function saveScreenshot(call, fixtureDir, runID, name) {
     height: dimensions.height,
     captured_at: new Date().toISOString(),
   };
-  await writeFile(file + ".json", JSON.stringify(metadata, null, 2) + "\n");
+  await writeFile(file + ".json", JSON.stringify(metadata, null, 2) + "\n", { mode: 0o600 });
   return metadata;
 }
 
@@ -233,7 +237,7 @@ export async function runNativeSmoke({
   snapshots = fixtureSnapshots,
 }) {
   const invoke = call;
-  call = async (name, args) => unwrapResult(await invoke(name, args), name);
+  call = async (name, args, options) => unwrapResult(await invoke(name, args, options), name);
   fixtureDir = resolve(fixtureDir);
   assert.ok(runID && /^[A-Za-z0-9._-]{1,120}$/.test(runID), "valid --run-id required");
   assert.ok(appPath && isAbsolute(appPath), "--app-path must be an absolute path to the fixture app bundle");
@@ -251,6 +255,7 @@ export async function runNativeSmoke({
   // or a claimed success string is never enough.
   const launch = unwrapResult(
     await call("computer_launch_app", {
+      execution_mode: "foreground",
       app_id: APP_ID,
     }),
     "computer_launch_app",
@@ -293,10 +298,12 @@ export async function runNativeSmoke({
   const text = "Native acceptance " + runID;
   const typeTarget = findTarget(initialTree, "fixture-text-input");
   await call("computer_click", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
   });
   await call("computer_type_text", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     text,
     element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
@@ -310,6 +317,7 @@ export async function runNativeSmoke({
 
   const addTarget = findTarget(await readTree(call), "fixture-add-button");
   await call("computer_click", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: addTarget.id, element_fingerprint: addTarget.fingerprint,
   });
@@ -327,21 +335,23 @@ export async function runNativeSmoke({
   assert.ok(screenshot.bytes >= 8 * 1024, "screenshot must contain real pixels");
   assert.notEqual(screenshot.sha256, beforeScreenshot.sha256, "capture must show a change after submission");
 
-  await call("computer_focus_window", { app_id: APP_ID, window_id: mainWindowId });
+  await call("computer_focus_window", { execution_mode: "foreground", app_id: APP_ID, window_id: mainWindowId });
 
   const treeForSelect = await readTree(call);
   const dropdown = findTarget(treeForSelect, "fixture-dropdown");
   await call("computer_click", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: dropdown.id, element_fingerprint: dropdown.fingerprint,
   });
-  await call("computer_key_press", { app_id: APP_ID, key: "down" });
-  await call("computer_key_press", { app_id: APP_ID, key: "return" });
+  await call("computer_key_press", { execution_mode: "foreground", app_id: APP_ID, key: "down" });
+  await call("computer_key_press", { execution_mode: "foreground", app_id: APP_ID, key: "return" });
   await waitFor((state) => state.dropdown === "Second", "dropdown selection");
   await assertSnapshotValue(await currentSnapshot(), "dropdown", "Second", "dropdown");
 
   const checkbox = findTarget(await readTree(call), "fixture-checkbox");
   await call("computer_click", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: checkbox.id, element_fingerprint: checkbox.fingerprint,
   });
@@ -351,6 +361,7 @@ export async function runNativeSmoke({
   const hover = findTarget(await readTree(call), "fixture-hover-area");
   const hoverResult = unwrapResult(
     await call("computer_hover", {
+      execution_mode: "foreground",
       app_id: APP_ID,
       element_id: hover.id, element_fingerprint: hover.fingerprint,
     }),
@@ -364,6 +375,7 @@ export async function runNativeSmoke({
   const source = findTarget(dragTree, "fixture-drag-item");
   const destination = findTarget(dragTree, "fixture-drop-target");
   await call("computer_drag", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     from: { element_id: source.id, element_fingerprint: source.fingerprint },
     to: { element_id: destination.id, element_fingerprint: destination.fingerprint },
@@ -376,6 +388,7 @@ export async function runNativeSmoke({
 
   const scrollTarget = findTarget(await readTree(call), "fixture-scroll-area");
   await call("computer_scroll", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: scrollTarget.id, element_fingerprint: scrollTarget.fingerprint,
     dx: 0,
@@ -390,6 +403,7 @@ export async function runNativeSmoke({
 
   const delayed = findTarget(await readTree(call), "fixture-delayed-button");
   await call("computer_click", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     element_id: delayed.id, element_fingerprint: delayed.fingerprint,
   });
@@ -398,6 +412,7 @@ export async function runNativeSmoke({
   await assertSnapshotValue(await currentSnapshot(), "delayed_status", "completed", "delayed transition");
 
   await call("computer_resize_window", {
+    execution_mode: "foreground",
     app_id: APP_ID,
     window_id: mainWindowId,
     width: 1040,
@@ -413,6 +428,7 @@ export async function runNativeSmoke({
   if (secondWindow) {
     const secondButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
+      execution_mode: "foreground",
       app_id: APP_ID,
       element_id: secondButton.id, element_fingerprint: secondButton.fingerprint,
     });
@@ -422,9 +438,10 @@ export async function runNativeSmoke({
       "computer_list_windows",
     )).windows ?? [];
     assert.ok(twoWindows.length >= 2, "second fixture window must be listed");
-    await call("computer_focus_window", { app_id: APP_ID, window_id: mainWindowId });
+    await call("computer_focus_window", { execution_mode: "foreground", app_id: APP_ID, window_id: mainWindowId });
     const closeButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
+      execution_mode: "foreground",
       app_id: APP_ID,
       element_id: closeButton.id, element_fingerprint: closeButton.fingerprint,
     });
@@ -436,6 +453,7 @@ export async function runNativeSmoke({
     assert.equal((await currentSnapshot()).submission_count, 1, "later actions must not submit again");
     const resetButton = findTarget(await readTree(call), "fixture-reset-button");
     await call("computer_click", {
+      execution_mode: "foreground",
       app_id: APP_ID,
       element_id: resetButton.id, element_fingerprint: resetButton.fingerprint,
     });
@@ -464,6 +482,7 @@ export async function runNativeSmoke({
   const screenshots = [beforeScreenshot, screenshot];
   return {
     scope: "computer_use_native_smoke",
+    execution_mode: "foreground",
     status: "passed",
     app_id: APP_ID,
     run_id: runID,
@@ -497,15 +516,20 @@ export async function runNativeSmoke({
  * computer-use CLI shape can be adjusted here without touching the flow.
  * The runner's own tests inject a fake `call` and never invoke this.
  */
-export function cliCall(cli, environment = process.env) {
+export function cliCall(cli, environment = process.env, execute = exec) {
   assert.ok(
     isAbsolute(cli),
     "--cli must be an absolute path to the bundled Tidebreak computer CLI",
   );
-  return async (name, args) => {
+  return async (name, args, { output } = {}) => {
+    const argv = ["computer", name, "--json", JSON.stringify(args)];
+    if (output) {
+      assert.ok(isAbsolute(output), "capture output must be an absolute path");
+      argv.push("--output", output);
+    }
     let stdout;
     try {
-      ({ stdout } = await exec(cli, ["computer", name, "--args-json", JSON.stringify(args), "--json"], {
+      ({ stdout } = await execute(cli, argv, {
         env: environment,
         timeout: 90_000,
         maxBuffer: 64 * 1024 * 1024,
