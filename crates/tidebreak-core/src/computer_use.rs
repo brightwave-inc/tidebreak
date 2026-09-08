@@ -43,6 +43,14 @@ pub const COMPUTER_FOCUS_WINDOW_TOOL: &str = "computer_focus_window";
 pub const COMPUTER_RETURN_TO_TIDEBREAK_TOOL: &str = "computer_return_to_tidebreak";
 /// Wait a bounded number of seconds (e.g. for an app to finish an action).
 pub const COMPUTER_WAIT_TOOL: &str = "computer_wait";
+/// Launch an app by its approved bundle id.
+pub const COMPUTER_LAUNCH_APP_TOOL: &str = "computer_launch_app";
+/// Move the pointer over an element or point in an app without pressing.
+pub const COMPUTER_HOVER_TOOL: &str = "computer_hover";
+/// Press and drag from one element/point to another within an app.
+pub const COMPUTER_DRAG_TOOL: &str = "computer_drag";
+/// Resize one window of an app in logical points.
+pub const COMPUTER_RESIZE_WINDOW_TOOL: &str = "computer_resize_window";
 
 /// Longest text `computer_type_text` will enter in one call. The helper's
 /// synthesized-keystroke fallback is further bounded (it would otherwise risk a
@@ -55,9 +63,29 @@ pub const MAX_READ_DEPTH: u32 = 25;
 pub const MAX_READ_NODES: u32 = 2000;
 /// Longest `computer_wait` sleep, in seconds.
 pub const MAX_WAIT_SECONDS: f64 = 10.0;
+/// Longest model-requested drag, in milliseconds. The helper enforces the
+/// same bound, so a drag is always finite and cancellable.
+pub const MAX_DRAG_DURATION_MS: u64 = 10_000;
+/// Longest condition text a wait may request, matching the browser wait
+/// surface.
+pub const MAX_WAIT_CONDITION_TEXT_CHARS: usize = 512;
+/// Upper bound on one requested window dimension (logical points). Keeps a
+/// nonsense request from reaching a window server resize.
+pub const MAX_WINDOW_DIMENSION: f64 = 10_000.0;
+/// Default long-edge cap applied to native captures when the model does not
+/// ask for one. Keeps PNGs near the MCP transport budget while staying
+/// readable.
+pub const DEFAULT_CAPTURE_MAX_DIMENSION: u32 = 1440;
+/// Hard cap a capture may request, applied again by the helper so a buggy
+/// caller cannot push an unbounded pixel buffer.
+pub const MAX_CAPTURE_MAX_DIMENSION: u32 = 4096;
+/// Default total time a condition wait polls, in seconds.
+pub const DEFAULT_CONDITION_TIMEOUT_SECONDS: f64 = 10.0;
+/// Hard bound a condition wait may request.
+pub const MAX_CONDITION_TIMEOUT_SECONDS: f64 = 30.0;
 
-/// All ten computer-use tool names.
-pub const COMPUTER_USE_TOOLS: [&str; 10] = [
+/// All fourteen computer-use tool names.
+pub const COMPUTER_USE_TOOLS: [&str; 14] = [
     COMPUTER_LIST_WINDOWS_TOOL,
     COMPUTER_CAPTURE_SCREEN_TOOL,
     COMPUTER_READ_APP_CONTENT_TOOL,
@@ -68,18 +96,27 @@ pub const COMPUTER_USE_TOOLS: [&str; 10] = [
     COMPUTER_FOCUS_WINDOW_TOOL,
     COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
     COMPUTER_WAIT_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL,
+    COMPUTER_HOVER_TOOL,
+    COMPUTER_DRAG_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL,
 ];
 
 /// The control (acting) tools, which require the `ControlApp` grant and gate
-/// behind the `ComputerMayControlApp` approval kind. Reads never card per-call
-/// once their grant exists. Scroll and focus are acting tools: they synthesize
-/// input, warp the cursor, and raise windows, so they are not read-only.
-pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 5] = [
+/// behind the `ComputerMayControlApp` approval kind. Launch, hover, drag, and
+/// resize all mutate the user's real host state or synthesize input, so they
+/// are control tools alongside click/type/key/scroll/focus. Reads never card
+/// per-call once their grant exists.
+pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 9] = [
     COMPUTER_CLICK_TOOL,
     COMPUTER_TYPE_TEXT_TOOL,
     COMPUTER_KEY_PRESS_TOOL,
     COMPUTER_SCROLL_TOOL,
     COMPUTER_FOCUS_WINDOW_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL,
+    COMPUTER_HOVER_TOOL,
+    COMPUTER_DRAG_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL,
 ];
 
 /// Whether `name` is any computer-use tool.
@@ -164,10 +201,29 @@ pub struct ComputerCaptureScreenArgs {
     #[serde(default = "default_true")]
     #[schemars(description = "Annotate interactive elements with numbered marks.")]
     pub annotate: bool,
+    /// Select one window of the app (from `computer_list_windows`) instead of
+    /// every window of the app. Ignored for whole-display captures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional window id to capture; app capture only.")]
+    pub window_id: Option<u32>,
+    /// Cap the longest image edge in pixels after capture so the image fits
+    /// the transport budget (default 1440, max 4096). The image is downscaled
+    /// to this edge; coordinates remain in the pre-scale pixel space and are
+    /// mapped explicitly by the same factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 1, max = MAX_CAPTURE_MAX_DIMENSION),
+        description = "Max image edge in pixels (default 1440, max 4096)."
+    )]
+    pub max_dimension: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn window_dimension_ok(value: Option<f64>) -> bool {
+    value.is_none_or(|v| v.is_finite() && v > 0.0 && v <= MAX_WINDOW_DIMENSION)
 }
 
 /// Canonical arguments for [`COMPUTER_READ_APP_CONTENT_TOOL`].
@@ -318,6 +374,105 @@ pub struct ComputerWaitArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Seconds to wait (default 1, max 10).")]
     pub seconds: Option<f64>,
+    /// Optional deterministic condition to wait for instead of a fixed pause.
+    /// App/window/text conditions poll the live app state; they never type or
+    /// click and never fall back to a fixed sleep when the condition fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional condition to wait for.")]
+    pub condition: Option<ComputerWaitConditionArgs>,
+    /// Total time to poll a `condition`, in seconds (default 10, max 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 0.1, max = MAX_CONDITION_TIMEOUT_SECONDS),
+        description = "Maximum condition wait in seconds (default 10, max 30)."
+    )]
+    pub condition_timeout_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ComputerWaitConditionArgs {
+    /// Wait until a process with `app_id` is a running application.
+    AppRunning,
+    /// Wait until `app_id` has at least one on-screen window.
+    WindowVisible,
+    /// Wait until the app's accessibility tree contains `text` exactly (case
+    /// sensitive, matching an element title/description/value).
+    TextPresent { text: String },
+    /// Wait until the app's accessibility tree no longer contains `text`
+    /// exactly (case sensitive, matching an element title/description/value).
+    TextAbsent { text: String },
+}
+
+/// Canonical arguments for [`COMPUTER_LAUNCH_APP_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerLaunchAppArgs {
+    /// The app to launch, by bundle id. The helper only opens the registered
+    /// application the id resolves to through NSWorkspace; arbitrary
+    /// executables, paths, and arguments are never accepted.
+    #[schemars(
+        length(min = 1, max = 256),
+        description = "App bundle id to launch (e.g. \"com.apple.Notes\")."
+    )]
+    pub app_id: String,
+}
+
+/// Canonical arguments for [`COMPUTER_HOVER_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerHoverArgs {
+    /// The app to hover in, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// The element or point to hover. Raw coordinates are global and are
+    /// re-validated against the app's on-screen windows immediately before
+    /// the pointer moves.
+    #[serde(flatten)]
+    pub target: ElementTargetArgs,
+}
+
+/// Canonical arguments for [`COMPUTER_DRAG_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerDragArgs {
+    /// The app to drag in, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// Where the press goes down.
+    #[schemars(description = "Drag origin: element or point.")]
+    pub from: ElementTargetArgs,
+    /// Where the button releases.
+    #[schemars(description = "Drag destination: element or point.")]
+    pub to: ElementTargetArgs,
+    /// Duration of the drag in milliseconds (default 200, max 10000). Both
+    /// endpoints are validated before the first mouse-down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 0, max = MAX_DRAG_DURATION_MS),
+        description = "Drag duration in ms (default 200, max 10000)."
+    )]
+    pub duration_ms: Option<u64>,
+}
+
+/// Canonical arguments for [`COMPUTER_RESIZE_WINDOW_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerResizeWindowArgs {
+    /// The app owning the window, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// Which window to resize (from `computer_list_windows`). Omit for the
+    /// app's main/frontmost window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional window id to resize.")]
+    pub window_id: Option<u32>,
+    /// New width in logical points (max 10000).
+    #[schemars(range(min = 1.0, max = MAX_WINDOW_DIMENSION))]
+    pub width: f64,
+    /// New height in logical points (max 10000).
+    #[schemars(range(min = 1.0, max = MAX_WINDOW_DIMENSION))]
+    pub height: f64,
 }
 
 // MARK: - Validation
@@ -367,7 +522,11 @@ validate_fn!(
 /// Validate a `computer_capture_screen` payload.
 #[must_use]
 pub fn validate_computer_capture_screen_arguments(arguments: &Value) -> bool {
-    parse::<ComputerCaptureScreenArgs>(arguments).is_some()
+    let Some(args) = parse::<ComputerCaptureScreenArgs>(arguments) else {
+        return false;
+    };
+    args.max_dimension
+        .is_none_or(|edge| (1..=MAX_CAPTURE_MAX_DIMENSION).contains(&edge))
 }
 
 /// Validate a `computer_read_app_content` payload, enforcing the read bounds.
@@ -431,8 +590,64 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
     let Some(args) = parse::<ComputerWaitArgs>(arguments) else {
         return false;
     };
-    args.seconds
-        .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s))
+    let seconds_ok = args
+        .seconds
+        .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s));
+    let timeout_ok = args
+        .condition_timeout_seconds
+        .is_none_or(|s| s.is_finite() && (0.1..=MAX_CONDITION_TIMEOUT_SECONDS).contains(&s));
+    let condition_ok = match &args.condition {
+        None => true,
+        Some(ComputerWaitConditionArgs::AppRunning)
+        | Some(ComputerWaitConditionArgs::WindowVisible) => true,
+        Some(ComputerWaitConditionArgs::TextPresent { text })
+        | Some(ComputerWaitConditionArgs::TextAbsent { text }) => {
+            !text.trim().is_empty() && text.chars().count() <= MAX_WAIT_CONDITION_TEXT_CHARS
+        }
+    };
+    seconds_ok && timeout_ok && condition_ok
+}
+
+/// Validate a `computer_launch_app` payload.
+#[must_use]
+pub fn validate_computer_launch_app_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerLaunchAppArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+}
+
+/// Validate a `computer_hover` payload.
+#[must_use]
+pub fn validate_computer_hover_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerHoverArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty() && target_is_well_formed(&args.target)
+}
+
+/// Validate a `computer_drag` payload, enforcing the duration bound and the
+/// shape of both endpoints.
+#[must_use]
+pub fn validate_computer_drag_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerDragArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+        && target_is_well_formed(&args.from)
+        && target_is_well_formed(&args.to)
+        && args.duration_ms.is_none_or(|ms| ms <= MAX_DRAG_DURATION_MS)
+}
+
+/// Validate a `computer_resize_window` payload, enforcing the window bounds.
+#[must_use]
+pub fn validate_computer_resize_window_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerResizeWindowArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+        && window_dimension_ok(Some(args.width))
+        && window_dimension_ok(Some(args.height))
 }
 
 /// Return the canonical native computer-use surface for every agent transport.
@@ -450,6 +665,10 @@ pub fn computer_use_tool_specs() -> Vec<ToolSpec> {
         computer_focus_window_tool_spec(),
         computer_return_to_tidebreak_tool_spec(),
         computer_wait_tool_spec(),
+        computer_launch_app_tool_spec(),
+        computer_hover_tool_spec(),
+        computer_drag_tool_spec(),
+        computer_resize_window_tool_spec(),
     ]
 }
 
@@ -470,6 +689,10 @@ pub fn validate_computer_use_arguments(name: &str, arguments: &Value) -> bool {
             validate_computer_return_to_tidebreak_arguments(arguments)
         }
         COMPUTER_WAIT_TOOL => validate_computer_wait_arguments(arguments),
+        COMPUTER_LAUNCH_APP_TOOL => validate_computer_launch_app_arguments(arguments),
+        COMPUTER_HOVER_TOOL => validate_computer_hover_arguments(arguments),
+        COMPUTER_DRAG_TOOL => validate_computer_drag_arguments(arguments),
+        COMPUTER_RESIZE_WINDOW_TOOL => validate_computer_resize_window_arguments(arguments),
         _ => false,
     }
 }
@@ -566,7 +789,43 @@ pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
 pub fn computer_wait_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerWaitArgs>(
         COMPUTER_WAIT_TOOL,
-        "Wait a bounded number of seconds, e.g. for an app to finish an action or a window to appear, before the next read or capture.",
+        "Wait for an app to finish an action, appear, or reach a requested condition before the next read or capture. Without a condition, waits a bounded number of seconds. With a condition, polls the live app/window/accessibility state until it resolves or the bounded timeout expires; it never types, clicks, or falls back to a sleep when the condition is not met.",
+    )
+}
+
+/// Tool contract for [`COMPUTER_LAUNCH_APP_TOOL`].
+#[must_use]
+pub fn computer_launch_app_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerLaunchAppArgs>(
+        COMPUTER_LAUNCH_APP_TOOL,
+        &format!("Launch an app by its registered bundle id (e.g. \"com.apple.Notes\"). Only the system's approved application identity is opened — arbitrary executables, paths, and command arguments are never accepted. Use before listing/reading an app that is not running.{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_HOVER_TOOL`].
+#[must_use]
+pub fn computer_hover_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerHoverArgs>(
+        COMPUTER_HOVER_TOOL,
+        &format!("Move the pointer over an element or point in an app without pressing. Use to reveal hover menus, tooltips, or drag affordances before a read or drag. {TARGETING_NOTE}{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_DRAG_TOOL`].
+#[must_use]
+pub fn computer_drag_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerDragArgs>(
+        COMPUTER_DRAG_TOOL,
+        &format!("Press at the `from` element/point and release at the `to` element/point within one app. Use for sliders, reordering, selection ranges, and custom canvas interactions. Both endpoints are resolved and validated against the app before the first mouse-down, and the duration is bounded. {TARGETING_NOTE}{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_RESIZE_WINDOW_TOOL`].
+#[must_use]
+pub fn computer_resize_window_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerResizeWindowArgs>(
+        COMPUTER_RESIZE_WINDOW_TOOL,
+        &format!("Resize one window of an app to the given width and height in logical points. Use to arrange testable window sizes; logical points map to physical pixels through the display backing scale factor. {ACTING_NOTE}"),
     )
 }
 
@@ -590,6 +849,26 @@ mod tests {
         assert!(!validate_computer_use_arguments(
             COMPUTER_CLICK_TOOL,
             &json!({"app_id": "com.apple.Notes", "x": 20})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_LAUNCH_APP_TOOL,
+            &json!({"app_id": "com.apple.Notes"})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_HOVER_TOOL,
+            &json!({"app_id": "com.apple.Notes", "x": 1.0, "y": 2.0})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_DRAG_TOOL,
+            &json!({
+                "app_id": "com.apple.Notes",
+                "from": {"mark": 1},
+                "to": {"x": 10.0, "y": 20.0}
+            })
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_RESIZE_WINDOW_TOOL,
+            &json!({"app_id": "com.apple.Notes", "width": 800.0, "height": 600.0})
         ));
     }
 
@@ -615,6 +894,10 @@ mod tests {
         // they are control tools.
         assert!(is_computer_use_control_tool(COMPUTER_SCROLL_TOOL));
         assert!(is_computer_use_control_tool(COMPUTER_FOCUS_WINDOW_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_LAUNCH_APP_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_HOVER_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_DRAG_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_RESIZE_WINDOW_TOOL));
         assert!(!is_computer_use_tool("read_file"));
     }
 
@@ -674,6 +957,15 @@ mod tests {
         assert!(!validate_computer_wait_arguments(
             &json!({ "seconds": -1.0 })
         ));
+        assert!(validate_computer_wait_arguments(
+            &json!({ "condition": { "kind": "app_running" } })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "condition": { "kind": "text_present", "text": "" } })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "condition": { "kind": "text_absent", "text": "x" }, "condition_timeout_seconds": 35.0 })
+        ));
         // serde_json cannot represent a non-finite float, so a NaN/Infinity
         // never survives a wire round-trip; the validator's `is_finite` guard
         // covers the in-memory case.
@@ -708,6 +1000,10 @@ mod tests {
             computer_focus_window_tool_spec(),
             computer_return_to_tidebreak_tool_spec(),
             computer_wait_tool_spec(),
+            computer_launch_app_tool_spec(),
+            computer_hover_tool_spec(),
+            computer_drag_tool_spec(),
+            computer_resize_window_tool_spec(),
         ] {
             assert_eq!(
                 spec.input_schema["additionalProperties"], false,
@@ -720,8 +1016,58 @@ mod tests {
         }
         assert_eq!(computer_click_tool_spec().name, COMPUTER_CLICK_TOOL);
         assert_eq!(
+            computer_launch_app_tool_spec().name,
+            COMPUTER_LAUNCH_APP_TOOL
+        );
+        assert_eq!(
             computer_read_app_content_tool_spec().name,
             COMPUTER_READ_APP_CONTENT_TOOL
         );
+    }
+
+    #[test]
+    fn new_native_primitives_enforce_argument_bounds() {
+        assert!(!validate_computer_launch_app_arguments(
+            &json!({"app_id": " "})
+        ));
+        assert!(!validate_computer_launch_app_arguments(&json!({})));
+        assert!(validate_computer_hover_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "element_id": "0.0",
+            "element_fingerprint": "fp"
+        })));
+        assert!(!validate_computer_hover_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "x": 1.0
+        })));
+        assert!(!validate_computer_drag_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "from": {"mark": 1},
+            "to": {"x": 1.0}
+        })));
+        assert!(!validate_computer_drag_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "from": {"mark": 1},
+            "to": {"x": 1.0, "y": 2.0},
+            "duration_ms": 10001
+        })));
+        assert!(!validate_computer_resize_window_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "width": 0.0,
+            "height": 600.0
+        })));
+        assert!(!validate_computer_resize_window_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "width": 10001.0,
+            "height": 600.0
+        })));
+        assert!(validate_computer_capture_screen_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "window_id": 3,
+            "max_dimension": 4096
+        })));
+        assert!(!validate_computer_capture_screen_arguments(&json!({
+            "max_dimension": 4097
+        })));
     }
 }

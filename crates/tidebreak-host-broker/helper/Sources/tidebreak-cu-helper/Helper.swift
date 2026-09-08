@@ -21,16 +21,31 @@ enum HelperOp: String, Decodable {
     case capture
     case readAxTree = "read_ax_tree"
     // Control ops (Accessibility input synthesis). `wait` is intentionally
-    // absent — it is an inert broker-side sleep that never reaches the helper.
+    // absent — it is an inert broker-side sleep that never reaches the helper;
+    // `wait_condition` does reach it because conditions need live app/window
+    // / accessibility state.
     case click
     case typeText = "type_text"
     case keyPress = "key_press"
     case scroll
     case focusWindow = "focus_window"
+    case launchApp = "launch_app"
+    case hover
+    case drag
+    case resizeWindow = "resize_window"
+    case waitCondition = "wait_condition"
     // Read-only: report a target element's role + label without acting, for the
     // broker's forced-confirmation tripwire (it classifies whether a control op
     // is consequential before acting).
     case describeElement = "describe_element"
+}
+
+/// `wait_condition` request kinds.
+enum WaitConditionKind: String, Decodable {
+    case appRunning = "app_running"
+    case windowVisible = "window_visible"
+    case textPresent = "text_present"
+    case textAbsent = "text_absent"
 }
 
 /// What a `capture` request targets.
@@ -86,6 +101,24 @@ struct HelperRequest: Decodable {
     /// double).
     let button: String?
     let clickCount: Int?
+    /// hover/drag/launch/resize/wait parameters.
+    let fromElementId: String?
+    let fromElementFingerprint: String?
+    let fromX: Double?
+    let fromY: Double?
+    let toElementId: String?
+    let toElementFingerprint: String?
+    let toX: Double?
+    let toY: Double?
+    let durationMs: Int?
+    let width: Double?
+    let height: Double?
+    let condition: WaitConditionKind?
+    let timeoutSeconds: Double?
+    /// wait_condition text (text_present / text_absent).
+    let text: String?
+    /// capture: optional long-edge cap in pixels (helper clamps 1...4096).
+    let maxDimension: Int?
     /// scroll: pixel deltas (positive dy scrolls down, positive dx scrolls
     /// right).
     let dx: Double?
@@ -123,6 +156,9 @@ enum HelperErrorCode: String, Encodable {
     case targetOutsideApp = "target_outside_app"
     /// The native API failed for some other reason.
     case operationFailed = "operation_failed"
+    /// The helper requires macOS 14+; the host is older. Explicit, so the
+    /// broker reports an unsupported build rather than a generic failure.
+    case unsupported = "unsupported"
 }
 
 struct HelperError: Error {
@@ -133,6 +169,15 @@ struct HelperError: Error {
 @main
 struct CUHelper {
     static func main() async {
+        // Native helper APIs require macOS 14. The host broker still runs on
+        // older macOS; only this computer-use surface is unsupported.
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 14 {
+            emitError(
+                HelperError(
+                    code: .unsupported,
+                    message: "computer use requires macOS 14 or newer; this host is unsupported"))
+            return
+        }
         let request: HelperRequest
         do {
             let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -166,6 +211,16 @@ struct CUHelper {
                 emit(try Control.scroll(request))
             case .focusWindow:
                 emit(try Control.focusWindow(request))
+            case .launchApp:
+                emit(try Control.launchApp(request))
+            case .hover:
+                emit(try Control.hover(request))
+            case .drag:
+                emit(try Control.drag(request))
+            case .resizeWindow:
+                emit(try Control.resizeWindow(request))
+            case .waitCondition:
+                emit(try Control.waitCondition(request))
             case .describeElement:
                 emit(try Control.describeElement(request))
             }
