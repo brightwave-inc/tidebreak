@@ -207,6 +207,8 @@ impl BrowserRuntime for FakeBrowserRuntime {
             document_epoch: args.document_epoch,
             target_ref: args.target_ref.clone(),
             action: args.action.kind().to_owned(),
+            execution_mode: args.execution_mode,
+            input_method: tidebreak_core::BrowserInputMethod::Dom,
             status: BrowserActStatus::Ok,
             message: "Action completed. Take a new snapshot before the next action.".to_owned(),
             requires_resnapshot: true,

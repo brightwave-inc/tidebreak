@@ -833,11 +833,16 @@ fn parse_browser_act_builds_a_canonical_native_action() {
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     } = command
     else {
         panic!("expected Act");
     };
     assert_eq!(browser_id, "browser-1");
+    assert_eq!(
+        execution_mode,
+        tidebreak_core::BrowserExecutionMode::Background
+    );
     assert_eq!(snapshot_id, "snapshot-1");
     assert_eq!(document_epoch, 9);
     assert_eq!(target_ref, "@e3");
@@ -2037,4 +2042,37 @@ async fn browser_client_ignores_ambient_http_proxy() {
         has_auth,
         "Authorization must reach the listener: {req_headers:?}"
     );
+}
+
+#[test]
+fn parse_browser_act_requires_an_explicit_foreground_mode() {
+    let flags = [
+        "act",
+        "--browser-id",
+        "browser-1",
+        "--snapshot-id",
+        "snapshot-1",
+        "--document-epoch",
+        "9",
+        "--ref",
+        "@e3",
+        "--click",
+        "--execution-mode",
+    ];
+    let parse = |mode: &str| {
+        parse_browser_args(
+            flags
+                .iter()
+                .chain(std::iter::once(&mode))
+                .map(|arg| arg.to_string()),
+        )
+    };
+    assert!(matches!(
+        parse("foreground").unwrap(),
+        BrowserCommand::Act {
+            execution_mode: tidebreak_core::BrowserExecutionMode::Foreground,
+            ..
+        }
+    ));
+    assert!(parse("automatic").is_err());
 }

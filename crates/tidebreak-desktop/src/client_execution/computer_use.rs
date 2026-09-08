@@ -32,13 +32,13 @@ use tidebreak_core::{
     validate_computer_use_arguments, CallId, ComputerCaptureScreenArgs, ComputerClickArgs,
     ComputerDragArgs, ComputerFocusWindowArgs, ComputerHoverArgs, ComputerKeyPressArgs,
     ComputerLaunchAppArgs, ComputerListWindowsArgs, ComputerReadAppContentArgs,
-    ComputerResizeWindowArgs, ComputerScrollArgs, ComputerTypeTextArgs, ComputerWaitArgs,
-    ComputerWaitConditionArgs, ImageRef, SessionId, ToolCallExecution, ToolCallRecord,
-    ToolCallStatus, COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL,
-    COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL, COMPUTER_KEY_PRESS_TOOL,
-    COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
-    COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL,
-    COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
+    ComputerResizeWindowArgs, ComputerReturnToTidebreakArgs, ComputerScrollArgs,
+    ComputerTypeTextArgs, ComputerWaitArgs, ComputerWaitConditionArgs, ImageRef, SessionId,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, COMPUTER_CAPTURE_SCREEN_TOOL,
+    COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL, COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL,
+    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL,
+    COMPUTER_READ_APP_CONTENT_TOOL, COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+    COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
 use tidebreak_host_broker::{
     extract_marks, is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod,
@@ -1181,7 +1181,7 @@ fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
         | OperationRequest::CuKeyPress { bundle_id, .. }
         | OperationRequest::CuScroll { bundle_id, .. }
         | OperationRequest::CuFocusWindow { bundle_id, .. }
-        | OperationRequest::CuLaunchApp { bundle_id }
+        | OperationRequest::CuLaunchApp { bundle_id, .. }
         | OperationRequest::CuHover { bundle_id, .. }
         | OperationRequest::CuDrag { bundle_id, .. }
         | OperationRequest::CuResizeWindow { bundle_id, .. }
