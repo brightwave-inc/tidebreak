@@ -1683,7 +1683,11 @@ export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line
 /**
  * One isolated workspace (worktree + branch) on a repo.
  */
-export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
+export type CodeWorkspaceSnapshot = {
+/**
+ * Present only on creation when the base refresh could not complete.
+ */
+base_refresh_warning?: string, id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
 /**
  * Commit the released branch pointed at, so a client can name the work
  * without the branch existing.
@@ -2611,7 +2615,7 @@ export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hin
  */
 member_catalog?: string, sign_in: SignInProgress, };
 
-export type GitSourceControlSettings = { auto_rename_branches: boolean, branch_prefix_mode: BranchPrefixMode, custom_branch_prefix?: string, account_prefix?: string, effective_branch_prefix: string, };
+export type GitSourceControlSettings = { auto_rename_branches: boolean, keep_local_main_up_to_date: boolean, branch_prefix_mode: BranchPrefixMode, custom_branch_prefix?: string, account_prefix?: string, effective_branch_prefix: string, };
 
 /**
  * How far a standing grant reaches.
