@@ -18,6 +18,7 @@ import {
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
+  revealAgentBrowser,
   removedCodeBrowserIds,
   removedCodeTerminalIds,
   adoptCodeTerminalId,
@@ -582,5 +583,67 @@ describe("code chrome layout", () => {
       { type: "file", path: "src/main.rs" },
     ]);
     expect(opened.editorSplit?.activeIndex).toBe(1);
+  });
+});
+
+describe("agent browser placement", () => {
+  it("opens beside the primary file and preserves conversation selection", () => {
+    const file = openCodeEditor(EMPTY_LAYOUT, {
+      type: "file",
+      path: "app.tsx",
+    });
+    for (const layout of [file, { ...file, conversationFocused: true }]) {
+      const next = revealAgentBrowser(layout, "agent-1");
+      expect(next.tabs).toEqual(layout.tabs);
+      expect(next.activeIndex).toBe(layout.activeIndex);
+      expect(next.conversationFocused).toBe(layout.conversationFocused);
+      expect(next.editorSplit).toEqual({
+        tabs: [{ type: "browser", browserId: "agent-1" }],
+        activeIndex: 0,
+        focused: undefined,
+      });
+    }
+  });
+
+  it("opens in the primary group when the secondary editor has focus", () => {
+    const layout = openCodeEditor(
+      openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
+      { type: "file", path: "b.ts" },
+      "secondary",
+    );
+    const next = revealAgentBrowser(layout, "agent-1");
+    expect(next.editorSplit).toEqual(layout.editorSplit);
+    expect(next.tabs[next.activeIndex]).toEqual({
+      type: "browser",
+      browserId: "agent-1",
+    });
+  });
+
+  it("moves an inactive browser beside the focused file without duplicating it", () => {
+    const layout = openCodeEditor(
+      openCodeEditor(EMPTY_LAYOUT, { type: "browser", browserId: "agent-1" }),
+      { type: "file", path: "a.ts" },
+    );
+    const next = revealAgentBrowser(layout, "agent-1");
+    expect(next.tabs).toEqual([{ type: "file", path: "a.ts" }]);
+    expect(next.activeIndex).toBe(0);
+    expect(codeBrowserIds(next)).toEqual(["agent-1"]);
+    expect(revealAgentBrowser(next, "agent-1")).toBe(next);
+  });
+
+  it("uses live input focus when the last selected tab belongs to the other group", () => {
+    const layout = openCodeEditor(
+      openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
+      { type: "file", path: "b.ts" },
+      "secondary",
+    );
+    const next = revealAgentBrowser(layout, "agent-1", "primary");
+    expect(next.tabs).toEqual(layout.tabs);
+    expect(next.activeIndex).toBe(layout.activeIndex);
+    expect(next.editorSplit?.focused).toBeUndefined();
+    expect(next.editorSplit?.tabs[next.editorSplit.activeIndex]).toEqual({
+      type: "browser",
+      browserId: "agent-1",
+    });
   });
 });
