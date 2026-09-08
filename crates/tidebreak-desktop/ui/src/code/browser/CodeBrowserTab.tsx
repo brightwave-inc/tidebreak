@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useComputerUseAction } from "@/computerUseAction";
+import { ComputerUseActionStatus } from "@/ComputerUseActionStatus";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
@@ -153,6 +155,12 @@ function CodeBrowserTabSession({
     useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
+  const action = useComputerUseAction({
+    source: "browser",
+    browserId,
+    workspaceId,
+    documentEpoch: runtime?.documentEpoch,
+  });
   const signalRefresh = useRefreshSignals((state) => state.signal);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
@@ -1297,6 +1305,15 @@ function CodeBrowserTabSession({
             onOverlayOpenChange={setViewportOpen}
             disabled={!session.url}
           />
+        }
+      />
+      <ComputerUseActionStatus
+        action={
+          runtime?.documentEpoch === undefined ||
+          runtime?.controller?.halted ||
+          runtime?.controller?.kind === "human"
+            ? null
+            : action
         }
       />
       {notice && (
