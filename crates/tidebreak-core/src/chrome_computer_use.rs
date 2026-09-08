@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{BrowserElementBounds, BrowserLoadState, BrowserOrigin, BrowserOriginScope, ToolSpec};
+use crate::{BrowserElementBounds, BrowserLoadState, BrowserOrigin, ToolSpec};
 
 /// List Chrome tabs visible to the caller's approved connection.
 pub const CHROME_LIST_TABS_TOOL: &str = "chrome_list_tabs";
@@ -117,6 +117,7 @@ pub enum ChromeOriginScope {
     /// Exactly one normalized public or local origin.
     Origin {
         #[schemars(description = "Normalized origin, e.g. https://example.com.")]
+        #[schemars(with = "String")]
         origin: BrowserOrigin,
     },
     /// Every loopback origin in the grant's workspace, across development
@@ -153,8 +154,7 @@ pub enum ChromeConnectionGrant {
     /// DevTools protocol cannot enforce selective domain safety once broad
     /// debugging access is approved. The native UI must disclose that the
     /// agent can change pages, read content, and inspect developer traffic
-    /// across every site open in the selected profile, and the host enforces
-    /// a separate explicit consent per control action before use.
+    /// across every site open in the selected profile, and the host binds access to the approved connection and session.
     DeveloperAllSites,
 }
 
@@ -450,7 +450,7 @@ pub struct ChromeActResult {
 /// One semantic Chrome action a model may request against a snapshot ref.
 /// This is Chrome's own action vocabulary rather than the in-app browser's
 /// engine-specific table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
 pub enum ChromeAction {
     /// Synthesise a single click on the re-resolved element.
@@ -635,7 +635,7 @@ pub struct ChromeScreenshotArgs {
 }
 
 /// Canonical arguments for [`CHROME_ACT_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ChromeActArgs {

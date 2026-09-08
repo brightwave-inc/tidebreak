@@ -24,6 +24,7 @@ postgres = ["tidebreak-core/postgres", "sea-orm/sqlx-postgres", "tidebreak-core/
 test-support = ["tidebreak-core/test-util"]
 
 [dependencies]
+tokio-tungstenite = { workspace = true }
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-code-delivery = { path = "../tidebreak-code-delivery" }
@@ -132,4 +133,3 @@ tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
 # loopback socket, with only Docker and the host model mocked.
 tidebreak-sandbox-agent = { path = "../tidebreak-sandbox-agent" }
 tower = { version = "=0.5.3", features = ["util"] }
-tokio-tungstenite = { workspace = true }
