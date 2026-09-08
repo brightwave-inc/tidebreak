@@ -106,6 +106,7 @@ mod agent_mcp;
 mod api;
 mod browser;
 mod code;
+mod computer_use;
 mod connect;
 mod diagnostics;
 mod event_stream;
@@ -465,6 +466,27 @@ async fn run() -> Result<i32> {
                 usage_error("browser-mcp accepts no arguments");
             }
             crate::browser::run_browser_mcp().await.map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("computer") => {
+            server_flags.refuse("computer");
+            let raw = text_args(args);
+            match crate::computer_use::parse_computer(raw) {
+                Ok(command) => crate::computer_use::run_computer(command).await.map(|()| 0),
+                Err(message) => {
+                    eprintln!(
+                        "tidebreak: {message}\n\n{}",
+                        crate::computer_use::COMPUTER_USAGE
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some(command) if command == OsStr::new("computer-mcp") => {
+            server_flags.refuse("computer-mcp");
+            if args.next().is_some() {
+                usage_error("computer-mcp accepts no arguments");
+            }
+            crate::computer_use::run_computer_mcp().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("agent-mcp") => {
             if args.next().is_some() {

@@ -16,10 +16,13 @@
 //! `mcpServers` entries are merged into a single `--mcp-config` flag so
 //! the engine sees one config object.
 
-use crate::BrowserChannelSpec;
+use crate::{BrowserChannelSpec, NativeChannelSpec};
 
 /// MCP server name used in `--mcp-config` for the browser tool bridge.
 pub const BROWSER_MCP_SERVER: &str = "tb-browser";
+
+/// MCP server name used in `--mcp-config` for the native computer-use bridge.
+pub const NATIVE_MCP_SERVER: &str = "tb-native";
 
 /// The `--mcp-config` JSON entry for the browser stdio MCP server.
 ///
@@ -29,82 +32,102 @@ pub const BROWSER_MCP_SERVER: &str = "tb-browser";
 pub fn browser_mcp_config_entry(
     bridge_command: &std::path::Path,
 ) -> Result<serde_json::Value, crate::HarnessError> {
+    stdio_mcp_config_entry(bridge_command, "browser-mcp", "browser")
+}
+
+/// The `--mcp-config` JSON entry for the native computer-use stdio MCP
+/// server. The child inherits `TIDEBREAK_NATIVE_CAPFILE` from the engine
+/// process environment; the config carries only the command and arguments.
+pub fn native_mcp_config_entry(
+    bridge_command: &std::path::Path,
+) -> Result<serde_json::Value, crate::HarnessError> {
+    stdio_mcp_config_entry(bridge_command, "computer-mcp", "native")
+}
+
+fn stdio_mcp_config_entry(
+    bridge_command: &std::path::Path,
+    subcommand: &str,
+    channel: &str,
+) -> Result<serde_json::Value, crate::HarnessError> {
     let bridge_command = bridge_command.to_str().ok_or_else(|| {
-        crate::HarnessError::Other(
-            "browser bridge command must be valid UTF-8 for Claude MCP config".into(),
-        )
+        crate::HarnessError::Other(format!(
+            "{channel} bridge command must be valid UTF-8 for Claude MCP config"
+        ))
     })?;
     Ok(serde_json::json!({
         "type": "stdio",
         "command": bridge_command,
-        "args": ["browser-mcp"],
+        "args": [subcommand],
     }))
 }
 
 /// Build a merged `--mcp-config` JSON string containing every present MCP
-/// server entry. Returns `None` when neither channel is present.
+/// server entry. Returns `None` when no channel is present.
 ///
 /// When only the approval channel is present, the output is identical to
 /// [`crate::ApprovalChannelSpec::mcp_config_json`] so existing behavior is
-/// unchanged. When only the browser channel is present, the output contains
-/// only the browser entry. When both are present, both entries appear in one
+/// unchanged. Otherwise every present channel's entry appears in one
 /// `mcpServers` object under one `--mcp-config` flag.
 pub fn merged_mcp_config_json(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&NativeChannelSpec>,
 ) -> Result<Option<String>, crate::HarnessError> {
-    let config = match (approval, browser) {
-        (None, None) => None,
-        (Some(channel), None) => {
-            // Existing behavior: approval-only config.
-            Some(channel.mcp_config_json(crate::claude::approvals::APPROVAL_MCP_SERVER))
-        }
-        (None, Some(spec)) => {
-            let mut servers = serde_json::Map::new();
-            servers.insert(
-                BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(spec.bridge_command())?,
-            );
-            Some(serde_json::json!({ "mcpServers": servers }).to_string())
-        }
-        (Some(channel), Some(spec)) => {
-            // Merge both into one config object.
-            let mut servers = serde_json::Map::new();
-            // Approval entry (HTTP with bearer).
-            servers.insert(
-                crate::claude::approvals::APPROVAL_MCP_SERVER.into(),
-                serde_json::json!({
-                    "type": "http",
-                    "url": channel.mcp_endpoint_url,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", channel.token),
-                    },
-                }),
-            );
-            // Browser entry (stdio, inherits env).
-            servers.insert(
-                BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(spec.bridge_command())?,
-            );
-            Some(serde_json::json!({ "mcpServers": servers }).to_string())
-        }
-    };
-    Ok(config)
+    if approval.is_none() && browser.is_none() && native.is_none() {
+        return Ok(None);
+    }
+    if let (Some(channel), None, None) = (approval, browser, native) {
+        // Existing behavior: approval-only config.
+        return Ok(Some(
+            channel.mcp_config_json(crate::claude::approvals::APPROVAL_MCP_SERVER),
+        ));
+    }
+    let mut servers = serde_json::Map::new();
+    if let Some(channel) = approval {
+        // Approval entry (HTTP with bearer).
+        servers.insert(
+            crate::claude::approvals::APPROVAL_MCP_SERVER.into(),
+            serde_json::json!({
+                "type": "http",
+                "url": channel.mcp_endpoint_url,
+                "headers": {
+                    "Authorization": format!("Bearer {}", channel.token),
+                },
+            }),
+        );
+    }
+    if let Some(spec) = browser {
+        // Browser entry (stdio, inherits env).
+        servers.insert(
+            BROWSER_MCP_SERVER.into(),
+            browser_mcp_config_entry(spec.bridge_command())?,
+        );
+    }
+    if let Some(spec) = native {
+        // Native computer-use entry (stdio, inherits env).
+        servers.insert(
+            NATIVE_MCP_SERVER.into(),
+            native_mcp_config_entry(spec.bridge_command())?,
+        );
+    }
+    Ok(Some(
+        serde_json::json!({ "mcpServers": servers }).to_string(),
+    ))
 }
 
-/// Launch argv fragments for the browser and/or approval MCP config.
+/// Launch argv fragments for the approval, browser, and native MCP config.
 ///
-/// Returns `None` when neither channel is present (no `--mcp-config` flag).
+/// Returns `None` when no channel is present (no `--mcp-config` flag).
 /// When only the approval channel is present, the output matches the
 /// existing [`crate::claude::approvals::launch_args_for_approval_channel`]
-/// exactly. When the browser channel is present, the `--mcp-config` flag
-/// carries the merged config and the `--permission-prompt-tool` flag is
-/// added only when the approval channel is also present.
+/// exactly. The `--permission-prompt-tool` flag is added only when the
+/// approval channel is present.
 pub fn launch_args_for_mcp_channels(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&NativeChannelSpec>,
 ) -> Result<Option<Vec<String>>, crate::HarnessError> {
-    let Some(config) = merged_mcp_config_json(approval, browser)? else {
+    let Some(config) = merged_mcp_config_json(approval, browser, native)? else {
         return Ok(None);
     };
     let mut flags = vec!["--mcp-config".into(), config];
@@ -153,13 +176,15 @@ mod tests {
 
     #[test]
     fn neither_channel_produces_no_flags() {
-        assert!(launch_args_for_mcp_channels(None, None).unwrap().is_none());
+        assert!(launch_args_for_mcp_channels(None, None, None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn approval_only_matches_existing_behavior() {
         let channel = approval_channel();
-        let flags = launch_args_for_mcp_channels(Some(&channel), None)
+        let flags = launch_args_for_mcp_channels(Some(&channel), None, None)
             .unwrap()
             .unwrap();
         let existing =
@@ -170,7 +195,7 @@ mod tests {
     #[test]
     fn browser_only_emits_stdio_config_without_prompt_tool() {
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(None, Some(&browser))
+        let flags = launch_args_for_mcp_channels(None, Some(&browser), None)
             .unwrap()
             .unwrap();
         assert_eq!(flags[0], "--mcp-config");
@@ -191,7 +216,7 @@ mod tests {
     fn both_channels_merge_into_one_config() {
         let approval = approval_channel();
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser))
+        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser), None)
             .unwrap()
             .unwrap();
         // Exactly one --mcp-config flag.
@@ -211,8 +236,8 @@ mod tests {
     fn browser_config_carries_no_secrets() {
         let browser = browser_channel();
         for flags in [
-            launch_args_for_mcp_channels(None, Some(&browser)),
-            launch_args_for_mcp_channels(Some(&approval_channel()), Some(&browser)),
+            launch_args_for_mcp_channels(None, Some(&browser), None),
+            launch_args_for_mcp_channels(Some(&approval_channel()), Some(&browser), None),
         ] {
             let flags = flags.unwrap().unwrap();
             let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
@@ -240,7 +265,7 @@ mod tests {
             PathBuf::from("/tmp/with spaces/cap.json"),
             PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
         );
-        let flags = launch_args_for_mcp_channels(None, Some(&browser))
+        let flags = launch_args_for_mcp_channels(None, Some(&browser), None)
             .unwrap()
             .unwrap();
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
@@ -260,6 +285,62 @@ mod tests {
         assert_eq!(args[0], "browser-mcp");
     }
 
+    fn native_channel() -> NativeChannelSpec {
+        NativeChannelSpec::new(
+            PathBuf::from("/tmp/tidebreak-native-cap.json"),
+            PathBuf::from("/usr/local/bin/tidebreak"),
+        )
+    }
+
+    #[test]
+    fn native_only_emits_stdio_config_without_prompt_tool() {
+        let native = native_channel();
+        let flags = launch_args_for_mcp_channels(None, None, Some(&native))
+            .unwrap()
+            .unwrap();
+        assert_eq!(flags[0], "--mcp-config");
+        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        assert_eq!(config["mcpServers"]["tb-native"]["type"], "stdio");
+        assert_eq!(
+            config["mcpServers"]["tb-native"]["command"],
+            "/usr/local/bin/tidebreak"
+        );
+        assert_eq!(config["mcpServers"]["tb-native"]["args"][0], "computer-mcp");
+        assert!(!flags.iter().any(|f| f == "--permission-prompt-tool"));
+        assert!(config["mcpServers"].get("tb-browser").is_none());
+    }
+
+    #[test]
+    fn all_three_channels_merge_into_one_config() {
+        let approval = approval_channel();
+        let browser = browser_channel();
+        let native = native_channel();
+        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser), Some(&native))
+            .unwrap()
+            .unwrap();
+        assert_eq!(flags.iter().filter(|f| **f == "--mcp-config").count(), 1);
+        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        assert!(config["mcpServers"].get("tb-approvals").is_some());
+        assert!(config["mcpServers"].get("tb-browser").is_some());
+        assert!(config["mcpServers"].get("tb-native").is_some());
+        assert!(flags.iter().any(|f| f == "--permission-prompt-tool"));
+    }
+
+    #[test]
+    fn native_config_carries_no_secrets() {
+        let native = native_channel();
+        let flags = launch_args_for_mcp_channels(None, None, Some(&native))
+            .unwrap()
+            .unwrap();
+        let config_str = flags[1].clone();
+        assert!(!config_str.contains("/tmp/tidebreak-native-cap.json"));
+        assert!(!config_str.contains("TIDEBREAK_NATIVE_CAPFILE"));
+        let config: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        let entry = &config["mcpServers"]["tb-native"];
+        assert!(entry.get("headers").is_none());
+        assert!(entry.get("env").is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
@@ -270,7 +351,7 @@ mod tests {
             PathBuf::from("/tmp/tidebreak-browser-cap.json"),
             PathBuf::from(OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec())),
         );
-        let error = launch_args_for_mcp_channels(None, Some(&browser))
+        let error = launch_args_for_mcp_channels(None, Some(&browser), None)
             .expect_err("non-UTF-8 bridge paths must fail closed");
 
         assert!(error.to_string().contains("must be valid UTF-8"));
