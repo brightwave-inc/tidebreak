@@ -5,6 +5,7 @@ import {
   codeBrowserIds,
   isEditorTab,
   openCodeEditor,
+  revealAgentBrowser,
   removedCodeBrowserIds,
 } from "../codeChrome";
 import { attachedRemotely } from "@/host";
@@ -13,7 +14,10 @@ import {
   readBrowserTabLayout,
   writeBrowserTabLayout,
 } from "./browserTabLayout";
-import { closeCodeBrowser, nativeCodeBrowserHost } from "../browser/browserHost";
+import {
+  closeCodeBrowser,
+  nativeCodeBrowserHost,
+} from "../browser/browserHost";
 import { seedBrowserSession } from "../browser/browserPersistence";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -118,11 +122,15 @@ export function useBrowserTabs({
 
   // The trusted native side mints agent tab lifecycle requests and this hook
   // owns tab membership, so it adopts them here: staging an agent-opened tab,
-  // focusing a tab the agent asked to activate, and dropping a tab whose
+  // revealing agent tabs beside the focused editor, and dropping a tab whose
   // native session the agent already closed. Layout access goes through a
   // ref because the subscription outlives any one render's layout.
   const layoutRef = useRef(layout);
-  layoutRef.current = layout;
+  const renderedLayoutRef = useRef(layout);
+  if (renderedLayoutRef.current !== layout) {
+    renderedLayoutRef.current = layout;
+    layoutRef.current = layout;
+  }
   const setLayoutRef = useRef(setLayout);
   setLayoutRef.current = setLayout;
   useEffect(() => {
@@ -132,6 +140,13 @@ export function useBrowserTabs({
     void nativeCodeBrowserHost
       .subscribe((event) => {
         if (cancelled || event.workspaceId !== workspaceId) return;
+        const focusedRegion = document.activeElement
+          ?.closest("[data-code-editor-region]")
+          ?.getAttribute("data-code-editor-region");
+        const activeRegion =
+          focusedRegion === "primary" || focusedRegion === "secondary"
+            ? focusedRegion
+            : undefined;
         if (event.type === "agent_open_requested") {
           const browserId = event.browserId;
           seedBrowserSession({
@@ -149,16 +164,21 @@ export function useBrowserTabs({
             ...current,
             [browserId]: "Browser (agent)",
           }));
-          setLayoutRef.current(
-            openCodeEditor(layoutRef.current, { type: "browser", browserId }),
+          const next = revealAgentBrowser(
+            layoutRef.current,
+            browserId,
+            activeRegion,
           );
+          layoutRef.current = next;
+          setLayoutRef.current(next);
         } else if (event.type === "agent_activate_requested") {
-          setLayoutRef.current(
-            openCodeEditor(layoutRef.current, {
-              type: "browser",
-              browserId: event.browserId,
-            }),
+          const next = revealAgentBrowser(
+            layoutRef.current,
+            event.browserId,
+            activeRegion,
           );
+          layoutRef.current = next;
+          setLayoutRef.current(next);
         } else if (event.type === "agent_closed_tab") {
           // The native session is already gone; only the panel remains.
           closedBrowserIdsRef.current.add(event.browserId);

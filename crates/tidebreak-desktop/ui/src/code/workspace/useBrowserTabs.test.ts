@@ -9,13 +9,20 @@ import {
   writeBrowserTabLayout,
 } from "./browserTabLayout";
 import { createElement, StrictMode } from "react";
+import type { BrowserHostEvent } from "../browser/browserHost";
 import { setAttachedRemotely } from "@/host";
 
 const mocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
   seed: vi.fn(),
+  subscribe: vi.fn(
+    async (_listener: (event: BrowserHostEvent) => void) => () => {},
+  ),
 }));
-vi.mock("../browser/browserHost", () => ({ closeCodeBrowser: mocks.close }));
+vi.mock("../browser/browserHost", () => ({
+  closeCodeBrowser: mocks.close,
+  nativeCodeBrowserHost: { available: () => true, subscribe: mocks.subscribe },
+}));
 vi.mock("../browser/browserPersistence", () => ({
   seedBrowserSession: mocks.seed,
 }));
@@ -163,5 +170,59 @@ describe("useBrowserTabs", () => {
 
     act(() => result.current.openBrowser());
     expect(Object.keys(result.current.browserInitialUrls)).toEqual([browserId]);
+  });
+});
+
+describe("agent browser lifecycle", () => {
+  it("opens agent previews beside the active file and preserves back-to-back requests", () => {
+    const file = openCodeEditor(EMPTY, { type: "file", path: "app.tsx" });
+    const { setLayout, result } = setup(file);
+    const listener = mocks.subscribe.mock.calls.at(-1)![0];
+    act(() => {
+      for (const browserId of ["agent-1", "agent-2"])
+        listener({
+          type: "agent_open_requested",
+          workspaceId: "ws-1",
+          browserId,
+          url: "http://localhost:5173",
+        });
+    });
+    const next = setLayout.mock.calls.at(-1)![0] as LayoutState;
+    expect(next.tabs).toEqual(file.tabs);
+    expect(next.activeIndex).toBe(file.activeIndex);
+    expect(next.editorSplit?.tabs).toEqual([
+      { type: "browser", browserId: "agent-1" },
+      { type: "browser", browserId: "agent-2" },
+    ]);
+    expect(next.editorSplit?.focused).toBeUndefined();
+    expect(result.current.browserInitialUrls).toEqual({
+      "agent-1": "http://localhost:5173",
+      "agent-2": "http://localhost:5173",
+    });
+  });
+
+  it("does not select an agent tab in the group where the user is typing", () => {
+    const layout = withBrowser(
+      openCodeEditor(EMPTY, { type: "file", path: "app.tsx" }),
+      "agent-1",
+    );
+    const file = { ...layout, activeIndex: 0 };
+    const { setLayout } = setup(file);
+    const listener = mocks.subscribe.mock.calls.at(-1)![0];
+    act(() =>
+      listener({
+        type: "agent_activate_requested",
+        workspaceId: "ws-1",
+        browserId: "agent-1",
+      }),
+    );
+    const next = setLayout.mock.calls.at(-1)![0] as LayoutState;
+    expect(next.tabs[next.activeIndex]).toEqual({
+      type: "file",
+      path: "app.tsx",
+    });
+    expect(next.editorSplit?.tabs).toEqual([
+      { type: "browser", browserId: "agent-1" },
+    ]);
   });
 });
