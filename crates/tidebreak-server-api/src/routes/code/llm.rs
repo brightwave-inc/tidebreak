@@ -193,7 +193,11 @@ pub async fn harness_git_credential(
         None => lender.as_ref(),
     };
     match lender
-        .git_credential(&subject.owner, &format!("{origin_owner}/{origin_name}"))
+        .git_credential(
+            &subject.owner,
+            &format!("{origin_owner}/{origin_name}"),
+            session.acts_as().into(),
+        )
         .await
     {
         Ok(credential) => plain(

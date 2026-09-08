@@ -156,6 +156,7 @@ pub async fn external_get_or_create(
                 reasoning_effort: None,
                 fast_mode: false,
                 permission_mode_ceiling: None,
+                acts_as: None,
             },
             body.permission_mode,
         )

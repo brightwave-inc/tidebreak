@@ -56,11 +56,17 @@ export function externalThreadUrl(
 export function SessionOriginBanner({
   origin,
   executionLocation,
+  actsAs,
 }: {
   origin: CodeSessionExternalOrigin;
   executionLocation: ExecutionLocation;
+  actsAs?: "person" | "bot";
 }) {
   const url = externalThreadUrl(origin);
+  const where =
+    executionLocation === "machine" ? "on this machine" : "in a sandbox";
+  const who =
+    actsAs === "bot" ? " as the bot" : actsAs === "person" ? " as you" : "";
   return (
     <div
       className="border-border-subtle bg-background/85 mx-auto mt-3 flex w-[calc(100%-2rem)] max-w-3xl items-start gap-2 rounded-lg border px-3 py-2"
@@ -71,8 +77,8 @@ export function SessionOriginBanner({
         aria-hidden
       />
       <p className="text-muted-foreground min-w-0 flex-1 text-xs">
-        Started from {channelLabel(origin.channel_kind)}; runs{" "}
-        {executionLocation === "machine" ? "on this machine" : "in a sandbox"}.
+        Started from {channelLabel(origin.channel_kind)}; runs {where}
+        {who}.
       </p>
       {url && (
         <button

@@ -106,6 +106,7 @@ where
         }),
         created_at: Set(session.created_at),
         execution_location: Set(session.execution_location.as_str().to_owned()),
+        acts_as: Set(session.acts_as.map(|value| value.as_str().to_owned())),
         // The conversation columns start at their creation defaults; the
         // chat routes fill them in once the session is read as a chat.
         project_id: Set(None),
@@ -1230,6 +1231,12 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
                 row.id, row.execution_location
             ))
         })?;
+    let acts_as = match row.acts_as.as_deref() {
+        None => None,
+        Some(token) => Some(crate::code::ActsAs::from_str(token).ok_or_else(|| {
+            AgentError::Store(format!("session {} has unknown acts_as {token}", row.id))
+        })?),
+    };
     Ok(Session {
         id: SessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
@@ -1254,5 +1261,6 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
         visibility,
         created_at: row.created_at,
         execution_location,
+        acts_as,
     })
 }

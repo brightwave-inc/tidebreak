@@ -551,6 +551,7 @@ mod tests {
             reasoning_effort: None,
             fast_mode: false,
             permission_mode_ceiling: None,
+            acts_as: None,
         }
     }
 

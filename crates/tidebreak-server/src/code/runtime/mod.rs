@@ -435,6 +435,9 @@ pub struct NewSessionSettings {
     /// ceiling that permits no mode the engine offers, after probe, on the
     /// same ceiling the route already clamps against.
     pub permission_mode_ceiling: Option<PermissionMode>,
+    /// Whose forge identity the session borrows as. `None` stores null and
+    /// reads as the owner-kind default (decision 0090).
+    pub acts_as: Option<tidebreak_core::ActsAs>,
 }
 
 impl CodeRuntime {

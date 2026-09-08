@@ -843,3 +843,61 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         "every read and action borrows only for the registered repository"
     );
 }
+
+/// A bot session's delivery probe names the App's login and asks the
+/// gateway for the installation identity.
+#[tokio::test]
+async fn a_bot_session_names_the_apps_login_on_delivery() {
+    let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let root = init_paired_repo(dir.path());
+    run(
+        &root,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    register_delivery_repository(&client, addr, &token, &root).await;
+    let owner = tidebreak_core::OwnerId::local();
+    let repo_id = tidebreak_core::db::code::list_repos(&runtime.db, &owner)
+        .await
+        .unwrap()[0]
+        .id;
+    let workspace = runtime
+        .create_workspace(&owner, repo_id, None, None, None)
+        .await
+        .unwrap();
+    runtime
+        .create_session(
+            &owner,
+            None,
+            workspace.id,
+            tidebreak_core::HarnessKind::ClaudeCode,
+            crate::code::runtime::NewSessionSettings {
+                acts_as: Some(tidebreak_core::ActsAs::Bot),
+                // The fixture adapter honors no structured approvals, so the
+                // session takes the one mode it can run in.
+                permission_mode: tidebreak_core::PermissionMode::Plan,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let status = runtime.workspace_pr(&owner, workspace.id).await.unwrap();
+    assert_eq!(status.pushes_as.as_deref(), Some("acme-ship[bot]"));
+    assert_eq!(status.pushes_as_self, Some(false));
+    assert!(
+        lender
+            .asked()
+            .contains(&crate::obo_gateway::GitForgeAttributionRequest::Installation),
+        "a bot session's probe asks for the installation identity: {:?}",
+        lender.asked()
+    );
+}

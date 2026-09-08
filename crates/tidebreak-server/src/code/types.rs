@@ -272,10 +272,17 @@ pub struct SessionSnapshot {
     pub external_origin: Option<SessionExternalOrigin>,
     /// Where the engine runs, fixed at creation (decision 0088).
     pub execution_location: ExecutionLocation,
+    /// Whose forge identity this session borrows as (decision 0090).
+    /// Absent on a snapshot from before the field existed; the parser
+    /// treats that as the owner-kind default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub acts_as: Option<tidebreak_core::ActsAs>,
 }
 
 impl From<Session> for SessionSnapshot {
     fn from(session: Session) -> Self {
+        let acts_as = session.acts_as();
         Self {
             id: session.id,
             owner_kind: session.owner_kind,
@@ -298,6 +305,7 @@ impl From<Session> for SessionSnapshot {
             // desktop attach it.
             external_origin: None,
             execution_location: session.execution_location,
+            acts_as: Some(acts_as),
         }
     }
 }

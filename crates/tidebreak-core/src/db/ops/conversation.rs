@@ -263,6 +263,7 @@ where
         subagents: Set(None),
         created_at: Set(chat.created_at),
         execution_location: Set("machine".to_owned()),
+        acts_as: Set(None),
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
         // Always persist the creation-time choice explicitly. The column's

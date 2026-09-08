@@ -224,6 +224,12 @@ as good as that confirmation gate.
 
 ## Identity and connect
 
+A session acts as one forge identity, chosen when it starts, the same way it
+chooses where the engine runs. A person's session acts as them; a service
+principal's acts as the App's bot. Hosted git names that choice on every
+borrow, and the gateway answers or refuses by name. This page does not yet
+let the channel pick the identity; get-or-create keeps today's default.
+
 A Slack user does not run until they hold a grant.
 
 On first mention from an unmapped user, the adapter stores the pending

@@ -8,6 +8,15 @@
 // bounds, reject control characters, and cross-check server policy, none of
 // which a type can express. See docs/wire-types.md.
 
+/**
+ * Whose forge identity a session borrows as, fixed at start (decision 0090).
+ *
+ * Chosen once, when the session is created. A person's session defaults to
+ * acting as themselves; a service principal's defaults to the App's bot.
+ * The borrow names the request and the gateway answers or refuses by name.
+ */
+export type ActsAs = "person" | "bot";
+
 export type AddSessionAccessBody = { subject: string, level: SessionAccessLevel, };
 
 /**
@@ -4875,7 +4884,13 @@ external_origin?: SessionExternalOrigin,
 /**
  * Where the engine runs, fixed at creation (decision 0088).
  */
-execution_location: ExecutionLocation, };
+execution_location: ExecutionLocation,
+/**
+ * Whose forge identity this session borrows as (decision 0090).
+ * Absent on a snapshot from before the field existed; the parser
+ * treats that as the owner-kind default.
+ */
+acts_as?: ActsAs, };
 
 /**
  * Who may read a session without holding an access row (decision 0086).

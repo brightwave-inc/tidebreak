@@ -354,6 +354,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
         created_at: chrono::Utc::now(),
         visibility: SessionVisibility::Private,
         execution_location: ExecutionLocation::Machine,
+        acts_as: None,
     };
     let resolution = tidebreak_core::db::code::resolve_external_machine_session(
         &db,
@@ -568,6 +569,7 @@ async fn bind_runtime_session(
         } else {
             ExecutionLocation::Machine
         },
+        acts_as: None,
     };
     tidebreak_core::db::code::resolve_external_machine_session(
         db,

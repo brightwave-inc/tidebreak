@@ -2517,6 +2517,7 @@ mod tests {
             subagents: Vec::new(),
             created_at: chrono::Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as: None,
         };
         insert_session(&db, &session).await.unwrap();
         (db, Arc::new(CodeEventBus::default()), session)

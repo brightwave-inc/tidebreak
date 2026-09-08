@@ -67,6 +67,7 @@ pub async fn create_session(
                 reasoning_effort: body.reasoning_effort,
                 fast_mode: body.fast_mode,
                 permission_mode_ceiling,
+                acts_as: None,
             },
         )
         .await?;
@@ -88,6 +89,7 @@ pub async fn create_internal_session(
             reasoning_effort: body.reasoning_effort,
             fast_mode: false,
             permission_mode_ceiling,
+            acts_as: None,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(SessionSnapshot::from(session))))
@@ -113,6 +115,7 @@ pub async fn create_remote_session(
                 reasoning_effort: body.reasoning_effort,
                 fast_mode: false,
                 permission_mode_ceiling,
+                acts_as: None,
             },
         )
         .await?;

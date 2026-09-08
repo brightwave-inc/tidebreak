@@ -52,3 +52,13 @@ export const OtherChannel: Story = {
 export const SandboxThread: Story = {
   args: { ...SlackThread.args, executionLocation: "sandbox" },
 };
+
+/** A person session borrows the caller's own forge identity. */
+export const ActsAsYou: Story = {
+  args: { ...SlackThread.args, actsAs: "person" },
+};
+
+/** A service session borrows the App's bot. */
+export const ActsAsTheBot: Story = {
+  args: { ...SlackThread.args, actsAs: "bot" },
+};

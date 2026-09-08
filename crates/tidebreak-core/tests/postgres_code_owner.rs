@@ -105,6 +105,7 @@ async fn seed_owner(
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as: None,
         },
     )
     .await

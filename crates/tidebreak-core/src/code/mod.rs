@@ -1433,6 +1433,52 @@ impl ExecutionLocation {
     }
 }
 
+/// Whose forge identity a session borrows as, fixed at start (decision 0090).
+///
+/// Chosen once, when the session is created. A person's session defaults to
+/// acting as themselves; a service principal's defaults to the App's bot.
+/// The borrow names the request and the gateway answers or refuses by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ActsAs {
+    /// The caller's own GitHub account.
+    Person,
+    /// The deployment's GitHub App bot.
+    Bot,
+}
+
+impl ActsAs {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Bot => "bot",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "person" => Some(Self::Person),
+            "bot" => Some(Self::Bot),
+            _ => None,
+        }
+    }
+
+    /// Null on the row means this: a service acts as the bot, anyone else as
+    /// themselves.
+    #[must_use]
+    pub fn default_for_owner_kind(owner_kind: Option<&str>) -> Self {
+        match owner_kind {
+            Some("service") => Self::Bot,
+            _ => Self::Person,
+        }
+    }
+}
+
 /// Who submitted a turn, or settled a decision (decision 0086).
 ///
 /// Every field is optional, because the paths that write one know different
@@ -1550,6 +1596,22 @@ pub struct Session {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Where the engine runs, fixed at creation (decision 0088).
     pub execution_location: ExecutionLocation,
+    /// Whose forge identity this session borrows as, when stored. `None`
+    /// reads as [`ActsAs::default_for_owner_kind`] (decision 0090).
+    #[serde(default)]
+    pub acts_as: Option<ActsAs>,
+}
+
+impl Session {
+    /// The forge identity this session borrows as, fixed at start.
+    ///
+    /// A stored null is the owner-kind default: a service acts as the bot,
+    /// a person as themselves.
+    #[must_use]
+    pub fn acts_as(&self) -> ActsAs {
+        self.acts_as
+            .unwrap_or_else(|| ActsAs::default_for_owner_kind(self.owner_kind.as_deref()))
+    }
 }
 
 /// Persisted turn record.

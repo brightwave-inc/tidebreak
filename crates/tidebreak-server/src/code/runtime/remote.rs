@@ -155,6 +155,7 @@ impl CodeRuntime {
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Sandbox,
+            acts_as: settings.acts_as,
         }
     }
 
@@ -307,6 +308,7 @@ impl CodeRuntime {
                                 gateway.as_ref() as &dyn crate::obo_gateway::GitCredentialLender
                             })
                             .or_else(|| self.git_credentials().map(|lender| lender.as_ref())),
+                        settings.acts_as.unwrap_or(tidebreak_core::ActsAs::Person),
                     )
                     .await?;
                 let session = self

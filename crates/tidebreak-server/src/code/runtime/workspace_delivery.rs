@@ -102,7 +102,10 @@ impl CodeRuntime {
         let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
-        let credential = self.borrow_git_credential(owner, &worktree).await?;
+        let acts_as = self.workspace_acts_as(owner, id).await;
+        let credential = self
+            .borrow_git_credential(owner, &worktree, acts_as)
+            .await?;
         let outcome = gh::push_branch(&worktree, &workspace.branch_name, credential.as_ref())
             .await
             .map_err(map_gh)?;
@@ -174,11 +177,15 @@ impl CodeRuntime {
         owner: &OwnerId,
         worktree: &std::path::Path,
         lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+        acts_as: tidebreak_core::ActsAs,
     ) {
         let Some(lender) = lender else {
             return;
         };
-        let Ok(identity) = lender.git_forge_identity(owner).await else {
+        if acts_as == tidebreak_core::ActsAs::Bot {
+            return;
+        }
+        let Ok(identity) = lender.git_forge_identity(owner, acts_as.into()).await else {
             return;
         };
         let crate::obo_gateway::GitForgeAttribution::Person {
@@ -204,7 +211,13 @@ impl CodeRuntime {
         // Tests must not inherit the developer machine's `gh` login.
         self.git_credentials()?;
         if let Some(lender) = self.git_credentials() {
-            let identity = lender.git_forge_identity(owner).await.ok()?;
+            let identity = lender
+                .git_forge_identity(
+                    owner,
+                    crate::obo_gateway::GitForgeAttributionRequest::Person,
+                )
+                .await
+                .ok()?;
             return match identity.attribution {
                 crate::obo_gateway::GitForgeAttribution::Person { login, .. } => Some(login),
                 crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
@@ -238,6 +251,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         worktree: &std::path::Path,
+        acts_as: tidebreak_core::ActsAs,
     ) -> Result<Option<crate::obo_gateway::GitCredential>, ServerError> {
         let Some(lender) = self.git_credentials() else {
             return Ok(None);
@@ -246,7 +260,10 @@ impl CodeRuntime {
             return Ok(None);
         };
         let repository = format!("{}/{}", target.owner, target.name);
-        match lender.git_credential(owner, &repository).await {
+        match lender
+            .git_credential(owner, &repository, acts_as.into())
+            .await
+        {
             Ok(credential) => Ok(Some(credential)),
             Err(refusal) => Err(ServerError::unprocessable_kind(
                 "git_forge_refused",
@@ -261,10 +278,27 @@ impl CodeRuntime {
     /// credentials and every checkout outside the lending gate — those keep
     /// `gh` exactly as it is. A gateway refusal fails the operation with its
     /// reason, exactly as a push does.
+    async fn workspace_acts_as(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+    ) -> tidebreak_core::ActsAs {
+        match list_sessions_for_workspace(&self.db, owner, workspace_id).await {
+            Ok(sessions) => sessions
+                .iter()
+                .find(|session| session.kind == SessionKind::Interactive)
+                .or(sessions.first())
+                .map(Session::acts_as)
+                .unwrap_or(tidebreak_core::ActsAs::Person),
+            Err(_) => tidebreak_core::ActsAs::Person,
+        }
+    }
+
     pub(super) async fn forge_rest_context(
         &self,
         owner: &OwnerId,
         worktree: &std::path::Path,
+        acts_as: tidebreak_core::ActsAs,
     ) -> Result<
         Option<(
             crate::code::types::CodeGitHubRepositoryTarget,
@@ -279,7 +313,7 @@ impl CodeRuntime {
             return Ok(None);
         };
         let credential = self
-            .borrow_git_credential(owner, worktree)
+            .borrow_git_credential(owner, worktree, acts_as)
             .await?
             .ok_or_else(|| {
                 ServerError::unprocessable_kind(
@@ -349,6 +383,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         workspace: &CodeWorkspace,
         lender: Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+        acts_as: tidebreak_core::ActsAs,
     ) -> Result<
         Option<(
             CodeGitHubRepositoryTarget,
@@ -394,7 +429,11 @@ impl CodeRuntime {
             }
         }
         let credential = lender
-            .git_credential(owner, &format!("{}/{}", target.owner, target.name))
+            .git_credential(
+                owner,
+                &format!("{}/{}", target.owner, target.name),
+                acts_as.into(),
+            )
             .await
             .map_err(|error| {
                 ServerError::unprocessable_kind(
@@ -411,8 +450,9 @@ impl CodeRuntime {
         workspace: &CodeWorkspace,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let (lender, _) = self.workspace_git_lender(owner, workspace).await?;
+        let acts_as = self.workspace_acts_as(owner, workspace.id).await;
         let identity = match lender {
-            Some(lender) => lender.git_forge_identity(owner).await.ok(),
+            Some(lender) => lender.git_forge_identity(owner, acts_as.into()).await.ok(),
             None => None,
         };
         let (pushes_as, pushes_as_self) = match identity {
@@ -478,7 +518,8 @@ impl CodeRuntime {
         if let Some(lender) = self.git_credentials() {
             let worktree = std::path::Path::new(&workspace.worktree_path);
             if forge_lending_target(worktree).await.is_some() {
-                if let Ok(identity) = lender.git_forge_identity(owner).await {
+                let acts_as = self.workspace_acts_as(owner, workspace.id).await;
+                if let Ok(identity) = lender.git_forge_identity(owner, acts_as.into()).await {
                     match identity.attribution {
                         crate::obo_gateway::GitForgeAttribution::Person { login, .. } => {
                             status.pushes_as = Some(login);
@@ -486,6 +527,7 @@ impl CodeRuntime {
                         }
                         crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
                             status.pushes_as = Some(bot_login.unwrap_or(identity.app_name));
+                            status.pushes_as_self = Some(false);
                         }
                     }
                 }
@@ -567,7 +609,12 @@ impl CodeRuntime {
             }
             None => {
                 let (target, credential) = self
-                    .workspace_forge_rest_context(owner, &workspace, lender.as_ref())
+                    .workspace_forge_rest_context(
+                        owner,
+                        &workspace,
+                        lender.as_ref(),
+                        self.workspace_acts_as(owner, workspace.id).await,
+                    )
                     .await
                     .map_err(|error| error.message().to_owned())?
                     .ok_or_else(|| {
@@ -1260,7 +1307,12 @@ impl CodeRuntime {
             .map_err(map_gh);
         }
         let (target, credential) = self
-            .workspace_forge_rest_context(owner, &workspace, lender.as_ref())
+            .workspace_forge_rest_context(
+                owner,
+                &workspace,
+                lender.as_ref(),
+                self.workspace_acts_as(owner, workspace.id).await,
+            )
             .await?
             .ok_or_else(|| {
                 ServerError::unprocessable_kind(
@@ -1541,7 +1593,8 @@ impl CodeRuntime {
         // authored fact comes straight from the creation answer, with no
         // second host read. Everywhere else `gh` does exactly what it always
         // has (decision 34), including its own best-effort fact read below.
-        let (digest, rest_fact) = match self.forge_rest_context(owner, &worktree).await? {
+        let acts_as = self.workspace_acts_as(owner, id).await;
+        let (digest, rest_fact) = match self.forge_rest_context(owner, &worktree, acts_as).await? {
             Some((target, credential)) => {
                 let api_base = self.forge_api_base_for(&target.host);
                 let (digest, fact) = gh::create_pull_request_rest(

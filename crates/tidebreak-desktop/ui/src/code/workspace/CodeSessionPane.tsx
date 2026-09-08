@@ -548,6 +548,7 @@ export function CodeSessionPane({
         <SessionOriginBanner
           origin={session.external_origin}
           executionLocation={session.execution_location}
+          actsAs={session.acts_as}
         />
       )}
       <div className={cn("message-view", follow.fadeClass)}>

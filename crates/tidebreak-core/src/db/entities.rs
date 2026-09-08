@@ -1571,6 +1571,8 @@ pub mod session {
         pub subagents: Option<Json>,
         pub created_at: DateTimeUtc,
         pub execution_location: String,
+        /// `person` or `bot` when stored; `None` is the owner-kind default.
+        pub acts_as: Option<String>,
         /// The conversation columns (decision 0048 step 5): a session is
         /// the conversation, so the project it belongs to, its title, its
         /// network policy, and its host-root revision live on the same row.
