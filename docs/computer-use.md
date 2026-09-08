@@ -2,8 +2,10 @@
 
 Tidebreak gives local coding sessions access to its in-app browser, native macOS
 apps, and Google Chrome. Codex, Claude Code, and OpenCode use bundled MCP
-servers. Grok uses the bundled CLI and reads screenshot files. The internal
-engine calls the same host services through session-scoped tools.
+servers. Grok uses the bundled CLI and reads screenshot files. On the qualified
+Grok 1.0.13 release, the ACP transport handles approvals, cancellation, and
+session resume. The internal engine calls the same host services through
+session-scoped tools.
 
 The desktop owns permissions and input. A harness receives a private capability
 for its session; it cannot choose another session, an arbitrary Chrome debugger
@@ -31,6 +33,12 @@ keyboard focus in Tidebreak. It does not silently replace a background action.
 
 Native capture and control require macOS 14 or later, the packaged helper,
 Accessibility permission, and Screen Recording permission where applicable.
+To check them, open **Settings → Permissions → Computer use on this Mac**.
+The panel identifies the running app and shows each permission separately.
+Choose **Request macOS permissions** or open the corresponding System Settings
+pane, then enable the permission for that app. If macOS asks you to quit and
+reopen the app, do that before retrying.
+
 Tidebreak asks for app access through a native dialog. Read and screenshot access
 do not authorize control. A whole-display screenshot needs its own grant.
 The disclosure explains that screenshots and visible content can reach your
