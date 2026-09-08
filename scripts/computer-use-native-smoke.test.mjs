@@ -119,10 +119,11 @@ function nativeFixture(options = {}) {
     calls.push([name, args]);
     switch (name) {
       case "computer_launch_app":
+        assert.deepEqual(Object.keys(args), ["app_id"], "launch only accepts a registered bundle id");
         if (options.failLaunch) throw new Error("launch rejected");
         return { outcome: "completed" };
       case "computer_list_windows":
-        return { windows: [{ id: 1, title: "Computer Use Fixture", visible: true }] };
+        return { outcome: "completed", data: { windows: [{ window_id: 1, title: "Computer Use Fixture", visible: true }] } };
       case "computer_focus_window":
         return { outcome: "completed" };
       case "computer_read_app_content": {
@@ -130,7 +131,7 @@ function nativeFixture(options = {}) {
         if (options.missingCheckbox) {
           nodes = nodes.filter((node) => node.identifier !== "fixture-checkbox");
         }
-        return { nodes };
+        return { outcome: "completed", data: { status: "ok", tree: JSON.stringify({ children: nodes }) } };
       }
       case "computer_capture_screen":
         return { images: [{ mime_type: "image/png", base64: fakePng(640, 480, options.staleScreenshot ? 0 : state.submission_count).toString("base64") }] };
@@ -140,7 +141,7 @@ function nativeFixture(options = {}) {
         writeSnapshot();
         return { outcome: "completed" };
       case "computer_click": {
-        const identifier = tree().find((node) => node.element_id === args.target.element_id)?.identifier;
+        const identifier = tree().find((node) => node.element_id === args.element_id)?.identifier;
         if (identifier === "fixture-add-button" && !options.suppressAdd) {
           state.submission_count += 1;
           writeEvent("submission", { count: state.submission_count, value: state.text_value });
@@ -178,6 +179,7 @@ function nativeFixture(options = {}) {
         writeSnapshot();
         return { outcome: "completed" };
       case "computer_drag":
+        assert.ok(args.from?.element_id && args.to?.element_id, "drag uses from/to targets");
         state.drag_dropped = true;
         state.drag_target = "fixture-drop-target";
         writeEvent("drag_started", { target: "fixture-drag-item" });
@@ -189,7 +191,8 @@ function nativeFixture(options = {}) {
         writeEvent("scroll", { content_y: 180 });
         writeSnapshot();
         return { outcome: "completed" };
-      case "computer_wait_for":
+      case "computer_wait":
+        assert.deepEqual(args, { seconds: 1.0 });
         return { outcome: "completed" };
       case "computer_resize_window":
         if (options.muteForce) state.force = (state.force ?? 0) + 1;
@@ -343,7 +346,7 @@ test("the adapter emits the expected shared tool names", async () => {
     "computer_hover",
     "computer_drag",
     "computer_resize_window",
-    "computer_wait_for",
+    "computer_wait",
   ]) {
     assert.ok(names.has(name), "runner must call " + name);
   }
@@ -374,12 +377,12 @@ test("every native refusal fails even when the fixture can reach the target stat
   const fixture = nativeFixture();
   const original = fixture.call;
   fixture.call = async (name, args) => {
-    if (name === "computer_wait_for") {
+    if (name === "computer_wait") {
       return { outcome: "failed", error_code: "unsupported", message: "wait is unavailable" };
     }
     return original(name, args);
   };
-  await assert.rejects(runNativeSmoke(smokeOptions(fixture)), /computer_wait_for failed.*unsupported/);
+  await assert.rejects(runNativeSmoke(smokeOptions(fixture)), /computer_wait failed.*unsupported/);
 });
 
 test("reset must clear the state rather than only replace its run id", async () => {
@@ -387,7 +390,7 @@ test("reset must clear the state rather than only replace its run id", async () 
   const original = fixture.call;
   fixture.call = async (name, args) => {
     const result = await original(name, args);
-    if (name === "computer_click" && args.target.element_id === "e-reset") {
+    if (name === "computer_click" && args.element_id === "e-reset") {
       fixture.events.findLast((event) => event.event === "state_snapshot").payload.submission_count = 1;
     }
     return result;

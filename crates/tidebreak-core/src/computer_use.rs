@@ -202,14 +202,14 @@ pub struct ComputerCaptureScreenArgs {
     #[schemars(description = "Annotate interactive elements with numbered marks.")]
     pub annotate: bool,
     /// Select one window of the app (from `computer_list_windows`) instead of
-    /// every window of the app. Ignored for whole-display captures.
+    /// every window of the app. Requires `app_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Optional window id to capture; app capture only.")]
     pub window_id: Option<u32>,
     /// Cap the longest image edge in pixels after capture so the image fits
     /// the transport budget (default 1440, max 4096). The image is downscaled
-    /// to this edge; coordinates remain in the pre-scale pixel space and are
-    /// mapped explicitly by the same factor.
+    /// to this edge. Use the returned coordinate frame to map screenshot
+    /// pixels into the global logical coordinates accepted by input tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
         range(min = 1, max = MAX_CAPTURE_MAX_DIMENSION),
@@ -370,6 +370,10 @@ pub struct ComputerReturnToTidebreakArgs {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerWaitArgs {
+    /// App to observe. Required with a condition; omitted for a fixed pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "App bundle id, required when waiting for a condition.")]
+    pub app_id: Option<String>,
     /// How long to wait, in seconds (default 1, max 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Seconds to wait (default 1, max 10).")]
@@ -527,6 +531,9 @@ pub fn validate_computer_capture_screen_arguments(arguments: &Value) -> bool {
     };
     args.max_dimension
         .is_none_or(|edge| (1..=MAX_CAPTURE_MAX_DIMENSION).contains(&edge))
+        && args.app_id.as_ref().is_none_or(|id| !id.trim().is_empty())
+        && (args.window_id.is_none() || args.app_id.is_some())
+        && !(args.app_id.is_some() && args.display_id.is_some())
 }
 
 /// Validate a `computer_read_app_content` payload, enforcing the read bounds.
@@ -605,7 +612,12 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
             !text.trim().is_empty() && text.chars().count() <= MAX_WAIT_CONDITION_TEXT_CHARS
         }
     };
-    seconds_ok && timeout_ok && condition_ok
+    let scope_ok = if args.condition.is_some() {
+        args.app_id.as_ref().is_some_and(|id| !id.trim().is_empty()) && args.seconds.is_none()
+    } else {
+        args.app_id.is_none() && args.condition_timeout_seconds.is_none()
+    };
+    seconds_ok && timeout_ok && condition_ok && scope_ok
 }
 
 /// Validate a `computer_launch_app` payload.
@@ -958,7 +970,7 @@ mod tests {
             &json!({ "seconds": -1.0 })
         ));
         assert!(validate_computer_wait_arguments(
-            &json!({ "condition": { "kind": "app_running" } })
+            &json!({ "app_id": "dev.tidebreak.fixture", "condition": { "kind": "app_running" } })
         ));
         assert!(!validate_computer_wait_arguments(
             &json!({ "condition": { "kind": "text_present", "text": "" } })
@@ -966,6 +978,15 @@ mod tests {
         assert!(!validate_computer_wait_arguments(
             &json!({ "condition": { "kind": "text_absent", "text": "x" }, "condition_timeout_seconds": 35.0 })
         ));
+        for args in [
+            json!({ "condition": { "kind": "app_running" } }),
+            json!({ "app_id": "", "condition": { "kind": "window_visible" } }),
+            json!({ "app_id": "dev.tidebreak.fixture", "condition": { "kind": "app_running" }, "seconds": 1 }),
+            json!({ "app_id": "dev.tidebreak.fixture", "seconds": 1 }),
+            json!({ "condition_timeout_seconds": 1 }),
+        ] {
+            assert!(!validate_computer_wait_arguments(&args), "{args}");
+        }
         // serde_json cannot represent a non-finite float, so a NaN/Infinity
         // never survives a wire round-trip; the validator's `is_finite` guard
         // covers the in-memory case.

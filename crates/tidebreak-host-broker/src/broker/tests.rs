@@ -4576,6 +4576,12 @@ impl ComputerUseBackend for StubCuBackend {
             width: 800,
             height: 600,
             media_type: "image/png".to_owned(),
+            coordinate_frame: Some(crate::computer_use::WindowFrame {
+                x: -200.0,
+                y: 80.0,
+                width: 1600.0,
+                height: 1200.0,
+            }),
         })
     }
 
@@ -5003,7 +5009,7 @@ fn new_control_ops_are_blocklist_gated_and_bounded() {
             fixture.subject,
             Capability::ControlApp,
             Scope::App {
-                bundle_id: "com.apple.Terminal".to_owned(),
+                bundle_id: "com.apple.SecurityAgent".to_owned(),
             },
             ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
         )
@@ -5011,7 +5017,7 @@ fn new_control_ops_are_blocklist_gated_and_bounded() {
     );
     let error = fixture
         .operate(OperationRequest::CuLaunchApp {
-            bundle_id: "com.apple.Terminal".to_owned(),
+            bundle_id: "com.apple.SecurityAgent".to_owned(),
         })
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Denied);
@@ -5091,7 +5097,7 @@ fn condition_wait_uses_read_authority_and_never_types() {
             fixture.subject,
             Capability::ReadAppContent,
             Scope::App {
-                bundle_id: "com.apple.Terminal".to_owned(),
+                bundle_id: "com.apple.SecurityAgent".to_owned(),
             },
             ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
         )
@@ -5099,7 +5105,7 @@ fn condition_wait_uses_read_authority_and_never_types() {
     );
     let error = fixture
         .operate(OperationRequest::CuWaitCondition {
-            bundle_id: "com.apple.Terminal".to_owned(),
+            bundle_id: "com.apple.SecurityAgent".to_owned(),
             condition: ConditionWire::AppRunning,
             timeout_seconds: None,
         })
@@ -5535,6 +5541,36 @@ fn captures_cross_the_wire_as_a_single_use_handoff() {
         .unwrap_err();
     assert_eq!(second.code, ErrorCode::NotFound);
     assert!(!second.retryable);
+}
+
+#[test]
+fn detailed_capture_preserves_coordinates_and_can_disable_marks() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::CaptureScreen, Some("com.example.app"));
+    let result = fixture
+        .operate(OperationRequest::CuCaptureScreenDetailed {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+            annotate: false,
+            window_id: None,
+            max_dimension: Some(720),
+        })
+        .unwrap();
+    let OperationResult::CuCaptureScreen(capture) = result else {
+        panic!("capture expected")
+    };
+    assert!(
+        capture.marks.is_empty(),
+        "unannotated captures must not expose stale marks"
+    );
+    let frame = capture
+        .coordinate_frame
+        .expect("capture transform must reach the desktop");
+    assert_eq!(
+        (frame.x, frame.y, frame.width, frame.height),
+        (-200.0, 80.0, 1600.0, 1200.0)
+    );
 }
 
 #[test]

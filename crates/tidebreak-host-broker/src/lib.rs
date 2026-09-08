@@ -32,7 +32,8 @@ pub use capability::{
 pub use computer_use::{
     AxTree, BackendError, BackendErrorKind, CaptureMeta, CaptureTarget, ComputerUseBackend,
     ControlMeta, ElementDescription, ElementTarget, HelperBackend, PermissionStatus,
-    UnsupportedBackend, WaitCondition, WaitObservation, WindowFrame, WindowInfo, HELPER_PATH_ENV,
+    UnsupportedBackend, WaitCondition, WaitObservation, WindowFrame, WindowInfo,
+    HELPER_CANCEL_PATH_ENV, HELPER_PATH_ENV,
 };
 pub use consequential::{classify, truncate_label, Consequence, ControlOp};
 pub use id::{

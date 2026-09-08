@@ -27,7 +27,8 @@ use tokio::{
 
 const SIDECAR_NAME: &str = "tidebreak-host-broker";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// Leave room for a 30s native condition wait and the helper's bounded shutdown.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_QUEUE_CAPACITY: usize = 32;
 pub(crate) const MUTATION_DISPATCH_WINDOW: Duration = Duration::from_secs(5);
@@ -53,6 +54,7 @@ pub(crate) struct BrokerClient {
     commands: mpsc::Sender<BrokerCommand>,
     admission: StdMutex<BrokerAdmission>,
     task: StdMutex<Option<JoinHandle<()>>>,
+    native_cancel_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +69,12 @@ enum BrokerAdmission {
 impl BrokerClient {
     pub(crate) fn new(app: AppHandle, data_dir: PathBuf, home_dir: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
+        let native_cancel_path = native_cancel_path(&data_dir);
+        if let Err(error) =
+            write_native_generation(&native_cancel_path, &uuid::Uuid::new_v4().to_string())
+        {
+            eprintln!("tidebreak-desktop: native computer control is unavailable: {error}");
+        }
         let task = tauri::async_runtime::spawn(
             BrokerWorker {
                 app,
@@ -83,7 +91,22 @@ impl BrokerClient {
             commands,
             admission: StdMutex::new(BrokerAdmission::Running),
             task: StdMutex::new(Some(task)),
+            native_cancel_path,
         }
+    }
+
+    /// Interrupt helper input without waiting behind a running broker call.
+    pub(crate) fn cancel_native_actions(&self) -> Result<(), BrokerClientError> {
+        write_native_generation(&self.native_cancel_path, "stopped").map_err(|error| {
+            // Missing state also cancels input if an atomic replacement fails.
+            let _ = std::fs::remove_file(&self.native_cancel_path);
+            BrokerClientError::Transport(error.to_string())
+        })
+    }
+
+    pub(crate) fn resume_native_actions(&self) -> Result<(), BrokerClientError> {
+        write_native_generation(&self.native_cancel_path, &uuid::Uuid::new_v4().to_string())
+            .map_err(|error| BrokerClientError::Transport(error.to_string()))
     }
 
     pub(crate) async fn control(
@@ -245,6 +268,7 @@ impl BrokerClient {
     }
 
     pub(crate) async fn shutdown(&self) {
+        let _ = self.cancel_native_actions();
         self.set_admission(BrokerAdmission::Shutdown);
         let (reply, finished) = oneshot::channel();
         let acknowledged = matches!(
@@ -490,6 +514,10 @@ impl Session {
             .args(args)
             .env_clear();
         sidecar = sidecar.envs(minimal_environment());
+        sidecar = sidecar.env(
+            tidebreak_host_broker::HELPER_CANCEL_PATH_ENV,
+            native_cancel_path(data_dir),
+        );
         #[cfg(target_os = "macos")]
         if let Some(helper) = computer_use_helper_path(app.path().resource_dir().ok().as_deref()) {
             sidecar = sidecar.env(tidebreak_host_broker::HELPER_PATH_ENV, helper);
@@ -670,6 +698,42 @@ async fn read_frame(input: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>, 
 }
 
 /// Resolve only app-owned paths. A harness cannot select the privileged helper.
+fn native_cancel_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("computer-use-control").join("generation")
+}
+
+fn write_native_generation(path: &Path, generation: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing control directory"))?;
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let temporary = directory.join(format!(".generation-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(generation.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
 #[cfg(target_os = "macos")]
 fn computer_use_helper_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
     let packaged = resource_dir.map(|dir| dir.join("host-broker/tidebreak-cu-helper"));
@@ -753,12 +817,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_stop_and_resume_replace_the_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = native_cancel_path(directory.path());
+        let first = uuid::Uuid::new_v4().to_string();
+        write_native_generation(&path, &first).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        write_native_generation(&path, "stopped").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "stopped");
+        let resumed = uuid::Uuid::new_v4().to_string();
+        write_native_generation(&path, &resumed).unwrap();
+        assert_ne!(first, resumed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), resumed);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn quiesce_closes_admission_before_its_queue_barrier() {
         let (commands, mut receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let client = BrokerClient {
             commands,
             admission: StdMutex::new(BrokerAdmission::Running),
             task: StdMutex::new(None),
+            native_cancel_path: PathBuf::new(),
         };
         let (first_reply, _first_finished) = oneshot::channel();
         client

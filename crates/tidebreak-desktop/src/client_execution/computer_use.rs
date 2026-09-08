@@ -29,24 +29,22 @@ use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tidebreak_core::{
-    validate_computer_capture_screen_arguments, validate_computer_click_arguments,
-    validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
-    validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
-    validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
-    validate_computer_type_text_arguments, validate_computer_wait_arguments, CallId,
-    ComputerCaptureScreenArgs, ComputerClickArgs, ComputerFocusWindowArgs, ComputerKeyPressArgs,
-    ComputerListWindowsArgs, ComputerReadAppContentArgs, ComputerScrollArgs, ComputerTypeTextArgs,
-    ComputerWaitArgs, ImageRef, SessionId, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_FOCUS_WINDOW_TOOL,
-    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
-    COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
-    COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
+    validate_computer_use_arguments, CallId, ComputerCaptureScreenArgs, ComputerClickArgs,
+    ComputerDragArgs, ComputerFocusWindowArgs, ComputerHoverArgs, ComputerKeyPressArgs,
+    ComputerLaunchAppArgs, ComputerListWindowsArgs, ComputerReadAppContentArgs,
+    ComputerResizeWindowArgs, ComputerScrollArgs, ComputerTypeTextArgs, ComputerWaitArgs,
+    ComputerWaitConditionArgs, ImageRef, SessionId, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL,
+    COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL, COMPUTER_KEY_PRESS_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL,
+    COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
 use tidebreak_host_broker::{
-    extract_marks, is_blocked_control_bundle, Capability, ConsentMethod, ControlRequest,
-    ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest, CuResolveHandoffRequest,
-    CuRevokeAppRequest, ElementTargetWire, ErrorCode, GrantSubject, Mark, OperationEnvelope,
-    OperationRequest, OperationResult, SubjectKind, PROTOCOL_VERSION,
+    extract_marks, is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod,
+    ControlRequest, ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest,
+    CuResolveHandoffRequest, CuRevokeAppRequest, ElementTargetWire, ErrorCode, GrantSubject, Mark,
+    OperationEnvelope, OperationRequest, OperationResult, SubjectKind, PROTOCOL_VERSION,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -509,9 +507,11 @@ pub(crate) async fn stop_computer_use_control(
     state
         .require_local(crate::host_authority::Authority::ComputerUse)
         .await?;
-    state.computer_use.halt().await;
+    state.computer_use.halt.send_replace(true);
     emit_state(&app, &state.computer_use);
-    Ok(())
+    let cancelled = state.broker.cancel_native_actions();
+    state.computer_use.halt().await;
+    cancelled.map_err(|error| error.to_string())
 }
 
 /// Re-arm control after a Stop. A renderer request may open the native prompt,
@@ -532,6 +532,10 @@ pub(crate) async fn resume_computer_use_control(
     )
     .await?
     {
+        state
+            .broker
+            .resume_native_actions()
+            .map_err(|error| error.to_string())?;
         state.computer_use.resume();
         emit_state(&app, &state.computer_use);
     }
@@ -777,23 +781,7 @@ fn is_computer_use_call(call: &ToolCallRecord) -> bool {
     if call.execution != ToolCallExecution::Client || call.status != ToolCallStatus::Pending {
         return false;
     }
-    match call.name.as_str() {
-        COMPUTER_LIST_WINDOWS_TOOL => validate_computer_list_windows_arguments(&call.arguments),
-        COMPUTER_CAPTURE_SCREEN_TOOL => validate_computer_capture_screen_arguments(&call.arguments),
-        COMPUTER_READ_APP_CONTENT_TOOL => {
-            validate_computer_read_app_content_arguments(&call.arguments)
-        }
-        COMPUTER_CLICK_TOOL => validate_computer_click_arguments(&call.arguments),
-        COMPUTER_TYPE_TEXT_TOOL => validate_computer_type_text_arguments(&call.arguments),
-        COMPUTER_KEY_PRESS_TOOL => validate_computer_key_press_arguments(&call.arguments),
-        COMPUTER_SCROLL_TOOL => validate_computer_scroll_arguments(&call.arguments),
-        COMPUTER_FOCUS_WINDOW_TOOL => validate_computer_focus_window_arguments(&call.arguments),
-        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
-            validate_computer_return_to_tidebreak_arguments(&call.arguments)
-        }
-        COMPUTER_WAIT_TOOL => validate_computer_wait_arguments(&call.arguments),
-        _ => false,
-    }
+    validate_computer_use_arguments(&call.name, &call.arguments)
 }
 
 // MARK: - Execution
@@ -829,8 +817,11 @@ async fn execute_operation(
         }
         CuAction::Wait(seconds) => {
             let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
-            tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)).await;
-            completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds }))
+            tokio::select! {
+                () = cu.wait_for_halt() => stopped_resolution(),
+                () = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)) =>
+                    completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
+            }
         }
         CuAction::Broker(request) => dispatch_broker(app, state, context, call, request).await,
     }
@@ -852,6 +843,9 @@ fn build_action(
             "The computer-use request was not available.",
         )
     };
+    if !validate_computer_use_arguments(&call.name, &call.arguments) {
+        return Err(invalid());
+    }
     match call.name.as_str() {
         COMPUTER_LIST_WINDOWS_TOOL => {
             let args: ComputerListWindowsArgs =
@@ -869,9 +863,14 @@ fn build_action(
                     display_id: args.display_id,
                 },
             };
-            Ok(CuAction::Broker(OperationRequest::CuCaptureScreen {
-                target,
-            }))
+            Ok(CuAction::Broker(
+                OperationRequest::CuCaptureScreenDetailed {
+                    target,
+                    annotate: args.annotate,
+                    window_id: args.window_id,
+                    max_dimension: args.max_dimension,
+                },
+            ))
         }
         COMPUTER_READ_APP_CONTENT_TOOL => {
             let args: ComputerReadAppContentArgs =
@@ -951,11 +950,67 @@ fn build_action(
                 window_id: args.window_id,
             }))
         }
+        COMPUTER_LAUNCH_APP_TOOL => {
+            let args: ComputerLaunchAppArgs =
+                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            Ok(CuAction::Broker(OperationRequest::CuLaunchApp {
+                bundle_id: args.app_id,
+            }))
+        }
+        COMPUTER_HOVER_TOOL => {
+            let args: ComputerHoverArgs =
+                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            let target = resolve_target(cu, call.chat_id, &args.app_id, &args.target)?;
+            Ok(CuAction::Broker(OperationRequest::CuHover {
+                bundle_id: args.app_id,
+                target,
+            }))
+        }
+        COMPUTER_DRAG_TOOL => {
+            let args: ComputerDragArgs =
+                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            let from = resolve_target(cu, call.chat_id, &args.app_id, &args.from)?;
+            let to = resolve_target(cu, call.chat_id, &args.app_id, &args.to)?;
+            Ok(CuAction::Broker(OperationRequest::CuDrag {
+                bundle_id: args.app_id,
+                from,
+                to,
+                duration_ms: args.duration_ms,
+            }))
+        }
+        COMPUTER_RESIZE_WINDOW_TOOL => {
+            let args: ComputerResizeWindowArgs =
+                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            Ok(CuAction::Broker(OperationRequest::CuResizeWindow {
+                bundle_id: args.app_id,
+                window_id: args.window_id,
+                width: args.width,
+                height: args.height,
+            }))
+        }
         COMPUTER_RETURN_TO_TIDEBREAK_TOOL => Ok(CuAction::ReturnToTidebreak),
         COMPUTER_WAIT_TOOL => {
             let args: ComputerWaitArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
-            Ok(CuAction::Wait(args.seconds.unwrap_or(1.0)))
+            if let Some(condition) = args.condition {
+                let condition = match condition {
+                    ComputerWaitConditionArgs::AppRunning => ConditionWire::AppRunning,
+                    ComputerWaitConditionArgs::WindowVisible => ConditionWire::WindowVisible,
+                    ComputerWaitConditionArgs::TextPresent { text } => {
+                        ConditionWire::TextPresent { text }
+                    }
+                    ComputerWaitConditionArgs::TextAbsent { text } => {
+                        ConditionWire::TextAbsent { text }
+                    }
+                };
+                Ok(CuAction::Broker(OperationRequest::CuWaitCondition {
+                    bundle_id: args.app_id.ok_or_else(invalid)?,
+                    condition,
+                    timeout_seconds: args.condition_timeout_seconds,
+                }))
+            } else {
+                Ok(CuAction::Wait(args.seconds.unwrap_or(1.0)))
+            }
         }
         _ => Err(unavailable(
             "invalid_request",
@@ -999,7 +1054,8 @@ fn resolve_target(
 fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
     match request {
         OperationRequest::CuListWindows { bundle_id } => bundle_id.as_deref(),
-        OperationRequest::CuCaptureScreen { target } => match target {
+        OperationRequest::CuCaptureScreen { target }
+        | OperationRequest::CuCaptureScreenDetailed { target, .. } => match target {
             tidebreak_host_broker::CaptureTargetWire::App { bundle_id } => Some(bundle_id),
             tidebreak_host_broker::CaptureTargetWire::Display { .. } => None,
         },
@@ -1008,7 +1064,12 @@ fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
         | OperationRequest::CuTypeText { bundle_id, .. }
         | OperationRequest::CuKeyPress { bundle_id, .. }
         | OperationRequest::CuScroll { bundle_id, .. }
-        | OperationRequest::CuFocusWindow { bundle_id, .. } => Some(bundle_id),
+        | OperationRequest::CuFocusWindow { bundle_id, .. }
+        | OperationRequest::CuLaunchApp { bundle_id }
+        | OperationRequest::CuHover { bundle_id, .. }
+        | OperationRequest::CuDrag { bundle_id, .. }
+        | OperationRequest::CuResizeWindow { bundle_id, .. }
+        | OperationRequest::CuWaitCondition { bundle_id, .. } => Some(bundle_id),
         _ => None,
     }
 }
@@ -1022,9 +1083,9 @@ fn consent_capability(call: &ToolCallRecord, request: &OperationRequest) -> Cons
         return ConsentCapability::ControlApp;
     }
     match request {
-        OperationRequest::CuCaptureScreen { .. } | OperationRequest::CuListWindows { .. } => {
-            ConsentCapability::CaptureScreen
-        }
+        OperationRequest::CuCaptureScreen { .. }
+        | OperationRequest::CuCaptureScreenDetailed { .. }
+        | OperationRequest::CuListWindows { bundle_id: None } => ConsentCapability::CaptureScreen,
         _ => ConsentCapability::ReadAppContent,
     }
 }
@@ -1459,7 +1520,27 @@ async fn map_result(
         | OperationResult::CuTypeText(meta)
         | OperationResult::CuKeyPress(meta)
         | OperationResult::CuScroll(meta)
-        | OperationResult::CuFocusWindow(meta) => completed(control_meta_json(&meta)),
+        | OperationResult::CuFocusWindow(meta)
+        | OperationResult::CuLaunchApp(meta)
+        | OperationResult::CuHover(meta)
+        | OperationResult::CuDrag(meta)
+        | OperationResult::CuResizeWindow(meta) => {
+            if meta.success {
+                completed(control_meta_json(&meta))
+            } else {
+                unavailable(
+                    "operation_failed",
+                    meta.detail
+                        .as_deref()
+                        .unwrap_or("The native action did not complete."),
+                )
+            }
+        }
+        OperationResult::CuWaitCondition(observation) => completed(serde_json::json!({
+            "status": if observation.met { "ok" } else { "timed_out" },
+            "met": observation.met,
+            "timed_out": observation.timed_out,
+        })),
         OperationResult::CuWait { seconds } => {
             completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds }))
         }
@@ -1563,6 +1644,8 @@ async fn finish_capture(
         "width": capture.width,
         "height": capture.height,
         "media_type": capture.media_type,
+        "coordinate_frame": capture.coordinate_frame,
+        "coordinate_note": "Input coordinates are global logical points. Map screenshot pixels with x = coordinate_frame.x + pixel_x * coordinate_frame.width / width and y = coordinate_frame.y + pixel_y * coordinate_frame.height / height.",
         // The structured reference a transcript carrier lifts into an image
         // block; the model also reads it here as the capture's identity.
         "image": image.map(|image| serde_json::json!({
@@ -1583,8 +1666,10 @@ async fn finish_capture(
 
 fn control_meta_json(meta: &tidebreak_host_broker::ControlMeta) -> serde_json::Value {
     serde_json::json!({
-        "status": "ok",
+        "status": if meta.success { "ok" } else { "failed" },
+        "success": meta.success,
         "used_fallback": meta.used_fallback,
+        "detail": meta.detail,
     })
 }
 
@@ -2048,10 +2133,119 @@ mod tests {
         );
         assert!(matches!(
             action,
-            Ok(CuAction::Broker(OperationRequest::CuCaptureScreen {
-                target: tidebreak_host_broker::CaptureTargetWire::Display { display_id: None }
-            }))
+            Ok(CuAction::Broker(
+                OperationRequest::CuCaptureScreenDetailed {
+                    target: tidebreak_host_broker::CaptureTargetWire::Display { display_id: None },
+                    annotate: true,
+                    window_id: None,
+                    max_dimension: None,
+                }
+            ))
         ));
+
+        let capture_call = call(
+            COMPUTER_CAPTURE_SCREEN_TOOL,
+            serde_json::json!({
+                "app_id": "dev.tidebreak.fixture", "window_id": 42,
+                "max_dimension": 720, "annotate": false,
+            }),
+        );
+        let Ok(CuAction::Broker(request)) = build_action(&cu, &capture_call) else {
+            panic!("selected-window capture must be mapped");
+        };
+        assert!(matches!(
+            &request,
+            OperationRequest::CuCaptureScreenDetailed {
+                window_id: Some(42),
+                max_dimension: Some(720),
+                annotate: false,
+                ..
+            }
+        ));
+        assert_eq!(request_bundle_id(&request), Some("dev.tidebreak.fixture"));
+        assert_eq!(
+            consent_capability(&capture_call, &request),
+            ConsentCapability::CaptureScreen
+        );
+
+        let wait_call = call(
+            COMPUTER_WAIT_TOOL,
+            serde_json::json!({
+                "app_id": "dev.tidebreak.fixture", "condition": { "kind": "text_present", "text": "Ready" },
+                "condition_timeout_seconds": 3,
+            }),
+        );
+        assert!(is_computer_use_call(&wait_call));
+        assert!(
+            matches!(build_action(&cu, &wait_call), Ok(CuAction::Broker(OperationRequest::CuWaitCondition {
+            bundle_id, condition: ConditionWire::TextPresent { text }, timeout_seconds: Some(3.0),
+        })) if bundle_id == "dev.tidebreak.fixture" && text == "Ready")
+        );
+        assert!(build_action(
+            &cu,
+            &call(
+                COMPUTER_WAIT_TOOL,
+                serde_json::json!({
+                    "condition": { "kind": "app_running" },
+                })
+            )
+        )
+        .is_err());
+
+        let mut drag_call = call(
+            COMPUTER_DRAG_TOOL,
+            serde_json::json!({
+                "app_id": "dev.tidebreak.fixture", "from": { "mark": 1 }, "to": { "mark": 2 }, "duration_ms": 300,
+            }),
+        );
+        cu.remember_marks(
+            drag_call.chat_id.0,
+            "dev.tidebreak.fixture",
+            vec![mark(1, "0.1"), mark(2, "0.2")],
+        );
+        let Ok(CuAction::Broker(request)) = build_action(&cu, &drag_call) else {
+            panic!("drag must resolve both marks");
+        };
+        assert!(
+            matches!(&request, OperationRequest::CuDrag { from, to, duration_ms: Some(300), .. }
+            if from.element_id.as_deref() == Some("0.1") && to.element_id.as_deref() == Some("0.2"))
+        );
+        assert_eq!(
+            consent_capability(&drag_call, &request),
+            ConsentCapability::ControlApp
+        );
+        drag_call.chat_id = SessionId::new();
+        assert!(
+            build_action(&cu, &drag_call).is_err(),
+            "another chat cannot reuse marks"
+        );
+
+        for (name, args) in [
+            (
+                COMPUTER_LAUNCH_APP_TOOL,
+                serde_json::json!({"app_id": "dev.tidebreak.fixture"}),
+            ),
+            (
+                COMPUTER_HOVER_TOOL,
+                serde_json::json!({"app_id": "dev.tidebreak.fixture", "x": 50, "y": 100}),
+            ),
+            (
+                COMPUTER_RESIZE_WINDOW_TOOL,
+                serde_json::json!({"app_id": "dev.tidebreak.fixture", "width": 800, "height": 600}),
+            ),
+        ] {
+            let current = call(name, args);
+            assert!(is_computer_use_call(&current));
+            let Ok(CuAction::Broker(request)) = build_action(&cu, &current) else {
+                panic!("{name} must map");
+            };
+            assert!(acts_on_host(name));
+            assert_eq!(request_bundle_id(&request), Some("dev.tidebreak.fixture"));
+            assert_eq!(
+                consent_capability(&current, &request),
+                ConsentCapability::ControlApp
+            );
+        }
 
         // Wait stays local; the clamp to the contract's bound happens at
         // execution time.
