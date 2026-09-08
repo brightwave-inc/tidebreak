@@ -249,6 +249,58 @@ impl BrowserChannelBinding {
         &self.bridge_command
     }
 }
+/// Public contract for desktop native computer-use adapters. The desktop
+/// implements [`NativeRuntime`] behind an `Arc` and installs it with the
+/// native-binding bind variants.
+pub use crate::code::native_runtime::{
+    NativeOperationHandle, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
+};
+
+/// Bind-time pairing of the desktop native computer-use runtime and the
+/// trusted bridge executable.
+///
+/// Both halves must be present for the server to mint native channels. The
+/// desktop constructs this when it has a [`NativeRuntime`] and has resolved
+/// the absolute path to the `tidebreak` CLI sidecar. When either half is
+/// absent, no native computer-use tools are advertised or injected —
+/// sessions work exactly as before the native channel existed.
+///
+/// `bridge_command` must be an absolute path. The desktop sibling resolver
+/// owns existence, file-type, and executable checks; the server boundary
+/// validates absoluteness as defense in depth.
+#[derive(Clone)]
+pub struct NativeChannelBinding {
+    /// The desktop native computer-use adapter.
+    pub runtime: Arc<dyn NativeRuntime>,
+    /// Absolute path to the trusted bridge executable.
+    pub bridge_command: PathBuf,
+}
+
+impl NativeChannelBinding {
+    /// Construct a binding from both required halves.
+    ///
+    /// `bridge_command` must be absolute; the desktop sibling resolver must
+    /// have already verified existence and executability.
+    #[must_use]
+    pub fn new(runtime: Arc<dyn NativeRuntime>, bridge_command: PathBuf) -> Self {
+        Self {
+            runtime,
+            bridge_command,
+        }
+    }
+
+    /// Return the native runtime.
+    #[must_use]
+    pub fn runtime(&self) -> &Arc<dyn NativeRuntime> {
+        &self.runtime
+    }
+
+    /// Return the absolute bridge executable path.
+    #[must_use]
+    pub fn bridge_command(&self) -> &std::path::Path {
+        &self.bridge_command
+    }
+}
 pub use error::ServerError;
 pub use pairing::{
     deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
@@ -565,6 +617,7 @@ pub async fn bind(config: Config, route_runtime: RouteRuntime) -> Result<Server>
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -588,6 +641,7 @@ pub async fn bind_configured(config: Config, route_runtime: RouteRuntime) -> Res
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -617,6 +671,7 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -645,6 +700,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -674,6 +730,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
+        None,
         None,
         route_runtime,
     )
@@ -714,6 +771,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         browser_runtime,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -728,6 +786,10 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
 /// When both halves are present (the binding always carries both, by
 /// construction), session creation mints a session-private capability
 /// file and injects the bridge executable path into engine config.
+///
+/// `native_binding` follows the same rule for the native computer-use
+/// channel: `None` advertises no native tools; a present binding mints a
+/// session-private native capability file per session.
 #[allow(clippy::too_many_arguments)]
 pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
     config: Config,
@@ -738,6 +800,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     let (browser_runtime, browser_bridge_command) = match binding {
@@ -755,6 +818,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         browser_runtime,
         browser_bridge_command,
         false,
+        native_binding,
         route_runtime,
     )
     .await
@@ -774,6 +838,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     let (browser_runtime, browser_bridge_command) = match binding {
@@ -791,6 +856,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
         browser_runtime,
         browser_bridge_command,
         true,
+        native_binding,
         route_runtime,
     )
     .await
@@ -808,6 +874,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
     foreground_browser_executor: bool,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
@@ -819,6 +886,16 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     {
         return Err(AgentError::config(format!(
             "browser bridge command must be an absolute path: {}",
+            bridge.display()
+        )));
+    }
+    if let Some(bridge) = native_binding
+        .as_ref()
+        .map(NativeChannelBinding::bridge_command)
+        .filter(|bridge| !bridge.is_absolute())
+    {
+        return Err(AgentError::config(format!(
+            "native bridge command must be an absolute path: {}",
             bridge.display()
         )));
     }
@@ -835,6 +912,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
         browser_runtime,
         browser_bridge_command,
         foreground_browser_executor,
+        native_binding,
         route_runtime,
     )
     .await
@@ -1042,6 +1120,7 @@ async fn bind_inner(
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
     foreground_browser_executor: bool,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
@@ -1331,6 +1410,13 @@ async fn bind_inner(
         harness_llm,
     )
     .with_gateway_runtime(state.gateway.clone())
+    // The native computer-use adapter and its bridge executable arrive as
+    // one binding so a runtime can never be installed without the sidecar
+    // that harness bridges invoke, and vice versa.
+    .with_native_binding(
+        native_binding
+            .map(|binding| (binding.runtime, binding.bridge_command)),
+    )
     // A channel-bound session on this machine's engine starts in the
     // operator's default mode and may ask up to the operator's ceiling
     // (decision 88); both are `ask` unless the deployment says otherwise.

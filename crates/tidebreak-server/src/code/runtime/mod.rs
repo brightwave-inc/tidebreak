@@ -201,8 +201,12 @@ pub struct CodeRuntime {
     /// and injects `TIDEBREAK_NATIVE_CAPFILE`; when absent, native tools are
     /// not advertised on external harness bridges or the internal engine.
     native_runtime: Option<Arc<dyn NativeRuntime>>,
-    /// The session-private native capability registry.
-    native_tokens: NativeTokenRegistry,
+    /// Absolute path to the trusted native bridge executable (the
+    /// `tidebreak` CLI sidecar). Installed together with `native_runtime`
+    /// through [`CodeRuntime::with_native_binding`]; when either half is
+    /// absent, `SessionSpec::native` stays `None` and no native tools are
+    /// advertised or injected.
+    native_bridge_command: Option<PathBuf>,
     pub(in crate::code) host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     /// Per-caller git-forge lending on a gateway-authenticated hosted
@@ -490,6 +494,7 @@ impl CodeRuntime {
             browser_runtime,
             browser_bridge_command,
             native_runtime: None,
+            native_bridge_command: None,
             native_tokens,
             host: HostEnv {
                 data_dir: Some(data_dir),
@@ -663,6 +668,7 @@ impl CodeRuntime {
             browser_runtime,
             browser_bridge_command,
             native_runtime: None,
+            native_bridge_command: None,
             native_tokens,
             host: HostEnv::from_process(),
             host_tool_broker: None,
@@ -837,7 +843,28 @@ impl CodeRuntime {
         self
     }
 
-    /// Test constructor that also installs a native runtime.
+    /// Install the native computer-use adapter and its bridge executable as
+    /// one binding, before recovery. `None` leaves native tools off: no
+    /// capfile is minted and `SessionSpec::native` stays `None`.
+    pub fn with_native_binding(
+        mut self,
+        binding: Option<(Arc<dyn NativeRuntime>, PathBuf)>,
+    ) -> Self {
+        match binding {
+            Some((runtime, bridge_command)) => {
+                self.native_runtime = Some(runtime);
+                self.native_bridge_command = Some(bridge_command);
+            }
+            None => {
+                self.native_runtime = None;
+                self.native_bridge_command = None;
+            }
+        }
+        self
+    }
+
+    /// Test constructor that also installs a native runtime with a fixed
+    /// bridge path.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_registry_and_native_runtime(
         db: Arc<DbStore>,
@@ -852,6 +879,9 @@ impl CodeRuntime {
             None,
             None,
         );
+        runtime.native_bridge_command = native_runtime
+            .as_ref()
+            .map(|_| PathBuf::from("/test/tidebreak-native-bridge"));
         runtime.native_runtime = native_runtime;
         runtime
     }
