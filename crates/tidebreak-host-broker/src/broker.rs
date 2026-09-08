@@ -38,7 +38,7 @@ use crate::{
     consequential::{classify, key_press_needs_confirmation, truncate_label},
     path_policy::RootIdentity,
     protocol::{
-        AppFolderWriteRequest, CaptureTargetWire, ControlEnvelope, ControlRequest,
+        AppFolderWriteRequest, CaptureTargetWire, ConditionWire, ControlEnvelope, ControlRequest,
         ControlResponseEnvelope, ControlResult, CuCaptureScreenResult,
         CuConfirmControlActionRequest, CuGrantAppRequest, CuGrantAppResult,
         CuNeedsConfirmationResult, CuResolveHandoffRequest, CuResolveHandoffResult,
@@ -60,7 +60,7 @@ use crate::{
     Capability, CaptureTarget, ConsentMethod, ConsentRecord, Consequence, ControlOp, ElementTarget,
     ExecutionContext, Grant, GrantError, GrantId, GrantSubject, OperationId, RelativePath,
     RequestId, RootAttachment, RootId, RootPolicy, RootPolicyError, Scope, SubjectKind,
-    ValidatedRoot,
+    ValidatedRoot, WaitCondition,
 };
 
 mod state_file;
@@ -88,6 +88,17 @@ const MAX_CU_TYPE_TEXT_BYTES: usize = 8 * 1024;
 /// Bound on the `cu_key_press` vocabulary reaching the helper.
 const MAX_CU_KEY_BYTES: usize = 64;
 const MAX_CU_MODIFIERS: usize = 8;
+/// Capture long-edge clamp and default. The defaults mirror the shared
+/// contract so the broker never needs to know a transport's pixel budget;
+/// transports can tighten further but never widen.
+const DEFAULT_CU_CAPTURE_DIMENSION: u32 = 1440;
+const MAX_CU_CAPTURE_DIMENSION: u32 = 4096;
+/// Condition-wait bounds.
+const DEFAULT_CU_CONDITION_TIMEOUT_SECONDS: f64 = 10.0;
+const MAX_CU_CONDITION_TIMEOUT_SECONDS: f64 = 30.0;
+const MAX_CU_CONDITION_TEXT_BYTES: usize = 2 * 1024;
+const MAX_CU_DRAG_DURATION_MS: u64 = 10_000;
+const MAX_CU_WINDOW_DIMENSION: f64 = 10_000.0;
 /// Cap on Set-of-Marks badges extracted for one annotated capture.
 const MAX_CAPTURE_MARKS: usize = 100;
 /// Pending consequential-action confirmations retained at once, oldest
@@ -757,10 +768,10 @@ struct OperationAudit {
 
 impl OperationAudit {
     fn from_envelope(envelope: &OperationEnvelope) -> Self {
-        // Input synthesis (click / type / key / scroll / focus) is a host
-        // mutation: its intent record must be durable before any event is
-        // synthesized, and the op refuses when the record cannot be made
-        // durable. Scroll warps the cursor; focus raises a window.
+        // Input synthesis and app/window mutation (click / type / key / scroll
+        // / focus / launch / hover / drag / resize) is a host mutation: its
+        // intent record must be durable before anything changes, and the op
+        // refuses when the record cannot be made durable.
         let mutates = matches!(
             envelope.request,
             OperationRequest::WriteFile(_)
@@ -769,6 +780,10 @@ impl OperationAudit {
                 | OperationRequest::CuKeyPress { .. }
                 | OperationRequest::CuScroll { .. }
                 | OperationRequest::CuFocusWindow { .. }
+                | OperationRequest::CuLaunchApp { .. }
+                | OperationRequest::CuHover { .. }
+                | OperationRequest::CuDrag { .. }
+                | OperationRequest::CuResizeWindow { .. }
         );
         let (operation, capability, target) = match &envelope.request {
             OperationRequest::ListRoots => (
@@ -801,7 +816,8 @@ impl OperationAudit {
                 cu_list_windows_capability(bundle_id.as_deref()),
                 cu_scope_audit_target(bundle_id.as_deref()),
             ),
-            OperationRequest::CuCaptureScreen { target } => (
+            OperationRequest::CuCaptureScreen { target }
+            | OperationRequest::CuCaptureScreenDetailed { target, .. } => (
                 AuditOperation::CuCaptureScreen,
                 Capability::CaptureScreen,
                 match target {
@@ -831,18 +847,43 @@ impl OperationAudit {
             ),
             OperationRequest::CuScroll { bundle_id, .. } => (
                 AuditOperation::CuScroll,
-                Capability::ReadAppContent,
+                Capability::ControlApp,
                 AuditTarget::app(bundle_id),
             ),
             OperationRequest::CuFocusWindow { bundle_id, .. } => (
                 AuditOperation::CuFocusWindow,
-                Capability::ReadAppContent,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuLaunchApp { bundle_id } => (
+                AuditOperation::CuLaunchApp,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuHover { bundle_id, .. } => (
+                AuditOperation::CuHover,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuDrag { bundle_id, .. } => (
+                AuditOperation::CuDrag,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuResizeWindow { bundle_id, .. } => (
+                AuditOperation::CuResizeWindow,
+                Capability::ControlApp,
                 AuditTarget::app(bundle_id),
             ),
             OperationRequest::CuWait { .. } => (
                 AuditOperation::CuWait,
                 Capability::ListRoots,
                 AuditTarget::Subject,
+            ),
+            OperationRequest::CuWaitCondition { bundle_id, .. } => (
+                AuditOperation::CuWaitCondition,
+                Capability::ReadAppContent,
+                AuditTarget::app(bundle_id),
             ),
         };
         Self {
@@ -2185,6 +2226,16 @@ impl Operator {
                         grant_id = authorized_by;
                         result
                     }),
+                OperationRequest::CuCaptureScreenDetailed {
+                    target,
+                    window_id,
+                    max_dimension,
+                } => self
+                    .cu_capture_screen_detailed(envelope.context, target, window_id, max_dimension)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
                 OperationRequest::CuReadAppContent {
                     bundle_id,
                     max_depth,
@@ -2246,7 +2297,51 @@ impl Operator {
                         grant_id = authorized_by;
                         result
                     }),
+                OperationRequest::CuLaunchApp { bundle_id } => self
+                    .cu_launch_app(envelope.context, bundle_id)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuHover { bundle_id, target } => self
+                    .cu_hover(envelope.context, bundle_id, target)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuDrag {
+                    bundle_id,
+                    from,
+                    to,
+                    duration_ms,
+                } => self
+                    .cu_drag(envelope.context, bundle_id, from, to, duration_ms)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuResizeWindow {
+                    bundle_id,
+                    window_id,
+                    width,
+                    height,
+                } => self
+                    .cu_resize_window(envelope.context, bundle_id, window_id, width, height)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
                 OperationRequest::CuWait { seconds } => Ok(cu_wait(seconds)),
+                OperationRequest::CuWaitCondition {
+                    bundle_id,
+                    condition,
+                    timeout_seconds,
+                } => self
+                    .cu_wait_condition(envelope.context, bundle_id, condition, timeout_seconds)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
             }
         })();
         (result, grant_id)
@@ -2537,6 +2632,22 @@ impl Operator {
         context: ExecutionContext,
         target: CaptureTargetWire,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        self.cu_capture_screen_detailed(context, target, None, None)
+    }
+
+    fn cu_capture_screen_detailed(
+        &self,
+        context: ExecutionContext,
+        target: CaptureTargetWire,
+        window_id: Option<u32>,
+        max_dimension: Option<u32>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        if window_id.is_some() && !matches!(target, CaptureTargetWire::App { .. }) {
+            return Err(BrokerError::InvalidCuRequest);
+        }
+        let max_dimension = max_dimension
+            .map(|edge| edge.min(MAX_CU_CAPTURE_DIMENSION))
+            .unwrap_or(DEFAULT_CU_CAPTURE_DIMENSION);
         let staging = self
             .shared
             .cu_staging
@@ -2553,6 +2664,7 @@ impl Operator {
                 (
                     CaptureTarget::App {
                         bundle_id: bundle_id.clone(),
+                        window_id,
                     },
                     grant_id,
                 )
@@ -2579,19 +2691,23 @@ impl Operator {
         // unannotated capture rather than failing one permission with the
         // other's absence.
         let marks = match &backend_target {
-            CaptureTarget::App { bundle_id } => self
+            CaptureTarget::App {
+                bundle_id,
+                window_id,
+                ..
+            } if window_id.is_none() => self
                 .shared
                 .computer_use
                 .read_ax_tree(bundle_id, Some(MAX_CU_AX_DEPTH), Some(MAX_CU_AX_NODES))
                 .map(|tree| extract_marks(&tree.tree, MAX_CAPTURE_MARKS))
                 .unwrap_or_default(),
-            CaptureTarget::Display { .. } => Vec::new(),
+            CaptureTarget::App { .. } | CaptureTarget::Display { .. } => Vec::new(),
         };
         let meta = self.spend_once_on_failure(
             grant_id,
             self.shared
                 .computer_use
-                .capture_with_marks(&backend_target, &out_path, &marks)
+                .capture_with_marks(&backend_target, &out_path, &marks, Some(max_dimension))
                 .map_err(BrokerError::ComputerUse),
         )?;
         {
@@ -2951,6 +3067,151 @@ impl Operator {
         Ok((OperationResult::CuFocusWindow(meta), Some(grant_id)))
     }
 
+    fn cu_launch_app(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .launch_app(&bundle_id)
+                .map_err(BrokerError::ComputerUse),
+        )?;
+        Ok((OperationResult::CuLaunchApp(meta), Some(grant_id)))
+    }
+
+    fn cu_hover(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        target: ElementTargetWire,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        let target = ElementTarget::from(target);
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .hover(&bundle_id, &target)
+                .map_err(BrokerError::ComputerUse),
+        )?;
+        Ok((OperationResult::CuHover(meta), Some(grant_id)))
+    }
+
+    fn cu_drag(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        from: ElementTargetWire,
+        to: ElementTargetWire,
+        duration_ms: Option<u64>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if duration_ms.is_some_and(|ms| ms > MAX_CU_DRAG_DURATION_MS) {
+            return Err(BrokerError::InvalidCuRequest);
+        }
+        let from = ElementTarget::from(from);
+        let to = ElementTarget::from(to);
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .drag(&bundle_id, &from, &to, duration_ms)
+                .map_err(BrokerError::ComputerUse),
+        )?;
+        Ok((OperationResult::CuDrag(meta), Some(grant_id)))
+    }
+
+    fn cu_resize_window(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        window_id: Option<u32>,
+        width: f64,
+        height: f64,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if !width.is_finite()
+            || !height.is_finite()
+            || !(1.0..=MAX_CU_WINDOW_DIMENSION).contains(&width)
+            || !(1.0..=MAX_CU_WINDOW_DIMENSION).contains(&height)
+        {
+            return Err(BrokerError::InvalidCuRequest);
+        }
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .resize_window(&bundle_id, window_id, width, height)
+                .map_err(BrokerError::ComputerUse),
+        )?;
+        Ok((OperationResult::CuResizeWindow(meta), Some(grant_id)))
+    }
+
+    fn cu_wait_condition(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        condition: ConditionWire,
+        timeout_seconds: Option<f64>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        let timeout = timeout_seconds
+            .filter(|value| value.is_finite() && *value >= 0.1)
+            .unwrap_or(DEFAULT_CU_CONDITION_TIMEOUT_SECONDS)
+            .min(MAX_CU_CONDITION_TIMEOUT_SECONDS);
+        if let Some(text) = condition_text(&condition) {
+            if text.is_empty() || text.len() > MAX_CU_CONDITION_TEXT_BYTES {
+                return Err(BrokerError::InvalidCuRequest);
+            }
+        }
+        let condition = match condition {
+            ConditionWire::AppRunning => WaitCondition::AppRunning,
+            ConditionWire::WindowVisible => WaitCondition::WindowVisible,
+            ConditionWire::TextPresent { text } => WaitCondition::TextPresent { text },
+            ConditionWire::TextAbsent { text } => WaitCondition::TextAbsent { text },
+        };
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ReadAppContent, &bundle_id)?
+        };
+        let observation = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .wait_condition(&bundle_id, &condition, timeout)
+                .map_err(BrokerError::ComputerUse),
+        )?;
+        Ok((
+            OperationResult::CuWaitCondition(observation),
+            Some(grant_id),
+        ))
+    }
+
     fn commit_state(
         &self,
         current: &mut MutexGuard<'_, State>,
@@ -3007,6 +3268,12 @@ fn hello(computer_use_available: bool) -> HelloResult {
                 "cu_scroll",
                 "cu_focus_window",
                 "cu_wait",
+                "cu_capture_screen_detailed",
+                "cu_launch_app",
+                "cu_hover",
+                "cu_drag",
+                "cu_resize_window",
+                "cu_wait_condition",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -3173,6 +3440,14 @@ fn bounded_wait_seconds(seconds: Option<f64>) -> f64 {
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
         .unwrap_or(0.0)
         .min(MAX_CU_WAIT_SECONDS)
+}
+
+/// The text a condition names, when it carries one.
+fn condition_text(condition: &ConditionWire) -> Option<&str> {
+    match condition {
+        ConditionWire::AppRunning | ConditionWire::WindowVisible => None,
+        ConditionWire::TextPresent { text } | ConditionWire::TextAbsent { text } => Some(text),
+    }
 }
 
 /// Broker-side wait: clamp to the bound and sleep. Never reaches the helper.
@@ -3399,6 +3674,11 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             BackendErrorKind::Yielded => (
                 ErrorCode::Yielded,
                 "a system security surface owns the foreground",
+                false,
+            ),
+            BackendErrorKind::TargetOutsideApp => (
+                ErrorCode::InvalidRequest,
+                "the target point is not inside a window owned by the granted app",
                 false,
             ),
             BackendErrorKind::OperationFailed => (

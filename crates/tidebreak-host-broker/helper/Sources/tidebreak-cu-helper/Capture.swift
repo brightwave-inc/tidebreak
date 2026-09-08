@@ -43,18 +43,20 @@ enum Capture {
         // Capture the full pixel buffer; keep the cursor out of analytical
         // screenshots.
         config.showsCursor = false
-
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter, configuration: config)
-
+        let scaled = try downscaleForBudget(image, maxDimension: request.maxDimension)
         try writePNG(
             image,
             marks: request.marks ?? [],
             displayFrame: display.map(\.frame),
             screenFrame: display.flatMap(screenFrame),
-            to: outPath)
+            to: outPath,
+            scaledImage: scaled)
         return Result(
-            width: image.width, height: image.height, path: outPath, mediaType: "image/png")
+            width: scaled.map(\.width) ?? image.width,
+            height: scaled.map(\.height) ?? image.height,
+            path: outPath, mediaType: "image/png")
     }
 
     /// Resolve the requested target into an `SCContentFilter` and the pixel
@@ -72,11 +74,22 @@ enum Capture {
             return (filter, (display.width, display.height), display)
 
         case .window:
+            guard let bundleId = request.bundleId else {
+                throw HelperError(code: .invalidRequest, message: "window capture requires bundle_id")
+            }
             guard let windowId = request.windowId else {
                 throw HelperError(code: .invalidRequest, message: "window capture requires window_id")
             }
             guard let window = content.windows.first(where: { $0.windowID == windowId }) else {
                 throw HelperError(code: .notFound, message: "window \(windowId) not found")
+            }
+            guard
+                let app = content.applications.first(where: {
+                    $0.bundleIdentifier == bundleId
+                }),
+                window.owningApplication?.processID == app.processID
+            else {
+                throw HelperError(code: .notFound, message: "window \(windowId) is not owned by the granted app")
             }
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let frame = window.frame
@@ -89,6 +102,22 @@ enum Capture {
             guard let app = content.applications.first(where: { $0.bundleIdentifier == bundleId })
             else {
                 throw HelperError(code: .notFound, message: "app \(bundleId) is not running")
+            }
+            // A selected window wins: capture exactly that window rather than
+            // every window of the app, and require it to be app-owned.
+            if let windowId = request.windowId {
+                guard
+                    let window = content.windows.first(where: {
+                        $0.windowID == windowId && $0.owningApplication?.processID == app.processID
+                    })
+                else {
+                    throw HelperError(
+                        code: .notFound,
+                        message: "window \(windowId) is not owned by \(bundleId)")
+                }
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let frame = window.frame
+                return (filter, (Int(frame.width), Int(frame.height)), nil)
             }
             // Pick the display the app's windows actually live on, not blindly
             // the first: a display-scoped filter includes only windows that
@@ -148,12 +177,13 @@ enum Capture {
 
     private static func writePNG(
         _ image: CGImage, marks: [CaptureMark], displayFrame: CGRect?, screenFrame: CGRect?,
-        to path: String
+        to path: String, scaledImage: CGImage?
     ) throws {
-        let rep = NSBitmapImageRep(cgImage: image)
+        let outputImage = scaledImage ?? image
+        let rep = NSBitmapImageRep(cgImage: outputImage)
         if !marks.isEmpty {
             drawMarks(
-                marks, on: rep, imageWidth: image.width, imageHeight: image.height,
+                marks, on: rep, imageWidth: outputImage.width, imageHeight: outputImage.height,
                 displayFrame: displayFrame, screenFrame: screenFrame)
         }
         guard let data = rep.representation(using: .png, properties: [:]) else {
@@ -302,5 +332,35 @@ enum Capture {
         -> CGFloat
     {
         Swift.max(minValue, Swift.min(value, maxValue))
+    }
+
+    /// Downscale to a bounded long edge, preserving aspect ratio, before the
+    /// PNG is encoded — this is what keeps captures inside the transport
+    /// budget by default. Coordinates in the resulting image are a uniform
+    /// scale of the original pixel space: mark frames and hit targets are
+    /// mapped by the same factor, with the factor reported where applicable.
+    private static func downscaleForBudget(
+        _ image: CGImage, maxDimension: Int?
+    ) throws -> CGImage? {
+        let cap = min(max(maxDimension ?? 1440, 1), 4096)
+        let longest = max(image.width, image.height)
+        guard longest > cap else { return nil }
+        let scale = Double(cap) / Double(longest)
+        let width = Int((Double(image.width) * scale).rounded())
+        let height = Int((Double(image.height) * scale).rounded())
+        guard width > 0, height > 0,
+            let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else {
+            throw HelperError(code: .operationFailed, message: "could not downscale capture")
+        }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let scaled = context.makeImage() else {
+            throw HelperError(code: .operationFailed, message: "could not encode downscaled capture")
+        }
+        return scaled
     }
 }
