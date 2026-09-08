@@ -40,14 +40,25 @@ function unwrapResult(result, name) {
       "computer " + name + " failed: " + errorCode + " — " + detail,
     );
   }
-  return result;
+  const data = result.data;
+  if (data?.status && !["ok", "completed"].includes(data.status)) {
+    throw new Error("computer " + name + " failed: " + (data.message ?? data.status));
+  }
+  return data && typeof data === "object" ? { ...result, ...data } : result;
 }
 
 function readResultTree(result) {
-  if (result.nodes) return result.nodes;
-  if (result.data && result.data.nodes) return result.data.nodes;
-  if (result.content && result.content.nodes) return result.content.nodes;
-  throw new Error("computer_read_app_content returned no accessibility tree");
+  let root = result.nodes ?? result.tree ?? result.data?.nodes ?? result.data?.tree;
+  if (typeof root === "string") root = JSON.parse(root);
+  if (!root) throw new Error("computer_read_app_content returned no accessibility tree");
+  const nodes = [];
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    nodes.push(node);
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of Array.isArray(root) ? root : [root]) visit(node);
+  return nodes;
 }
 
 export function findTarget(tree, identifier, expectedRole) {
@@ -241,8 +252,6 @@ export async function runNativeSmoke({
   const launch = unwrapResult(
     await call("computer_launch_app", {
       app_id: APP_ID,
-      path: appPath,
-      arguments: ["--fixture-dir", fixtureDir, "--run-id", runID],
     }),
     "computer_launch_app",
   );
@@ -263,7 +272,8 @@ export async function runNativeSmoke({
     windows.some((window) => (window.title ?? window.name) === WINDOW_TITLE),
     "fixture window did not appear after launch",
   );
-  const mainWindowId = windows.find((window) => (window.title ?? window.name) === WINDOW_TITLE)?.id;
+  const mainWindow = windows.find((window) => (window.title ?? window.name) === WINDOW_TITLE);
+  const mainWindowId = mainWindow?.window_id ?? mainWindow?.id;
   assert.ok(mainWindowId !== undefined, "fixture window must expose a window id");
 
   const baseline = await readEvents(fixtureDir, runID);
@@ -284,12 +294,12 @@ export async function runNativeSmoke({
   const typeTarget = findTarget(initialTree, "fixture-text-input");
   await call("computer_click", {
     app_id: APP_ID,
-    target: { element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint },
+    element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
   });
   await call("computer_type_text", {
     app_id: APP_ID,
     text,
-    target: { element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint },
+    element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
   });
   await waitFor((state) => state.text_value === text, "text entry");
   let events = await readEvents(fixtureDir, runID);
@@ -301,7 +311,7 @@ export async function runNativeSmoke({
   const addTarget = findTarget(await readTree(call), "fixture-add-button");
   await call("computer_click", {
     app_id: APP_ID,
-    target: { element_id: addTarget.id, element_fingerprint: addTarget.fingerprint },
+    element_id: addTarget.id, element_fingerprint: addTarget.fingerprint,
   });
   await waitFor((state) => state.submission_count === 1, "one submission");
   events = await readEvents(fixtureDir, runID);
@@ -323,7 +333,7 @@ export async function runNativeSmoke({
   const dropdown = findTarget(treeForSelect, "fixture-dropdown");
   await call("computer_click", {
     app_id: APP_ID,
-    target: { element_id: dropdown.id, element_fingerprint: dropdown.fingerprint },
+    element_id: dropdown.id, element_fingerprint: dropdown.fingerprint,
   });
   await call("computer_key_press", { app_id: APP_ID, key: "down" });
   await call("computer_key_press", { app_id: APP_ID, key: "return" });
@@ -333,7 +343,7 @@ export async function runNativeSmoke({
   const checkbox = findTarget(await readTree(call), "fixture-checkbox");
   await call("computer_click", {
     app_id: APP_ID,
-    target: { element_id: checkbox.id, element_fingerprint: checkbox.fingerprint },
+    element_id: checkbox.id, element_fingerprint: checkbox.fingerprint,
   });
   await waitFor((state) => state.checkbox === true, "checkbox checked");
   await assertSnapshotValue(await currentSnapshot(), "checkbox", true, "checkbox");
@@ -342,7 +352,7 @@ export async function runNativeSmoke({
   const hoverResult = unwrapResult(
     await call("computer_hover", {
       app_id: APP_ID,
-      target: { element_id: hover.id, element_fingerprint: hover.fingerprint },
+      element_id: hover.id, element_fingerprint: hover.fingerprint,
     }),
     "computer_hover",
   );
@@ -355,8 +365,9 @@ export async function runNativeSmoke({
   const destination = findTarget(dragTree, "fixture-drop-target");
   await call("computer_drag", {
     app_id: APP_ID,
-    target: { element_id: destination.id, element_fingerprint: destination.fingerprint },
-    source: { element_id: source.id, element_fingerprint: source.fingerprint },
+    from: { element_id: source.id, element_fingerprint: source.fingerprint },
+    to: { element_id: destination.id, element_fingerprint: destination.fingerprint },
+    duration_ms: 400,
   });
   await waitFor((state) => state.drag_dropped === true, "drag drop");
   const dragState = await currentSnapshot();
@@ -366,7 +377,7 @@ export async function runNativeSmoke({
   const scrollTarget = findTarget(await readTree(call), "fixture-scroll-area");
   await call("computer_scroll", {
     app_id: APP_ID,
-    target: { element_id: scrollTarget.id, element_fingerprint: scrollTarget.fingerprint },
+    element_id: scrollTarget.id, element_fingerprint: scrollTarget.fingerprint,
     dx: 0,
     dy: 180,
   });
@@ -380,9 +391,9 @@ export async function runNativeSmoke({
   const delayed = findTarget(await readTree(call), "fixture-delayed-button");
   await call("computer_click", {
     app_id: APP_ID,
-    target: { element_id: delayed.id, element_fingerprint: delayed.fingerprint },
+    element_id: delayed.id, element_fingerprint: delayed.fingerprint,
   });
-  await call("computer_wait_for", { app_id: APP_ID, seconds: 1.0 });
+  await call("computer_wait", { seconds: 1.0 });
   await waitFor((state) => state.delayed_status === "completed", "delayed transition", 6000);
   await assertSnapshotValue(await currentSnapshot(), "delayed_status", "completed", "delayed transition");
 
@@ -403,7 +414,7 @@ export async function runNativeSmoke({
     const secondButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
       app_id: APP_ID,
-      target: { element_id: secondButton.id, element_fingerprint: secondButton.fingerprint },
+      element_id: secondButton.id, element_fingerprint: secondButton.fingerprint,
     });
     await waitFor((state) => state.second_window_open === true, "second window");
     const twoWindows = (unwrapResult(
@@ -415,7 +426,7 @@ export async function runNativeSmoke({
     const closeButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
       app_id: APP_ID,
-      target: { element_id: closeButton.id, element_fingerprint: closeButton.fingerprint },
+      element_id: closeButton.id, element_fingerprint: closeButton.fingerprint,
     });
     await waitFor((state) => state.second_window_open === false, "second window closed");
   }
@@ -426,7 +437,7 @@ export async function runNativeSmoke({
     const resetButton = findTarget(await readTree(call), "fixture-reset-button");
     await call("computer_click", {
       app_id: APP_ID,
-      target: { element_id: resetButton.id, element_fingerprint: resetButton.fingerprint },
+      element_id: resetButton.id, element_fingerprint: resetButton.fingerprint,
     });
     await waitFor((state) => !!state.run_id && state.run_id !== runID, "reset");
     const resetState = await currentSnapshot();

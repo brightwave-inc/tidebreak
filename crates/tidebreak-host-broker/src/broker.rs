@@ -2228,10 +2228,17 @@ impl Operator {
                     }),
                 OperationRequest::CuCaptureScreenDetailed {
                     target,
+                    annotate,
                     window_id,
                     max_dimension,
                 } => self
-                    .cu_capture_screen_detailed(envelope.context, target, window_id, max_dimension)
+                    .cu_capture_screen_detailed(
+                        envelope.context,
+                        target,
+                        annotate,
+                        window_id,
+                        max_dimension,
+                    )
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2632,13 +2639,14 @@ impl Operator {
         context: ExecutionContext,
         target: CaptureTargetWire,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
-        self.cu_capture_screen_detailed(context, target, None, None)
+        self.cu_capture_screen_detailed(context, target, true, None, None)
     }
 
     fn cu_capture_screen_detailed(
         &self,
         context: ExecutionContext,
         target: CaptureTargetWire,
+        annotate: bool,
         window_id: Option<u32>,
         max_dimension: Option<u32>,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
@@ -2695,7 +2703,7 @@ impl Operator {
                 bundle_id,
                 window_id,
                 ..
-            } if window_id.is_none() => self
+            } if annotate && window_id.is_none() => self
                 .shared
                 .computer_use
                 .read_ax_tree(bundle_id, Some(MAX_CU_AX_DEPTH), Some(MAX_CU_AX_NODES))
@@ -2729,6 +2737,7 @@ impl Operator {
                 width: meta.width,
                 height: meta.height,
                 media_type: meta.media_type,
+                coordinate_frame: meta.coordinate_frame,
                 marks,
             }),
             Some(grant_id),
