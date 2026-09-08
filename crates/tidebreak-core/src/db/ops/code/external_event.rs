@@ -125,19 +125,56 @@ pub async fn record_external_message(
     message: &str,
     actor: &crate::code::TurnActor,
 ) -> Result<ExternalMessageRecord> {
+    record_external_message_with_context(
+        store, owner, session_id, event_id, channel_ts, message, actor, None,
+    )
+    .await
+    .map_err(|error| match error {
+        ExternalMessageIntakeError::Store(error) => error,
+        ExternalMessageIntakeError::Context { message, .. } => AgentError::Store(message.into()),
+    })
+}
+
+/// A context refusal is client input; persistence failures remain server faults.
+#[derive(Debug, thiserror::Error)]
+pub enum ExternalMessageIntakeError {
+    /// Invalid or late context, with a stable API classification.
+    #[error("{message}")]
+    Context {
+        /// Machine-readable refusal.
+        kind: &'static str,
+        /// Client-safe explanation.
+        message: &'static str,
+    },
+    /// Persistence or serialization failed.
+    #[error(transparent)]
+    Store(#[from] AgentError),
+}
+
+/// Record quoted first-turn context and its binding consent with the message.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_external_message_with_context(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+    channel_ts: &str,
+    message: &str,
+    actor: &crate::code::TurnActor,
+    context: Option<&crate::code::ExternalThreadContext>,
+) -> std::result::Result<ExternalMessageRecord, ExternalMessageIntakeError> {
     if event_id.trim().is_empty() || channel_ts.trim().is_empty() {
         return Err(AgentError::Store(
             "an external message needs an event id and an ordering token".into(),
-        ));
+        )
+        .into());
     }
     if message.trim().is_empty() || message.contains('\0') {
-        return Err(AgentError::Store("invalid external message".into()));
+        return Err(AgentError::Store("invalid external message".into()).into());
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
-        return Err(AgentError::Store(format!(
-            "code session {session_id} not found"
-        )));
+        return Err(AgentError::Store(format!("code session {session_id} not found")).into());
     }
     if let Some(event) = find_event_on(&transaction, owner, session_id, event_id).await? {
         transaction.commit().await.map_err(store_err)?;
@@ -158,8 +195,63 @@ pub async fn record_external_message(
         return Err(AgentError::Store(format!(
             "a session may queue at most {} messages",
             QueuedTurn::MAX_PER_SESSION
-        )));
+        ))
+        .into());
     }
+    let rendered;
+    let message = if let Some(context) = context {
+        context
+            .validate()
+            .map_err(|message| ExternalMessageIntakeError::Context {
+                kind: "invalid_thread_context",
+                message,
+            })?;
+        let has_turn = entities::turn::Entity::find()
+            .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::turn::Column::SessionId.eq(session_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        let has_event = entities::code_external_event::Entity::find()
+            .filter(entities::code_external_event::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_external_event::Column::SessionId.eq(session_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if has_turn || has_event || !existing.is_empty() {
+            return Err(ExternalMessageIntakeError::Context {
+                kind: "context_first_turn_only",
+                message: "Thread context is accepted only on the first message of a session.",
+            });
+        }
+        let binding = entities::code_external_binding::Entity::find_by_id(context.binding_id.0)
+            .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_external_binding::Column::SessionId.eq(session_id.0))
+            .filter(entities::code_external_binding::Column::GrantId.eq(context.grant_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let Some(binding) = binding else {
+            return Err(ExternalMessageIntakeError::Context {
+                kind: "context_binding_mismatch",
+                message: "The context binding must belong to this session and grant.",
+            });
+        };
+        entities::code_external_binding::ActiveModel {
+            id: Set(binding.id),
+            context_opt_in: Set(true),
+            ..Default::default()
+        }
+        .update(&transaction)
+        .await
+        .map_err(store_err)?;
+        rendered = context.render(message).map_err(AgentError::from)?;
+        rendered.as_str()
+    } else {
+        message
+    };
     let position = existing.last().map_or(0, |last| last.position + 1);
     let now = database_now(&transaction).await?;
     let queued_id = TurnId::new();
@@ -173,7 +265,7 @@ pub async fn record_external_message(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
-        actor: Set(Some(serde_json::to_value(actor)?)),
+        actor: Set(Some(serde_json::to_value(actor).map_err(AgentError::from)?)),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),
@@ -198,7 +290,7 @@ pub async fn record_external_message(
         // and answer with the winner's id.
         transaction.rollback().await.map_err(store_err)?;
         let Some(event) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
-            return Err(store_err(error));
+            return Err(store_err(error).into());
         };
         return Ok(ExternalMessageRecord::Replay {
             turn_id: TurnId(event.turn_id),

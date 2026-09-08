@@ -1812,6 +1812,7 @@ pub mod code_external_binding {
         pub external_key: String,
         pub grant_id: Uuid,
         pub session_id: Uuid,
+        pub context_opt_in: bool,
         pub created_at: DateTimeUtc,
     }
 

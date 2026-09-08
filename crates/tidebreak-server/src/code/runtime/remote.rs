@@ -880,6 +880,7 @@ impl CodeRuntime {
             event_id,
             channel_ts,
             actor,
+            context,
         } = message;
         if !tidebreak_core::db::code::session_bound_to_grant(&self.db, owner, session_id, grant_id)
             .await?
@@ -917,7 +918,7 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        let record = tidebreak_core::db::code::record_external_message(
+        let record = tidebreak_core::db::code::record_external_message_with_context(
             &self.db,
             owner,
             session_id,
@@ -925,8 +926,15 @@ impl CodeRuntime {
             &channel_ts,
             &text,
             &actor,
+            context.as_ref(),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            tidebreak_core::db::code::ExternalMessageIntakeError::Context { kind, message } => {
+                ServerError::bad_request_kind(kind, message)
+            }
+            tidebreak_core::db::code::ExternalMessageIntakeError::Store(error) => error.into(),
+        })?;
         let (turn_id, fresh) = match &record {
             tidebreak_core::ExternalMessageRecord::Recorded(row) => (row.id, true),
             tidebreak_core::ExternalMessageRecord::Replay { turn_id } => (*turn_id, false),

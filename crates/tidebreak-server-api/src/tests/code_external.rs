@@ -2745,17 +2745,49 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    let binding =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &service, session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|binding| binding.external_key == "T1/C1/1.1")
+            .unwrap();
+    let mut message = serde_json::json!({
+        "text": "ship it",
+        "event_id": "Ev-ws",
+        "channel_ts": "1700000099.000100",
+        "actor": { "external_identity": "U9", "display": "Ines" },
+        "context": [{"author": "Casey", "timestamp": "1700000098.000100", "text": "The button fails on mobile."}],
+    });
+    let messages_url = format!("/external/code/sessions/{session_id}/messages");
+    let (status, refused) = call_json(
+        &router,
+        "POST",
+        &messages_url,
+        &grant_token,
+        Some(message.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(refused["kind"], "context_not_allowed");
+    message["context_opt_in"] = serde_json::json!(true);
+    let (status, refused) = call_json(
+        &router,
+        "POST",
+        &messages_url,
+        &grant_token,
+        Some(message.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(refused["kind"], "context_binding_required");
+    message["context_binding_id"] = serde_json::json!(binding.id);
     let (status, named) = call_json(
         &router,
         "POST",
-        &format!("/external/code/sessions/{session_id}/messages"),
+        &messages_url,
         &grant_token,
-        Some(serde_json::json!({
-            "text": "ship it",
-            "event_id": "Ev-ws",
-            "channel_ts": "1700000099.000100",
-            "actor": { "external_identity": "U9", "display": "Ines" },
-        })),
+        Some(message.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -2777,6 +2809,33 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
             .and_then(|actor| actor.display.as_deref()),
         Some("Ines")
     );
+    assert!(turn.user_input.contains("Untrusted thread context"));
+    assert!(turn.user_input.contains("The button fails on mobile."));
+    assert!(turn.user_input.ends_with("Current request:\nship it"));
+    assert!(
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &service, session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == binding.id)
+            .unwrap()
+            .context_opt_in
+    );
+    let (status, replay) = call_json(
+        &router,
+        "POST",
+        &messages_url,
+        &grant_token,
+        Some(message.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["turn_id"], named["turn_id"]);
+    message["event_id"] = serde_json::json!("Ev-ws-later");
+    let (status, refused) =
+        call_json(&router, "POST", &messages_url, &grant_token, Some(message)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(refused["kind"], "context_first_turn_only");
 
     let (status, _) = call_json(
         &router,
@@ -2856,6 +2915,57 @@ async fn a_person_grant_refuses_a_body_actor() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn external_context_refuses_person_grants_even_with_opt_in() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({"external_key": "T1/D-context/1.1", "repo_id": repo_id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/D-context/1.1").await;
+    let binding =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()
+            .remove(0);
+    let (status, refused) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/messages"),
+        &pair.token,
+        Some(serde_json::json!({
+            "text": "Fix it", "event_id": "Ev-context", "channel_ts": "1.1",
+            "context_opt_in": true, "context_binding_id": binding.id,
+            "context": [{"author":"Casey", "timestamp":"1.0", "text":"Bug report"}],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(refused["kind"], "context_not_allowed");
+    assert!(
+        !tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()[0]
+            .context_opt_in
+    );
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn long_command_approval_script() -> Vec<tidebreak_harness::HarnessEvent> {

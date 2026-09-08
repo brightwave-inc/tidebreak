@@ -136,6 +136,9 @@ pub struct ExternalSessionResponse {
     /// `created`, `existing`, or `ended`.
     pub status: &'static str,
     pub session_id: SessionId,
+    /// The conversation binding to name when sending first-turn context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<tidebreak_core::CodeBindingId>,
     pub acts_as: tidebreak_core::ActsAs,
     /// The person's login or the App's bot login, when the forge named one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,25 +265,27 @@ pub async fn external_get_or_create(
             body.acts_as,
         )
         .await?;
-    let response_from = |status: &'static str, session_id: SessionId| ExternalSessionResponse {
-        status,
-        session_id,
-        acts_as: identity.acts_as,
-        acting_login: identity.acting_login.clone(),
-        app_name: identity.app_name.clone(),
-        connect_url: identity.connect_url.clone(),
-    };
+    let response_from =
+        |status: &'static str, session_id: SessionId, binding_id| ExternalSessionResponse {
+            status,
+            session_id,
+            binding_id,
+            acts_as: identity.acts_as,
+            acting_login: identity.acting_login.clone(),
+            app_name: identity.app_name.clone(),
+            connect_url: identity.connect_url.clone(),
+        };
     let (status, response) = match resolution {
         ExternalSessionResolution::Created(binding) => (
             StatusCode::CREATED,
-            response_from("created", binding.session_id),
+            response_from("created", binding.session_id, Some(binding.id)),
         ),
         ExternalSessionResolution::Existing(binding) => (
             StatusCode::OK,
-            response_from("existing", binding.session_id),
+            response_from("existing", binding.session_id, Some(binding.id)),
         ),
         ExternalSessionResolution::Ended { session_id } => {
-            (StatusCode::OK, response_from("ended", session_id))
+            (StatusCode::OK, response_from("ended", session_id, None))
         }
         ExternalSessionResolution::GrantMismatch => {
             return Err(ServerError::not_found("code session not found"));
@@ -439,6 +444,15 @@ pub struct ExternalMessageBody {
     /// Required under a workspace grant: the person who sent the message.
     #[serde(default)]
     pub actor: Option<ExternalActor>,
+    /// Prior thread messages, accepted on the first message only.
+    #[serde(default)]
+    pub context: Option<Vec<tidebreak_core::code::ExternalContextMessage>>,
+    /// The channel explicitly enabled quoted thread context.
+    #[serde(default)]
+    pub context_opt_in: bool,
+    /// The binding whose channel opted in.
+    #[serde(default)]
+    pub context_binding_id: Option<tidebreak_core::CodeBindingId>,
 }
 
 #[derive(serde::Deserialize)]
@@ -479,6 +493,28 @@ pub async fn external_messages(
             "a person grant takes the actor from the linked identity, not the body",
         ));
     }
+    let context = match body.context {
+        Some(messages) => {
+            if !grant.kind.is_workspace() || !body.context_opt_in {
+                return Err(ServerError::bad_request_kind(
+                    "context_not_allowed",
+                    "Thread context requires a workspace grant and explicit channel opt-in.",
+                ));
+            }
+            let binding_id = body.context_binding_id.ok_or_else(|| {
+                ServerError::bad_request_kind(
+                    "context_binding_required",
+                    "Thread context must name the channel binding that opted in.",
+                )
+            })?;
+            Some(tidebreak_core::code::ExternalThreadContext {
+                binding_id,
+                grant_id: grant.id,
+                messages,
+            })
+        }
+        None => None,
+    };
     let (external_identity, display) = if let Some(actor) = body.actor {
         (Some(actor.external_identity), Some(actor.display))
     } else {
@@ -492,6 +528,7 @@ pub async fn external_messages(
             grant.id,
             id,
             ExternalMessage {
+                context,
                 text: body.text,
                 event_id: body.event_id,
                 channel_ts: body.channel_ts,

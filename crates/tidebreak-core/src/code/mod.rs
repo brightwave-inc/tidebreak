@@ -17,6 +17,9 @@ pub use event::{
     MAX_TOOL_SUMMARY_CHARS,
 };
 
+mod external_input;
+pub use external_input::{ExternalContextMessage, ExternalThreadContext};
+
 use crate::attention::{Attention, FenceReason};
 use crate::image::ImageRef;
 use crate::PermissionMode;
@@ -1826,6 +1829,9 @@ pub struct CodeExternalBinding {
     pub session_id: SessionId,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the adapter supplied channel opt-in for the first turn.
+    #[serde(default)]
+    pub context_opt_in: bool,
 }
 
 /// The credential a channel adapter holds per linked user
