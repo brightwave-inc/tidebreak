@@ -618,6 +618,19 @@ impl PrincipalAuthenticator {
         }
     }
 
+    /// `"service"` when this owner is a service principal the token file names;
+    /// `None` for a person, the local owner, or an authenticator that does not
+    /// keep a roster.
+    pub fn session_owner_kind_for(&self, owner: &tidebreak_core::OwnerId) -> Option<&'static str> {
+        match self {
+            Self::Static(tokens) => tokens
+                .kind_for_owner(owner)
+                .is_some_and(|kind| kind == crate::principal::PrincipalKind::Service)
+                .then_some("service"),
+            _ => None,
+        }
+    }
+
     async fn resolve(&self, presented: &str) -> Option<Principal> {
         match self.try_resolve(presented).await {
             Ok(principal) => principal,
@@ -1565,6 +1578,16 @@ impl TokenMap {
             ));
         }
         Ok(Self { entries })
+    }
+
+    /// The principal kind recorded for this owner key, when the file names
+    /// that user. Used when an adapter grant must know whether its owner is a
+    /// service without presenting that owner's token.
+    pub fn kind_for_owner(&self, owner: &tidebreak_core::OwnerId) -> Option<PrincipalKind> {
+        let id = owner.as_str().strip_prefix("user:")?;
+        self.entries
+            .iter()
+            .find_map(|(_, user, kind, _)| (user.to_string() == id).then_some(*kind))
     }
 
     /// The user the presented credential names and the role they hold, if

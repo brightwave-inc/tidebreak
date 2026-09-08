@@ -234,6 +234,7 @@ async fn browser_credentials_cannot_mask_missing_or_unconfirmed_delegation() {
     let error = runtime
         .external_get_or_create(
             &owner,
+            None,
             grant.id,
             "slack",
             "T1/C1/legacy",
@@ -241,6 +242,7 @@ async fn browser_credentials_cannot_mask_missing_or_unconfirmed_delegation() {
             None,
             tidebreak_core::HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings::default(),
+            None,
             None,
         )
         .await
@@ -492,9 +494,10 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
         CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry).with_harness_llm(relay),
     );
     restarted.start("http://127.0.0.1:1".into()).await.unwrap();
-    let result = restarted
+    let (result, _) = restarted
         .external_get_or_create(
             &owner,
+            None,
             grant.id,
             "slack",
             "T1/C1/restarted",
@@ -502,6 +505,7 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
             Some("From Slack".into()),
             HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings::default(),
+            None,
             None,
         )
         .await

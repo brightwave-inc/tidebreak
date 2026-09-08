@@ -32,6 +32,17 @@ asked to act as you and the forge cannot).
 This slice does not read the channel's request. External get-or-create keeps
 today's behavior; a following slice can take the adapter's choice.
 
+## Amendment 2026-09-08: get-or-create names who the session acts as
+
+External get-or-create now takes optional `acts_as` and decides once, before
+the workspace is cloned. A service-owned session always acts as the bot. A
+request for `bot` acts as the bot. `person` or an absent value probes the
+delegated lender as the person: a person identity is kept; `not_connected`,
+`person_not_offered`, or `no_git_forge` falls back to the bot and, when the
+person could connect, returns `connect_url`; `unavailable` is `502
+forge_unavailable` and starts nothing. A machine with no lender keeps today's
+person semantics and does not probe.
+
 ## Alternatives considered
 
 **Decide from the channel at each borrow.** Rejected: a session that starts

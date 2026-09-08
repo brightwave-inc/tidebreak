@@ -168,6 +168,18 @@ impl ServerError {
         }
     }
 
+    /// A `502 Bad Gateway` with a route-specific stable kind, for a dependency
+    /// the caller should retry (the forge, a verifier).
+    pub fn bad_gateway_kind(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `500 Internal Server Error` for an unexpected server-side failure that
     /// isn't an [`AgentError`] (for example, another subsystem fault). Carries a stable
     /// `kind` so a client sees the same `{ kind, message }` shape as any error.

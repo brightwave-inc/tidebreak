@@ -18,6 +18,18 @@ fn external_delegation_error(error: tidebreak_core::AgentError) -> ServerError {
     }
 }
 
+/// What get-or-create decided the session acts as, for the adapter to render.
+/// `acting_login`, `app_name`, and `connect_url` are known at create when the
+/// forge answered; an existing session reports `acts_as` from the row and
+/// leaves the rest empty (they are not stored on the session).
+#[derive(Debug, Clone)]
+pub struct ExternalActsAsView {
+    pub acts_as: tidebreak_core::ActsAs,
+    pub acting_login: Option<String>,
+    pub app_name: Option<String>,
+    pub connect_url: Option<String>,
+}
+
 impl CodeRuntime {
     /// Create a workspace whose checkout lives in a sandbox, not on this
     /// machine. A per-workspace `remote:<id>` worktree marker records that
@@ -179,6 +191,7 @@ impl CodeRuntime {
     pub async fn external_get_or_create(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         grant_id: tidebreak_core::CodeGrantId,
         channel_kind: &str,
         external_key: &str,
@@ -187,7 +200,14 @@ impl CodeRuntime {
         harness: HarnessKind,
         settings: NewSessionSettings,
         requested_mode: Option<tidebreak_core::PermissionMode>,
-    ) -> Result<tidebreak_core::ExternalSessionResolution, ServerError> {
+        requested_acts_as: Option<tidebreak_core::ActsAs>,
+    ) -> Result<
+        (
+            tidebreak_core::ExternalSessionResolution,
+            ExternalActsAsView,
+        ),
+        ServerError,
+    > {
         if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
             return Err(ServerError::conflict_kind(
                 "binding_key_invalid",
@@ -221,16 +241,34 @@ impl CodeRuntime {
         .await?
         {
             if binding.grant_id != grant_id {
-                return Ok(tidebreak_core::ExternalSessionResolution::GrantMismatch);
+                return Ok((
+                    tidebreak_core::ExternalSessionResolution::GrantMismatch,
+                    ExternalActsAsView {
+                        acts_as: tidebreak_core::ActsAs::default_for_owner_kind(owner_kind),
+                        acting_login: None,
+                        app_name: None,
+                        connect_url: None,
+                    },
+                ));
             }
             let session = self.get_session(owner, binding.session_id).await?;
+            let identity = ExternalActsAsView {
+                acts_as: session.acts_as(),
+                acting_login: None,
+                app_name: None,
+                connect_url: None,
+            };
             if session.lifecycle == SessionLifecycle::Ended {
-                return Ok(tidebreak_core::ExternalSessionResolution::Ended {
-                    session_id: binding.session_id,
-                });
+                return Ok((
+                    tidebreak_core::ExternalSessionResolution::Ended {
+                        session_id: binding.session_id,
+                    },
+                    identity,
+                ));
             }
-            return Ok(tidebreak_core::ExternalSessionResolution::Existing(
-                Box::new(binding),
+            return Ok((
+                tidebreak_core::ExternalSessionResolution::Existing(Box::new(binding)),
+                identity,
             ));
         }
         let repo = self.get_repo(owner, repo_id).await?;
@@ -239,14 +277,18 @@ impl CodeRuntime {
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?
                 .is_some_and(|grant| grant.kind.is_workspace());
-        let settings = NewSessionSettings {
-            acts_as: if workspace_grant {
-                Some(tidebreak_core::ActsAs::Bot)
-            } else {
-                settings.acts_as
-            },
-            ..settings
+        let requested_acts_as = if workspace_grant {
+            Some(tidebreak_core::ActsAs::Bot)
+        } else {
+            requested_acts_as
         };
+        let lender: Option<&dyn crate::obo_gateway::GitCredentialLender> = delegated
+            .as_ref()
+            .map(|gateway| gateway.as_ref() as &dyn crate::obo_gateway::GitCredentialLender)
+            .or_else(|| self.git_credentials().map(|lender| lender.as_ref()));
+        let identity = self
+            .decide_external_acts_as(owner, owner_kind, requested_acts_as, lender)
+            .await?;
         match self.external_execution_location() {
             ExecutionLocation::Sandbox => {
                 if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {
@@ -267,11 +309,15 @@ impl CodeRuntime {
                         "the repository records no origin, so a sandbox cannot clone it",
                     ));
                 }
+                let settings = NewSessionSettings {
+                    acts_as: Some(identity.acts_as),
+                    ..settings
+                };
                 let workspace = self.build_remote_workspace(owner, &repo, title).await?;
                 let session =
-                    Self::remote_session_value(owner, None, workspace.id, harness, settings);
+                    Self::remote_session_value(owner, owner_kind, workspace.id, harness, settings);
                 self.validate_remote_execution(&session)?;
-                Ok(tidebreak_core::db::code::resolve_external_session(
+                let resolution = tidebreak_core::db::code::resolve_external_session(
                     &self.db,
                     owner,
                     grant_id,
@@ -280,7 +326,8 @@ impl CodeRuntime {
                     &workspace,
                     &session,
                 )
-                .await?)
+                .await?;
+                Ok((resolution, identity))
             }
             ExecutionLocation::Machine => {
                 // The machine's own engine: the ordinary local workspace and
@@ -305,14 +352,7 @@ impl CodeRuntime {
                 }
                 let settings = NewSessionSettings {
                     permission_mode: mode,
-                    ..settings
-                };
-                let settings = NewSessionSettings {
-                    acts_as: if workspace_grant {
-                        Some(tidebreak_core::ActsAs::Bot)
-                    } else {
-                        settings.acts_as
-                    },
+                    acts_as: Some(identity.acts_as),
                     ..settings
                 };
                 let workspace = self
@@ -322,19 +362,14 @@ impl CodeRuntime {
                         title,
                         None,
                         None,
-                        delegated
-                            .as_ref()
-                            .map(|gateway| {
-                                gateway.as_ref() as &dyn crate::obo_gateway::GitCredentialLender
-                            })
-                            .or_else(|| self.git_credentials().map(|lender| lender.as_ref())),
-                        settings.acts_as.unwrap_or(tidebreak_core::ActsAs::Person),
+                        lender,
+                        identity.acts_as,
                     )
                     .await?;
                 let session = self
                     .create_session_of_kind_unattached(
                         owner,
-                        None,
+                        owner_kind,
                         workspace.id,
                         SessionKind::Interactive,
                         harness,
@@ -357,9 +392,101 @@ impl CodeRuntime {
                 ) {
                     self.attach_and_spawn_worker(session).await?;
                 }
-                Ok(resolution)
+                Ok((resolution, identity))
             }
         }
+    }
+
+    /// Choose the session's forge identity once, before the workspace is
+    /// cloned, so the clone borrows the same identity the session will
+    /// (decision 0090 amendment).
+    async fn decide_external_acts_as(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        requested: Option<tidebreak_core::ActsAs>,
+        lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+    ) -> Result<ExternalActsAsView, ServerError> {
+        use crate::obo_gateway::{GitForgeAttribution, GitForgeAttributionRequest, GitForgeError};
+
+        if owner_kind == Some("service") {
+            return self.external_bot_identity(owner, lender, None).await;
+        }
+        let Some(lender) = lender else {
+            // Standalone and desktop: local git identity, no probe.
+            return Ok(ExternalActsAsView {
+                acts_as: requested.unwrap_or(tidebreak_core::ActsAs::Person),
+                acting_login: None,
+                app_name: None,
+                connect_url: None,
+            });
+        };
+        if requested == Some(tidebreak_core::ActsAs::Bot) {
+            return self.external_bot_identity(owner, Some(lender), None).await;
+        }
+        match lender
+            .git_forge_identity(owner, GitForgeAttributionRequest::Person)
+            .await
+        {
+            Ok(identity) => match identity.attribution {
+                GitForgeAttribution::Person { login, .. } => Ok(ExternalActsAsView {
+                    acts_as: tidebreak_core::ActsAs::Person,
+                    acting_login: Some(login),
+                    app_name: Some(identity.app_name).filter(|name| !name.is_empty()),
+                    connect_url: None,
+                }),
+                GitForgeAttribution::Bot { bot_login } => Ok(ExternalActsAsView {
+                    acts_as: tidebreak_core::ActsAs::Bot,
+                    acting_login: bot_login,
+                    app_name: Some(identity.app_name).filter(|name| !name.is_empty()),
+                    connect_url: None,
+                }),
+            },
+            Err(GitForgeError::NotConnected { connect_url }) => {
+                self.external_bot_identity(owner, Some(lender), connect_url)
+                    .await
+            }
+            Err(GitForgeError::PersonNotOffered | GitForgeError::NoGitForge) => {
+                self.external_bot_identity(owner, Some(lender), None).await
+            }
+            Err(GitForgeError::Unavailable(detail)) => Err(ServerError::bad_gateway_kind(
+                "forge_unavailable",
+                format!("the forge is temporarily unavailable; retry ({detail})"),
+            )),
+            Err(_) => Err(ServerError::bad_gateway_kind(
+                "forge_unavailable",
+                "the forge could not answer who this session acts as; retry",
+            )),
+        }
+    }
+
+    async fn external_bot_identity(
+        &self,
+        owner: &OwnerId,
+        lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+        connect_url: Option<String>,
+    ) -> Result<ExternalActsAsView, ServerError> {
+        use crate::obo_gateway::{GitForgeAttribution, GitForgeAttributionRequest};
+
+        let mut view = ExternalActsAsView {
+            acts_as: tidebreak_core::ActsAs::Bot,
+            acting_login: None,
+            app_name: None,
+            connect_url,
+        };
+        let Some(lender) = lender else {
+            return Ok(view);
+        };
+        if let Ok(identity) = lender
+            .git_forge_identity(owner, GitForgeAttributionRequest::Installation)
+            .await
+        {
+            view.app_name = Some(identity.app_name).filter(|name| !name.is_empty());
+            if let GitForgeAttribution::Bot { bot_login } = identity.attribution {
+                view.acting_login = bot_login;
+            }
+        }
+        Ok(view)
     }
 
     /// Where an external session runs on this deployment (decision 0088):

@@ -1503,9 +1503,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
         let grant = tidebreak_core::CodeGrantId::new();
-        let resolved = runtime
+        let (resolved, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 grant,
                 "slack",
                 "T1/C7/42.1",
@@ -1513,6 +1514,7 @@ mod tests {
                 Some("fix the flake".into()),
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
@@ -1532,9 +1534,10 @@ mod tests {
         assert!(workspace.is_remote());
 
         // The channel's retry answers with the same session.
-        let again = runtime
+        let (again, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 grant,
                 "slack",
                 "T1/C7/42.1",
@@ -1542,6 +1545,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
@@ -1552,9 +1556,10 @@ mod tests {
         assert_eq!(hit.session_id, binding.session_id);
 
         // Another grant's call on the same conversation refuses.
-        let refused = runtime
+        let (refused, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 tidebreak_core::CodeGrantId::new(),
                 "slack",
                 "T1/C7/42.1",
@@ -1562,6 +1567,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
@@ -1580,9 +1586,10 @@ mod tests {
         assert!(tidebreak_core::db::code::save_session(&runtime.db, &stored)
             .await
             .unwrap());
-        let ended = runtime
+        let (ended, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 grant,
                 "slack",
                 "T1/C7/42.1",
@@ -1590,6 +1597,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
@@ -1610,9 +1618,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
         let grant = tidebreak_core::CodeGrantId::new();
-        let resolved = runtime
+        let (resolved, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 grant,
                 "slack",
                 "T1/C9/77.1",
@@ -1620,6 +1629,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
@@ -1758,9 +1768,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
         let grant = tidebreak_core::CodeGrantId::new();
-        let resolved = runtime
+        let (resolved, _) = runtime
             .external_get_or_create(
                 &owner,
+                None,
                 grant,
                 "slack",
                 "T1/C4/5.5",
@@ -1768,6 +1779,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
                 None,
             )
             .await
