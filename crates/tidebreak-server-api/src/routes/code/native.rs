@@ -155,13 +155,11 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 fn map_runtime_error(error: NativeRuntimeError) -> ServerError {
     match error {
-        NativeRuntimeError::SessionEnded => {
-            ServerError::forbidden("the native session has ended")
-        }
+        NativeRuntimeError::SessionEnded => ServerError::forbidden("the native session has ended"),
         NativeRuntimeError::NotAuthorized(message) => ServerError::forbidden(message),
-        NativeRuntimeError::Unsupported(operation) => ServerError::not_implemented(format!(
-            "this host does not support {operation}"
-        )),
+        NativeRuntimeError::Unsupported(operation) => {
+            ServerError::not_implemented(format!("this host does not support {operation}"))
+        }
         NativeRuntimeError::RequestConflict => ServerError::conflict_kind(
             "native_request_conflict",
             "that request id is already bound to a different call; mint a new request id",

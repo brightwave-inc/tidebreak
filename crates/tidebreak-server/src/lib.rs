@@ -172,19 +172,22 @@ use tidebreak_core::{
     ask_user_questions_tool_spec, browser_act_tool_spec, browser_list_tool_spec,
     browser_navigate_tool_spec, browser_screenshot_tool_spec, browser_snapshot_tool_spec,
     browser_upload_tool_spec, browser_wait_tool_spec, computer_capture_screen_tool_spec,
-    computer_click_tool_spec, computer_focus_window_tool_spec, computer_key_press_tool_spec,
+    computer_click_tool_spec, computer_drag_tool_spec, computer_focus_window_tool_spec,
+    computer_hover_tool_spec, computer_key_press_tool_spec, computer_launch_app_tool_spec,
     computer_list_windows_tool_spec, computer_read_app_content_tool_spec,
-    computer_return_to_tidebreak_tool_spec, computer_scroll_tool_spec,
-    computer_type_text_tool_spec, computer_wait_tool_spec, exit_plan_mode_tool_spec,
-    import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
-    read_connected_file_tool_spec, request_folder_access_tool_spec,
+    computer_resize_window_tool_spec, computer_return_to_tidebreak_tool_spec,
+    computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
+    exit_plan_mode_tool_spec, import_connected_file_tool_spec, list_connected_folders_tool_spec,
+    list_folder_tool_spec, read_connected_file_tool_spec, request_folder_access_tool_spec,
     validate_ask_user_questions_arguments, validate_browser_act_arguments,
     validate_browser_list_arguments, validate_browser_navigate_arguments,
     validate_browser_screenshot_arguments, validate_browser_snapshot_arguments,
     validate_browser_upload_arguments, validate_browser_wait_arguments,
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
-    validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
-    validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
+    validate_computer_drag_arguments, validate_computer_focus_window_arguments,
+    validate_computer_hover_arguments, validate_computer_key_press_arguments,
+    validate_computer_launch_app_arguments, validate_computer_list_windows_arguments,
+    validate_computer_read_app_content_arguments, validate_computer_resize_window_arguments,
     validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
     validate_computer_type_text_arguments, validate_computer_wait_arguments,
     validate_exit_plan_mode_arguments, validate_import_connected_file_arguments,
@@ -1390,10 +1393,7 @@ async fn bind_inner(
     // The native computer-use adapter and its bridge executable arrive as
     // one binding so a runtime can never be installed without the sidecar
     // that harness bridges invoke, and vice versa.
-    .with_native_binding(
-        native_binding
-            .map(|binding| (binding.runtime, binding.bridge_command)),
-    )
+    .with_native_binding(native_binding.map(|binding| (binding.runtime, binding.bridge_command)))
     // A channel-bound session on this machine's engine starts in the
     // operator's default mode and may ask up to the operator's ceiling
     // (decision 88); both are `ask` unless the deployment says otherwise.
@@ -2071,6 +2071,19 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             computer_focus_window_tool_spec(),
             validate_computer_focus_window_arguments,
         ),
+        (
+            computer_launch_app_tool_spec(),
+            validate_computer_launch_app_arguments,
+        ),
+        (
+            computer_hover_tool_spec(),
+            validate_computer_hover_arguments,
+        ),
+        (computer_drag_tool_spec(), validate_computer_drag_arguments),
+        (
+            computer_resize_window_tool_spec(),
+            validate_computer_resize_window_arguments,
+        ),
     ] {
         tools.register_validated_client(spec, ApprovalClass::Sensitive, validate);
     }
@@ -2222,6 +2235,29 @@ pub fn desktop_connect_options(url: &str) -> sea_orm::ConnectOptions {
         .idle_timeout(None)
         .max_lifetime(None);
     options
+}
+
+#[cfg(test)]
+mod computer_use_registration_tests {
+    use super::*;
+
+    #[test]
+    fn native_registry_exposes_every_supported_tool_with_correct_authority() {
+        let mut tools = ToolRegistry::new();
+        register_computer_use_tools(&mut tools);
+        let names: std::collections::BTreeSet<_> =
+            tools.specs().into_iter().map(|spec| spec.name).collect();
+        for name in tidebreak_core::COMPUTER_USE_TOOLS {
+            assert!(names.contains(name), "missing native tool: {name}");
+            let expected = if tidebreak_core::is_computer_use_control_tool(name) {
+                ApprovalClass::Sensitive
+            } else {
+                ApprovalClass::ReadOnly
+            };
+            assert_eq!(tools.registered_class(name), Some(expected), "{name}");
+        }
+        assert_eq!(names.len(), tidebreak_core::COMPUTER_USE_TOOLS.len());
+    }
 }
 
 #[cfg(test)]

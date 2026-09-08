@@ -278,7 +278,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         binary: Some(PathBuf::from("codex")),
         sink,
         browser: None,
-            native: None,
+        native: None,
     })
 }
 
@@ -587,7 +587,7 @@ fn spec_for(
         binary: Some(binary.to_path_buf()),
         sink: Arc::new(SilentSink),
         browser: None,
-            native: None,
+        native: None,
     }
 }
 

@@ -72,12 +72,14 @@ mod tests {
         snapshot: impl IntoIterator<Item = (OsString, OsString)>,
         plan_env: &[(String, String)],
         browser: Option<&BrowserChannelSpec>,
+        native: Option<&NativeChannelSpec>,
     ) -> std::collections::BTreeMap<String, String> {
         final_env_for(
             tidebreak_core::HarnessKind::ClaudeCode,
             snapshot,
             plan_env,
             browser,
+            native,
         )
     }
 
@@ -220,7 +222,13 @@ mod tests {
         );
         assert!(claude.contains_key("ANTHROPIC_API_KEY"));
         assert!(!claude.contains_key("OPENAI_API_KEY"));
-        let codex = final_env_for(tidebreak_core::HarnessKind::Codex, snapshot(), &[], None, None);
+        let codex = final_env_for(
+            tidebreak_core::HarnessKind::Codex,
+            snapshot(),
+            &[],
+            None,
+            None,
+        );
         assert!(codex.contains_key("OPENAI_API_KEY"));
         assert!(!codex.contains_key("ANTHROPIC_API_KEY"));
         for kind in [
