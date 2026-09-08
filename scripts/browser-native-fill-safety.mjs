@@ -1,23 +1,18 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { cliCall, fixtureOrigin } from "./browser-native-smoke.mjs";
 
-const options = {};
-for (let index = 2; index < process.argv.length; index += 2) {
-  const key = process.argv[index];
-  assert.ok(["--cli", "--fixture-origin", "--browser-id"].includes(key) && process.argv[index + 1],
-    "pass --cli, --fixture-origin, and optionally --browser-id");
-  assert.ok(!options[key], "duplicate argument");
-  options[key] = process.argv[index + 1];
-}
-const origin = fixtureOrigin(options["--fixture-origin"]);
-const call = cliCall(options["--cli"] ?? "");
-const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-
-async function main() {
+export async function runNativeFillSafety({
+  call,
+  origin,
+  browserId: requestedBrowserId,
+  pause = (ms) => new Promise((done) => setTimeout(done, ms)),
+}) {
   const sessions = (await call(["list"])).sessions.filter((session) =>
     session.visible && session.url && new URL(session.url).origin === origin &&
-    (!options["--browser-id"] || session.browserId === options["--browser-id"]));
+    (!requestedBrowserId || session.browserId === requestedBrowserId));
   assert.equal(sessions.length, 1, "open and share one visible fixture tab in this session");
   const session = sessions[0];
   assert.equal(session.engine.name, "wk_web_view", "this test requires the native engine");
@@ -50,7 +45,7 @@ async function main() {
     const forbidden = "Must not insert " + randomUUID();
     const action = await call(["act", "--browser-id", browserId,
       "--snapshot-id", before.snapshotId, "--document-epoch", String(before.documentEpoch),
-      "--ref", field.ref, "--fill", forbidden]);
+      "--ref", field.ref, "--execution-mode", "foreground", "--fill", forbidden]);
     const expectedStatus = fixtureCase.startsWith("replace_") ? "stale_target" : "unsupported_native";
     assert.equal(action.status, expectedStatus, fixtureCase + " must refuse changed input: " + (action.message ?? ""));
     const live = (await call(["list"])).sessions.find((entry) => entry.browserId === browserId);
@@ -70,7 +65,7 @@ async function main() {
     assert.ok(verifier[0].ref && verifier[0].actions.includes("click"));
     const verified = await call(["act", "--browser-id", browserId,
       "--snapshot-id", after.snapshotId, "--document-epoch", String(after.documentEpoch),
-      "--ref", verifier[0].ref, "--click"]);
+      "--ref", verifier[0].ref, "--execution-mode", "foreground", "--click"]);
     assert.equal(verified.status, "ok", "native value verification click failed");
     const valuesSnapshot = await snapshot();
     const valuesText = valuesSnapshot.nodes.filter((node) => node.kind === "content")
@@ -81,10 +76,29 @@ async function main() {
     }, fixtureCase + " inserted text into an original, replacement, or decoy field");
     report.push({ fixtureCase, status: action.status, noInsertion: true });
   }
-  console.log(JSON.stringify({ scope: "native_fill_safety", status: "passed", browserId, cases: report }, null, 2));
+  return { scope: "native_fill_safety", status: "passed", browserId, cases: report };
 }
 
-main().catch((error) => {
-  console.error("Native fill safety failed: " + error.message);
-  process.exitCode = 1;
-});
+async function main(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    assert.ok(["--cli", "--fixture-origin", "--browser-id"].includes(key) && argv[index + 1],
+      "pass --cli, --fixture-origin, and optionally --browser-id");
+    assert.ok(!options[key], "duplicate argument");
+    options[key] = argv[index + 1];
+  }
+  const report = await runNativeFillSafety({
+    call: cliCall(options["--cli"] ?? ""),
+    origin: fixtureOrigin(options["--fixture-origin"]),
+    browserId: options["--browser-id"],
+  });
+  console.log(JSON.stringify(report, null, 2));
+}
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main(process.argv.slice(2)).catch((error) => {
+    console.error("Native fill safety failed: " + error.message);
+    process.exitCode = 1;
+  });
+}

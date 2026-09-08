@@ -93,12 +93,19 @@ selection tests do not establish native input support.
 
 ## Foreground fill safety
 
-After the Todo smoke passes, qualify the focus and selection race cases inside
-the same Tidebreak coding session. Open the fixture with `nativeFillCase` set to
-`replace_on_focus`, `steal_focus`, `replace_on_select`, or
-`steal_focus_on_select`. For each case, use fresh element references and pass
-`--execution-mode foreground` on the browser CLI action. Review the native focus
-approval before the action runs.
+After the Todo smoke passes, run the focus and selection race cases inside the
+same Tidebreak coding session:
+
+```sh
+node scripts/browser-native-fill-safety.mjs \
+  --cli /absolute/path/to/the/bundled/tidebreak \
+  --fixture-origin http://127.0.0.1:41781
+```
+
+The runner opens `replace_on_focus`, `steal_focus`, `replace_on_select`, and
+`steal_focus_on_select` fixture cases. It passes `--execution-mode foreground`
+for every fill and verification click. Review each native focus approval before
+the action runs. Declining an approval stops the runner.
 
 Require `stale_target` for replacement cases and `unsupported_native` for focus
 theft. Verify that the fixture's native event handler ran, then use its
@@ -106,10 +113,13 @@ theft. Verify that the fixture's native event handler ran, then use its
 replacement, and decoy values. All three must remain unchanged. The default
 fixture does not install these event handlers.
 
-`scripts/browser-native-fill-safety.mjs` retains the old foreground assumptions
-but does not pass the explicit execution mode. It does not qualify these
-foreground races until its action calls request that mode. A background result
-cannot substitute for this gate.
+To verify the runner's command arguments and failure handling, run:
+
+```sh
+node --test scripts/browser-native-fill-safety.test.mjs
+```
+
+These tests use a fake CLI. They do not qualify native input or focus retention.
 
 
 ## Recovery fixture
