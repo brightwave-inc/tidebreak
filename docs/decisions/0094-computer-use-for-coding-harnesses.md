@@ -1,4 +1,4 @@
-# 93. Computer use for coding harnesses
+# 94. Computer use for coding harnesses
 
 - Status: Accepted
 - Date: 2026-09-08
@@ -21,7 +21,11 @@ The host derives owner, workspace, and session identity. Each operation carries 
 
 Independent tabs may operate concurrently only when their adapter does not use desktop input. Any operation that uses mouse, keyboard, or foreground focus holds exclusive host input ownership. Human takeover ends that ownership before another queued action can begin.
 
-The three adapters cover Tidebreak's in-app browser, native macOS apps, and Chrome. Chrome uses an approved local debugging connection; an extension can provide equivalent integration. The model cannot supply arbitrary debugger endpoints or use full debugger access to bypass narrower site grants. Developer diagnostics require explicit authority.
+The three adapters cover Tidebreak's in-app browser, native macOS apps, and Chrome. Chrome uses an approved local debugging connection. Managed Chrome starts with a separate temporary profile. Existing Chrome access has a separate disclosure covering all web tabs exposed by that instance, including signed-in pages. The model cannot supply debugger endpoints. Developer diagnostics require explicit authority.
+
+Background execution is the default. The in-app browser uses synthetic DOM actions and shows a ghost cursor without moving the hardware pointer. Managed Chrome uses CDP input and creates tabs in the background. Native apps use accessibility actions that do not require activation. Native hover, drag, key chords, menus, and unsupported accessibility targets return `requires_foreground` before input. Foreground execution requires separate native approval; the runtime never automatically changes modes.
+
+A ghost cursor shows activity; it does not isolate desktop input. Background accessibility actions can still cause an app to raise its own window. Browser DOM events are synthetic and cannot reproduce every trusted-input behavior. Such limitations are explicit results, not a promise that all apps operate without focus. Foreground actions share exclusive input ownership, and Stop prevents queued actions until explicit Resume. An older Resume approval cannot clear a newer Stop.
 
 ## Implementation contract
 

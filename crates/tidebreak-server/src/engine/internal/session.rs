@@ -41,7 +41,7 @@ pub(super) struct InternalSession {
     session_id: SessionId,
     chat_id: SessionId,
     /// Session-native computer-use tools built from the session's capability
-    /// file (decision 93). Empty when the session holds no native channel.
+    /// file (decision 94). Empty when the session holds no native channel.
     native_tools: Vec<Arc<dyn tidebreak_core::Tool>>,
     active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals acknowledged through [`HarnessSession::decide`].

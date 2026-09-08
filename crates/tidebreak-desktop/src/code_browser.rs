@@ -1387,7 +1387,7 @@ async fn share_browser_with_agent(
 }
 
 /// The shared sentence that discloses exactly where captured pixels and
-/// diagnostics go. Decision 93 requires this disclosure before any grant may
+/// diagnostics go. Decision 94 requires this disclosure before any grant may
 /// include screenshot access.
 const CAPTURE_DISCLOSURE: &str = "Screenshots show everything visible in the tab and are sent to the agent's selected model and provider; automatic redaction is not guaranteed. Console, page-error, and in-page network diagnostics for this site are shared the same way.";
 
