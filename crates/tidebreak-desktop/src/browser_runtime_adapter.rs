@@ -152,6 +152,8 @@ impl BrowserRuntime for DesktopBrowserRuntime {
             event.workspace_id = Some(scope.workspace.to_string());
             event.document_epoch = Some(args.document_epoch);
         }
+        let activity =
+            activity.map(|event| crate::computer_use_action::CallActivity::start(&self.app, event));
         let result = crate::browser_semantics::browser_native_act(
             &self.app,
             &self.registry,
@@ -173,9 +175,7 @@ impl BrowserRuntime for DesktopBrowserRuntime {
                 }
                 _ => None,
             };
-            crate::computer_use_action::finish_call_activity(
-                &self.app, activity, success, error_code,
-            );
+            activity.finish(success, error_code);
         }
         result
     }

@@ -1053,7 +1053,8 @@ async fn execute_operation(
         call.chat_id,
         &event_call,
         crate::computer_use_action::ComputerUseActionSource::Native,
-    );
+    )
+    .map(|event| crate::computer_use_action::CallActivity::start(app, event));
     let resolution = async {
         match action {
             CuAction::ReturnToTidebreak => {
@@ -1098,7 +1099,7 @@ async fn execute_operation(
             StoredResolution::Failed { error_code, .. } => (false, Some(error_code.as_str())),
             StoredResolution::Cancelled { .. } => (false, Some("cancelled")),
         };
-        crate::computer_use_action::finish_call_activity(app, activity, success, error_code);
+        activity.finish(success, error_code);
     }
     resolution
 }

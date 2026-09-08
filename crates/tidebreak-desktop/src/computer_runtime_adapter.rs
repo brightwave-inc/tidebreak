@@ -275,7 +275,8 @@ impl NativeRuntime for DesktopComputerRuntime {
             scope.session,
             call,
             crate::computer_use_action::ComputerUseActionSource::Chrome,
-        );
+        )
+        .map(|event| crate::computer_use_action::CallActivity::start(&self.app, event));
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => unknown(call, "Chrome was stopped. Inspect the target before issuing a new action."),
@@ -288,9 +289,7 @@ impl NativeRuntime for DesktopComputerRuntime {
         };
         let result = bound_chrome_result(call, result);
         if let Some(activity) = activity {
-            crate::computer_use_action::finish_call_activity(
-                &self.app,
-                activity,
+            activity.finish(
                 result.outcome == ComputerUseOutcome::Completed,
                 result.error_code.as_deref(),
             );

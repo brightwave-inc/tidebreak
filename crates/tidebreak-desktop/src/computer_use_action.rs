@@ -119,6 +119,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dropped_requests_cancel_and_completed_requests_emit_only_once() {
+        use std::sync::{Arc, Mutex};
+        let call = tidebreak_core::computer_session::ComputerUseCall {
+            request_id: uuid::Uuid::new_v4(),
+            name: "computer_click".into(),
+            arguments: serde_json::json!({"app_id": "test.fixture"}),
+        };
+        let event = activity_for_call(
+            tidebreak_core::SessionId::new(),
+            &call,
+            ComputerUseActionSource::Native,
+        )
+        .unwrap();
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let capture = phases.clone();
+        let activity = CallActivity::with_emitter(event.clone(), move |event| {
+            capture
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(event.phase).unwrap());
+        });
+        drop(activity);
+        assert_eq!(*phases.lock().unwrap(), vec!["running", "cancelled"]);
+        phases.lock().unwrap().clear();
+        let capture = phases.clone();
+        CallActivity::with_emitter(event, move |event| {
+            capture
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(event.phase).unwrap());
+        })
+        .finish(true, None);
+        assert_eq!(*phases.lock().unwrap(), vec!["running", "completed"]);
+    }
+
+    #[test]
     fn activity_wire_names_match_the_shared_ui_contract() {
         let event = ComputerUseActionEvent {
             action_id: "action-1".into(),
@@ -166,7 +202,7 @@ pub(crate) fn activity_for_call(
     let action = match action_name {
         "click" | "check" | "select" => ComputerUseActionKind::Click,
         "double_click" => ComputerUseActionKind::DoubleClick,
-        "type_text" | "type" | "fill" => ComputerUseActionKind::Type,
+        "type_text" | "type" | "fill" | "clear" => ComputerUseActionKind::Type,
         "key_press" | "press" | "key_chord" => ComputerUseActionKind::Key,
         "scroll" | "scroll_into_view" => ComputerUseActionKind::Scroll,
         "drag" => ComputerUseActionKind::Drag,
@@ -223,24 +259,64 @@ pub(crate) fn activity_for_call(
     })
 }
 
-pub(crate) fn finish_call_activity(
-    app: &AppHandle,
-    mut activity: ComputerUseActionEvent,
-    success: bool,
-    error_code: Option<&str>,
-) {
-    activity.phase = match error_code {
-        Some("requires_foreground" | "foreground_required") => {
-            ComputerUseActionPhase::ForegroundRequired
+/// Track a request until it settles. A dropped dispatch emits cancellation so
+/// a stopped or abandoned request cannot leave the activity indicator running.
+/// Running means a request is in progress; it does not claim input was sent.
+pub(crate) struct CallActivity {
+    event: Option<ComputerUseActionEvent>,
+    emit: Box<dyn Fn(&ComputerUseActionEvent) + Send + Sync>,
+}
+
+impl CallActivity {
+    pub(crate) fn start(app: &AppHandle, event: ComputerUseActionEvent) -> Self {
+        let app = app.clone();
+        Self::with_emitter(event, move |event| emit_computer_use_action(&app, event))
+    }
+
+    fn with_emitter(
+        mut event: ComputerUseActionEvent,
+        emit: impl Fn(&ComputerUseActionEvent) + Send + Sync + 'static,
+    ) -> Self {
+        event.started_at_millis = action_time_millis();
+        event.visible_until_millis = event.started_at_millis + 30_000;
+        emit(&event);
+        Self {
+            event: Some(event),
+            emit: Box::new(emit),
         }
-        Some("stopped_by_user" | "interrupted" | "computer_use_cancelled" | "cancelled") => {
-            ComputerUseActionPhase::Cancelled
+    }
+
+    pub(crate) fn finish(mut self, success: bool, error_code: Option<&str>) {
+        let phase = match error_code {
+            Some("requires_foreground" | "foreground_required") => {
+                ComputerUseActionPhase::ForegroundRequired
+            }
+            Some(
+                "stopped_by_user"
+                | "stopped"
+                | "interrupted"
+                | "computer_use_cancelled"
+                | "cancelled",
+            ) => ComputerUseActionPhase::Cancelled,
+            _ if success => ComputerUseActionPhase::Completed,
+            _ => ComputerUseActionPhase::Failed,
+        };
+        self.settle(phase);
+    }
+
+    fn settle(&mut self, phase: ComputerUseActionPhase) {
+        if let Some(mut event) = self.event.take() {
+            event.phase = phase;
+            event.visible_until_millis = action_time_millis() + 1_500;
+            (self.emit)(&event);
         }
-        _ if success => ComputerUseActionPhase::Completed,
-        _ => ComputerUseActionPhase::Failed,
-    };
-    activity.visible_until_millis = action_time_millis() + 1_500;
-    emit_computer_use_action(app, &activity);
+    }
+}
+
+impl Drop for CallActivity {
+    fn drop(&mut self) {
+        self.settle(ComputerUseActionPhase::Cancelled);
+    }
 }
 
 fn action_time_millis() -> i64 {
