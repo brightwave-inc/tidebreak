@@ -18,8 +18,8 @@
 //! * Capfiles are written create-new (mode 0600 on Unix) → sync → drop →
 //!   atomic rename. Temp files are deleted on every post-create failure path.
 //! * The JSON payload carries only `version`, `endpoint`, `token`, and the
-//!   runtime's `semantic_actions` capability — no owner, workspace, or
-//!   session identifiers.
+//!   runtime's `semantic_actions`, `lifecycle`, and `developer_diagnostics`
+//!   capabilities — no owner, workspace, or session identifiers.
 //! * In-memory authority is revoked before best-effort file deletion.
 
 use std::collections::HashMap;
@@ -666,7 +666,7 @@ mod tests {
     // ── capfile schema ───────────────────────────────────────────────────
 
     #[test]
-    fn capfile_schema_is_exact_and_defaults_semantic_actions_off() {
+    fn capfile_schema_is_exact_and_defaults_optional_capabilities_off() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("schema");
@@ -676,19 +676,28 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
 
         let obj = value.as_object().expect("capfile must be a JSON object");
-        let expected: HashSet<&str> = ["version", "endpoint", "token", "semantic_actions"]
-            .iter()
-            .copied()
-            .collect();
+        let expected: HashSet<&str> = [
+            "version",
+            "endpoint",
+            "token",
+            "semantic_actions",
+            "lifecycle",
+            "developer_diagnostics",
+        ]
+        .iter()
+        .copied()
+        .collect();
         let actual: HashSet<&str> = obj.keys().map(String::as_str).collect();
 
         assert_eq!(
             actual, expected,
-            "capfile must have exactly {{version, endpoint, token, semantic_actions}} keys"
+            "capfile must contain only the endpoint, token, version, and declared capability flags"
         );
         assert_eq!(value["version"], CAPFILE_VERSION);
         assert!(value["token"].as_str().unwrap().starts_with("tbreak_bt_"));
         assert_eq!(value["semantic_actions"], false);
+        assert_eq!(value["lifecycle"], false);
+        assert_eq!(value["developer_diagnostics"], false);
         assert!(!spec.semantic_actions);
     }
 
