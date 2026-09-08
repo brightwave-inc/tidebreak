@@ -48,6 +48,7 @@ enum Control {
     /// wire `Window` shape but stays private to this file.
     struct AppWindow {
         let windowId: UInt32
+        let ownerPid: pid_t
         let frame: CGRect
     }
 
@@ -122,8 +123,9 @@ enum Control {
         guard let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
             return
         }
-        if systemDialogFrontmostPrefixes.contains(where: { frontmost == $0 || frontmost.hasPrefix($0) })
-        {
+        if systemDialogFrontmostPrefixes.contains(where: {
+            frontmost == $0 || frontmost.hasPrefix($0)
+        }) {
             throw HelperError(
                 code: .yielded,
                 message:
@@ -132,19 +134,27 @@ enum Control {
         }
     }
 
-    /// Whether any window of `app` currently covers `point`; used to confirm
-    /// drag movement stays inside the granted app instead of trusting the
-    /// static start frame until release.
-    private static func appOccludes(_ point: CGPoint, app: NSRunningApplication) -> Bool {
-        windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier)
-            .contains { $0.frame.contains(point) }
+    /// The broker rotates this generation when control stops or resumes.
+    static func ensureNotCancelled(_ request: HelperRequest) throws {
+        guard request.cancelPath != nil || request.cancelGeneration != nil else { return }
+        guard let path = request.cancelPath, let generation = request.cancelGeneration,
+            !generation.isEmpty, generation != "stopped",
+            let data = FileManager.default.contents(atPath: path), data.count <= 1024,
+            let actual = String(data: data, encoding: .utf8),
+            actual.trimmingCharacters(in: .whitespacesAndNewlines) == generation
+        else {
+            throw HelperError(
+                code: .yielded, message: "computer use stopped or its control session changed")
+        }
     }
 
     // MARK: - Ops
 
     static func click(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
+        try activateAndWait(app, request: request)
         let button = request.button ?? "left"
         let count = request.clickCount ?? 1
 
@@ -153,6 +163,7 @@ enum Control {
             // AXPress is the clean path for a plain single left click — no
             // coordinates, no Retina math.
             if button == "left", count <= 1 {
+                try ensureNotCancelled(request)
                 if AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
                     return Result(success: true, usedFallback: false, detail: "AXPress")
                 }
@@ -163,7 +174,8 @@ enum Control {
                 throw HelperError(
                     code: .operationFailed, message: "element has no on-screen frame to click")
             }
-            try postMouseClick(at: center, button: button, clickCount: count)
+            try ensurePointInApp(center, app: app)
+            try postMouseClick(at: center, button: button, clickCount: count, request: request)
             return Result(success: true, usedFallback: true, detail: "synthesized \(button) click")
         }
 
@@ -173,11 +185,12 @@ enum Control {
         // A raw point is global; confine it to the granted app's windows so a
         // click cannot land on another app's (or Tidebreak's own) surface.
         try ensurePointInApp(point, app: app)
-        try postMouseClick(at: point, button: button, clickCount: count)
+        try postMouseClick(at: point, button: button, clickCount: count, request: request)
         return Result(success: true, usedFallback: true, detail: "synthesized click at point")
     }
 
     static func typeText(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
         guard let text = request.text else {
@@ -186,12 +199,15 @@ enum Control {
 
         if request.elementId != nil {
             let element = try resolveElement(app: app, request: request)
+            try ensureNotCancelled(request)
             AXUIElementSetAttributeValue(
                 element, kAXFocusedAttribute as CFString, true as CFTypeRef)
             // Setting AXValue is the clean path for a text field; if the element
             // rejects it (not a value-bearing role), fall back to synthesizing
             // keystrokes into the now-focused element.
-            if AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
+            try ensureNotCancelled(request)
+            if AXUIElementSetAttributeValue(
+                element, kAXValueAttribute as CFString, text as CFString)
                 == .success
             {
                 return Result(success: true, usedFallback: false, detail: "set AXValue")
@@ -200,17 +216,18 @@ enum Control {
             // PID, and setting AXFocused does not reliably foreground the app —
             // bring it forward first (as keyPress and the no-element path below
             // do) so the text cannot land in a different window.
-            activateAndWait(app)
-            try typeUnicode(text)
+            try activateAndWait(app, request: request)
+            try typeUnicode(text, request: request)
             return Result(success: true, usedFallback: true, detail: "synthesized keystrokes")
         }
 
-        activateAndWait(app)
-        try typeUnicode(text)
+        try activateAndWait(app, request: request)
+        try typeUnicode(text, request: request)
         return Result(success: true, usedFallback: true, detail: "synthesized keystrokes")
     }
 
     static func keyPress(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
         guard let keyName = request.key else {
@@ -220,7 +237,7 @@ enum Control {
             throw HelperError(code: .invalidRequest, message: "unknown key: \(keyName)")
         }
         // A chord targets the focused app, so bring it forward first.
-        activateAndWait(app)
+        try activateAndWait(app, request: request)
         // A real event source (not nil) delivers far more reliably than a fresh
         // nil source. With a nil source, apps that read modifier/key state from
         // the session (Electron, browsers) intermittently drop synthesized
@@ -280,51 +297,49 @@ enum Control {
         down.flags = chordMask
         up.flags = chordMask
 
-        // Everything is synthesized; from here only posting happens, which
-        // cannot fail.
+        var pressedModifiers = 0
+        var keyIsDown = false
+        defer {
+            if keyIsDown { up.post(tap: .cghidEventTap) }
+            for modUp in modifierUps.suffix(pressedModifiers) {
+                modUp.post(tap: .cghidEventTap)
+            }
+        }
         for modDown in modifierDowns {
+            try ensureNotCancelled(request)
             modDown.post(tap: .cghidEventTap)
+            pressedModifiers += 1
         }
-        // Let the flagsChanged events land before the keystroke so the modifier
-        // state is settled.
-        if !modifiers.isEmpty {
-            usleep(keyPressHoldMicros)
-        }
-        // Hold the key briefly before release. A zero-duration down→up can land
-        // inside a single run-loop tick and read as "never pressed" to apps that
-        // sample key state per tick; a short hold makes the press register as a
-        // real keystroke.
+        if !modifiers.isEmpty { usleep(keyPressHoldMicros) }
+        try ensureNotCancelled(request)
         down.post(tap: .cghidEventTap)
+        keyIsDown = true
         usleep(keyPressHoldMicros)
+        try ensureNotCancelled(request)
         up.post(tap: .cghidEventTap)
-        // Release modifiers last, after the key, while the chord flags are still
-        // asserted.
-        for modUp in modifierUps {
-            modUp.post(tap: .cghidEventTap)
-        }
+        keyIsDown = false
         return Result(success: true, usedFallback: false, detail: "key \(keyName)")
     }
 
     static func scroll(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
         let dx = request.dx ?? 0
         let dy = request.dy ?? 0
 
-        // A scroll-wheel event lands on the view under the cursor, so position
-        // the cursor over the target first (element center, else an explicit
-        // point) when one was given.
-        var usedFallback = true
-        if request.elementId != nil {
-            let element = try resolveElement(app: app, request: request)
-            if let center = elementCenter(element) {
-                CGWarpMouseCursorPosition(center)
-            }
-            usedFallback = false
-        } else if let point = explicitPoint(request) {
-            // A raw point is global; confine it to the granted app's windows.
-            try ensurePointInApp(point, app: app)
-            CGWarpMouseCursorPosition(point)
+        try activateAndWait(app, request: request)
+        let point: CGPoint
+        if request.elementId != nil || explicitPoint(request) != nil {
+            point = try resolveTargetPoint(app: app, request: request)
+        } else if let cursor = CGEvent(source: nil)?.location {
+            point = cursor
+        } else {
+            throw HelperError(code: .operationFailed, message: "could not locate the pointer")
+        }
+        try ensurePointInApp(point, app: app)
+        guard dx.isFinite, dy.isFinite else {
+            throw HelperError(code: .invalidRequest, message: "scroll deltas must be finite")
         }
 
         // The deltas feed a CGEvent's Int32 wheel fields; a finite but huge
@@ -340,91 +355,127 @@ enum Control {
         else {
             throw HelperError(code: .operationFailed, message: "could not synthesize scroll event")
         }
+        event.location = point
+        try ensureNotCancelled(request)
         event.post(tap: .cghidEventTap)
-        return Result(success: true, usedFallback: usedFallback, detail: "scroll dx \(dx) dy \(dy)")
+        return Result(success: true, usedFallback: true, detail: "scroll dx \(dx) dy \(dy)")
     }
 
     static func focusWindow(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
         // This is the agent's path back to an app after focus shifted away. A
         // bare async activate() loses the race against a just-activated window,
         // so wait for the app to actually become frontmost before reporting
         // success.
-        activateAndWait(app)
-        // Window-level targeting by CGWindowID is a follow-up (AX windows do not
-        // expose CGWindowID); app activation is the robust guarantee.
-        // Best-effort: also raise the app's main window.
-        let appElement = AXTree.appElement(for: app.processIdentifier)
-        if let mainValue = AXTree.copyAttr(appElement, kAXMainWindowAttribute as CFString),
-            CFGetTypeID(mainValue) == AXUIElementGetTypeID()
-        {
-            AXUIElementPerformAction(mainValue as! AXUIElement, kAXRaiseAction as CFString)
+        try activateAndWait(app, request: request)
+        guard let windowId = request.windowId else {
+            return Result(success: true, usedFallback: false, detail: "focused app")
         }
-        return Result(success: true, usedFallback: false, detail: "focused app")
+        guard
+            windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier)
+                .contains(where: { $0.windowId == windowId })
+        else {
+            throw HelperError(
+                code: .staleElement, message: "the requested window no longer belongs to the app")
+        }
+        let appElement = AXTree.appElement(for: app.processIdentifier)
+        guard let window = accessibleWindowElement(matching: windowId, appElement: appElement)
+        else {
+            throw HelperError(
+                code: .operationFailed, message: "the requested window has no accessibility target")
+        }
+        try ensureNotCancelled(request)
+        guard AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success else {
+            throw HelperError(
+                code: .operationFailed, message: "the app rejected the window focus request")
+        }
+        try ensureNotCancelled(request)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        repeat {
+            try ensureNotCancelled(request)
+            if let focused = AXTree.copyAttr(appElement, kAXFocusedWindowAttribute as CFString),
+                CFGetTypeID(focused) == AXUIElementGetTypeID(), CFEqual(focused, window)
+            {
+                return Result(success: true, usedFallback: false, detail: "verified focused window")
+            }
+            usleep(20_000)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        throw HelperError(
+            code: .operationFailed, message: "the requested window did not become focused")
     }
 
-    /// Launch an app by its registered bundle id. NSWorkspace resolves the id
-    /// to the app's installed bundle; no path, executable, or argument is ever
-    /// accepted. The app is activated on launch so the caller's next control
-    /// op can rely on focus (an app that ignores activation still reports
-    /// failure-free and the broker/gate continue to enforce all policy).
-    static func launchApp(_ request: HelperRequest) throws -> Result {
+    /// Launch a registered bundle and confirm its process exists before return.
+    static func launchApp(_ request: HelperRequest) async throws -> Result {
+        try ensureNotCancelled(request)
         guard let bundleId = request.bundleId, !bundleId.isEmpty else {
             throw HelperError(code: .invalidRequest, message: "launch_app requires bundle_id")
         }
-        guard !isBlocked(bundleId) else {
-            throw HelperError(code: .operationFailed, message: "app \(bundleId) is not automatable")
-        }
-        let launched = NSWorkspace.shared.launchApplication(
-            withBundleIdentifier: bundleId, options: [.default, .activateAllWindows])
-        guard launched else {
+        try ensureNotBlocked(bundleId)
+        try ensureNoSystemDialogFrontmost()
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
             throw HelperError(
-                code: .notFound,
-                message: "could not launch registered application \(bundleId)")
+                code: .notFound, message: "registered application \(bundleId) not found")
         }
-        // Wait briefly for the process to register so a follow-up
-        // list/read/capture does not race the launch.
-        let deadline = Date().addingTimeInterval(2.0)
-        while Date() < deadline {
-            if NSWorkspace.shared.runningApplications.contains(where: {
-                $0.bundleIdentifier == bundleId
-            }) {
-                return Result(success: true, usedFallback: false, detail: "launched \(bundleId)")
-            }
-            usleep(20_000)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        try ensureNotCancelled(request)
+        let app = try await NSWorkspace.shared.openApplication(
+            at: url, configuration: configuration)
+        guard app.bundleIdentifier == bundleId, !app.isTerminated else {
+            throw HelperError(
+                code: .operationFailed, message: "the requested application did not start")
         }
-        return Result(success: true, usedFallback: false, detail: "launch requested \(bundleId)")
+        return Result(success: true, usedFallback: false, detail: "launched \(bundleId)")
     }
 
     /// Move the pointer over an element or confined coordinate point without
     /// pressing.
     static func hover(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
+        try activateAndWait(app, request: request)
         let point = try resolveTargetPoint(app: app, request: request)
-        CGWarpMouseCursorPosition(point)
-        // Warp is synchronous. A small settle keeps Electron/Chromium hover
-        // from dropping the enter event.
+        try ensurePointInApp(point, app: app)
+        guard
+            let move = CGEvent(
+                mouseEventSource: CGEventSource(stateID: .combinedSessionState),
+                mouseType: .mouseMoved,
+                mouseCursorPosition: point, mouseButton: .left)
+        else {
+            throw HelperError(
+                code: .operationFailed, message: "could not synthesize pointer movement")
+        }
+        try ensureNotCancelled(request)
+        move.post(tap: .cghidEventTap)
         usleep(50_000)
-        return Result(success: true, usedFallback: false, detail: "hovered at point")
+        return Result(success: true, usedFallback: true, detail: "posted pointer movement")
     }
 
     /// Press, drag through a bounded number of steps, and release. Both
     /// endpoints are resolved and confined before the first mouse-down, so a
     /// mid-drag test cannot leave a different app holding the button.
     static func drag(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
+        try activateAndWait(app, request: request)
         let from = try resolveTargetPoint(app: app, request: request, prefix: "from")
         let to = try resolveTargetPoint(app: app, request: request, prefix: "to")
-        guard appOccludes(from, app: app), appOccludes(to, app: app) else {
+        let points = dragPoints(from: from, to: to, durationMs: request.durationMs)
+        let initialWindows = windows(pid: nil, bundleId: nil)
+        guard
+            ([from] + points).allSatisfy({
+                pointBelongsToApp($0, pid: app.processIdentifier, windows: initialWindows)
+            })
+        else {
             throw HelperError(
                 code: .targetOutsideApp,
-                message: "a drag endpoint is not inside a window owned by the granted app")
+                message: "the drag path leaves the granted app or crosses another window")
         }
-        let duration = Double(min(max(request.durationMs ?? 200, 0), 10_000)) / 1000.0
-        let now = Date().timeIntervalSince1970
         guard
             let source = CGEventSource(stateID: .combinedSessionState),
             let down = CGEvent(
@@ -432,62 +483,75 @@ enum Control {
                 mouseCursorPosition: from, mouseButton: .left),
             let up = CGEvent(
                 mouseEventSource: source, mouseType: .leftMouseUp,
-                mouseCursorPosition: to, mouseButton: .left)
+                mouseCursorPosition: from, mouseButton: .left)
         else {
             throw HelperError(code: .operationFailed, message: "could not synthesize drag events")
         }
-        // Stamp the whole sequence as one coherent gesture at the same
-        // instant, so a target that samples event time sees no gaps.
-        for event in [down, up] {
-            event.timestamp = now
+        let moves = try points.map { point -> CGEvent in
+            guard
+                let move = CGEvent(
+                    mouseEventSource: source, mouseType: .leftMouseDragged,
+                    mouseCursorPosition: point, mouseButton: .left)
+            else {
+                throw HelperError(
+                    code: .operationFailed, message: "could not synthesize drag movement")
+            }
+            return move
         }
-        // At the default 200ms, 20 steps is smooth enough to register drag
-        // tracking without being brittle; at the 10s cap it stays bounded. A
-        // security dialog appearing mid-drag stops before the next move so a
-        // dangling drag cannot land on a system surface.
-        let steps = max(20, min(1000, Int(duration * 200)))
-        let movePoints = (1...steps).map { step -> CGPoint in
-            let t = Double(step) / Double(steps)
-            return CGPoint(
-                x: from.x + (to.x - from.x) * t,
-                y: from.y + (to.y - from.y) * t)
-        }
-        let firstOccludedIndex = movePoints.firstIndex(where: { appOccludes($0, app: app) })
-        var moveEvents: [CGEvent] = []
-        moveEvents.reserveCapacity(steps + 2)
-        if let firstOccludedIndex {
-            for point in movePoints[firstOccludedIndex...] where appOccludes(point, app: app) {
+        var lastPoint = from
+        let interval =
+            Double(min(max(request.durationMs ?? 200, 0), 10_000)) / 1000 / Double(points.count)
+        try ensureNotCancelled(request)
+        try deliverDrag(
+            count: moves.count,
+            press: { down.post(tap: .cghidEventTap) },
+            move: { index in
+                try ensureNotCancelled(request)
+                try ensureNoSystemDialogFrontmost()
                 guard
-                    let move = CGEvent(
-                        mouseEventSource: source, mouseType: .leftMouseDragged,
-                        mouseCursorPosition: point, mouseButton: .left)
+                    NSWorkspace.shared.frontmostApplication?.processIdentifier
+                        == app.processIdentifier
                 else {
                     throw HelperError(
-                        code: .operationFailed, message: "could not synthesize drag move")
+                        code: .yielded, message: "the granted app lost focus during drag")
                 }
-                moveEvents.append(move)
-            }
+                try ensurePointInApp(points[index], app: app)
+                moves[index].timestamp = DispatchTime.now().uptimeNanoseconds
+                moves[index].post(tap: .cghidEventTap)
+                lastPoint = points[index]
+            },
+            release: {
+                up.location = lastPoint
+                up.timestamp = DispatchTime.now().uptimeNanoseconds
+                up.post(tap: .cghidEventTap)
+            },
+            pause: { Thread.sleep(forTimeInterval: interval) })
+        return Result(
+            success: true, usedFallback: true, detail: "posted drag with \(points.count) movements")
+    }
+
+    static func dragPoints(from: CGPoint, to: CGPoint, durationMs: Int?) -> [CGPoint] {
+        let duration = min(max(durationMs ?? 200, 0), 10_000)
+        let steps = max(20, min(1000, duration / 5))
+        return (1...steps).map { step in
+            let fraction = Double(step) / Double(steps)
+            return CGPoint(
+                x: from.x + (to.x - from.x) * fraction,
+                y: from.y + (to.y - from.y) * fraction)
         }
-        // If the app moved out from under the drag path, return a stale/target
-        // refusal before the first event is posted.
-        if moveEvents.isEmpty {
-            throw HelperError(
-                code: .targetOutsideApp,
-                message: "the app moved during the drag; refusing to synthesize outside it")
+    }
+
+    /// Release at the last delivered point even when a later guard refuses.
+    static func deliverDrag(
+        count: Int, press: () -> Void, move: (Int) throws -> Void,
+        release: () -> Void, pause: () -> Void
+    ) rethrows {
+        press()
+        defer { release() }
+        for index in 0..<count {
+            pause()
+            try move(index)
         }
-        // All events exist before any is posted, so a synthesis failure cannot
-        // leave the mouse button latched.
-        down.post(tap: .cghidEventTap)
-        usleep(8_000)
-        for (index, move) in moveEvents.enumerated() {
-            move.post(tap: .cghidEventTap)
-            usleep(1_000)
-            if index + 1 < moveEvents.count {
-                try ensureNoSystemDialogFrontmost()
-            }
-        }
-        up.post(tap: .cghidEventTap)
-        return Result(success: true, usedFallback: true, detail: "dragged \(moveEvents.count) steps")
     }
 
     /// Resize one window of the granted app to a width/height in logical
@@ -495,13 +559,15 @@ enum Control {
     /// re-validated against the app's current window list immediately before
     /// resizing.
     static func resizeWindow(_ request: HelperRequest) throws -> Result {
+        try ensureNotCancelled(request)
         let app = try requireControllableApp(request)
         try ensureNoSystemDialogFrontmost()
         guard let width = request.width, let height = request.height,
             width.isFinite, height.isFinite, width > 0, height > 0,
             width <= 10_000, height <= 10_000
         else {
-            throw HelperError(code: .invalidRequest, message: "resize_window requires positive width/height")
+            throw HelperError(
+                code: .invalidRequest, message: "resize_window requires positive width/height")
         }
         let appElement = AXTree.appElement(for: app.processIdentifier)
         let windows = Control.windows(
@@ -516,7 +582,9 @@ enum Control {
                     code: .staleElement,
                     message: "window \(windowId) no longer exists for the granted app")
             }
-            guard let windowElement = resizableWindowElement(matching: windowId, appElement: appElement)
+            guard
+                let windowElement = accessibleWindowElement(
+                    matching: windowId, appElement: appElement)
             else {
                 throw HelperError(
                     code: .staleElement,
@@ -528,25 +596,41 @@ enum Control {
                 CFGetTypeID(mainValue) == AXUIElementGetTypeID()
             {
                 candidate = mainValue as! AXUIElement
-            } else if let windowValue = AXTree.copyAttr(appElement, kAXFocusedWindowAttribute as CFString),
+            } else if let windowValue = AXTree.copyAttr(
+                appElement, kAXFocusedWindowAttribute as CFString),
                 CFGetTypeID(windowValue) == AXUIElementGetTypeID()
             {
                 candidate = windowValue as! AXUIElement
             } else {
-                throw HelperError(code: .notFound, message: "app has no main/focused window to resize")
+                throw HelperError(
+                    code: .notFound, message: "app has no main/focused window to resize")
             }
         }
-        let size = CGSize(width: width, height: height)
+        var size = CGSize(width: width, height: height)
         guard let sizeValue = AXValueCreate(.cgSize, &size) else {
             throw HelperError(code: .operationFailed, message: "could not build size for resize")
         }
+        try ensureNotCancelled(request)
         let error = AXUIElementSetAttributeValue(candidate, kAXSizeAttribute as CFString, sizeValue)
         guard error == .success else {
             throw HelperError(
                 code: .operationFailed,
                 message: "app rejected the resize (AX error \(error.rawValue))")
         }
-        return Result(success: true, usedFallback: false, detail: "resized window")
+        let deadline = ProcessInfo.processInfo.systemUptime + 1.0
+        repeat {
+            try ensureNotCancelled(request)
+            if let frame = AXTree.copyFrame(candidate), sizeMatches(frame: frame, requested: size) {
+                return Result(success: true, usedFallback: false, detail: "verified resized window")
+            }
+            usleep(20_000)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        throw HelperError(
+            code: .operationFailed, message: "the window did not reach the requested size")
+    }
+
+    static func sizeMatches(frame: AXTree.Frame, requested: CGSize) -> Bool {
+        abs(frame.width - requested.width) <= 1 && abs(frame.height - requested.height) <= 1
     }
 
     /// Pure condition wait. Accessibility is requested for text conditions
@@ -554,6 +638,7 @@ enum Control {
     /// need no TCC grant. Always returns after the poll — a failing condition
     /// reports timed_out rather than blocking past its bound.
     static func waitCondition(_ request: HelperRequest) throws -> WaitResult {
+        try ensureNotCancelled(request)
         let bundleId: String
         if let requested = request.bundleId {
             bundleId = requested
@@ -566,36 +651,37 @@ enum Control {
         guard let kind = request.condition else {
             throw HelperError(code: .invalidRequest, message: "wait_condition requires condition")
         }
-        let timeout = min(max(request.timeoutSeconds ?? 10.0, 0.1), 30.0)
-        let deadline = Date().addingTimeInterval(timeout)
+        let requestedTimeout = request.timeoutSeconds ?? 10
+        guard requestedTimeout.isFinite else {
+            throw HelperError(code: .invalidRequest, message: "timeout_seconds must be finite")
+        }
+        let timeout = min(max(requestedTimeout, 0.1), 30)
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         var observed = false
         repeat {
-            let current: Bool
+            try ensureNotCancelled(request)
             switch kind {
             case .appRunning:
-                current = NSWorkspace.shared.runningApplications.contains(where: {
+                observed = NSWorkspace.shared.runningApplications.contains(where: {
                     $0.bundleIdentifier == bundleId
                 })
             case .windowVisible:
-                current = !Control.windows(pid: nil, bundleId: bundleId).isEmpty
+                observed = !Control.windows(pid: nil, bundleId: bundleId).isEmpty
             case .textPresent, .textAbsent:
                 guard let text = request.text, !text.isEmpty else {
                     throw HelperError(
                         code: .invalidRequest, message: "text conditions require text")
                 }
-                // Text reads are bounded by the same tree budget as app
-                // content, but matching is done here (not in the broker) so
-                // the helper stays a dumb executor.
-                current = try Control.treeContains(bundleId: bundleId, text: text)
+                let observation = try treeContains(
+                    bundleId: bundleId, text: text, deadline: deadline, request: request)
+                observed = observation.satisfies(kind)
             }
-            observed = kind == .textAbsent ? !current : current
-            if !observed && Date() < deadline {
-                usleep(100_000)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            if !observed && remaining > 0 {
+                Thread.sleep(forTimeInterval: min(remaining, 0.1))
             }
-        } while !observed && Date() < deadline
-        return WaitResult(
-            met: observed,
-            timedOut: !observed)
+        } while !observed && ProcessInfo.processInfo.systemUptime < deadline
+        return WaitResult(met: observed, timedOut: !observed)
     }
 
     /// Read the target element's role + label without acting — the broker's
@@ -756,7 +842,7 @@ enum Control {
         else { return [] }
         let bundleByPid = Dictionary(
             NSWorkspace.shared.runningApplications.compactMap { app in
-                app.bundleIdentifier.map { ($0, app.processIdentifier) }
+                app.bundleIdentifier.map { (app.processIdentifier, $0) }
             },
             uniquingKeysWith: { first, _ in first })
         var result: [AppWindow] = []
@@ -767,10 +853,14 @@ enum Control {
             else { continue }
             if let pid, ownerPid != pid { continue }
             if let bundleId, bundleByPid[ownerPid] != bundleId { continue }
-            guard let bounds = info[kCGWindowBounds as String] as? [String: Any] else { continue }
+            guard let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0,
+                (bounds["Width"] as? NSNumber)?.doubleValue ?? 0 > 0,
+                (bounds["Height"] as? NSNumber)?.doubleValue ?? 0 > 0
+            else { continue }
             result.append(
                 AppWindow(
-                    windowId: wid,
+                    windowId: wid, ownerPid: ownerPid,
                     frame: CGRect(
                         x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
                         y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
@@ -784,7 +874,7 @@ enum Control {
     /// current CGWindow bounds, rounded to whole points to survive Retina
     /// jitter. Returns nil when the AX list has no matching window (many apps
     /// expose only some windows through AX).
-    private static func resizableWindowElement(
+    private static func accessibleWindowElement(
         matching windowId: UInt32, appElement: AXUIElement
     ) -> AXUIElement? {
         guard
@@ -796,7 +886,9 @@ enum Control {
             y: target.frame.origin.y.rounded(),
             width: target.frame.width.rounded(),
             height: target.frame.height.rounded())
-        return AXTree.copyChildren(appElement).first { windowElement in
+        let value = AXTree.copyAttr(appElement, kAXWindowsAttribute as CFString)
+        let windows = (value as? [AXUIElement]) ?? []
+        return windows.first { windowElement in
             guard let frame = AXTree.copyFrame(windowElement) else { return false }
             return CGRect(
                 x: frame.x.rounded(), y: frame.y.rounded(),
@@ -804,11 +896,52 @@ enum Control {
         }
     }
 
-    /// Bounded accessibility-tree search for wait conditions. Reads the same
-    /// AX title/description/value strings a tree read surfaces and matches
-    /// case-sensitively; depth/node caps mirror `AXTree`, so a condition can
-    /// never scan unbounded content.
-    private static func treeContains(bundleId: String, text: String) throws -> Bool {
+    enum TextObservation: Equatable {
+        case present, absent, incomplete
+
+        func satisfies(_ condition: WaitConditionKind) -> Bool {
+            switch condition {
+            case .textPresent: return self == .present
+            case .textAbsent: return self == .absent
+            default: return false
+            }
+        }
+    }
+
+    struct TextNode<Element> {
+        let strings: [String]
+        let children: [Element]
+        let complete: Bool
+    }
+
+    /// Absence requires a complete tree. An unreadable node or exhausted bound
+    /// leaves the condition unmet, even when no text matched the readable nodes.
+    static func searchText<Element>(
+        root: Element, text: String, maxNodes: Int = 2000,
+        maxDepth: Int = 25, deadline: Double, now: () -> Double,
+        read: (Element) throws -> TextNode<Element>
+    ) rethrows -> TextObservation {
+        var pending = [(root, 0)]
+        var remaining = maxNodes
+        var complete = true
+        while let (element, depth) = pending.popLast() {
+            guard remaining > 0, now() < deadline else { return .incomplete }
+            if depth > maxDepth {
+                complete = false
+                continue
+            }
+            remaining -= 1
+            let node = try read(element)
+            if node.strings.contains(where: { $0.contains(text) }) { return .present }
+            complete = complete && node.complete
+            pending.append(contentsOf: node.children.reversed().map { ($0, depth + 1) })
+        }
+        return complete ? .absent : .incomplete
+    }
+
+    private static func treeContains(
+        bundleId: String, text: String, deadline: Double, request: HelperRequest
+    ) throws -> TextObservation {
         guard Permissions.requestAll().accessibility else {
             throw HelperError(
                 code: .permissionDenied, message: "Accessibility permission is not granted")
@@ -817,34 +950,54 @@ enum Control {
             let app = NSWorkspace.shared.runningApplications.first(where: {
                 $0.bundleIdentifier == bundleId
             })
-        else { return false }
-        var budget = 2000
-        return contains(
-            text: text, element: AXTree.appElement(for: app.processIdentifier),
-            depth: 0, currentNodeBudget: &budget)
+        else { return .incomplete }
+        return try searchText(
+            root: AXTree.appElement(for: app.processIdentifier), text: text,
+            deadline: deadline, now: { ProcessInfo.processInfo.systemUptime },
+            read: {
+                try ensureNotCancelled(request)
+                return readTextNode($0, deadline: deadline)
+            })
     }
 
-    private static func contains(
-        text: String, element: AXUIElement, depth: Int, currentNodeBudget budget: inout Int
-    ) -> Bool {
-        if budget <= 0 || depth > 25 { return false }
-        budget -= 1
-        let title = AXTree.copyString(element, kAXTitleAttribute as CFString)
-        let description = AXTree.copyString(element, kAXDescriptionAttribute as CFString)
-        let value = AXTree.copyValueString(element, kAXValueAttribute as CFString)
-        if [title, description, value].compactMap({ $0 }).contains(where: { $0.contains(text) }) {
-            return true
-        }
-        for child in AXTree.copyChildren(element) {
-            if contains(
-                text: text, element: child, depth: depth + 1,
-                currentNodeBudget: &budget)
-            {
-                return true
+    private static func readTextNode(_ element: AXUIElement, deadline: Double) -> TextNode<
+        AXUIElement
+    > {
+        var complete = true
+        func attribute(_ name: CFString) -> CFTypeRef? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                complete = false
+                return nil
             }
-            if budget <= 0 { return false }
+            AXUIElementSetMessagingTimeout(element, Float(min(remaining, 0.2)))
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, name, &value)
+            if error == .attributeUnsupported || error == .noValue { return nil }
+            guard error == .success else {
+                complete = false
+                return nil
+            }
+            return value
         }
-        return false
+        var strings: [String] = []
+        for name in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+            guard let value = attribute(name as CFString) else { continue }
+            if CFGetTypeID(value) == CFStringGetTypeID() {
+                strings.append(value as! String)
+            } else if let number = value as? NSNumber {
+                strings.append(number.stringValue)
+            }
+        }
+        var children: [AXUIElement] = []
+        if let value = attribute(kAXChildrenAttribute as CFString) {
+            if let array = value as? [AXUIElement] {
+                children = array
+            } else {
+                complete = false
+            }
+        }
+        return TextNode(strings: strings, children: children, complete: complete)
     }
 
     /// Resolve a target (element center, else explicit global point) to a
@@ -854,12 +1007,14 @@ enum Control {
     private static func resolveTargetPoint(
         app: NSRunningApplication, request: HelperRequest, prefix: String? = nil
     ) throws -> CGPoint {
-        let elementId = prefix.map {
-            $0 == "to" ? request.toElementId : request.fromElementId
-        } ?? request.elementId
-        let fingerprint = prefix.map {
-            $0 == "to" ? request.toElementFingerprint : request.fromElementFingerprint
-        } ?? request.elementFingerprint
+        let elementId =
+            prefix.map {
+                $0 == "to" ? request.toElementId : request.fromElementId
+            } ?? request.elementId
+        let fingerprint =
+            prefix.map {
+                $0 == "to" ? request.toElementFingerprint : request.fromElementFingerprint
+            } ?? request.elementFingerprint
         let x = prefix.map { $0 == "to" ? request.toX : request.fromX } ?? request.x
         let y = prefix.map { $0 == "to" ? request.toY : request.fromY } ?? request.y
 
@@ -892,17 +1047,18 @@ enum Control {
     /// bounds share the global top-left-origin point space, so a point-in-rect
     /// test is valid.
     private static func ensurePointInApp(_ point: CGPoint, app: NSRunningApplication) throws {
-        let windows = Control.windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier)
-        guard !windows.isEmpty else {
-            throw HelperError(
-                code: .operationFailed, message: "could not enumerate windows to confine a coordinate")
-        }
-        guard windows.contains(where: { $0.frame.contains(point) }) else {
+        let stack = windows(pid: nil, bundleId: nil)
+        guard pointBelongsToApp(point, pid: app.processIdentifier, windows: stack) else {
             throw HelperError(
                 code: .targetOutsideApp,
-                message:
-                    "the target point is not inside any window owned by \(app.bundleIdentifier ?? "the granted app"); refusing to act on a different app")
+                message: "the target point is outside the granted app or another window covers it")
         }
+    }
+
+    /// CGWindowList returns windows from front to back.
+    static func pointBelongsToApp(_ point: CGPoint, pid: pid_t, windows: [AppWindow]) -> Bool {
+        guard point.x.isFinite, point.y.isFinite else { return false }
+        return windows.first(where: { $0.frame.contains(point) })?.ownerPid == pid
     }
 
     // MARK: - Activation
@@ -917,14 +1073,15 @@ enum Control {
     /// app (or are dropped) and only the tail reaches the target, which is
     /// exactly the "only a couple characters get typed" symptom. Activate, then
     /// spin the run loop until the app reports active (bounded) so the whole
-    /// burst lands where intended. Fails open: returns after the cap even if
-    /// `isActive` never flips (some accessory / full-screen-Space apps report
-    /// it oddly) — proceed to type rather than regress the case where
-    /// activation actually worked.
-    private static func activateAndWait(_ app: NSRunningApplication) {
+    /// burst lands where intended. Refuse input if the granted app does not
+    /// become frontmost before the bound.
+    private static func activateAndWait(_ app: NSRunningApplication, request: HelperRequest) throws
+    {
+        try ensureNotCancelled(request)
         app.activate()
         let deadline = Date().addingTimeInterval(activationTimeout)
         while !app.isActive, Date() < deadline {
+            try ensureNotCancelled(request)
             // Pump briefly so the workspace's activation notification can land
             // and flip `isActive`, with a sleep floor underneath it: this is a
             // single-shot CLI with no NSApplication, so the run loop usually has
@@ -934,17 +1091,26 @@ enum Control {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
             usleep(5_000)
         }
+        try ensureNoSystemDialogFrontmost()
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+        else {
+            throw HelperError(code: .yielded, message: "the granted app did not become frontmost")
+        }
     }
 
     // MARK: - CGEvent synthesis
 
-    private static func postMouseClick(at point: CGPoint, button: String, clickCount: Int) throws {
-        try postMouseSequence(at: point, button: button, clickCount: clickCount)
+    private static func postMouseClick(
+        at point: CGPoint, button: String, clickCount: Int, request: HelperRequest
+    ) throws {
+        try postMouseSequence(at: point, button: button, clickCount: clickCount, request: request)
     }
 
     /// Post a single-target click sequence with the same combined session
     /// source hover/drag use, so Electron-style apps see mouse state coherently.
-    private static func postMouseSequence(at point: CGPoint, button: String, clickCount: Int) throws {
+    private static func postMouseSequence(
+        at point: CGPoint, button: String, clickCount: Int, request: HelperRequest
+    ) throws {
         let (downType, upType, cgButton): (CGEventType, CGEventType, CGMouseButton) =
             button == "right"
             ? (.rightMouseDown, .rightMouseUp, .right)
@@ -952,6 +1118,7 @@ enum Control {
         let count = max(1, min(clickCount, 3))
         let source = CGEventSource(stateID: .combinedSessionState)
         for click in 1...count {
+            try ensureNotCancelled(request)
             guard
                 let down = CGEvent(
                     mouseEventSource: source, mouseType: downType, mouseCursorPosition: point,
@@ -1003,7 +1170,7 @@ enum Control {
     /// carrying all of its UTF-16 units, so a non-BMP character (an emoji, CJK
     /// ext-B) is never split into a lone, unpaired surrogate that the receiving
     /// app would drop or replace with U+FFFD.
-    private static func typeUnicode(_ text: String) throws {
+    private static func typeUnicode(_ text: String, request: HelperRequest) throws {
         let units = Array(text.utf16)
         guard units.count <= maxSynthesizedTypeUnits else {
             throw HelperError(
@@ -1015,17 +1182,15 @@ enum Control {
         // One event source for the whole burst gives steadier ordering than a
         // fresh nil source per event.
         let source = CGEventSource(stateID: .combinedSessionState)
-        // A long burst can run for seconds; a system security dialog appearing
-        // mid-burst must stop the remaining keystrokes from landing in it, so
-        // re-check the foreground periodically, not only at op start.
-        var sinceYieldCheck = 0
         for grapheme in text {
-            if sinceYieldCheck >= 64 {
-                try ensureNoSystemDialogFrontmost()
-                sinceYieldCheck = 0
+            try ensureNotCancelled(request)
+            try ensureNoSystemDialogFrontmost()
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == request.bundleId
+            else {
+                throw HelperError(
+                    code: .yielded, message: "the granted app lost focus while typing")
             }
             var cluster = Array(grapheme.utf16)
-            sinceYieldCheck += cluster.count
             guard
                 let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                 let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
