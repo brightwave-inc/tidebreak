@@ -1,7 +1,8 @@
 //! Parse captured Grok CLI `streaming-json` lines into [`HarnessEvent`]s.
 //!
 //! Written only against the checked-in fixtures under `fixtures/grok/1.0.4/`
-//! and the supplemental subagent projection under `fixtures/grok/1.0.5/`.
+//! the supplemental subagent projection under `fixtures/grok/1.0.5/`, and
+//! image reads under `fixtures/grok/1.0.13/`.
 //! Unknown event types increment a counter and are logged (size-capped). They
 //! are never fatal and never dropped silently.
 
@@ -724,6 +725,15 @@ fn content_text(value: Option<&Value>) -> Option<String> {
             .and_then(Value::as_str)
         {
             parts.push(text.to_owned());
+        } else if let Some(image) = item
+            .get("content")
+            .filter(|content| content.get("type").and_then(Value::as_str) == Some("image"))
+        {
+            let media_type = image
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown type");
+            parts.push(format!("Image received ({media_type})."));
         }
     }
     if parts.is_empty() {

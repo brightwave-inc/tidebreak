@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stageComputerUseHelper } from "./prepare-computer-use-helper.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, "..");
@@ -96,3 +97,6 @@ stageBinary("tidebreak-host-broker", "tidebreak-host-broker");
 // The later harness command-path PR resolves the absolute path at runtime;
 // this slice only packages the binary so it is available on disk.
 stageBinary("tidebreak", "tidebreak-cli");
+
+// Native computer use depends on the separately signed Swift helper.
+stageComputerUseHelper({ desktopDir, workspaceDir, targetRoot, triple, release });

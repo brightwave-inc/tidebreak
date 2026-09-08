@@ -385,6 +385,9 @@ impl HelperBackend {
     /// Returns `None` when no helper is present (the broker then uses
     /// [`UnsupportedBackend`] and does not advertise the computer-use ops).
     pub fn resolve() -> Option<Self> {
+        if !computer_use_platform_supported() {
+            return None;
+        }
         if let Some(path) = std::env::var_os(HELPER_PATH_ENV) {
             let path = PathBuf::from(path);
             if path.is_file() {
@@ -752,8 +755,40 @@ impl ComputerUseBackend for HelperBackend {
     }
 
     fn is_available(&self) -> bool {
-        true
+        computer_use_platform_supported()
     }
+}
+
+/// The Swift helper requires macOS 14 even though the desktop supports older releases.
+fn computer_use_platform_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            Command::new("/usr/bin/sw_vers")
+                .arg("-productVersion")
+                .env("SYSTEM_VERSION_COMPAT", "0")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .is_some_and(|version| macos_version_supports_computer_use(&version))
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_version_supports_computer_use(version: &str) -> bool {
+    let mut components = version.trim().split('.');
+    components
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 14)
+        && components.all(|component| component.parse::<u32>().is_ok())
 }
 
 /// Inject an [`ElementTarget`]'s present fields into a helper request (omitting
@@ -873,6 +908,35 @@ struct DescribeResultJson {
     label: Option<String>,
     #[serde(default)]
     fingerprint: Option<String>,
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::macos_version_supports_computer_use;
+
+    #[test]
+    fn computer_use_requires_macos_14_or_later() {
+        for version in ["10.15.7", "10.16", "11.7.10", "12.7.6", "13.7.8"] {
+            assert!(!macos_version_supports_computer_use(version), "{version}");
+        }
+        for version in ["14", "14.0", "14.8.1\n", "15.6.1", "26.0"] {
+            assert!(macos_version_supports_computer_use(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn unreadable_macos_versions_do_not_advertise_computer_use() {
+        for version in [
+            "",
+            "macOS 14.0",
+            "14.x",
+            "14.",
+            "14..0",
+            "99999999999999999999",
+        ] {
+            assert!(!macos_version_supports_computer_use(version), "{version}");
+        }
+    }
 }
 
 // Exercises the HelperBackend's spawn / concurrent-drain / bounded-wait

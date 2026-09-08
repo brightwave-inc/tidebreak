@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 use tauri::{async_runtime::JoinHandle, AppHandle};
 use tauri_plugin_shell::ShellExt;
 use thiserror::Error;
@@ -488,6 +490,10 @@ impl Session {
             .args(args)
             .env_clear();
         sidecar = sidecar.envs(minimal_environment());
+        #[cfg(target_os = "macos")]
+        if let Some(helper) = computer_use_helper_path(app.path().resource_dir().ok().as_deref()) {
+            sidecar = sidecar.env(tidebreak_host_broker::HELPER_PATH_ENV, helper);
+        }
 
         let command: std::process::Command = sidecar.into();
         let mut command = Command::from(command);
@@ -661,6 +667,25 @@ async fn read_frame(input: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>, 
             return Ok(frame);
         }
     }
+}
+
+/// Resolve only app-owned paths. A harness cannot select the privileged helper.
+#[cfg(target_os = "macos")]
+fn computer_use_helper_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let packaged = resource_dir.map(|dir| dir.join("host-broker/tidebreak-cu-helper"));
+    if let Some(path) = packaged.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+    // Tauri dev runs outside a bundle, after prepare-sidecar stages the helper.
+    #[cfg(debug_assertions)]
+    {
+        let staged =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/host-broker/tidebreak-cu-helper");
+        if staged.is_file() {
+            return Some(staged);
+        }
+    }
+    None
 }
 
 fn minimal_environment() -> Vec<(OsString, OsString)> {

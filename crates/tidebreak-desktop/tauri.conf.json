@@ -71,6 +71,7 @@
       }
     },
     "resources": {
+      "resources/host-broker/": "host-broker/",
       "../../scripts/exec-documents/": "exec-scripts/",
       "../../skills/": "skills/",
       "../../plugins/": "plugins/",
