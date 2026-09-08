@@ -28,6 +28,7 @@ pub(crate) use core::{
     sandbox_agent_run_worker, sandbox_runtime, sandbox_task_plan_worker, scripted_harness,
     task_plan_tool, InstanceLock, HOST_MAX_CONNECTIONS,
 };
+pub use core::chrome;
 pub use core::{
     code_execution, connectors, consent, deprovision_provisioned_gateway, deprovision_target,
     ensure_home_dir, host_folders, listen_endpoint, logging, media_type, openapi_catalog,

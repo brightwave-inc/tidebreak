@@ -56,6 +56,7 @@ pub mod browser;
 pub mod cancel;
 pub mod chat_journal;
 pub mod chrome_computer_use;
+pub mod chrome_connection;
 pub mod citation;
 pub mod client_tools;
 pub mod code;
