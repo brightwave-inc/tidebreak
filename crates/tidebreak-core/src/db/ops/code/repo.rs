@@ -185,6 +185,7 @@ pub async fn set_repo_origin(
         )
         .filter(entities::code_repo::Column::Id.eq(id.0))
         .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_repo::Column::RemovedAt.is_null())
         .exec(&store.conn)
         .await
         .map_err(store_err)?;

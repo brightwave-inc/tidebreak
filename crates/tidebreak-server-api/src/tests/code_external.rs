@@ -290,6 +290,123 @@ async fn an_external_session_names_its_repository_by_origin() {
     assert_eq!(nameless.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
+/// A registered checkout resolves immediately, before the reconcile sweep.
+/// Legacy registrations acquire their origin without changing user settings.
+#[tokio::test]
+async fn registered_repository_origins_are_ready_for_external_sessions() {
+    let (router, _fake, runtime, template_id, token, dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let root = super::code::init_git_repo_named(dir.path(), "registered");
+    super::code::add_github_remote(&root, "registered");
+    let response = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": root }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let registered_id: RepoId = body["id"].as_str().unwrap().parse().unwrap();
+    let registered = tidebreak_core::db::code::get_repo(&runtime.db, &owner, registered_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(registered.origin_host.as_deref(), Some("github.com"));
+    assert_eq!(registered.origin_owner.as_deref(), Some("acme"));
+    assert_eq!(registered.origin_name.as_deref(), Some("registered"));
+    assert_eq!(
+        runtime
+            .repo_by_origin(&owner, "ACME/Registered")
+            .await
+            .unwrap()
+            .id,
+        registered_id
+    );
+
+    let root = super::code::init_git_repo_named(dir.path(), "legacy");
+    super::code::add_github_remote(&root, "legacy");
+    let mut legacy = runtime.get_repo(&owner, template_id).await.unwrap();
+    legacy.id = RepoId::new();
+    legacy.root_path = root.display().to_string();
+    legacy.display_name = "Keep this name".into();
+    legacy.branch_prefix = "keep/".into();
+    legacy.origin_host = None;
+    legacy.origin_owner = None;
+    legacy.origin_name = None;
+    insert_repo(&runtime.db, &legacy).await.unwrap();
+    let resolved = runtime.repo_by_origin(&owner, "acme/legacy").await.unwrap();
+    assert_eq!(resolved.id, legacy.id);
+    let stored = tidebreak_core::db::code::get_repo(&runtime.db, &owner, legacy.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.origin_name.as_deref(), Some("legacy"));
+    assert_eq!(stored.display_name, "Keep this name");
+    assert_eq!(stored.branch_prefix, "keep/");
+
+    let other = OwnerId::new("other").unwrap();
+    assert!(runtime.repo_by_origin(&other, "acme/legacy").await.is_err());
+    assert!(tidebreak_core::db::code::mark_repo_removed(
+        &runtime.db,
+        &owner,
+        legacy.id,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap());
+    assert!(runtime.repo_by_origin(&owner, "acme/legacy").await.is_err());
+}
+
+/// An unqualified GitHub name cannot choose an enterprise host or an
+/// arbitrary checkout when several registrations name the same origin.
+#[tokio::test]
+async fn external_repository_lookup_refuses_host_collisions_and_duplicate_checkouts() {
+    let (_router, _fake, runtime, repo_id, dir) = external_app().await;
+    let owner = OwnerId::local();
+    let mut other = runtime.get_repo(&owner, repo_id).await.unwrap();
+    other.id = RepoId::new();
+    other.root_path = dir.path().join("enterprise").display().to_string();
+    other.origin_host = Some("github.example.com".into());
+    insert_repo(&runtime.db, &other).await.unwrap();
+    assert_eq!(
+        runtime
+            .repo_by_origin(&owner, "acme/tools")
+            .await
+            .unwrap()
+            .id,
+        repo_id
+    );
+    assert!(tidebreak_core::db::code::mark_repo_removed(
+        &runtime.db,
+        &owner,
+        repo_id,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap());
+    let error = runtime
+        .repo_by_origin(&owner, "acme/tools")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "repo_unknown");
+
+    other.id = RepoId::new();
+    other.root_path = dir.path().join("first").display().to_string();
+    other.origin_host = Some("github.com".into());
+    insert_repo(&runtime.db, &other).await.unwrap();
+    other.id = RepoId::new();
+    other.root_path = dir.path().join("second").display().to_string();
+    insert_repo(&runtime.db, &other).await.unwrap();
+    let error = runtime
+        .repo_by_origin(&owner, "acme/tools")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "repo_ambiguous");
+}
+
 /// A fake forge that lends one fixed credential for whichever repository is
 /// asked, recording the ask.
 struct LendingFake {

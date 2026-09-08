@@ -68,6 +68,9 @@ impl CodeRuntime {
             }
             Err(other) => return Err(map_worktree(other)),
         };
+        let origin = super::super::delivery::repository_target_from_path(&validated.toplevel)
+            .await
+            .ok();
         let repo = CodeRepo {
             id: RepoId::new(),
             owner: owner.clone(),
@@ -83,9 +86,9 @@ impl CodeRuntime {
             created_at: Utc::now(),
             removed_at: None,
             cloned_from,
-            origin_host: None,
-            origin_owner: None,
-            origin_name: None,
+            origin_host: origin.as_ref().map(|target| target.host.clone()),
+            origin_owner: origin.as_ref().map(|target| target.owner.clone()),
+            origin_name: origin.map(|target| target.name),
         };
         insert_repo(&self.db, &repo).await?;
         self.delivery_cache.invalidate_owner(owner);
@@ -113,34 +116,84 @@ impl CodeRuntime {
                 format!("{origin:?} is not a repository as owner/name"),
             ));
         };
-        self.list_repos(owner)
-            .await?
-            .into_iter()
-            .filter(|repo| repo.removed_at.is_none())
-            .find(|repo| {
-                repo.origin_owner
+        let mut matched = None;
+        for repo in self.list_repos(owner).await? {
+            let repo = self.refresh_missing_repo_origin(repo).await?;
+            if repo.removed_at.is_some()
+                || !repo
+                    .origin_host
+                    .as_deref()
+                    .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+                || !repo
+                    .origin_owner
                     .as_deref()
                     .is_some_and(|value| value.eq_ignore_ascii_case(origin_owner))
-                    && repo
-                        .origin_name
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(origin_name))
-            })
-            .ok_or_else(|| {
-                ServerError::conflict_kind(
-                    "repo_unknown",
+                || !repo
+                    .origin_name
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(origin_name))
+            {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(ServerError::conflict_kind(
+                    "repo_ambiguous",
                     format!(
-                        "{origin_owner}/{origin_name} is not registered on this machine; \
-                         clone it in Tidebreak first"
+                        "{origin_owner}/{origin_name} has multiple registered checkouts; \
+                         select one by repo_id"
                     ),
-                )
-            })
+                ));
+            }
+            matched = Some(repo);
+        }
+        matched.ok_or_else(|| {
+            ServerError::conflict_kind(
+                "repo_unknown",
+                format!(
+                    "{origin_owner}/{origin_name} is not registered on this machine; \
+                     clone it in Tidebreak first"
+                ),
+            )
+        })
     }
 
     pub async fn get_repo(&self, owner: &OwnerId, id: RepoId) -> Result<CodeRepo, ServerError> {
-        get_repo(&self.db, owner, id)
+        let repo = get_repo(&self.db, owner, id)
             .await?
-            .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))
+            .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))?;
+        self.refresh_missing_repo_origin(repo).await
+    }
+
+    /// Backfill older registrations before callers need their origin. Only the
+    /// origin columns change, so a concurrent settings edit stays intact.
+    async fn refresh_missing_repo_origin(&self, repo: CodeRepo) -> Result<CodeRepo, ServerError> {
+        if repo.removed_at.is_some()
+            || (repo.origin_host.is_some()
+                && repo.origin_owner.is_some()
+                && repo.origin_name.is_some())
+        {
+            return Ok(repo);
+        }
+        let Ok(target) =
+            super::super::delivery::repository_target_from_path(Path::new(&repo.root_path)).await
+        else {
+            // Local repositories without a forge remote remain usable by id.
+            return Ok(repo);
+        };
+        tidebreak_core::db::code::set_repo_origin(
+            &self.db,
+            &repo.owner,
+            repo.id,
+            &target.host,
+            &target.owner,
+            &target.name,
+        )
+        .await?;
+        // Re-read after git and the write: removal or a settings edit may have
+        // completed while the remote was being resolved.
+        get_repo(&self.db, &repo.owner, repo.id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("repo {} not found", repo.id)))
     }
 
     pub(crate) async fn save_repo(&self, repo: &CodeRepo) -> Result<(), ServerError> {
