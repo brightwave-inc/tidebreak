@@ -119,7 +119,10 @@ fn control_tools_are_sensitive_and_observation_tools_read_only() {
             spec,
             client: client.clone(),
         };
-        let expected = if is_computer_use_control_tool(&name) {
+        let expected = if is_computer_use_control_tool(&name)
+            || name == "computer_return_to_tidebreak"
+            || name.starts_with("chrome_")
+        {
             ApprovalClass::Sensitive
         } else {
             ApprovalClass::ReadOnly

@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_present_appends_exactly_five_allowed_verbs() {
+    fn browser_present_describes_observation_and_image_delivery() {
         let browser = spec("/usr/local/bin/tidebreak");
         let instructions = browser_instructions(&browser).unwrap();
         assert!(instructions.contains("browser list --json"));
@@ -1083,20 +1083,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_present_does_not_advertise_semantic_action_verbs() {
+    fn browser_without_semantic_actions_does_not_advertise_act() {
         let browser = spec("/usr/local/bin/tidebreak");
         let instructions = browser_instructions(&browser).unwrap();
-        // Only `act` and any semantic-action verbs must remain absent.
-        // Wait and screenshot are now advertised.
-        assert!(
-            !instructions.contains("browser act"),
-            "act must not be advertised"
-        );
-        assert!(
-            !instructions.contains("browser_act"),
-            "browser_act must not be advertised"
-        );
-        // The five allowed verbs must appear.
+        assert!(!instructions.contains("browser act --"));
+        assert!(!instructions.contains("browser_act"));
+        // Observation remains available alongside the action surface.
         assert!(
             instructions.contains("browser list"),
             "list must be advertised"

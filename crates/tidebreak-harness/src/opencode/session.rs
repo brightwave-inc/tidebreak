@@ -283,6 +283,7 @@ fn effective_existing_config_str<'a>(
 }
 
 /// Argv for the long-lived serve child. Prompt never appears here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compose_serve_plan(
     binary: &std::path::Path,
     extra_argv: &[String],

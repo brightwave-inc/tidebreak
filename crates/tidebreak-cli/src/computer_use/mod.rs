@@ -721,7 +721,9 @@ impl Tool for NativeTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        if is_computer_use_control_tool(&self.spec.name) || is_chrome_session_tool(&self.spec.name)
+        if is_computer_use_control_tool(&self.spec.name)
+            || self.spec.name == "computer_return_to_tidebreak"
+            || is_chrome_session_tool(&self.spec.name)
         {
             ApprovalClass::Sensitive
         } else {

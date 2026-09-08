@@ -1717,7 +1717,9 @@ async fn browser_mcp_text_can_drive_a_snapshot_action_sequence() {
     let action = json!({
         "browserId": "browser-1", "snapshotId": "snap-1", "documentEpoch": 3,
         "ref": "element-1", "action": "click", "status": "ok",
-        "message": "Action completed", "requiresResnapshot": true
+        "message": "Action completed", "requiresResnapshot": true,
+        "executionMode": "background",
+        "inputMethod": "dom"
     });
     let responses = [snapshot.clone(), action.clone()];
     let handle = tokio::spawn(async move {
