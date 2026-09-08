@@ -206,6 +206,7 @@ impl ServerError {
                 kind: kind.to_owned(),
                 message: message.into(),
             },
+            extra: None,
         }
     }
 
