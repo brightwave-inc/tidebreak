@@ -35,8 +35,9 @@ pub use core::{
     rest_executor, sandbox_container_run, sandbox_docker, secret_rehome, voice_transcription,
     web_search, AppState, BrowserChannelBinding, BrowserRuntime, BrowserRuntimeError,
     BrowserRuntimeScope, DeprovisionTarget, DurableOperationStore, LocalVoiceError,
-    LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, PairingError, PairingHandle,
-    PendingRegistration, Server, ServerError, UpdateQuiesce,
+    LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, NativeChannelBinding,
+    NativeOperationHandle, NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError,
+    PairingHandle, PendingRegistration, Server, ServerError, UpdateQuiesce,
 };
 
 pub mod routes;
@@ -431,6 +432,16 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::browser_screenshot),
         )
         .route("/code/browser/act", post(routes::code::browser_act))
+        .with_state(state.clone());
+
+    // The engine-facing native computer-use channel. Authenticated per
+    // request by the session-scoped capability bearer (see
+    // `routes::code::native`), so this router is also kept out of
+    // `require_token`; both routes are POST so the token and the request
+    // body never touch a path or query.
+    let native_api = Router::new()
+        .route("/code/native/execute", post(routes::code::native_execute))
+        .route("/code/native/result", post(routes::code::native_result))
         .with_state(state.clone());
 
     // The engine-facing inference relay (decision 71). Authenticated per
@@ -1199,6 +1210,7 @@ pub fn app(state: AppState) -> Router {
         // The inference relay authenticates the same way with its own
         // per-session key.
         .merge(browser_api)
+        .merge(native_api)
         .merge(harness_llm_api)
         .merge(external_adapter_api);
     let frame_state = state.clone();
@@ -1388,6 +1400,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
 ) -> Result<Server> {
     core::bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
         config,
@@ -1398,6 +1411,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         local_voice,
         host_folders,
         binding,
+        native_binding,
         route_runtime(),
     )
     .await
@@ -1413,6 +1427,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
 ) -> Result<Server> {
     core::bind_configured_with_desktop_foreground_browser_executor(
         config,
@@ -1423,6 +1438,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
         local_voice,
         host_folders,
         binding,
+        native_binding,
         route_runtime(),
     )
     .await
