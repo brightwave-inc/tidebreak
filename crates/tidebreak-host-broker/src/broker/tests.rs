@@ -4444,8 +4444,10 @@ fn completed_receipts_are_bounded_without_breaking_retry_or_receipt_lookup() {
 // ---------------------------------------------------------------------------
 
 use crate::computer_use::{
-    AxTree, CaptureMeta, ElementDescription, PermissionStatus, WindowFrame, WindowInfo,
+    AxTree, CaptureMeta, ElementDescription, PermissionStatus, WaitCondition, WaitObservation,
+    WindowFrame, WindowInfo,
 };
+use crate::{ConditionWire, CuGrantAppResult};
 use crate::{CuConfirmControlActionRequest, CuListAppGrantsRequest, CuResolveHandoffRequest};
 
 /// A scripted backend: the broker's policy is what is under test, so the
@@ -4460,6 +4462,11 @@ struct StubCuBackend {
     keys: Mutex<Vec<String>>,
     scrolled: Mutex<Vec<String>>,
     focused: Mutex<Vec<String>>,
+    launched: Mutex<Vec<String>>,
+    hovered: Mutex<Vec<String>>,
+    dragged: Mutex<Vec<String>>,
+    resized: Mutex<Vec<(String, f64, f64)>>,
+    wait_conditions: Mutex<Vec<(String, WaitCondition)>>,
     capture_png: Vec<u8>,
     fail_click: Mutex<Option<BackendErrorKind>>,
 }
@@ -4502,6 +4509,26 @@ impl StubCuBackend {
 
     fn focuses(&self) -> Vec<String> {
         self.focused.lock().unwrap().clone()
+    }
+
+    fn launched(&self) -> Vec<String> {
+        self.launched.lock().unwrap().clone()
+    }
+
+    fn hovered(&self) -> Vec<String> {
+        self.hovered.lock().unwrap().clone()
+    }
+
+    fn dragged(&self) -> Vec<String> {
+        self.dragged.lock().unwrap().clone()
+    }
+
+    fn resized(&self) -> Vec<(String, f64, f64)> {
+        self.resized.lock().unwrap().clone()
+    }
+
+    fn wait_conditions(&self) -> Vec<(String, WaitCondition)> {
+        self.wait_conditions.lock().unwrap().clone()
     }
 
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
@@ -4550,6 +4577,17 @@ impl ComputerUseBackend for StubCuBackend {
             height: 600,
             media_type: "image/png".to_owned(),
         })
+    }
+
+    fn capture_with_marks(
+        &self,
+        target: &CaptureTarget,
+        out_path: &Path,
+        _marks: &[crate::set_of_marks::Mark],
+        _max_dimension: Option<u32>,
+    ) -> Result<CaptureMeta, BackendError> {
+        let _ = target;
+        self.capture(target, out_path)
     }
 
     fn read_ax_tree(
@@ -4654,6 +4692,73 @@ impl ComputerUseBackend for StubCuBackend {
             success: true,
             used_fallback: false,
             detail: None,
+        })
+    }
+
+    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError> {
+        self.launched.lock().unwrap().push(bundle_id.to_owned());
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn hover(&self, bundle_id: &str, _target: &ElementTarget) -> Result<ControlMeta, BackendError> {
+        self.hovered.lock().unwrap().push(bundle_id.to_owned());
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn drag(
+        &self,
+        bundle_id: &str,
+        _from: &ElementTarget,
+        _to: &ElementTarget,
+        _duration_ms: Option<u64>,
+    ) -> Result<ControlMeta, BackendError> {
+        self.dragged.lock().unwrap().push(bundle_id.to_owned());
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: true,
+            detail: None,
+        })
+    }
+
+    fn resize_window(
+        &self,
+        bundle_id: &str,
+        _window_id: Option<u32>,
+        width: f64,
+        height: f64,
+    ) -> Result<ControlMeta, BackendError> {
+        self.resized
+            .lock()
+            .unwrap()
+            .push((bundle_id.to_owned(), width, height));
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn wait_condition(
+        &self,
+        bundle_id: &str,
+        condition: &WaitCondition,
+        _timeout_seconds: f64,
+    ) -> Result<WaitObservation, BackendError> {
+        self.wait_conditions
+            .lock()
+            .unwrap()
+            .push((bundle_id.to_owned(), condition.clone()));
+        Ok(WaitObservation {
+            met: true,
+            timed_out: false,
         })
     }
 
@@ -4768,6 +4873,238 @@ fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
     assert_eq!(response.code, ErrorCode::Yielded);
     assert_ne!(response.code, ErrorCode::Denied);
     assert!(!response.retryable);
+}
+
+#[test]
+fn native_primitives_authorize_as_control_and_reach_the_backend() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    fixture
+        .operate(OperationRequest::CuLaunchApp {
+            bundle_id: "com.example.app".to_owned(),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuHover {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire {
+                x: Some(10.0),
+                y: Some(20.0),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                element_fingerprint: Some("fp1".to_owned()),
+                ..Default::default()
+            },
+            to: ElementTargetWire {
+                x: Some(30.0),
+                y: Some(40.0),
+                ..Default::default()
+            },
+            duration_ms: Some(250),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: Some(7),
+            width: 900.0,
+            height: 700.0,
+        })
+        .unwrap();
+
+    assert_eq!(fixture.backend.launched(), ["com.example.app"]);
+    assert_eq!(fixture.backend.hovered(), ["com.example.app"]);
+    assert_eq!(fixture.backend.dragged(), ["com.example.app"]);
+    assert_eq!(
+        fixture.backend.resized(),
+        [("com.example.app".to_owned(), 900.0, 700.0)]
+    );
+
+    let events = fixture.audit.events.lock().unwrap();
+    for operation in [
+        AuditOperation::CuLaunchApp,
+        AuditOperation::CuHover,
+        AuditOperation::CuDrag,
+        AuditOperation::CuResizeWindow,
+    ] {
+        let intents = events
+            .iter()
+            .filter(|event| {
+                event.operation == operation && event.outcome == AuditOutcome::Attempted
+            })
+            .count();
+        let allowed = events
+            .iter()
+            .filter(|event| event.operation == operation && event.outcome == AuditOutcome::Allowed)
+            .count();
+        assert_eq!((intents, allowed), (1, 1), "{operation:?}");
+    }
+}
+
+#[test]
+fn read_grants_never_cover_launch_hover_drag_or_resize() {
+    let fixture = cu_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject,
+            capability: Capability::ReadAppContent,
+            bundle_id: Some("com.example.app".to_owned()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+        }))
+        .unwrap();
+    for request in [
+        OperationRequest::CuLaunchApp {
+            bundle_id: "com.example.app".to_owned(),
+        },
+        OperationRequest::CuHover {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire::default(),
+        },
+        OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire::default(),
+            to: ElementTargetWire::default(),
+            duration_ms: None,
+        },
+        OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 100.0,
+            height: 100.0,
+        },
+    ] {
+        let error = operate(&fixture.broker.operator(), context, request).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied);
+    }
+    assert!(fixture.backend.launched().is_empty());
+    assert!(fixture.backend.hovered().is_empty());
+    assert!(fixture.backend.dragged().is_empty());
+    assert!(fixture.backend.resized().is_empty());
+}
+
+#[test]
+fn new_control_ops_are_blocklist_gated_and_bounded() {
+    let fixture = cu_setup();
+    fixture.broker.shared.state.lock().unwrap().grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            fixture.subject,
+            Capability::ControlApp,
+            Scope::App {
+                bundle_id: "com.apple.Terminal".to_owned(),
+            },
+            ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+        )
+        .unwrap(),
+    );
+    let error = fixture
+        .operate(OperationRequest::CuLaunchApp {
+            bundle_id: "com.apple.Terminal".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.launched().is_empty());
+
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    let error = fixture
+        .operate(OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire::default(),
+            to: ElementTargetWire::default(),
+            duration_ms: Some(10_001),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    let error = fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 10_001.0,
+            height: 1.0,
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(fixture.backend.dragged().is_empty());
+    assert!(fixture.backend.resized().is_empty());
+}
+
+#[test]
+fn condition_wait_uses_read_authority_and_never_types() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ReadAppContent, Some("com.example.app"));
+    fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.example.app".to_owned(),
+            condition: ConditionWire::TextPresent {
+                text: "Ready".to_owned(),
+            },
+            timeout_seconds: None,
+        })
+        .unwrap();
+    let OperationResult::CuWaitCondition(observation) = fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.example.app".to_owned(),
+            condition: ConditionWire::WindowVisible,
+            timeout_seconds: Some(20.0),
+        })
+        .unwrap()
+    else {
+        panic!("expected condition result")
+    };
+    assert!(observation.met);
+    assert!(!observation.timed_out);
+
+    // Read authority suffices for waits (pure observation) and no input
+    // synthesis ever happened.
+    assert_eq!(
+        fixture.backend.wait_conditions(),
+        [
+            (
+                "com.example.app".to_owned(),
+                WaitCondition::TextPresent {
+                    text: "Ready".to_owned()
+                }
+            ),
+            ("com.example.app".to_owned(), WaitCondition::WindowVisible),
+        ]
+    );
+    assert!(fixture.backend.clicks().is_empty());
+    assert!(fixture.backend.keys().is_empty());
+    assert!(fixture.backend.typed.lock().unwrap().is_empty());
+
+    // A wait for a blocked app is refused even with a grant.
+    fixture.broker.shared.state.lock().unwrap().grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            fixture.subject,
+            Capability::ReadAppContent,
+            Scope::App {
+                bundle_id: "com.apple.Terminal".to_owned(),
+            },
+            ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+        )
+        .unwrap(),
+    );
+    let error = fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.apple.Terminal".to_owned(),
+            condition: ConditionWire::AppRunning,
+            timeout_seconds: None,
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
 }
 
 #[test]
@@ -5304,6 +5641,12 @@ fn hello_advertises_computer_use_only_when_a_backend_is_available() {
         "cu_scroll",
         "cu_focus_window",
         "cu_wait",
+        "cu_capture_screen_detailed",
+        "cu_launch_app",
+        "cu_hover",
+        "cu_drag",
+        "cu_resize_window",
+        "cu_wait_condition",
     ] {
         assert!(
             hello.operations.iter().any(|advertised| advertised == op),
