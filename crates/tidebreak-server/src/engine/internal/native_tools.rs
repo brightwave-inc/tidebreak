@@ -8,7 +8,7 @@
 //! workspace, and session scope is derived by the server from the token —
 //! never asserted by the engine.
 //!
-//! The tool set is built dynamically from `computer_use_tool_specs()`: a
+//! The tool set is built dynamically from `computer_session_tool_specs()`: a
 //! primitive registered in `tidebreak_core::computer_use` is advertised here
 //! without an engine change. Capture pixels return as real [`ToolOutput`]
 //! image blocks with the same budgets the MCP bridge enforces — decoded
@@ -21,7 +21,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
-use tidebreak_core::computer_use::{computer_use_tool_specs, validate_computer_use_arguments};
+use tidebreak_core::computer_session::{computer_session_tool_specs, validate_computer_session_arguments};
 use tidebreak_core::{
     ApprovalClass, DocumentBlob, ImageData, ImageMediaType, ImageRef, Result as CoreResult, Tool,
     ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec, MAX_IMAGE_DIMENSION,
@@ -45,7 +45,7 @@ pub(super) fn native_session_tools(
     native: &NativeChannelSpec,
 ) -> Result<Vec<Arc<dyn Tool>>, String> {
     let client = Arc::new(NativeSessionClient::from_capfile(&native.capability_file)?);
-    Ok(computer_use_tool_specs()
+    Ok(computer_session_tool_specs()
         .into_iter()
         .map(|spec| {
             Arc::new(InternalNativeTool {
@@ -277,7 +277,7 @@ impl Tool for InternalNativeTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> CoreResult<ToolOutput> {
-        if !validate_computer_use_arguments(&self.spec.name, &args) {
+        if !validate_computer_session_arguments(&self.spec.name, &args) {
             return Ok(ToolOutput::failed(
                 ToolErrorCategory::InvalidArguments,
                 format!("invalid {} arguments", self.spec.name),
@@ -403,7 +403,7 @@ mod tests {
         .unwrap();
         let native = NativeChannelSpec::new(capfile, "/usr/local/bin/tidebreak".into());
         let tools = native_session_tools(&native).unwrap();
-        let canonical = computer_use_tool_specs();
+        let canonical = computer_session_tool_specs();
         assert_eq!(tools.len(), canonical.len());
         for (tool, spec) in tools.iter().zip(canonical) {
             assert_eq!(tool.spec().name, spec.name);
