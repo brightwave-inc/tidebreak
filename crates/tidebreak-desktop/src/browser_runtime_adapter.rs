@@ -12,9 +12,11 @@ use std::sync::{Mutex, MutexGuard};
 use async_trait::async_trait;
 use tauri::AppHandle;
 use tidebreak_core::{
-    BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
-    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
+    BrowserActArgs, BrowserActResult, BrowserActivateArgs, BrowserCloseArgs,
+    BrowserDiagnosticsArgs, BrowserDiagnosticsResult, BrowserLifecycleResult, BrowserListResult,
+    BrowserNavigateArgs, BrowserNavigateResult, BrowserOpenArgs, BrowserOpenResult,
+    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
+    BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
 };
 use tidebreak_server::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use uuid::Uuid;
@@ -41,6 +43,16 @@ impl DesktopBrowserRuntime {
 #[async_trait]
 impl BrowserRuntime for DesktopBrowserRuntime {
     fn supports_semantic_actions(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    fn supports_lifecycle(&self) -> bool {
+        // Tab creation, close, and activation ride the platform-neutral
+        // renderer adoption flow, not the macOS-only semantic scripts.
+        true
+    }
+
+    fn supports_developer_diagnostics(&self) -> bool {
         cfg!(target_os = "macos")
     }
 
@@ -126,6 +138,60 @@ impl BrowserRuntime for DesktopBrowserRuntime {
     ) -> Result<BrowserActResult, BrowserRuntimeError> {
         let capability_id = self.sessions.capability_for(&self.registry, scope)?;
         crate::browser_semantics::browser_native_act(
+            &self.app,
+            &self.registry,
+            capability_id,
+            args.clone(),
+        )
+        .await
+        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn open(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserOpenArgs,
+    ) -> Result<BrowserOpenResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::code_browser::open_browser_for_agent(&self.app, &self.registry, capability_id, args)
+            .await
+            .map_err(|error| map_native_error(None, error))
+    }
+
+    async fn close(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserCloseArgs,
+    ) -> Result<BrowserLifecycleResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::code_browser::close_browser_for_agent(&self.app, &self.registry, capability_id, args)
+            .await
+            .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn activate(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserActivateArgs,
+    ) -> Result<BrowserLifecycleResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::code_browser::activate_browser_for_agent(
+            &self.app,
+            &self.registry,
+            capability_id,
+            args,
+        )
+        .await
+        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn diagnostics(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserDiagnosticsArgs,
+    ) -> Result<BrowserDiagnosticsResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::browser_semantics::browser_diagnostics(
             &self.app,
             &self.registry,
             capability_id,
@@ -284,6 +350,7 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
         "browser origin is not shared with this agent"
         | "browser origin is not shared for this operation"
         | "browser origin is not shared for control"
+        | "browser origin is not shared for screenshots"
         | "browser control was stopped by the user"
         | "browser has no authorized HTTP origin" => {
             return BrowserRuntimeError::NotAuthorized(error);
@@ -300,6 +367,15 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
         }
         "semantic browser control is not available on this platform yet" => {
             return BrowserRuntimeError::Unsupported("semantic snapshots".to_owned());
+        }
+        "browser screenshots are not available on this platform yet" => {
+            return BrowserRuntimeError::Unsupported("screenshots".to_owned());
+        }
+        "browser diagnostics are not available on this platform yet" => {
+            return BrowserRuntimeError::Unsupported("page diagnostics".to_owned());
+        }
+        "browser lifecycle control is not available on this platform yet" => {
+            return BrowserRuntimeError::Unsupported("agent browser lifecycle".to_owned());
         }
         _ => {}
     }

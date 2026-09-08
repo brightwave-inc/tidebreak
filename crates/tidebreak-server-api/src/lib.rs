@@ -433,6 +433,16 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::browser_screenshot),
         )
         .route("/code/browser/act", post(routes::code::browser_act))
+        .route("/code/browser/open", post(routes::code::browser_open))
+        .route("/code/browser/close", post(routes::code::browser_close))
+        .route(
+            "/code/browser/activate",
+            post(routes::code::browser_activate),
+        )
+        .route(
+            "/code/browser/diagnostics",
+            post(routes::code::browser_diagnostics),
+        )
         .with_state(state.clone());
 
     // The engine-facing native computer-use channel. Authenticated per

@@ -5490,6 +5490,370 @@ pub(crate) async fn browser_remove_inspect_overlay(
     Ok(())
 }
 
+// ── Page diagnostics ──────────────────────────────────────────────
+
+/// Page-world hook installed at document start in every managed browser
+/// webview. It records console calls, uncaught errors, unhandled rejections,
+/// and instrumented fetch/XHR activity in a bounded ring buffer that
+/// `browser_diagnostics` drains. It runs in the page's own JavaScript world
+/// on purpose: everything it stores is untrusted page data by contract, and
+/// the page could always tamper with its own console anyway.
+pub(crate) const BROWSER_DIAGNOSTICS_INIT_SCRIPT: &str = r#"
+(() => {
+  if (window.__tidebreakDiagnostics) return;
+  const store = { entries: [], next: 1, dropped: 0, networkCaptured: false };
+  try {
+    Object.defineProperty(window, "__tidebreakDiagnostics", {
+      value: store,
+      writable: false,
+      configurable: false,
+    });
+  } catch (_) {
+    return;
+  }
+  const MAX_ENTRIES = 500;
+  const MAX_TEXT = 1024;
+  const MAX_URL = 2048;
+  const push = (channel, level, text, url, status) => {
+    if (store.entries.length >= MAX_ENTRIES) {
+      store.entries.shift();
+      store.dropped += 1;
+    }
+    store.entries.push({
+      sequence: store.next++,
+      channel,
+      level,
+      text: String(text || "").slice(0, MAX_TEXT),
+      url: url ? String(url).slice(0, MAX_URL) : null,
+      status: typeof status === "number" && status > 0 ? status : null,
+    });
+  };
+  const describe = (parts) => parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      try {
+        return JSON.stringify(part);
+      } catch (_) {
+        return String(part);
+      }
+    })
+    .join(" ");
+  for (const level of ["debug", "log", "info", "warn", "error"]) {
+    const original = console[level];
+    if (typeof original !== "function") continue;
+    console[level] = function (...parts) {
+      try {
+        push("console", level, describe(parts));
+      } catch (_) {}
+      return original.apply(this, parts);
+    };
+  }
+  window.addEventListener("error", (event) => {
+    push("page_error", "error", event.message || "uncaught error", event.filename || null);
+  }, true);
+  window.addEventListener("unhandledrejection", (event) => {
+    let reason = "";
+    try {
+      reason = String(event.reason);
+    } catch (_) {}
+    push("page_error", "error", "unhandled promise rejection: " + reason);
+  });
+  try {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const method = String((init && init.method) || (input && input.method) || "GET");
+      const promise = originalFetch(input, init);
+      promise.then(
+        (response) => {
+          push("network", response.ok ? "info" : "warn", method + " " + url, url, response.status);
+        },
+        (error) => {
+          push("network", "error", method + " " + url + " failed: " + String(error), url);
+        },
+      );
+      return promise;
+    };
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__tidebreakRequest = { method: String(method), url: String(url) };
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function (...parts) {
+      const request = this.__tidebreakRequest;
+      if (request) {
+        this.addEventListener("loadend", () => {
+          push(
+            "network",
+            this.status === 0 || this.status >= 400 ? "warn" : "info",
+            request.method + " " + request.url,
+            request.url,
+            this.status || null,
+          );
+        });
+      }
+      return originalSend.apply(this, parts);
+    };
+    store.networkCaptured = true;
+  } catch (_) {
+    store.networkCaptured = false;
+  }
+})();
+"#;
+
+const DIAGNOSTICS_DRAIN_SCRIPT: &str = r#"
+(() => {
+  const AFTER = __AFTER_SEQUENCE__;
+  const MAX = __MAX_ENTRIES__;
+  const store = window.__tidebreakDiagnostics;
+  if (!store || !Array.isArray(store.entries)) {
+    return JSON.stringify({
+      installed: false,
+      networkCaptured: false,
+      truncated: false,
+      entries: [],
+    });
+  }
+  const matching = store.entries.filter((entry) => Number(entry.sequence) > AFTER);
+  const entries = matching.slice(0, MAX);
+  return JSON.stringify({
+    installed: true,
+    networkCaptured: Boolean(store.networkCaptured),
+    truncated: Number(store.dropped) > 0 || matching.length > entries.length,
+    entries,
+  });
+})()
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDiagnosticsDrain {
+    installed: bool,
+    #[serde(default)]
+    network_captured: bool,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    entries: Vec<RawDiagnosticsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDiagnosticsEntry {
+    sequence: u64,
+    channel: String,
+    level: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    status: Option<u16>,
+}
+
+fn diagnostics_drain_script(arguments: &tidebreak_core::BrowserDiagnosticsArgs) -> String {
+    DIAGNOSTICS_DRAIN_SCRIPT
+        .replace(
+            "__AFTER_SEQUENCE__",
+            &arguments.after_sequence.unwrap_or(0).to_string(),
+        )
+        .replace(
+            "__MAX_ENTRIES__",
+            &arguments.bounded_max_entries().to_string(),
+        )
+}
+
+/// Re-validate every raw page-supplied field against the bounded contract.
+/// Entries with unknown channels are dropped rather than guessed.
+fn sanitize_diagnostics_entries(
+    raw: Vec<RawDiagnosticsEntry>,
+) -> Vec<tidebreak_core::BrowserDiagnosticsEntry> {
+    use tidebreak_core::{BrowserDiagnosticsChannel, BrowserLogLevel};
+
+    let clean = |value: String, limit: usize| -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_control() || *character == '\n')
+            .take(limit)
+            .collect()
+    };
+    raw.into_iter()
+        .filter_map(|entry| {
+            let channel = match entry.channel.as_str() {
+                "console" => BrowserDiagnosticsChannel::Console,
+                "page_error" => BrowserDiagnosticsChannel::PageError,
+                "network" => BrowserDiagnosticsChannel::Network,
+                _ => return None,
+            };
+            let level = match entry.level.as_str() {
+                "debug" => BrowserLogLevel::Debug,
+                "info" => BrowserLogLevel::Info,
+                "warn" => BrowserLogLevel::Warn,
+                "error" => BrowserLogLevel::Error,
+                _ => BrowserLogLevel::Log,
+            };
+            Some(tidebreak_core::BrowserDiagnosticsEntry {
+                sequence: entry.sequence,
+                channel,
+                level,
+                text: clean(
+                    entry.text,
+                    tidebreak_core::MAX_BROWSER_DIAGNOSTICS_TEXT_CHARS,
+                ),
+                url: entry.url.map(|url| clean(url, 2_048)),
+                status: entry.status,
+            })
+        })
+        .collect()
+}
+
+/// Read bounded page diagnostics from one authorized, agent-controlled tab.
+pub(crate) async fn browser_diagnostics(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserDiagnosticsArgs,
+) -> Result<tidebreak_core::BrowserDiagnosticsResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser diagnostics request is not valid".to_owned());
+    }
+    let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    if !host_snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.developer_diagnostics)
+    {
+        return Err("browser diagnostics are not available on this platform yet".to_owned());
+    }
+    let origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let browser_id = arguments.browser_id.clone();
+    let app = app.clone();
+    let dispatch_registry = registry.clone();
+    registry
+        .dispatch_agent(
+            capability_id,
+            &browser_id,
+            &origin,
+            BrowserGrantCapability::BrowserDiagnoseOrigin,
+            "diagnostics",
+            None,
+            BrowserDispatchEffect::Observe,
+            None,
+            move || async move {
+                read_page_diagnostics(app, dispatch_registry, capability_id, arguments).await
+            },
+        )
+        .await
+}
+
+async fn read_page_diagnostics(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserDiagnosticsArgs,
+) -> Result<tidebreak_core::BrowserDiagnosticsResult, String> {
+    let label = browser_label(&arguments.browser_id)?;
+    let start_fence = registry
+        .observation_fence(capability_id, &arguments.browser_id)
+        .map_err(|error| format!("diagnostics authorization lapsed: {error}"))?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    let raw: RawDiagnosticsDrain =
+        evaluate_json_page_world(&webview, &diagnostics_drain_script(&arguments)).await?;
+    let end_fence = registry
+        .observation_fence(capability_id, &arguments.browser_id)
+        .map_err(|error| format!("diagnostics authorization lapsed: {error}"))?;
+    if end_fence != start_fence {
+        return Err("browser document changed while diagnostics were being read".to_owned());
+    }
+    Ok(tidebreak_core::BrowserDiagnosticsResult {
+        browser_id: arguments.browser_id,
+        document_epoch: end_fence.document_epoch,
+        content_trust: tidebreak_core::BrowserContentTrust::UntrustedPage,
+        entries: sanitize_diagnostics_entries(raw.entries),
+        truncated: raw.truncated,
+        // `installed == false` means the hook never ran in this document, so
+        // no network activity could have been observed either.
+        network_captured: raw.installed && raw.network_captured,
+    })
+}
+
+/// Evaluate in WebKit's page world, where the diagnostics ring buffer lives.
+/// Only the diagnostics reader may use this: every other semantic script
+/// stays isolated in the Tidebreak content world.
+#[cfg(target_os = "macos")]
+async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
+    webview: &Webview,
+    script: &str,
+) -> Result<T, String> {
+    use std::sync::Mutex;
+
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use tokio::{sync::oneshot, time::timeout};
+
+    let (sender, receiver) = oneshot::channel();
+    let sender = Mutex::new(Some(sender));
+    let script = script.to_owned();
+    with_browser_webview(webview, move |view| unsafe {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                let _ = sender
+                    .send(Err("browser JavaScript requires the main thread".to_owned()));
+            }
+            return;
+        };
+        let content_world = objc2_web_kit::WKContentWorld::pageWorld(mtm);
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) else {
+                return;
+            };
+            if !error.is_null() {
+                let message = (&*error).localizedDescription().to_string();
+                let _ = sender.send(Err(format!("browser JavaScript failed: {message}")));
+                return;
+            }
+            if value.is_null() {
+                let _ = sender.send(Err("browser JavaScript returned no value".to_owned()));
+                return;
+            }
+            let value: &NSString = &*value.cast();
+            let _ = sender.send(Ok(value.to_string()));
+        });
+        let script = NSString::from_str(&script);
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            Some(&handler),
+        );
+    })?;
+
+    let raw = timeout(
+        std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS),
+        receiver,
+    )
+    .await
+    .map_err(|_| "browser JavaScript timed out".to_owned())?
+    .map_err(|_| "browser JavaScript was interrupted".to_owned())??;
+    serde_json::from_str(&raw).map_err(|error| format!("invalid browser response: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
+    _webview: &Webview,
+    _script: &str,
+) -> Result<T, String> {
+    Err("browser diagnostics are not available on this platform yet".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

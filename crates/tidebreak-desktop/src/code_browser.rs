@@ -13,8 +13,9 @@ use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tidebreak_core::{
-    BrowserGrantCapability, BrowserNavigateArgs, BrowserNavigateResult, BrowserOrigin,
-    BrowserOriginScope, OwnerId,
+    BrowserActivateArgs, BrowserCloseArgs, BrowserGrantCapability, BrowserLifecycleResult,
+    BrowserLifecycleStatus, BrowserNavigateArgs, BrowserNavigateResult, BrowserOpenArgs,
+    BrowserOpenResult, BrowserOrigin, BrowserOriginScope, OwnerId,
 };
 use tokio::sync::oneshot;
 use url::Url;
@@ -47,6 +48,11 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+/// How long an agent-requested open waits for the renderer to stage the tab.
+const AGENT_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long an agent-requested activation waits for the tab to become visible.
+const AGENT_ACTIVATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const AGENT_LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 /// How often the host reads the view's URL while the tab is showing, on the
 /// platforms without a native URL observer. macOS pushes every change through
 /// `browser_url_observer` and never polls.
@@ -568,6 +574,229 @@ pub(crate) async fn navigate_browser_for_agent(
         .await
 }
 
+// ── Agent lifecycle ───────────────────────────────────────────────
+
+/// Open a new shared tab for an agent at an origin the user already granted.
+///
+/// The renderer owns tab layout, so the native side emits an adoption event
+/// and waits for the renderer to create the child webview through the normal
+/// `Create` command. Opening never creates consent: the destination origin
+/// must already be covered by a control grant for this workspace.
+pub(crate) async fn open_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserOpenArgs,
+) -> Result<BrowserOpenResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser open request is not valid".to_owned());
+    }
+    let renderer_url = app.get_webview("main").and_then(|main| main.url().ok());
+    let destination = validated_url(&arguments.url, renderer_url.as_ref())?;
+    let destination_origin = BrowserOrigin::from_url(destination.as_str())
+        .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
+    let workspace_id =
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), &destination_origin)?;
+    let browser_id = format!("agent-{}", Uuid::new_v4().simple());
+    browser_label(&browser_id)?;
+
+    emit_agent_lifecycle_event(
+        app,
+        &workspace_id,
+        &browser_id,
+        "agent_open_requested",
+        Some(destination.to_string()),
+    );
+
+    let deadline = tokio::time::Instant::now() + AGENT_OPEN_TIMEOUT;
+    loop {
+        if let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) {
+            // Background is the default: the renderer may stage the tab
+            // without revealing it, keeping the user's cursor and focus
+            // undisturbed. Controller acquisition needs visibility, so a
+            // hidden tab simply defers it to the first observation; the
+            // result reports the actual mode.
+            if snapshot.exists {
+                registry.mark_agent_opened(capability_id, &browser_id)?;
+                let visible = snapshot.visible.unwrap_or(false);
+                let snapshot = if visible {
+                    begin_agent_browser_control(app, registry, capability_id, &browser_id)
+                        .unwrap_or(snapshot)
+                } else {
+                    snapshot
+                };
+                return Ok(BrowserOpenResult {
+                    browser_id,
+                    url: snapshot.url.unwrap_or_else(|| destination.to_string()),
+                    load_state: snapshot.load_state.unwrap_or(BrowserLoadState::Loading),
+                    document_epoch: snapshot.document_epoch.unwrap_or(0),
+                    visible,
+                });
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("browser tab did not open before the deadline".to_owned());
+        }
+        tokio::time::sleep(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+    }
+}
+
+/// Close one tab the same agent capability opened. Human-owned tabs and tabs
+/// reclaimed by takeover return a typed refusal instead of closing.
+pub(crate) async fn close_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserCloseArgs,
+) -> Result<BrowserLifecycleResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser close request is not valid".to_owned());
+    }
+    let label = browser_label(&arguments.browser_id)?;
+    let workspace_id = match registry.authorize_agent_close(capability_id, &arguments.browser_id) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) if error == "browser session is not registered" => {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::UnknownBrowser,
+                "This browser id names no live tab.",
+            ));
+        }
+        Err(error) if error == "browser tab was not opened by this agent" => {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::Refused,
+                "Only tabs this agent opened can be closed. The user keeps this tab.",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+
+    let downloads = app.state::<BrowserDownloadStore>();
+    downloads.cancel_browser(&arguments.browser_id)?;
+    let owner_id = OwnerId::local();
+    registry.ensure_recovery_binding(&owner_id, &arguments.browser_id, &workspace_id)?;
+    if let Some(webview) = app.get_webview(&label) {
+        close_browser_webview(&webview)?;
+    }
+    registry.remove(&arguments.browser_id, &workspace_id)?;
+    registry.forget_recovery(&owner_id, &arguments.browser_id, &workspace_id)?;
+    emit_agent_lifecycle_event(
+        app,
+        &workspace_id,
+        &arguments.browser_id,
+        "agent_closed_tab",
+        None,
+    );
+    Ok(lifecycle_result(
+        &arguments.browser_id,
+        BrowserLifecycleStatus::Ok,
+        "The tab is closed. Its browser id, snapshots, and refs are no longer valid.",
+    ))
+}
+
+/// Make one shared tab visible by asking the renderer to select it, then
+/// waiting for the native visibility to confirm.
+pub(crate) async fn activate_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserActivateArgs,
+) -> Result<BrowserLifecycleResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser activate request is not valid".to_owned());
+    }
+    browser_label(&arguments.browser_id)?;
+    let (workspace_id, visible) =
+        match registry.authorize_agent_activation(capability_id, &arguments.browser_id) {
+            Ok(authorized) => authorized,
+            Err(error) if error == "browser session is not registered" => {
+                return Ok(lifecycle_result(
+                    &arguments.browser_id,
+                    BrowserLifecycleStatus::UnknownBrowser,
+                    "This browser id names no live tab.",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+    if visible {
+        return Ok(lifecycle_result(
+            &arguments.browser_id,
+            BrowserLifecycleStatus::Ok,
+            "The tab is already visible and focused.",
+        ));
+    }
+
+    emit_agent_lifecycle_event(
+        app,
+        &workspace_id,
+        &arguments.browser_id,
+        "agent_activate_requested",
+        None,
+    );
+    let deadline = tokio::time::Instant::now() + AGENT_ACTIVATE_TIMEOUT;
+    loop {
+        if registry
+            .snapshot(&arguments.browser_id, &workspace_id)
+            .is_ok_and(|snapshot| snapshot.visible.unwrap_or(false))
+        {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::Ok,
+                "The tab is now visible and focused.",
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::EngineFailure,
+                "The tab did not become visible before the deadline.",
+            ));
+        }
+        tokio::time::sleep(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+    }
+}
+
+fn lifecycle_result(
+    browser_id: &str,
+    status: BrowserLifecycleStatus,
+    message: &str,
+) -> BrowserLifecycleResult {
+    BrowserLifecycleResult {
+        browser_id: browser_id.to_owned(),
+        status,
+        message: message.to_owned(),
+    }
+}
+
+fn emit_agent_lifecycle_event(
+    app: &AppHandle,
+    workspace_id: &str,
+    browser_id: &str,
+    kind: &'static str,
+    url: Option<String>,
+) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: workspace_id.to_owned(),
+            browser_id: browser_id.to_owned(),
+            kind,
+            url,
+            title: None,
+            message: None,
+            load_state: None,
+            document_epoch: None,
+            controller: None,
+            agent_access: None,
+            origin: None,
+        },
+    );
+}
+
 fn missing_browser_snapshot(
     browser_id: &str,
     workspace_id: &str,
@@ -654,6 +883,10 @@ fn create_browser(
     let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
     #[cfg(target_os = "macos")]
     let builder = builder.data_store_identifier(profile.data_store_identifier());
+    // Installed at document start in the page world so browser_diagnostics
+    // can drain console, error, and instrumented network activity later.
+    let builder = builder
+        .initialization_script(crate::browser_semantics::BROWSER_DIAGNOSTICS_INIT_SCRIPT);
     let builder = builder
         .on_navigation(move |url| {
             let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {
@@ -1083,8 +1316,33 @@ async fn share_browser_with_agent(
     browser_id: &str,
     workspace_id: &str,
 ) -> Result<(BrowserSnapshot, Option<String>), String> {
-    if let Some(resumed) = registry.resume_shared_browser(browser_id, workspace_id)? {
-        return Ok(resumed);
+    if let Some((snapshot, pending_navigation)) =
+        registry.resume_shared_browser(browser_id, workspace_id)?
+    {
+        // Consent persisted before the screenshot disclosure lacks capture.
+        // Re-sharing is the explicit moment to offer the upgraded disclosure;
+        // declining keeps the original observation/control consent working.
+        let needs_capture_disclosure = snapshot
+            .agent_access
+            .as_ref()
+            .is_some_and(|access| access.shared && !access.can_capture_screens);
+        if !needs_capture_disclosure {
+            return Ok((snapshot, pending_navigation));
+        }
+        let origin = registry.share_target_origin(browser_id, workspace_id)?;
+        if native_capture_disclosure_choice(app, &origin).await? {
+            let snapshot = registry.extend_browser_access(
+                browser_id,
+                workspace_id,
+                &origin,
+                &[
+                    BrowserGrantCapability::BrowserCaptureVisibleTab,
+                    BrowserGrantCapability::BrowserDiagnoseOrigin,
+                ],
+            )?;
+            return Ok((snapshot, pending_navigation));
+        }
+        return Ok((snapshot, pending_navigation));
     }
     let origin = registry.share_target_origin(browser_id, workspace_id)?;
     let scope = if origin.is_loopback() {
@@ -1107,10 +1365,48 @@ async fn share_browser_with_agent(
         &[
             BrowserGrantCapability::BrowserControlOrigin,
             BrowserGrantCapability::BrowserTransferFiles,
+            BrowserGrantCapability::BrowserCaptureVisibleTab,
+            BrowserGrantCapability::BrowserDiagnoseOrigin,
         ],
     )?;
     let pending_navigation = registry.take_pending_navigation(browser_id, workspace_id)?;
     Ok((snapshot, pending_navigation))
+}
+
+/// The shared sentence that discloses exactly where captured pixels and
+/// diagnostics go. Decision 93 requires this disclosure before any grant may
+/// include screenshot access.
+const CAPTURE_DISCLOSURE: &str = "Screenshots show everything visible in the tab and are sent to the agent's selected model and provider; automatic redaction is not guaranteed. Console, page-error, and in-page network diagnostics for this site are shared the same way.";
+
+/// Offer the screenshot/diagnostics disclosure to a workspace whose existing
+/// grant predates it. Approval extends the covering grant; declining changes
+/// nothing.
+async fn native_capture_disclosure_choice(
+    app: &AppHandle,
+    origin: &BrowserOrigin,
+) -> Result<bool, String> {
+    let origin = crate::native_security_label(origin.as_str());
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Agents in this workspace can already inspect and navigate {origin}. Also allow screenshots and page diagnostics?\n\n{CAPTURE_DISCLOSURE}\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing."
+        ))
+        .title("Allow screenshots for agents?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow screenshots".to_owned(),
+            "Keep text-only sharing".to_owned(),
+        ));
+    if let Some(window) = app.get_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native browser permission prompt closed unexpectedly".to_owned())
 }
 
 async fn native_public_share_choice(
@@ -1122,7 +1418,7 @@ async fn native_public_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin}?\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing, including after app restarts. Page content is untrusted. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe."
+            "Allow agents in this workspace to inspect, navigate, and screenshot {origin}?\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing, including after app restarts. Page content is untrusted. {CAPTURE_DISCLOSURE} Password and verification-code fields stay out of text snapshots and still require human takeover for input. Every file upload requires another confirmation."
         ))
         .title("Share this site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -1150,7 +1446,7 @@ async fn native_loopback_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nTidebreak remembers your selected scope for this workspace until you choose Stop sharing, including after app restarts. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
+            "Allow agents in this workspace to inspect, navigate, and screenshot {origin_label}?\n\nTidebreak remembers your selected scope for this workspace until you choose Stop sharing, including after app restarts. {CAPTURE_DISCLOSURE} Password and verification-code fields stay out of text snapshots and still require human takeover for input. Every file upload requires another confirmation. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
         ))
         .title("Share a local site with agents?")
         .kind(MessageDialogKind::Warning)
