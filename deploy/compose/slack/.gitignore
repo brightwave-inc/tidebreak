@@ -1,0 +1,5 @@
+# Operator secrets. `.env` is already ignored at the repository root.
+tokens
+slack.env
+machines.json
+token-sealing.key

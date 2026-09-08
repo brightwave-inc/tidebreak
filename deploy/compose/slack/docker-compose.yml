@@ -1,0 +1,108 @@
+# Tidebreak standalone machine plus the Slack adapter.
+#
+# THIS STACK BINDS TO LOCALHOST BY DESIGN. Published ports are loopback only.
+# Terminate TLS in front of them. There is deliberately no TLS in this file.
+# See docs/self-hosting.md.
+#
+#   docker compose --env-file .env up -d
+#
+# Required before the first `up`:
+#   - a tokens file at ./tokens (admin person plus a `service` line)
+#   - machines.json (see machines.json.example)
+#   - slack.env (Slack bot token and signing secret)
+#   - .env with passwords, blob store, bootstrap bearer, and image tags
+
+name: tidebreak-slack
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tidebreak
+      POSTGRES_DB: tidebreak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - tidebreak-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tidebreak -d tidebreak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    expose:
+      - "5432"
+
+  adapter-postgres:
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slack_adapter
+      POSTGRES_DB: slack_adapter
+      POSTGRES_PASSWORD: ${ADAPTER_POSTGRES_PASSWORD:?set ADAPTER_POSTGRES_PASSWORD in .env}
+    volumes:
+      - adapter-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slack_adapter -d slack_adapter"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    expose:
+      - "5432"
+
+  tidebreak:
+    image: ${TIDEBREAK_SERVER_IMAGE:?set TIDEBREAK_SERVER_IMAGE in .env}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TIDEBREAK_PROFILE: self_host
+      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/tidebreak
+      TIDEBREAK_BLOB_STORE_URL: ${TIDEBREAK_BLOB_STORE_URL:?set TIDEBREAK_BLOB_STORE_URL in .env}
+      TIDEBREAK_AUTH_TOKENS_FILE: /run/tidebreak/tokens
+      TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS: ${TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS:?set TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS in .env}
+      TIDEBREAK_PUBLIC_URL: ${TIDEBREAK_PUBLIC_URL:?set TIDEBREAK_PUBLIC_URL in .env}
+      TIDEBREAK_DATA_DIR: /var/lib/tidebreak
+      TIDEBREAK_LISTEN_ADDR: 0.0.0.0:8080
+      TIDEBREAK_LOG: ${TIDEBREAK_LOG:-info}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ALLOW_HTTP: ${AWS_ALLOW_HTTP:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./tokens:/run/tidebreak/tokens:ro
+      - tidebreak-data:/var/lib/tidebreak
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  slack-adapter:
+    image: ${TIDEBREAK_SLACK_ADAPTER_IMAGE:?set TIDEBREAK_SLACK_ADAPTER_IMAGE in .env}
+    restart: unless-stopped
+    depends_on:
+      adapter-postgres:
+        condition: service_healthy
+      tidebreak:
+        condition: service_started
+    env_file:
+      - slack.env
+    environment:
+      DATABASE_URL: postgres://slack_adapter:${ADAPTER_POSTGRES_PASSWORD:?set ADAPTER_POSTGRES_PASSWORD in .env}@adapter-postgres:5432/slack_adapter
+      # Placeholder: replace TOKEN_SEALING_KEY with the environment name the
+      # adapter image documents for its token-sealing key.
+      TOKEN_SEALING_KEY: ${TOKEN_SEALING_KEY:?set TOKEN_SEALING_KEY in .env}
+      # Directory as a mounted file. To pass the same document as environment
+      # instead, set SLACK_ADAPTER_MACHINES to the JSON and drop this volume.
+      SLACK_ADAPTER_MACHINES_FILE: /run/slack-adapter/machines.json
+    volumes:
+      - ./machines.json:/run/slack-adapter/machines.json:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+
+volumes:
+  tidebreak-postgres:
+  tidebreak-data:
+  adapter-postgres:
