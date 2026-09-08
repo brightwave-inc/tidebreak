@@ -276,9 +276,6 @@ impl NativeRuntime for DesktopComputerRuntime {
             call,
             crate::computer_use_action::ComputerUseActionSource::Chrome,
         );
-        if let Some(activity) = &activity {
-            crate::computer_use_action::emit_computer_use_action(&self.app, activity);
-        }
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => unknown(call, "Chrome was stopped. Inspect the target before issuing a new action."),

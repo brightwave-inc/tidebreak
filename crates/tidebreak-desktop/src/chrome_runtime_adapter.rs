@@ -48,8 +48,8 @@ impl From<&ChromeScope> for ScopeKey {
     fn from(scope: &ChromeScope) -> Self {
         Self {
             owner: scope.owner.clone(),
-            workspace: scope.workspace.clone(),
-            session: scope.session.clone(),
+            workspace: scope.workspace,
+            session: scope.session,
         }
     }
 }
@@ -461,7 +461,7 @@ impl ChromeRuntimeAdapter {
                 ChromeConnectionSpec {
                     connection_id: id.clone(),
                     owner: scope.owner.clone(),
-                    workspace: scope.workspace.clone(),
+                    workspace: scope.workspace,
                     endpoint_label: match mode {
                         ChromeConnectionMode::Managed => "Chrome for this coding session",
                         ChromeConnectionMode::Existing => "Your existing Chrome browser",
@@ -682,7 +682,7 @@ fn installed_chrome(home: &Path) -> Result<PathBuf, String> {
 fn default_profile(home: &Path) -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(home.join("Library/Application Support/Google/Chrome"));
+        Ok(home.join("Library/Application Support/Google/Chrome"))
     }
     #[cfg(not(target_os = "macos"))]
     {

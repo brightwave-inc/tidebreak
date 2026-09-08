@@ -425,7 +425,7 @@ pub(crate) fn compose_for_surface(
                 "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop control or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
             );
             lines.push(
-                "- When work in another app is finished, use `computer_return_to_tidebreak` so the user can see completion and continue the conversation.",
+                "- Work in background mode by default and preserve the user's focus and pointer. An action that returns requires_foreground needs a separate request with execution_mode set to foreground and native approval; never retry that fallback automatically. After background work, report completion without bringing Tidebreak or another app to the front.",
             );
         }
         push_section(&mut prompt, COMPUTER_USE_HEADING, &lines);
@@ -991,6 +991,8 @@ mod tests {
             full.contains("Read before acting"),
             "read-first guidance is required: {full}"
         );
+        assert!(full.contains("Work in background mode by default"));
+        assert!(full.contains("never retry that fallback automatically"));
         assert!(full.contains("do not inspect code through computer-use screenshots"));
         assert!(full.contains("unless the user explicitly asks for on-screen inspection"));
         assert!(full.contains("say that you cannot inspect the source"));
