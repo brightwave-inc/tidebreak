@@ -32,8 +32,8 @@ use crate::{
     },
     blocklist::is_blocked_control_bundle,
     computer_use::{
-        BackendError, BackendErrorKind, ComputerUseBackend, ControlMeta, HelperBackend,
-        UnsupportedBackend,
+        BackendError, BackendErrorKind, ComputerUseBackend, ControlMeta, ExecutionMode,
+        HelperBackend, UnsupportedBackend,
     },
     consequential::{classify, key_press_needs_confirmation, truncate_label},
     path_policy::RootIdentity,
@@ -339,11 +339,13 @@ enum PendingActionKind {
         target: ElementTarget,
         button: Option<String>,
         click_count: Option<u32>,
+        execution_mode: ExecutionMode,
     },
     TypeText {
         bundle_id: String,
         text: String,
         target: ElementTarget,
+        execution_mode: ExecutionMode,
     },
     /// A key press held for confirmation — a chord or a bare Return, the
     /// keyboard paths that commit (send / delete / quit) without any element
@@ -352,6 +354,7 @@ enum PendingActionKind {
         bundle_id: String,
         key: String,
         modifiers: Option<Vec<String>>,
+        execution_mode: ExecutionMode,
     },
 }
 
@@ -855,7 +858,7 @@ impl OperationAudit {
                 Capability::ControlApp,
                 AuditTarget::app(bundle_id),
             ),
-            OperationRequest::CuLaunchApp { bundle_id } => (
+            OperationRequest::CuLaunchApp { bundle_id, .. } => (
                 AuditOperation::CuLaunchApp,
                 Capability::ControlApp,
                 AuditTarget::app(bundle_id),
@@ -2080,29 +2083,43 @@ impl Controller {
                 return Err(BrokerError::StaleTarget);
             }
         }
+        // The confirmed action keeps the execution mode the broker held it
+        // with; a confirmation never escalates a background request into a
+        // foreground takeover.
         match &pending.action {
             PendingActionKind::Click {
                 bundle_id,
                 target,
                 button,
                 click_count,
-            } => self
-                .shared
-                .computer_use
-                .click(bundle_id, target, button.as_deref(), *click_count),
+                execution_mode,
+            } => self.shared.computer_use.click(
+                bundle_id,
+                target,
+                button.as_deref(),
+                *click_count,
+                *execution_mode,
+            ),
             PendingActionKind::TypeText {
                 bundle_id,
                 text,
                 target,
-            } => self.shared.computer_use.type_text(bundle_id, text, target),
+                execution_mode,
+            } => self
+                .shared
+                .computer_use
+                .type_text(bundle_id, text, target, *execution_mode),
             PendingActionKind::KeyPress {
                 bundle_id,
                 key,
                 modifiers,
-            } => self
-                .shared
-                .computer_use
-                .key_press(bundle_id, key, modifiers.as_deref()),
+                execution_mode,
+            } => self.shared.computer_use.key_press(
+                bundle_id,
+                key,
+                modifiers.as_deref(),
+                *execution_mode,
+            ),
         }
         .map_err(BrokerError::ComputerUse)
         .map(|meta| (meta, grant_id))
@@ -2258,8 +2275,16 @@ impl Operator {
                     target,
                     button,
                     click_count,
+                    execution_mode,
                 } => self
-                    .cu_click(envelope.context, bundle_id, target, button, click_count)
+                    .cu_click(
+                        envelope.context,
+                        bundle_id,
+                        target,
+                        button,
+                        click_count,
+                        execution_mode,
+                    )
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2268,8 +2293,9 @@ impl Operator {
                     bundle_id,
                     text,
                     target,
+                    execution_mode,
                 } => self
-                    .cu_type_text(envelope.context, bundle_id, text, target)
+                    .cu_type_text(envelope.context, bundle_id, text, target, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2278,8 +2304,9 @@ impl Operator {
                     bundle_id,
                     key,
                     modifiers,
+                    execution_mode,
                 } => self
-                    .cu_key_press(envelope.context, bundle_id, key, modifiers)
+                    .cu_key_press(envelope.context, bundle_id, key, modifiers, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2289,8 +2316,9 @@ impl Operator {
                     target,
                     dx,
                     dy,
+                    execution_mode,
                 } => self
-                    .cu_scroll(envelope.context, bundle_id, target, dx, dy)
+                    .cu_scroll(envelope.context, bundle_id, target, dx, dy, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2298,20 +2326,28 @@ impl Operator {
                 OperationRequest::CuFocusWindow {
                     bundle_id,
                     window_id,
+                    execution_mode,
                 } => self
-                    .cu_focus_window(envelope.context, bundle_id, window_id)
+                    .cu_focus_window(envelope.context, bundle_id, window_id, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
                     }),
-                OperationRequest::CuLaunchApp { bundle_id } => self
-                    .cu_launch_app(envelope.context, bundle_id)
+                OperationRequest::CuLaunchApp {
+                    bundle_id,
+                    execution_mode,
+                } => self
+                    .cu_launch_app(envelope.context, bundle_id, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
                     }),
-                OperationRequest::CuHover { bundle_id, target } => self
-                    .cu_hover(envelope.context, bundle_id, target)
+                OperationRequest::CuHover {
+                    bundle_id,
+                    target,
+                    execution_mode,
+                } => self
+                    .cu_hover(envelope.context, bundle_id, target, execution_mode)
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2321,8 +2357,16 @@ impl Operator {
                     from,
                     to,
                     duration_ms,
+                    execution_mode,
                 } => self
-                    .cu_drag(envelope.context, bundle_id, from, to, duration_ms)
+                    .cu_drag(
+                        envelope.context,
+                        bundle_id,
+                        from,
+                        to,
+                        duration_ms,
+                        execution_mode,
+                    )
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2332,8 +2376,16 @@ impl Operator {
                     window_id,
                     width,
                     height,
+                    execution_mode,
                 } => self
-                    .cu_resize_window(envelope.context, bundle_id, window_id, width, height)
+                    .cu_resize_window(
+                        envelope.context,
+                        bundle_id,
+                        window_id,
+                        width,
+                        height,
+                        execution_mode,
+                    )
                     .map(|(result, authorized_by)| {
                         grant_id = authorized_by;
                         result
@@ -2778,6 +2830,7 @@ impl Operator {
         target: ElementTargetWire,
         button: Option<String>,
         click_count: Option<u32>,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -2803,6 +2856,7 @@ impl Operator {
                     target: target.clone(),
                     button: button.clone(),
                     click_count,
+                    execution_mode,
                 },
             ),
         )? {
@@ -2812,7 +2866,13 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .click(&bundle_id, &target, button.as_deref(), click_count)
+                .click(
+                    &bundle_id,
+                    &target,
+                    button.as_deref(),
+                    click_count,
+                    execution_mode,
+                )
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuClick(meta), Some(grant_id)))
@@ -2824,6 +2884,7 @@ impl Operator {
         bundle_id: String,
         text: String,
         target: ElementTargetWire,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -2848,6 +2909,7 @@ impl Operator {
                     bundle_id: bundle_id.clone(),
                     text: text.clone(),
                     target: target.clone(),
+                    execution_mode,
                 },
             ),
         )? {
@@ -2857,7 +2919,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .type_text(&bundle_id, &text, &target)
+                .type_text(&bundle_id, &text, &target, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuTypeText(meta), Some(grant_id)))
@@ -2956,6 +3018,7 @@ impl Operator {
         bundle_id: String,
         key: String,
         modifiers: Option<Vec<String>>,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -2994,6 +3057,7 @@ impl Operator {
                         bundle_id: bundle_id.clone(),
                         key: key.clone(),
                         modifiers: modifiers.clone(),
+                        execution_mode,
                     },
                     Some(truncate_label(&label)),
                     // A key press has no element, so no fingerprint to bind.
@@ -3011,7 +3075,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .key_press(&bundle_id, &key, modifiers.as_deref())
+                .key_press(&bundle_id, &key, modifiers.as_deref(), execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuKeyPress(meta), Some(grant_id)))
@@ -3024,6 +3088,7 @@ impl Operator {
         target: ElementTargetWire,
         dx: Option<f64>,
         dy: Option<f64>,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3046,7 +3111,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .scroll(&bundle_id, &target, dx, dy)
+                .scroll(&bundle_id, &target, dx, dy, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuScroll(meta), Some(grant_id)))
@@ -3057,6 +3122,7 @@ impl Operator {
         context: ExecutionContext,
         bundle_id: String,
         window_id: Option<u32>,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3070,7 +3136,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .focus_window(&bundle_id, window_id)
+                .focus_window(&bundle_id, window_id, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuFocusWindow(meta), Some(grant_id)))
@@ -3080,6 +3146,7 @@ impl Operator {
         &self,
         context: ExecutionContext,
         bundle_id: String,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3091,7 +3158,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .launch_app(&bundle_id)
+                .launch_app(&bundle_id, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuLaunchApp(meta), Some(grant_id)))
@@ -3102,6 +3169,7 @@ impl Operator {
         context: ExecutionContext,
         bundle_id: String,
         target: ElementTargetWire,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3114,7 +3182,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .hover(&bundle_id, &target)
+                .hover(&bundle_id, &target, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuHover(meta), Some(grant_id)))
@@ -3127,6 +3195,7 @@ impl Operator {
         from: ElementTargetWire,
         to: ElementTargetWire,
         duration_ms: Option<u64>,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3143,7 +3212,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .drag(&bundle_id, &from, &to, duration_ms)
+                .drag(&bundle_id, &from, &to, duration_ms, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuDrag(meta), Some(grant_id)))
@@ -3156,6 +3225,7 @@ impl Operator {
         window_id: Option<u32>,
         width: f64,
         height: f64,
+        execution_mode: ExecutionMode,
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
@@ -3174,7 +3244,7 @@ impl Operator {
             grant_id,
             self.shared
                 .computer_use
-                .resize_window(&bundle_id, window_id, width, height)
+                .resize_window(&bundle_id, window_id, width, height, execution_mode)
                 .map_err(BrokerError::ComputerUse),
         )?;
         Ok((OperationResult::CuResizeWindow(meta), Some(grant_id)))
@@ -3688,6 +3758,11 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             BackendErrorKind::TargetOutsideApp => (
                 ErrorCode::InvalidRequest,
                 "the target point is not inside a window owned by the granted app",
+                false,
+            ),
+            BackendErrorKind::RequiresForeground => (
+                ErrorCode::RequiresForeground,
+                "the action cannot run in the background without taking over the user's focus or pointer; nothing was performed",
                 false,
             ),
             BackendErrorKind::OperationFailed => (
