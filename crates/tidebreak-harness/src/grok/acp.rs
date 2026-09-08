@@ -242,10 +242,14 @@ impl GrokSession {
             ));
         }
         let plan = self.compose_acp_plan(&input)?;
-        *self.acp.lock().await = Control {
-            generation: Uuid::new_v4().to_string(),
-            ..Control::default()
-        };
+        {
+            let mut state = self.acp.lock().await;
+            *state = Control {
+                generation: Uuid::new_v4().to_string(),
+                ..Control::default()
+            };
+            self.acp_stop.send_replace(false);
+        }
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -439,16 +443,17 @@ impl GrokSession {
         parser: &mut GrokStreamParser,
         setup: bool,
     ) -> Result<Value, HarnessError> {
-        {
-            let mut state = self.acp.lock().await;
-            if state.stopped {
-                return Err(HarnessError::Other("Grok ACP was stopped".into()));
+        let mut stop = self.acp_stop.subscribe();
+        let request = async {
+            {
+                let mut state = self.acp.lock().await;
+                if state.stopped {
+                    return Err(HarnessError::Other("Grok ACP was stopped".into()));
+                }
+                state
+                    .write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+                    .await?;
             }
-            state
-                .write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-                .await?;
-        }
-        let read = async {
             loop {
                 let value = reader.next().await?;
                 if value.get("id").and_then(Value::as_i64) == Some(id)
@@ -472,11 +477,17 @@ impl GrokSession {
             }
         };
         if setup {
-            timeout(HANDSHAKE_TIMEOUT, read)
-                .await
-                .map_err(|_| HarnessError::Other(format!("Grok ACP {method} timed out")))?
+            tokio::select! {
+                biased;
+                _ = stop.wait_for(|stopped| *stopped) => {
+                    Err(HarnessError::Other("Grok ACP was stopped during startup".into()))
+                }
+                result = timeout(HANDSHAKE_TIMEOUT, request) => {
+                    result.map_err(|_| HarnessError::Other(format!("Grok ACP {method} timed out")))?
+                }
+            }
         } else {
-            read.await
+            request.await
         }
     }
 
@@ -671,6 +682,9 @@ impl GrokSession {
         let done = self.acp_done.notified();
         tokio::pin!(done);
         done.as_mut().enable();
+        // Wake setup before taking the write lock: the child may have stopped
+        // reading stdin, so an in-flight request can hold that lock.
+        self.acp_stop.send_replace(true);
         {
             let mut state = self.acp.lock().await;
             state.stopped = true;

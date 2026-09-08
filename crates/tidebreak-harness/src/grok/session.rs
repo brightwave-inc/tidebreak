@@ -78,6 +78,7 @@ pub struct GrokSession {
     unrecognized: AtomicU64,
     acp: AsyncMutex<acp::Control>,
     acp_done: tokio::sync::Notify,
+    acp_stop: watch::Sender<bool>,
 }
 
 impl GrokSession {
@@ -99,6 +100,7 @@ impl GrokSession {
             unrecognized: AtomicU64::new(0),
             acp: AsyncMutex::new(acp::Control::default()),
             acp_done: tokio::sync::Notify::new(),
+            acp_stop: watch::channel(false).0,
         }
     }
     fn compose_plan(

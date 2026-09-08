@@ -146,7 +146,7 @@ impl crate::HarnessEventSink for Sink {
 
 #[cfg(unix)]
 const SERVER: &str = r#"#!/usr/bin/python3
-import json,os,sys
+import json,os,signal,sys
 frames=[json.loads(line)['value'] for line in open(os.environ['ACP_FIXTURE'])]
 permission=next(v for v in frames if v.get('method')=='session/request_permission')
 updates=[v for v in frames if v.get('method')=='session/update']
@@ -157,6 +157,12 @@ def record(v):
  with open(os.environ['ACP_RECORD'],'a') as f:f.write(json.dumps(v)+'\n')
 for line in sys.stdin:
  v=json.loads(line);record(v);method=v.get('method')
+ stall=os.environ['ACP_RECORD']+'.stall'
+ if os.path.exists(stall) and open(stall).read()==method:continue
+ if method=='initialize' and os.path.exists(os.environ['ACP_RECORD']+'.blockwrite'):
+  emit({'jsonrpc':'2.0','id':'x'*131072,'method':'client/stall'})
+  open(os.environ['ACP_RECORD']+'.waiting','w').close()
+  while True:signal.pause()
  if method=='initialize':emit({'jsonrpc':'2.0','id':v['id'],'result':{'protocolVersion':1}})
  elif method in ('session/new','session/load'):
   if method=='session/load':emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'OLD_REPLAY'}}}})
@@ -551,5 +557,134 @@ async fn acp_does_not_echo_malformed_rpc_ids_or_create_approval_waiters() {
             ))
             .count(),
         6
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_stop_cancels_every_startup_stage_and_allows_the_next_turn() {
+    for stage in [
+        "initialize",
+        "session/new",
+        "session/load",
+        "session/set_model",
+        "session/set_mode",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, sink) = session(dir.path(), PermissionMode::Auto, false);
+        std::fs::write(dir.path().join("record.stall"), stage).unwrap();
+        if stage == "session/load" {
+            *session.resume_ref.lock().unwrap() = Some("fixture-session".into());
+        }
+        let mut input = turn();
+        input.model = Some("grok-4.6".into());
+        input.reasoning_effort = Some(ReasoningEffort::High);
+        let running = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(input).await }
+        });
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if std::fs::read_to_string(dir.path().join("record"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .any(|call| call["method"] == stage)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Grok never reached {stage}"));
+        let stopped_at = tokio::time::Instant::now();
+        timeout(Duration::from_secs(6), session.interrupt())
+            .await
+            .unwrap_or_else(|_| panic!("Stop hung during {stage}"))
+            .unwrap();
+        let outcome = timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !matches!(outcome, Ok(TurnOutcome::Clean)),
+            "{stage}: {outcome:?}"
+        );
+        assert!(
+            session.child.lock().await.is_none(),
+            "{stage}: child remains"
+        );
+        assert!(session.child_pid().is_none(), "{stage}: PID remains");
+        assert!(session.acp.lock().await.pending.is_empty());
+        assert!(!sink.events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnStarted | HarnessEvent::TurnCompleted { .. }
+        )));
+        assert!(!std::fs::read_to_string(dir.path().join("record"))
+            .unwrap()
+            .contains("session/prompt"));
+        assert!(
+            stopped_at.elapsed() < Duration::from_secs(1),
+            "Stop during {stage} took {:?}",
+            stopped_at.elapsed()
+        );
+        std::fs::remove_file(dir.path().join("record.stall")).unwrap();
+        let next = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(turn()).await }
+        });
+        let approval = wait_approval(&sink).await;
+        session
+            .decide(approval, ApprovalDecision::Deny { feedback: None })
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(3), next)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            TurnOutcome::Clean
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_stop_cancels_a_setup_write_before_taking_its_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, _) = session(dir.path(), PermissionMode::Auto, false);
+    std::fs::write(dir.path().join("record.blockwrite"), "").unwrap();
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move { session.run_turn(turn()).await }
+    });
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if dir.path().join("record.waiting").exists() && session.acp.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Grok did not stop reading during the setup reply");
+    let stopped_at = tokio::time::Instant::now();
+    timeout(Duration::from_secs(12), session.interrupt())
+        .await
+        .expect("Stop hung behind the setup write lock")
+        .unwrap();
+    let outcome = timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(outcome, Ok(TurnOutcome::Clean)));
+    assert!(session.child.lock().await.is_none());
+    assert!(session.child_pid().is_none());
+    assert!(
+        stopped_at.elapsed() < Duration::from_secs(1),
+        "Stop waited for the setup write: {:?}",
+        stopped_at.elapsed()
     );
 }
