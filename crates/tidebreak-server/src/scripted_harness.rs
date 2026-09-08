@@ -17,9 +17,9 @@ use tidebreak_core::{
 };
 use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
-    AdapterRegistry, ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef,
-    HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv,
-    ListedHarnessModel, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
+    ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv, ListedHarnessModel,
+    ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -899,17 +899,6 @@ pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
     }
     adapter.writes = parsed.writes;
     Ok(Some(adapter))
-}
-
-/// Install the env-driven scripted engine in place of the matching built-in,
-/// so a spawned `tidebreak serve` can drive code-mode turns without a real
-/// harness binary.
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
-    if let Some(adapter) = adapter_from_env()? {
-        registry.register(Arc::new(adapter));
-    }
-    Ok(())
 }
 
 #[cfg_attr(test, allow(dead_code))]
