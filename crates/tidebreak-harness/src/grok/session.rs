@@ -1,4 +1,4 @@
-//! One print-mode child per turn (`--prompt-file` + `--output-format streaming-json`).
+//! One Grok child per turn: captured ACP pins use `agent stdio`; older pins use print mode.
 
 use std::io::Write;
 use std::path::Path;
@@ -27,6 +27,10 @@ use crate::{
 };
 use tidebreak_core::{HarnessKind, PermissionMode, ReasoningEffort};
 use uuid::Uuid;
+
+#[path = "acp.rs"]
+mod acp;
+pub(crate) use acp::supports_version as supports_acp_version;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -72,6 +76,8 @@ pub struct GrokSession {
     /// Unrecognized events summed across every turn's parser: each turn is a
     /// fresh child, so the per-turn count alone would reset on every prompt.
     unrecognized: AtomicU64,
+    acp: AsyncMutex<acp::Control>,
+    acp_done: tokio::sync::Notify,
 }
 
 impl GrokSession {
@@ -91,6 +97,8 @@ impl GrokSession {
             pid: ChildPid::new(),
             reaped: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
+            acp: AsyncMutex::new(acp::Control::default()),
+            acp_done: tokio::sync::Notify::new(),
         }
     }
     fn compose_plan(
@@ -361,6 +369,18 @@ pub(crate) fn refuse_unhonored_mode(mode: PermissionMode) -> Result<(), HarnessE
     }
 }
 
+/// ACP carries approvals on the captured pin; older print-mode pins keep their policy.
+pub(crate) fn refuse_versioned_mode(
+    mode: PermissionMode,
+    version: &str,
+) -> Result<(), HarnessError> {
+    if supports_acp_version(version) && mode != PermissionMode::Plan {
+        Ok(())
+    } else {
+        refuse_unhonored_mode(mode)
+    }
+}
+
 /// Argv for one print-mode child. The prompt lives in `prompt_file`, never
 /// on argv. Callers must already have refused an unhonored permission mode.
 pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, HarnessError> {
@@ -568,6 +588,9 @@ fn computer_use_prompt(
 #[async_trait]
 impl HarnessSession for GrokSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        if supports_acp_version(&self.version) {
+            return self.run_acp_turn(input).await;
+        }
         refuse_unhonored_mode(self.permission_mode())?;
         let prompt_text = computer_use_prompt(
             &input.text,
@@ -588,15 +611,21 @@ impl HarnessSession for GrokSession {
 
     async fn decide(
         &self,
-        _approval: HarnessApprovalRef,
-        _decision: ApprovalDecision,
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        if supports_acp_version(&self.version) {
+            return self.decide_acp(approval, decision).await;
+        }
         Err(HarnessError::Other(
             "this engine has no structured approval channel".into(),
         ))
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
+        if supports_acp_version(&self.version) && self.interrupt_acp().await? {
+            return Ok(());
+        }
         let mut slot = self.child.lock().await;
         let Some(child) = slot.as_mut() else {
             return Ok(());
@@ -613,7 +642,7 @@ impl HarnessSession for GrokSession {
     /// the engine cannot honor are refused here for the same reason launch
     /// refuses them, rather than silently running the old posture.
     async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
-        refuse_unhonored_mode(mode)?;
+        refuse_versioned_mode(mode, &self.version)?;
         *self.permission_mode.lock().expect("grok permission mode") = mode;
         Ok(())
     }
@@ -1445,7 +1474,7 @@ exit 0
                     browser: None,
                     native: None,
                 },
-                "1.0.13".into(),
+                "1.0.5".into(),
             )
         }
 

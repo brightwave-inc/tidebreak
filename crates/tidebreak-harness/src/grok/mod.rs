@@ -1,10 +1,9 @@
 //! Grok CLI adapter. Best-effort tier.
 //!
-//! Process model for 1.0.4: one print-mode child per turn
-//! (`--prompt-file` + `--output-format streaming-json`). Chosen over
-//! `grok agent stdio` ACP because the captured print stream is a real
-//! machine-readable NDJSON surface and no ACP permission
-//! request/response pair was captured.
+//! Pins 1.0.4 and 1.0.5 use one print-mode child per turn. The captured
+//! 1.0.13 ACP channel carries native approvals, cancellation, and session
+//! loading over stdin/stdout. Other versions retain the print fallback
+//! without claiming a verified Auto posture.
 
 pub mod parse;
 pub mod session;
@@ -135,12 +134,26 @@ impl HarnessAdapter for GrokAdapter {
             transcript: CapLevel::Unsupported,
             memory_loopback: CapLevel::Unsupported,
         };
-        // Off the captured 1.0 line the unprompted-write observation behind
-        // Auto no longer holds; a later default posture is unproven
-        // (decision 31 rule 3). The Unsupported verdicts stay: this adapter
-        // composes no approval channel or plan flags at any version.
-        if crate::probe::off_pinned_line(probe.version.as_deref(), (1, 0)) {
+        // An unprompted write on an older pin does not establish a later
+        // release's default posture. ACP support is enabled separately below.
+        let captured_print_auto = probe.version.as_deref().is_some_and(|version| {
+            let version = version
+                .trim()
+                .strip_prefix("grok ")
+                .unwrap_or(version.trim());
+            matches!(version.split_whitespace().next(), Some("1.0.4" | "1.0.5"))
+        });
+        if !captured_print_auto {
             caps.auto_mode = CapLevel::Unknown;
+        }
+        if probe
+            .version
+            .as_deref()
+            .is_some_and(session::supports_acp_version)
+        {
+            caps.structured_approvals = CapLevel::Supported;
+            caps.auto_mode = CapLevel::Supported;
+            caps.image_input = CapLevel::Unsupported;
         }
         caps
     }
@@ -165,10 +178,10 @@ impl HarnessAdapter for GrokAdapter {
         let Some(binary) = spec.binary.as_deref().filter(|path| path.is_absolute()) else {
             return Err(HarnessError::NotFound);
         };
-        crate::grok::session::refuse_unhonored_mode(spec.permission_mode)?;
         let version = observe_version(binary, &spec.env)
             .await
             .unwrap_or_else(|_| "unknown".into());
+        crate::grok::session::refuse_versioned_mode(spec.permission_mode, &version)?;
         Ok(Box::new(GrokSession::new(spec, version)))
     }
 }

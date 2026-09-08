@@ -98,6 +98,12 @@ impl GrokStreamParser {
         self.version = version.into();
     }
 
+    /// Record the final prompt occupancy when ACP reports only cumulative spend
+    /// and the last call. It does not establish the first call's occupancy.
+    pub(super) fn set_last_call_context_tokens(&mut self, tokens: u64) {
+        self.last_call_context_tokens = Some(tokens);
+    }
+
     /// Unrecognized-event count so far.
     #[must_use]
     pub fn unrecognized(&self) -> u64 {

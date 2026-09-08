@@ -3,8 +3,8 @@ version = "1.0.13"
 date = "2026-09-08"
 observed_version_command = "grok --version"
 observed_version = "grok 1.0.13 (5e9a58528b76) [stable]"
-integration_path = "print-streaming-json"
-scenarios = ["image-read"]
+integration_path = "print-streaming-json-and-acp-stdio"
+scenarios = ["image-read", "acp-approve", "acp-deny", "acp-cancel", "acp-resume"]
 
 [capture]
 notes = """
@@ -14,6 +14,15 @@ Chat Completions fixture. The fixture requests read_file for a generated
 runs. The tool update contains image content, and the next request contains
 the same PNG bytes in an image_url block. The probe qualifies tool image
 transport; it does not qualify model vision quality or direct user attachments.
+
+The ACP captures use grok agent --no-leader stdio with a separate localhost
+fixture, fresh HOME, and non-loopback network access denied. The provider
+requests one harmless printf command. allow_once creates its file;
+reject_once and session/cancel leave the file absent. A separate capture
+also verifies session/load after restarting the child, resetting a previously
+always-approve native session to supervised permissions, and confirming
+session/set_model and session/set_mode. Usage fields come from scripted
+provider accounting. No external model runs.
 """
 
 [redaction]
@@ -23,9 +32,15 @@ become fixture identifiers. available_commands entries are removed because
 they name unrelated local skills. The recorded request retains only its model
 and image-bearing tool message. It omits system text, tools, and headers.
 The image is a generated solid red square. Its bytes are unchanged.
+ACP records retain both directions, exact one-use option IDs, tool inputs,
+and terminal outcomes. Machine paths and session identifiers are replaced.
+Unrelated model catalogs, command inventories, and timestamp metadata are omitted.
 """
 
 verified = [
+  "ACP initialize/session/new and session/load accept the captured shapes",
+  "ACP allow_once executes the exact command; reject_once leaves it unexecuted",
+  "ACP session/cancel interrupts a waiting tool without executing it",
   "read_file accepts target_file and reads a local PNG in headless mode",
   "tool_call_update carries image content and ReadFile.ImageContent",
   "the next Chat Completions request carries a tool-role image_url block",
