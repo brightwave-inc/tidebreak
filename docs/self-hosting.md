@@ -272,6 +272,8 @@ aspirational.
 | `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET` | with OIDC | — | OIDC client secret, used only for the server-to-server code exchange. It stays in process memory. |
 | `TIDEBREAK_AUTH_OIDC_CLAIM` | no | `sub` | ID-token claim whose string value becomes the Tidebreak user id. Requires OIDC. |
 | `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |
+| `GH_TOKEN` or `GITHUB_TOKEN` | no | unset | Standalone forge token the server holds and lends per git operation. The agent child never inherits it. |
+| `TIDEBREAK_GIT_BOT_LOGIN` | no | unset | GitHub login the token belongs to, so the UI can say whose account work lands as. |
 | `TIDEBREAK_VAULT_ADDR` | required with Vault custody | — | Vault base URL. HTTPS is required except for literal loopback development. Setting any Vault option enables Vault configuration and requires this variable plus `TIDEBREAK_VAULT_TOKEN_FILE`. |
 | `TIDEBREAK_VAULT_TOKEN_FILE` | required with Vault custody | — | Mounted file containing the Vault token. Tidebreak reads it for every request so rotation does not require a restart. |
 | `TIDEBREAK_VAULT_MOUNT` | no | `secret` | KV v2 mount path. |
@@ -511,12 +513,13 @@ per engine.
 
 Two things the image deliberately does not decide for you:
 
-- **A GitHub identity.** Tidebreak observes `gh`'s authentication and never
-  reads or stores a token ([decision record
-  34](decisions/0034-harness-discovery-credentials.md)), and a container has
-  no terminal to run `gh auth login` in. Set `GH_TOKEN` in the server's
-  environment and `gh` picks it up. Everyone on the deployment then acts as
-  that one account; per-user GitHub identity is not built yet.
+- **A GitHub identity.** Set `GH_TOKEN` (or `GITHUB_TOKEN`) in the server's
+  environment. The server holds it and lends it per git operation through
+  the same seam a hosted machine uses; the agent child never sees the
+  token. Everyone on the deployment acts as that one account. Set
+  `TIDEBREAK_GIT_BOT_LOGIN` to the GitHub login the token belongs to so the
+  UI can say whose account work lands as. Per-user GitHub identity is a
+  hosted-machine path, not this one.
 - **A commit identity.** `git commit` needs a name and an email, and the image
   invents neither. Set `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
   `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` in the server's environment,

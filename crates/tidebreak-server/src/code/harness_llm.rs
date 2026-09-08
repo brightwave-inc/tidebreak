@@ -96,6 +96,9 @@ pub struct HarnessLlmRelay {
     client: reqwest::Client,
     state: Mutex<RelayState>,
     external: Option<Arc<crate::obo_gateway::external::ExternalDelegations>>,
+    /// When false, the registry still mints session keys for git's loopback
+    /// route, but workers do not point engine inference at this relay.
+    forwards_inference: bool,
 }
 
 #[derive(Default)]
@@ -119,7 +122,29 @@ impl HarnessLlmRelay {
             client,
             state: Mutex::new(RelayState::default()),
             external: None,
+            forwards_inference: true,
         }
+    }
+
+    /// Session keys for git's loopback route on a machine that lends forge
+    /// credentials but does not relay engine inference (standalone self-host).
+    pub fn keys_only() -> Self {
+        let obo = Arc::new(
+            OboGateway::new(
+                "http://127.0.0.1",
+                "tidebreak:standalone-git-relay-keys".to_owned(),
+            )
+            .expect("loopback dummy gateway URL is valid"),
+        );
+        let mut relay = Self::new(obo);
+        relay.forwards_inference = false;
+        relay
+    }
+
+    /// Whether workers should point engine children at this relay for inference.
+    #[must_use]
+    pub fn forwards_inference(&self) -> bool {
+        self.forwards_inference
     }
 
     /// Attach durable external consent before any worker can use this relay.
@@ -486,6 +511,27 @@ pub fn spawn_wiring(
 
 /// The loopback route a machine session's git asks for a credential.
 pub const GIT_CREDENTIAL_PATH: &str = "/code/git/credential";
+
+/// Whether `name` is a GitHub forge token the engine child must not inherit
+/// once this machine lends credentials itself.
+#[must_use]
+pub fn is_forge_token_env(name: &str) -> bool {
+    name.eq_ignore_ascii_case("GH_TOKEN") || name.eq_ignore_ascii_case("GITHUB_TOKEN")
+}
+
+/// Drop `GH_TOKEN` and `GITHUB_TOKEN` from a string environment overlay.
+pub fn scrub_forge_token_env(env: &mut Vec<(String, String)>) {
+    env.retain(|(name, _)| !is_forge_token_env(name));
+}
+
+/// Drop `GH_TOKEN` and `GITHUB_TOKEN` from a captured process environment.
+pub fn scrub_forge_token_os_env(env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>) {
+    env.retain(|(name, _)| {
+        name.to_str()
+            .map(|name| !is_forge_token_env(name))
+            .unwrap_or(true)
+    });
+}
 
 /// What the git helper and the `gh` wrapper print to stderr, before the
 /// status and the machine's reason, when the loopback route refuses.
@@ -1065,6 +1111,54 @@ mod tests {
         assert!(
             odd.contains("exec '/opt/it'\\''s/gh'"),
             "a quote in the path survives: {odd}"
+        );
+    }
+
+    #[test]
+    fn a_lending_child_env_carries_the_relay_key_and_no_forge_token() {
+        let mut extra = vec![
+            (RELAY_KEY_ENV.to_owned(), "session-relay-key".to_owned()),
+            ("GH_TOKEN".to_owned(), "must-not-reach-the-child".to_owned()),
+            (
+                "GITHUB_TOKEN".to_owned(),
+                "must-not-reach-the-child-either".to_owned(),
+            ),
+        ];
+        extra.extend(git_credential_wiring("http://127.0.0.1:9"));
+        extra.push(("PATH".to_owned(), "/session/bin:/usr/bin".to_owned()));
+        scrub_forge_token_env(&mut extra);
+        let mut probe = vec![
+            (
+                std::ffi::OsString::from("GH_TOKEN"),
+                std::ffi::OsString::from("from-the-process"),
+            ),
+            (
+                std::ffi::OsString::from("PATH"),
+                std::ffi::OsString::from("/usr/bin"),
+            ),
+        ];
+        scrub_forge_token_os_env(&mut probe);
+        assert!(
+            extra
+                .iter()
+                .any(|(name, value)| name == RELAY_KEY_ENV && value == "session-relay-key"),
+            "the session relay key stays: {extra:?}"
+        );
+        assert!(
+            extra
+                .iter()
+                .any(|(name, value)| name == "PATH" && value.starts_with("/session/bin:")),
+            "the gh wrapper precedes the real binary: {extra:?}"
+        );
+        assert!(
+            extra.iter().all(|(name, _)| !is_forge_token_env(name)),
+            "overlay holds no forge token: {extra:?}"
+        );
+        assert!(
+            probe
+                .iter()
+                .all(|(name, _)| name.to_str() != Some("GH_TOKEN")),
+            "the captured snapshot holds no forge token: {probe:?}"
         );
     }
 }

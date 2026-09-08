@@ -473,6 +473,92 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
     assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+/// A standalone machine's static lender answers the deployment token for
+/// `https` against github.com, nothing for another host, and refuses a
+/// Person request because the machine acts as one account.
+#[tokio::test]
+async fn a_sessions_git_borrows_the_standalone_deployment_token_from_the_loopback_route() {
+    let lender = Arc::new(crate::obo_gateway::StaticGitCredentialLender::new(
+        "deployment-token".to_owned(),
+        Some("ship-bot".to_owned()),
+    ));
+    let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::keys_only());
+    let (router, _fake, runtime, repo_id, _token, _dir) = external_app_built({
+        let lender = lender.clone();
+        let relay = relay.clone();
+        move |runtime| runtime.with_git_credentials(lender).with_harness_llm(relay)
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C8/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C8/1.1").await;
+    let person = runtime.get_session(&owner, session_id).await.unwrap();
+    let mut bot_session = person.clone();
+    bot_session.id = tidebreak_core::SessionId::new();
+    bot_session.acts_as = Some(tidebreak_core::ActsAs::Bot);
+    tidebreak_core::db::code::insert_session(&runtime.db, &bot_session)
+        .await
+        .unwrap();
+    let bot_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
+        owner: owner.clone(),
+        session: bot_session.id,
+    });
+    let person_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
+        owner: owner.clone(),
+        session: session_id,
+    });
+    let route = format!(
+        "http://{addr}{}",
+        crate::code::harness_llm::GIT_CREDENTIAL_PATH
+    );
+    let ask =
+        |body: &'static str, key: &str| client.post(&route).bearer_auth(key).body(body).send();
+
+    let lent = ask(
+        "protocol=https\nhost=github.com\npath=acme/tools.git\n",
+        &bot_key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(lent.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        lent.text().await.unwrap(),
+        "username=x-access-token\npassword=deployment-token\n"
+    );
+
+    let other = ask("protocol=https\nhost=evil.example\n", &bot_key)
+        .await
+        .unwrap();
+    assert_eq!(other.status(), reqwest::StatusCode::OK);
+    assert_eq!(other.text().await.unwrap(), "");
+
+    let person = ask(
+        "protocol=https\nhost=github.com\npath=acme/tools.git\n",
+        &person_key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(person.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let reason = person.text().await.unwrap();
+    assert!(
+        reason.contains("standalone machine acts as one"),
+        "the helper names why person is refused: {reason}"
+    );
+}
+
 /// A Slack sandbox stays remote when a browser follows the link, queues a
 /// turn, and the hosted process recovers its session rows.
 #[tokio::test]

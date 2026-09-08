@@ -807,6 +807,13 @@ pub fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String {
         ),
         GitForgeAttribution::Bot {
             bot_login: Some(bot_login),
+        } if identity.app_name
+            == crate::obo_gateway::static_lender::STANDALONE_FORGE_APP_NAME =>
+        {
+            format!("Clones and pushes use this machine's GitHub account: work lands as {bot_login}.")
+        }
+        GitForgeAttribution::Bot {
+            bot_login: Some(bot_login),
         } => format!(
             "Clones and pushes use this deployment's GitHub App: work lands as {bot_login}, not as your GitHub account."
         ),
@@ -856,8 +863,9 @@ pub fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
                                                   add it to the installation on GitHub."
             .to_owned(),
         GitForgeError::PersonNotOffered => {
-            "This session asked to act as you, and the deployment's git forge does not offer \
-             that identity. Ask as the App's bot, or connect a forge that can act as you."
+            "This session asked to act as you, and the deployment does not offer that identity. \
+             A standalone machine acts as one GitHub account. Ask as the deployment's account, \
+             or connect a forge that can act as you."
                 .to_owned()
         }
     }
@@ -1281,6 +1289,20 @@ mod tests {
             Some(("compressing objects".into(), 100))
         );
         assert_eq!(parse_clone_progress_line("Cloning into 'foo'..."), None);
+    }
+
+    #[test]
+    fn standalone_attribution_names_the_deployment_account() {
+        let identity = GitForgeIdentity {
+            app_name: crate::obo_gateway::static_lender::STANDALONE_FORGE_APP_NAME.to_owned(),
+            attribution: GitForgeAttribution::Bot {
+                bot_login: Some("ship-bot".into()),
+            },
+        };
+        assert_eq!(
+            hosted_attribution_sentence(&identity),
+            "Clones and pushes use this machine's GitHub account: work lands as ship-bot."
+        );
     }
 
     #[test]

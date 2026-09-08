@@ -287,7 +287,10 @@ impl CodeRuntime {
         // On a gateway-authenticated machine, point the engine's own
         // inference at this server's relay (decision 71): a per-session key
         // stands in for provider credentials the hosted image does not have.
-        let (extra_argv, extra_env, relay_key_env) = match self.harness_llm.as_ref() {
+        // A standalone machine that lends a forge token still mints the key
+        // so git can borrow through the loopback route, without redirecting
+        // inference.
+        let (extra_argv, extra_env, relay_key_env, child_env) = match self.harness_llm.as_ref() {
             // An in-process engine resolves inference through the server
             // itself; there is no child to point at the relay.
             Some(relay) if !session.harness_kind.is_in_process() => {
@@ -303,19 +306,32 @@ impl CodeRuntime {
                     owner: session.owner.clone(),
                     session: session.id,
                 });
-                let (argv, mut env) =
-                    crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key);
-                // A repository session's own git borrows the person's forge
-                // credential through the loopback route under the same key,
-                // so the harness's shell can push what it made. A machine
-                // that lends none leaves git as it found it.
+                let (argv, mut env) = if relay.forwards_inference() {
+                    crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                if !env
+                    .iter()
+                    .any(|(name, _)| name == crate::code::harness_llm::RELAY_KEY_ENV)
+                {
+                    env.push((
+                        crate::code::harness_llm::RELAY_KEY_ENV.to_owned(),
+                        key.clone(),
+                    ));
+                }
+                let mut child_env = probe.env.clone();
+                // A repository session's own git borrows through the loopback
+                // route under the same key. Claude Code, Codex, Opencode, and
+                // Grok all take this overlay; the wrapper's directory is
+                // prepended to PATH so it precedes the real `gh`.
                 if workspace.is_some() && self.git_credentials.is_some() {
                     env.extend(crate::code::harness_llm::git_credential_wiring(&base));
                     if let Some(path) = self
                         .gh_shim_path(
                             &private_root,
                             workspace.as_ref(),
-                            &probe.env,
+                            &child_env,
                             &base,
                             &session.owner,
                         )
@@ -323,14 +339,17 @@ impl CodeRuntime {
                     {
                         env.push(("PATH".to_owned(), path));
                     }
+                    crate::code::harness_llm::scrub_forge_token_env(&mut env);
+                    crate::code::harness_llm::scrub_forge_token_os_env(&mut child_env);
                 }
                 (
                     argv,
                     env,
                     Some(crate::code::harness_llm::RELAY_KEY_ENV.to_owned()),
+                    child_env,
                 )
             }
-            _ => (Vec::new(), Vec::new(), None),
+            _ => (Vec::new(), Vec::new(), None, probe.env.clone()),
         };
 
         let spec = SessionSpec {
@@ -351,7 +370,7 @@ impl CodeRuntime {
             extra_argv,
             extra_env,
             relay_key_env,
-            env: probe.env.clone(),
+            env: child_env,
             approval,
             binary: binary.clone(),
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
