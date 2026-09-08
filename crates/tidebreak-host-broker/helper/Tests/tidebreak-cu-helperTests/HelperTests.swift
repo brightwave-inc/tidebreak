@@ -29,7 +29,31 @@ struct HelperTests {
         print("PASS testPointerTargetRejectsAnotherWindowCoveringTheGrantedApp")
         try suite.testAXIdentifierIsAvailableForFixtureTargets()
         print("PASS testAXIdentifierIsAvailableForFixtureTargets")
-        print("12 helper regression tests passed")
+        suite.testScrollDirectionMatchesAPI()
+        print("PASS testScrollDirectionMatchesAPI")
+        suite.testDisplayCaptureKeepsGlobalPlacement()
+        print("PASS testDisplayCaptureKeepsGlobalPlacement")
+        print("14 helper regression tests passed")
+    }
+
+    func testScrollDirectionMatchesAPI() {
+        expectEqual(Control.scrollWheelDelta(180), -180)
+        expectEqual(Control.scrollWheelDelta(-180), 180)
+        expectEqual(Control.scrollWheelDelta(1e20), Int32.min)
+        expectEqual(Control.scrollWheelDelta(-1e20), Int32.max)
+    }
+
+    func testDisplayCaptureKeepsGlobalPlacement() {
+        let frame = CGRect(x: -1920, y: 100, width: 1920, height: 1080)
+        let display = Capture.configuration(
+            width: 1440, height: 810, coordinateFrame: frame, displayScoped: true)
+        expectEqual(display.sourceRect, CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        expectEqual(display.destinationRect, CGRect(x: 0, y: 0, width: 1440, height: 810))
+        expectFalse(display.preservesAspectRatio)
+        let window = Capture.configuration(
+            width: 500, height: 400, coordinateFrame: frame, displayScoped: false)
+        expectEqual(window.sourceRect, .zero)
+        expectTrue(window.ignoreShadowsSingleWindow)
     }
 
     private func request(_ json: String) throws -> HelperRequest {

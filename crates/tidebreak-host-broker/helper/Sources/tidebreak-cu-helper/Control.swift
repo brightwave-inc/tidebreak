@@ -346,19 +346,35 @@ enum Control {
         // delta (a model asking to "scroll to the bottom" with dy=1e10) would
         // trap the Int32 conversion and crash the process. Clamp instead of
         // crashing — an enormous scroll is an enormous scroll.
-        let clampedDy = min(max(dy.rounded(), Double(Int32.min)), Double(Int32.max))
-        let clampedDx = min(max(dx.rounded(), Double(Int32.min)), Double(Int32.max))
+        let clampedDy = scrollWheelDelta(dy)
+        let clampedDx = scrollWheelDelta(dx)
         guard
             let event = CGEvent(
                 scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
-                wheel1: Int32(clampedDy), wheel2: Int32(clampedDx), wheel3: 0)
+                wheel1: clampedDy, wheel2: clampedDx, wheel3: 0)
         else {
             throw HelperError(code: .operationFailed, message: "could not synthesize scroll event")
         }
+        guard
+            let move = CGEvent(
+                mouseEventSource: CGEventSource(stateID: .combinedSessionState),
+                mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        else {
+            throw HelperError(
+                code: .operationFailed, message: "could not position the pointer for scrolling")
+        }
+        try ensureNotCancelled(request)
+        move.post(tap: .cghidEventTap)
+        usleep(20_000)
         event.location = point
         try ensureNotCancelled(request)
         event.post(tap: .cghidEventTap)
         return Result(success: true, usedFallback: true, detail: "scroll dx \(dx) dy \(dy)")
+    }
+
+    /// Positive API deltas move content down/right; CG wheel deltas use the opposite sign.
+    static func scrollWheelDelta(_ delta: Double) -> Int32 {
+        Int32(min(max(-delta.rounded(), Double(Int32.min)), Double(Int32.max)))
     }
 
     static func focusWindow(_ request: HelperRequest) throws -> Result {
@@ -415,6 +431,13 @@ enum Control {
         }
         try ensureNotBlocked(bundleId)
         try ensureNoSystemDialogFrontmost()
+        if let running = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleId && !$0.isTerminated
+        }) {
+            try activateAndWait(running, request: request)
+            return Result(
+                success: true, usedFallback: false, detail: "activated running \(bundleId)")
+        }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
             throw HelperError(
                 code: .notFound, message: "registered application \(bundleId) not found")
@@ -466,7 +489,7 @@ enum Control {
         let from = try resolveTargetPoint(app: app, request: request, prefix: "from")
         let to = try resolveTargetPoint(app: app, request: request, prefix: "to")
         let points = dragPoints(from: from, to: to, durationMs: request.durationMs)
-        let initialWindows = windows(pid: nil, bundleId: nil)
+        let initialWindows = windows(pid: app.processIdentifier, bundleId: app.bundleIdentifier)
         guard
             ([from] + points).allSatisfy({
                 pointBelongsToApp($0, pid: app.processIdentifier, windows: initialWindows)
@@ -474,7 +497,7 @@ enum Control {
         else {
             throw HelperError(
                 code: .targetOutsideApp,
-                message: "the drag path leaves the granted app or crosses another window")
+                message: "the drag path leaves the granted app")
         }
         guard
             let source = CGEventSource(stateID: .combinedSessionState),
@@ -1038,20 +1061,27 @@ enum Control {
         return point
     }
 
-    /// Refuse a coordinate target that does not fall inside an on-screen window
-    /// owned by the granted app. A raw point is global; without this check a
-    /// click or scroll could land on another app's window — including Tidebreak's
-    /// own consent/Stop/Resume controls — while the broker's audit attributes it
-    /// to the granted app. This is the confinement that makes a coordinate
-    /// target no broader than an element target. AX frames and CGWindowList
-    /// bounds share the global top-left-origin point space, so a point-in-rect
-    /// test is valid.
+    /// Hit-test through Accessibility to ignore click-through overlays while
+    /// refusing any pointer target owned by another app.
     private static func ensurePointInApp(_ point: CGPoint, app: NSRunningApplication) throws {
-        let stack = windows(pid: nil, bundleId: nil)
-        guard pointBelongsToApp(point, pid: app.processIdentifier, windows: stack) else {
+        guard point.x.isFinite, point.y.isFinite else {
+            throw HelperError(code: .invalidRequest, message: "target coordinates must be finite")
+        }
+        var hit: AXUIElement?
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.2)
+        let error = AXUIElementCopyElementAtPosition(
+            system, Float(point.x), Float(point.y), &hit)
+        var owner: pid_t = 0
+        guard error == .success, let hit,
+            AXUIElementGetPid(hit, &owner) == .success,
+            owner == app.processIdentifier
+        else {
             throw HelperError(
                 code: .targetOutsideApp,
-                message: "the target point is outside the granted app or another window covers it")
+                message:
+                    "the pointer target is outside the granted app (AX \(error.rawValue), owner \(owner))"
+            )
         }
     }
 

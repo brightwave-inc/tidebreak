@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Entry point and wire protocol for the computer-use helper.
@@ -171,7 +172,9 @@ struct HelperError: Error {
     @main
 #endif
 struct CUHelper {
+    @MainActor
     static func main() async {
+        _ = NSApplication.shared
         // Native helper APIs require macOS 14. The host broker still runs on
         // older macOS; only this computer-use surface is unsupported.
         if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 14 {

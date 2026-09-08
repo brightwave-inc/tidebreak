@@ -53,13 +53,10 @@ enum Capture {
         let (filter, size, coordinateFrame) = try buildFilter(
             target, request: request, content: content)
 
-        let config = SCStreamConfiguration()
-        config.width = size.width
-        config.height = size.height
-        // Capture the full pixel buffer; keep the cursor out of analytical
-        // screenshots.
-        config.showsCursor = false
-        config.ignoreShadowsSingleWindow = true
+        let config = configuration(
+            width: size.width, height: size.height,
+            coordinateFrame: coordinateFrame,
+            displayScoped: target == .display || (target == .app && request.windowId == nil))
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter, configuration: config)
         let scaled = try downscaleForBudget(image, maxDimension: request.maxDimension)
@@ -74,6 +71,25 @@ enum Capture {
             height: scaled.map(\.height) ?? image.height,
             path: outPath, mediaType: "image/png", coordinateFrame: CoordinateFrame(coordinateFrame)
         )
+    }
+
+    static func configuration(
+        width: Int, height: Int, coordinateFrame: CGRect,
+        displayScoped: Bool
+    ) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+        if displayScoped {
+            // Without explicit rectangles, ScreenCaptureKit can zoom the app's
+            // windows to fill the image and invalidate global coordinate mapping.
+            config.sourceRect = CGRect(origin: .zero, size: coordinateFrame.size)
+            config.destinationRect = CGRect(x: 0, y: 0, width: width, height: height)
+            config.preservesAspectRatio = false
+        }
+        return config
     }
 
     /// Resolve the requested target into an `SCContentFilter` and the pixel
