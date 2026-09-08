@@ -109,8 +109,9 @@ tokio = { version = "=1.53.1", features = [
 tokio-util = { version = "=0.7.19", features = ["io-util"] }
 # Use rustls for WebSockets; the loopback chat socket itself is plain ws://.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
-# Share reqwest with tauri-plugin-updater. Rustls uses the platform trust store;
-# query and form encoding require explicit features in reqwest 0.13.
+# Share reqwest with tauri-plugin-updater. In reqwest 0.13, `rustls` enables
+# rustls-platform-verifier; ClientBuilder installs it when no custom roots are set.
+# Query and form encoding require explicit features in reqwest 0.13.
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "multipart", "stream", "query", "form", "rustls"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }

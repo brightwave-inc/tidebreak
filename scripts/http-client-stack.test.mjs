@@ -9,6 +9,7 @@ const packages = lockfile
   .map((entry) => ({
     name: entry.match(/^name = "([^"]+)"$/m)?.[1],
     version: entry.match(/^version = "([^"]+)"$/m)?.[1],
+    dependencies: entry.match(/^dependencies = \[([\s\S]*?)^\]/m)?.[1] ?? "",
   }));
 
 // The updater and workspace clients must share one HTTP stack. A second
@@ -23,3 +24,11 @@ for (const name of ["reqwest", "hyper", "hyper-rustls"]) {
     );
   });
 }
+
+// reqwest 0.13's rustls feature supplies the platform certificate verifier.
+// Keep that verifier in the resolved client graph when changing HTTP features.
+test("reqwest retains platform certificate verification", () => {
+  const reqwest = packages.find((entry) => entry.name === "reqwest");
+  assert.ok(reqwest);
+  assert.match(reqwest.dependencies, /^ "rustls-platform-verifier",$/m);
+});
