@@ -12,10 +12,10 @@ use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{ApprovalId, HarnessKind, TurnId};
+use super::{ApprovalId, ApprovalKind, HarnessKind, TurnId};
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
-use crate::preview::{ToolActionPreview, ToolResultPreview};
+use crate::preview::{ToolActionPreview, ToolResultPreview, MAX_ACTION_FIELD_CHARS};
 use crate::provider::{RefusalOutcome, StopReason};
 use crate::tool::{ApprovalClass, ToolOutput};
 
@@ -320,6 +320,10 @@ pub enum InternalApprovalRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         preview: Option<ToolActionPreview>,
+        /// True when the preview was cut to the action-field bound so a
+        /// channel adapter can fall back to a web link for the rest.
+        #[serde(default, skip_serializing_if = "is_false")]
+        preview_truncated: bool,
     },
     /// A questions card parked the turn; the questions ride the row's kind.
     Questions {
@@ -331,6 +335,167 @@ pub enum InternalApprovalRequest {
         /// Turn that resumes after the decision commits.
         turn_id: TurnId,
     },
+}
+
+impl InternalApprovalRequest {
+    /// Card facts a channel can render without loading the approval row.
+    #[must_use]
+    pub fn from_kind(kind: &ApprovalKind, turn_id: TurnId, auto_judging: bool) -> Self {
+        match kind {
+            ApprovalKind::ToolUse {
+                preview,
+                offered_grants,
+            } => {
+                let (preview, preview_truncated) = bound_action_preview(preview.clone());
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: tool_name_for_preview(&preview),
+                    class: class_for_preview(&preview),
+                    approval: ToolApprovalKind::for_tool_name(&tool_name_for_preview(&preview)),
+                    grant_scopes: offered_grants.clone(),
+                    preview: Some(preview),
+                    preview_truncated,
+                }
+            }
+            ApprovalKind::Questions { .. } => Self::Questions { turn_id },
+            ApprovalKind::Plan { .. } => Self::Plan { turn_id },
+            ApprovalKind::Command { cmd, cwd } => {
+                let (command, preview_truncated) = bound_preview_text(cmd);
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "exec".into(),
+                    class: ApprovalClass::Workspace,
+                    approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::Exec {
+                        command,
+                        args: Vec::new(),
+                        cwd: cwd.clone().unwrap_or_else(|| ".".into()),
+                        files: Vec::new(),
+                        summary: None,
+                    }),
+                    preview_truncated,
+                }
+            }
+            ApprovalKind::FileWrite { paths } => {
+                let path = paths.first().cloned().unwrap_or_default();
+                let (path, preview_truncated) = bound_preview_text(&path);
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "write_file".into(),
+                    class: ApprovalClass::Workspace,
+                    approval: ToolApprovalKind::WorkspaceMayModifyFiles,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::WriteFile {
+                        path,
+                        summary: None,
+                    }),
+                    preview_truncated,
+                }
+            }
+            ApprovalKind::Network { summary } | ApprovalKind::Other { summary } => {
+                let (summary, preview_truncated) = bound_preview_text(summary);
+                Self::ToolUse {
+                    auto_judging,
+                    tool_name: "other".into(),
+                    class: ApprovalClass::Sensitive,
+                    approval: ToolApprovalKind::Unsupported,
+                    grant_scopes: Vec::new(),
+                    preview: Some(ToolActionPreview::WriteFile {
+                        path: summary,
+                        summary: None,
+                    }),
+                    preview_truncated,
+                }
+            }
+        }
+    }
+}
+
+fn bound_preview_text(text: &str) -> (String, bool) {
+    if text.chars().count() > MAX_ACTION_FIELD_CHARS {
+        (text.chars().take(MAX_ACTION_FIELD_CHARS).collect(), true)
+    } else {
+        (text.to_owned(), false)
+    }
+}
+
+fn bound_action_preview(preview: ToolActionPreview) -> (ToolActionPreview, bool) {
+    match preview {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+            summary,
+        } => {
+            let (command, truncated) = bound_preview_text(&command);
+            (
+                ToolActionPreview::Exec {
+                    command,
+                    args,
+                    cwd,
+                    files,
+                    summary,
+                },
+                truncated,
+            )
+        }
+        ToolActionPreview::Search { query, summary } => {
+            let (query, truncated) = bound_preview_text(&query);
+            (ToolActionPreview::Search { query, summary }, truncated)
+        }
+        ToolActionPreview::WebSearch {
+            query,
+            domains,
+            start_published_at,
+            end_published_at,
+            summary,
+        } => {
+            let (query, truncated) = bound_preview_text(&query);
+            (
+                ToolActionPreview::WebSearch {
+                    query,
+                    domains,
+                    start_published_at,
+                    end_published_at,
+                    summary,
+                },
+                truncated,
+            )
+        }
+        ToolActionPreview::WebExtract { url, summary } => {
+            let (url, truncated) = bound_preview_text(&url);
+            (ToolActionPreview::WebExtract { url, summary }, truncated)
+        }
+        ToolActionPreview::WriteFile { path, summary } => {
+            let (path, truncated) = bound_preview_text(&path);
+            (ToolActionPreview::WriteFile { path, summary }, truncated)
+        }
+        other => (other, false),
+    }
+}
+
+fn tool_name_for_preview(preview: &ToolActionPreview) -> String {
+    match preview {
+        ToolActionPreview::Exec { .. } => "exec".into(),
+        ToolActionPreview::Search { .. } => "search".into(),
+        ToolActionPreview::WebSearch { .. } => "web_search".into(),
+        ToolActionPreview::WebExtract { .. } => "web_extract".into(),
+        ToolActionPreview::WriteFile { .. } => "write_file".into(),
+        ToolActionPreview::DelegateAgent { .. } => crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+    }
+}
+
+fn class_for_preview(preview: &ToolActionPreview) -> ApprovalClass {
+    match preview {
+        ToolActionPreview::Exec { .. }
+        | ToolActionPreview::WriteFile { .. }
+        | ToolActionPreview::DelegateAgent { .. } => ApprovalClass::Workspace,
+        ToolActionPreview::Search { .. }
+        | ToolActionPreview::WebSearch { .. }
+        | ToolActionPreview::WebExtract { .. } => ApprovalClass::Sensitive,
+    }
 }
 
 /// One event in an external agent-engine session's journal.
@@ -451,8 +616,9 @@ pub enum Event {
     ApprovalRequested {
         /// Hint id; the row is the source of truth.
         approval_id: ApprovalId,
-        /// What the card asks, for the chat surface's replay. Internal
-        /// engine; absent on every row an external adapter writes.
+        /// What the card asks: tool name, class, consent kind, grant ladder,
+        /// and a size-capped preview. Written for machine sessions; absent
+        /// on sandbox sessions, which never park on these cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         request: Option<InternalApprovalRequest>,

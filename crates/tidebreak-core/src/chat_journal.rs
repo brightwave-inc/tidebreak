@@ -77,6 +77,7 @@ pub fn journal_row(event: &AgentEvent) -> Event {
                 approval: *kind,
                 grant_scopes: grant_scopes.clone(),
                 preview: preview.clone(),
+                preview_truncated: false,
             }),
         },
         AgentEvent::ApprovalDecided { call_id, approved } => Event::ApprovalResolved {
@@ -187,6 +188,7 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
                 approval,
                 grant_scopes,
                 preview,
+                preview_truncated: _,
             } => AgentEvent::ApprovalRequired {
                 auto_judging,
                 call_id: CallId(approval_id.0),

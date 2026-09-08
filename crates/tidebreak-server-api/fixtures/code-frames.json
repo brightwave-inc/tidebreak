@@ -1190,6 +1190,31 @@
   },
   {
     "kind": "event_frame",
+    "name": "event: approval_requested (truncated preview)",
+    "value": {
+      "event": {
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "request": {
+          "approval": "exec_may_run_networked_command",
+          "class": "workspace",
+          "kind": "tool_use",
+          "preview": {
+            "args": [],
+            "command": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "cwd": ".",
+            "files": [],
+            "tool": "exec"
+          },
+          "preview_truncated": true,
+          "tool_name": "exec"
+        },
+        "type": "approval_requested"
+      },
+      "seq": 61
+    }
+  },
+  {
+    "kind": "event_frame",
     "name": "event: task_plan_updated (internal engine)",
     "value": {
       "event": {
