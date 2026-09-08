@@ -819,12 +819,12 @@ async fn execute_receipt(
         return publish_resolution(state, &receipt, &resolution).await;
     }
     // An interrupted dispatch is never re-fired: a control op may already have
-    // acted, and a capture already disclosed the screen. Close it out and let
-    // the agent retry deliberately.
+    // acted, and a capture already disclosed the screen. Close it out and ask
+    // the agent to inspect the target before another action.
     if receipt.phase == FolderOperationPhase::DispatchStarted {
         receipt.resolution = Some(unavailable(
             "computer_use_interrupted",
-            "The computer-use operation could not be safely resumed after an interruption. Please try again.",
+            "The computer-use operation was interrupted and may already have run. Inspect the target before acting again; do not repeat the action automatically.",
         ));
         state
             .receipts
@@ -933,7 +933,7 @@ async fn recover_after_claim_conflict(
     // exact token through its expired-claim path once the lease lapses.
     receipt.resolution = Some(unavailable(
         "computer_use_interrupted",
-        "The computer-use operation could not be safely resumed after an interruption. Please try again.",
+        "The computer-use operation was interrupted and may already have run. Inspect the target before acting again; do not repeat the action automatically.",
     ));
     state
         .receipts
@@ -1568,7 +1568,7 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
         // not surface broker internals to the model.
         return BrokerFailure::Resolution(unavailable(
             "computer_unavailable",
-            "Computer use is not available right now. Try again.",
+            "The host connection ended before the operation was confirmed. Inspect the target before acting again; do not repeat the action automatically.",
         ));
     };
     match code {
@@ -1606,7 +1606,7 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
         )),
         _ => BrokerFailure::Resolution(unavailable(
             "operation_failed",
-            "The computer-use operation failed on the host. Retry once; if it keeps failing, tell the user.",
+            "The host could not confirm the computer-use operation. Inspect the target before acting again; do not repeat the action automatically.",
         )),
     }
 }
@@ -2114,7 +2114,7 @@ fn map_control_error(error: &BrokerClientError) -> StoredResolution {
         ),
         _ => unavailable(
             "computer_unavailable",
-            "Computer use is not available right now. Try again.",
+            "The host connection ended before the operation was confirmed. Inspect the target before acting again; do not repeat the action automatically.",
         ),
     }
 }

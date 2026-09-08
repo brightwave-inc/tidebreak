@@ -569,8 +569,11 @@ fn map_output(
             error_code: None,
             images,
         },
-        SessionNativeResolution::Failed { result, error_code } => {
-            let message = result
+        SessionNativeResolution::Failed {
+            mut result,
+            error_code,
+        } => {
+            let mut message = result
                 .get("message")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("The computer-use operation was not performed.")
@@ -578,6 +581,10 @@ fn map_output(
             let outcome = if output.acts_on_host && error_code == "computer_unavailable" {
                 // The broker transport failed after an acting dispatch may
                 // have left this process; whether input landed is unknowable.
+                message = "The host connection ended before the operation was confirmed. Inspect the target before acting again; do not repeat the action automatically.".into();
+                if let Some(data) = result.as_object_mut() {
+                    data.insert("message".into(), serde_json::Value::String(message.clone()));
+                }
                 ComputerUseOutcome::Unknown
             } else {
                 ComputerUseOutcome::Rejected
@@ -894,6 +901,32 @@ mod tests {
         let _ = task.await.unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         assert!(!computer_use.owns_dispatch(session));
+    }
+
+    #[test]
+    fn an_unconfirmed_action_requires_inspection_before_another_action() {
+        let one = call(
+            "computer_click",
+            serde_json::json!({"app_id": "com.example"}),
+        );
+        let result = map_output(
+            &one,
+            SessionNativeOutput {
+                resolution: SessionNativeResolution::Failed {
+                    result: serde_json::json!({"message": "Try again."}),
+                    error_code: "computer_unavailable".into(),
+                },
+                images: vec![],
+                acts_on_host: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+        assert!(result
+            .text
+            .contains("Inspect the target before acting again"));
+        assert!(!result.text.contains("Try again"));
+        assert_eq!(result.data["message"], result.text);
     }
 
     #[test]
