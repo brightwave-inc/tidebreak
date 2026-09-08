@@ -266,7 +266,9 @@ impl BrowserTokenRegistry {
 
         Ok(
             BrowserChannelSpec::new(capfile_path, bridge_command.to_path_buf())
-                .with_semantic_actions(capabilities.semantic_actions),
+                .with_semantic_actions(capabilities.semantic_actions)
+                .with_lifecycle(capabilities.lifecycle)
+                .with_developer_diagnostics(capabilities.developer_diagnostics),
         )
     }
 
@@ -699,6 +701,8 @@ mod tests {
         assert_eq!(value["lifecycle"], false);
         assert_eq!(value["developer_diagnostics"], false);
         assert!(!spec.semantic_actions);
+        assert!(!spec.lifecycle);
+        assert!(!spec.developer_diagnostics);
     }
 
     #[test]
@@ -713,6 +717,39 @@ mod tests {
 
         assert_eq!(value["semantic_actions"], true);
         assert!(spec.semantic_actions);
+    }
+
+    #[test]
+    fn issued_spec_and_capfile_retain_each_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        for semantic_actions in [false, true] {
+            for lifecycle in [false, true] {
+                for developer_diagnostics in [false, true] {
+                    let capabilities = BrowserChannelCapabilities {
+                        semantic_actions,
+                        lifecycle,
+                        developer_diagnostics,
+                    };
+                    let spec = reg
+                        .issue_with_capabilities(
+                            subject("capabilities"),
+                            &test_bridge_command(),
+                            capabilities,
+                        )
+                        .unwrap();
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&spec.capability_file).unwrap())
+                            .unwrap();
+                    assert_eq!(spec.semantic_actions, semantic_actions);
+                    assert_eq!(spec.lifecycle, lifecycle);
+                    assert_eq!(spec.developer_diagnostics, developer_diagnostics);
+                    assert_eq!(value["semantic_actions"], spec.semantic_actions);
+                    assert_eq!(value["lifecycle"], spec.lifecycle);
+                    assert_eq!(value["developer_diagnostics"], spec.developer_diagnostics);
+                }
+            }
+        }
     }
 
     #[test]

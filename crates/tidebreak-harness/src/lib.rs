@@ -604,11 +604,15 @@ pub struct BrowserChannelSpec {
     /// sidecar). The server validates absoluteness; the desktop sibling
     /// resolver validates existence and executability.
     pub bridge_command: std::path::PathBuf,
-    /// Whether the native runtime can synthesize trusted semantic actions.
+    /// Whether the native runtime supports semantic actions.
     ///
     /// Adapters use this only to advertise an action verb. The browser
     /// runtime still authorizes every action at dispatch time.
     pub semantic_actions: bool,
+    /// Whether the runtime supports opening, showing, and closing agent tabs.
+    pub lifecycle: bool,
+    /// Whether the runtime exposes page errors and console diagnostics.
+    pub developer_diagnostics: bool,
 }
 
 impl BrowserChannelSpec {
@@ -632,6 +636,8 @@ impl BrowserChannelSpec {
             capability_file,
             bridge_command,
             semantic_actions: false,
+            lifecycle: false,
+            developer_diagnostics: false,
         }
     }
 
@@ -639,6 +645,20 @@ impl BrowserChannelSpec {
     #[must_use]
     pub fn with_semantic_actions(mut self, semantic_actions: bool) -> Self {
         self.semantic_actions = semantic_actions;
+        self
+    }
+
+    /// Advertise tab lifecycle commands when the runtime supports them.
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: bool) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
+    /// Advertise page diagnostics when the runtime supports them.
+    #[must_use]
+    pub fn with_developer_diagnostics(mut self, developer_diagnostics: bool) -> Self {
+        self.developer_diagnostics = developer_diagnostics;
         self
     }
 
