@@ -882,6 +882,9 @@ async fn a_bot_session_names_the_apps_login_on_delivery() {
             tidebreak_core::HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings {
                 acts_as: Some(tidebreak_core::ActsAs::Bot),
+                // The fixture adapter honors no structured approvals, so the
+                // session takes the one mode it can run in.
+                permission_mode: tidebreak_core::PermissionMode::Plan,
                 ..Default::default()
             },
         )

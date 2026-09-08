@@ -527,6 +527,7 @@ impl CodeRuntime {
                         }
                         crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
                             status.pushes_as = Some(bot_login.unwrap_or(identity.app_name));
+                            status.pushes_as_self = Some(false);
                         }
                     }
                 }
