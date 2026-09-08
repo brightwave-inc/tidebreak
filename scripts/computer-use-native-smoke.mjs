@@ -11,7 +11,6 @@ const exec = promisify(execFile);
 const APP_ID = "dev.tidebreak.ComputerUseFixture";
 const WINDOW_TITLE = "Computer Use Fixture";
 const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
-const MAX_READ_RESULT_BYTES = 16 * 1024 * 1024;
 
 export const REQUIRED_IDENTIFIERS = [
   "fixture-text-input",
@@ -27,7 +26,6 @@ export const REQUIRED_IDENTIFIERS = [
   "fixture-reset-button",
 ];
 
-function settle(value) { return value; }
 
 function unwrapResult(result, name) {
   if (!result || typeof result !== "object") {
