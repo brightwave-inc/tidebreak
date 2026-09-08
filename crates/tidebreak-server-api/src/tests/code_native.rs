@@ -35,6 +35,27 @@ struct FakeNativeRuntime {
     revoked: Mutex<Vec<NativeRuntimeScope>>,
     unavailable: bool,
     unknown_outcome: bool,
+    blocked: Option<Arc<BlockedOperation>>,
+}
+
+#[derive(Default)]
+struct BlockedOperation {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+    returned: std::sync::atomic::AtomicBool,
+    owner_released: std::sync::atomic::AtomicBool,
+}
+
+struct InFlightOwner(Arc<BlockedOperation>);
+
+impl Drop for InFlightOwner {
+    fn drop(&mut self) {
+        self.0
+            .owner_released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.released.notify_one();
+    }
 }
 
 impl FakeNativeRuntime {
@@ -104,6 +125,14 @@ impl NativeRuntime for FakeNativeRuntime {
             .lock()
             .unwrap()
             .push((scope.clone(), call.clone()));
+        let _owner = if let Some(blocked) = &self.blocked {
+            let owner = InFlightOwner(blocked.clone());
+            blocked.entered.notify_one();
+            blocked.release.notified().await;
+            Some(owner)
+        } else {
+            None
+        };
         if self.unknown_outcome {
             let unknown = ComputerUseResult {
                 request_id: call.request_id,
@@ -124,6 +153,11 @@ impl NativeRuntime for FakeNativeRuntime {
             .lock()
             .unwrap()
             .insert(call.request_id, (call.clone(), result.clone()));
+        if let Some(blocked) = &self.blocked {
+            blocked
+                .returned
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(result)
     }
 
@@ -309,6 +343,68 @@ async fn post(
         r = r.bearer_auth(t);
     }
     r.send().await.unwrap()
+}
+
+#[tokio::test]
+async fn client_disconnect_keeps_native_execution_alive_until_its_result_is_stored() {
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncWriteExt;
+
+    let blocked = Arc::new(BlockedOperation::default());
+    let runtime = Arc::new(FakeNativeRuntime {
+        blocked: Some(blocked.clone()),
+        ..FakeNativeRuntime::default()
+    });
+    let a = native_app(Some(runtime.clone())).await;
+    let (workspace, session) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
+    let token = mint_token(&a.code, workspace, session);
+    let request_id = Uuid::new_v4();
+    let call = wait_call(request_id);
+    let body = serde_json::to_string(&call).unwrap();
+    let mut connection = tokio::net::TcpStream::connect(a.addr).await.unwrap();
+    let request = format!(
+        "POST /code/native/execute HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len(),
+    );
+    connection.write_all(request.as_bytes()).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        blocked.entered.notified(),
+    )
+    .await
+    .unwrap();
+    // Close the actual HTTP connection after the runtime takes ownership.
+    // Its pending host operation cannot be recalled by dropping this socket.
+    connection.shutdown().await.unwrap();
+    drop(connection);
+    let released_early = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        blocked.released.notified(),
+    )
+    .await
+    .is_ok();
+    assert!(
+        !released_early,
+        "HTTP disconnect dropped the native runtime future before the host operation completed"
+    );
+    assert!(!blocked.owner_released.load(Ordering::SeqCst));
+    blocked.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        blocked.released.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(blocked.returned.load(Ordering::SeqCst));
+    let result = post(a.addr, "result", Some(&token), call.clone()).await;
+    assert_eq!(result.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        result.json::<serde_json::Value>().await.unwrap()["outcome"],
+        "completed"
+    );
+    let repeated = post(a.addr, "execute", Some(&token), call).await;
+    assert_eq!(repeated.status(), reqwest::StatusCode::OK);
+    assert_eq!(runtime.executions().len(), 1);
 }
 
 #[tokio::test]

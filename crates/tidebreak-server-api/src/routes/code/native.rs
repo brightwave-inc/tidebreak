@@ -40,17 +40,29 @@ pub async fn native_execute(
     require_well_formed(&call)?;
     let runtime = attached_runtime(&state)?;
     let scope = NativeRuntimeScope::from(subject);
-    match runtime.execute(&scope, &call).await {
-        Ok(result) => Ok(Json(result)),
-        Err(NativeRuntimeError::Recovered) => match runtime.result_for_call(&scope, &call).await {
-            Ok(Some(stored)) => Ok(Json(stored)),
-            Ok(None) => Err(ServerError::internal(
-                "the native runtime reported a recovered result it cannot produce",
-            )),
+    // The host owns execution after validation. An HTTP disconnect drops the
+    // handler, but cannot release foreground ownership while a native helper
+    // or Chrome command still runs. The runtime retains the final result for
+    // /code/native/result; session Stop and revocation still cancel it.
+    tokio::spawn(async move {
+        match runtime.execute(&scope, &call).await {
+            Ok(result) => Ok(Json(result)),
+            Err(NativeRuntimeError::Recovered) => {
+                match runtime.result_for_call(&scope, &call).await {
+                    Ok(Some(stored)) => Ok(Json(stored)),
+                    Ok(None) => Err(ServerError::internal(
+                        "the native runtime reported a recovered result it cannot produce",
+                    )),
+                    Err(error) => Err(map_runtime_error(error)),
+                }
+            }
             Err(error) => Err(map_runtime_error(error)),
-        },
-        Err(error) => Err(map_runtime_error(error)),
-    }
+        }
+    })
+    .await
+    .map_err(|_| {
+        ServerError::internal("the native operation task ended before returning a result")
+    })?
 }
 
 /// Fetch the stored result for an exact prior call, without re-executing.
