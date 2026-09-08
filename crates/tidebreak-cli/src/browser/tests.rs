@@ -2060,7 +2060,7 @@ fn parse_browser_act_requires_an_explicit_foreground_mode() {
         "--execution-mode",
     ];
     let parse = |mode: &str| {
-        parse_browser_args(
+        parse_browser(
             flags
                 .iter()
                 .chain(std::iter::once(&mode))
