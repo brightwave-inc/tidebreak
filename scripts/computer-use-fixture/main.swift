@@ -103,6 +103,9 @@ final class FixtureState {
     private var delayedStatus = "idle"
     private var secondWindowOpen = false
     private var lastDragTarget = "none"
+    private var scrollOffset = 0.0
+    private var windowWidth = 920.0
+    private var windowHeight = 760.0
 
     init(store: EventStore, runID: String) {
         self.store = store
@@ -120,10 +123,14 @@ final class FixtureState {
     func isSecondWindowOpen() -> Bool { secondWindowOpen }
 
     func snapshot() {
+        snapshot(runID: runID)
+    }
+
+    private func snapshot(runID overriddenRunID: String) {
         store.write("state_snapshot", payload: [
             "app_id": fixtureBundleID,
             "title": fixtureWindowTitle,
-            "run_id": runID,
+            "run_id": overriddenRunID,
             "submission_count": submissionCounter,
             "dropdown": dropdownSelection,
             "checkbox": checkboxChecked,
@@ -132,6 +139,8 @@ final class FixtureState {
             "drag_target": lastDragTarget,
             "delayed_status": delayedStatus,
             "second_window_open": secondWindowOpen,
+            "scroll_offset": Int(scrollOffset),
+            "window_size": ["width": Int(windowWidth), "height": Int(windowHeight)],
         ])
     }
 
@@ -184,12 +193,15 @@ final class FixtureState {
     }
 
     func noteWindowResized(width: Double, height: Double) {
+        windowWidth = width
+        windowHeight = height
         store.write("window_resized", payload: ["width": Int(width), "height": Int(height)])
         snapshot()
     }
 
     func noteScroll(contentY: Double) {
-        store.write("scroll", payload: ["content_y": Int(contentY)])
+        scrollOffset = max(0, contentY)
+        store.write("scroll", payload: ["content_y": Int(scrollOffset)])
         snapshot()
     }
 
@@ -200,6 +212,14 @@ final class FixtureState {
 
     func markResetRequested(newRunID: String) {
         store.write("reset_requested", payload: ["new_run_id": newRunID])
+    }
+
+    /// The old run's final snapshot describes the freshly reset run so the
+    /// accepting runner can observe the transition from the directory it
+    /// already owns. Events after this point belong to the new run.
+    func markResetCompleted(newRunID: String) {
+        store.write("reset_completed", payload: ["new_run_id": newRunID])
+        snapshot(runID: newRunID)
     }
 }
 
@@ -312,6 +332,7 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
     private var secondWindowController: NSWindowController?
     private var positionedDragItem = false
     private var lastScrollY: CGFloat = 0
+    private var delayedWorkItem: DispatchWorkItem?
 
     init(fixtureDirectory: URL, state: FixtureState) {
         self.fixtureDirectory = fixtureDirectory
@@ -603,11 +624,14 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
 
     @objc private func delayedStatusPressed() {
         delayedStatusLabel.stringValue = "Delayed status: pending"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        delayedWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.state.setDelayedStatus("completed")
             self.delayedStatusLabel.stringValue = "Delayed status: completed"
         }
+        delayedWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: item)
     }
 
     @objc private func secondWindowPressed() {
@@ -646,12 +670,15 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
     @objc private func resetPressed() {
         let freshRunID = UUID().uuidString
         state.markResetRequested(newRunID: freshRunID)
+        delayedWorkItem?.cancel()
+        delayedWorkItem = nil
         if let secondWindowController {
             secondWindowController.close()
             self.secondWindowController = nil
             secondWindowButton.title = "Open second window"
         }
         do {
+            state.markResetCompleted(newRunID: freshRunID)
             let store = try EventStore(fixtureDirectory: fixtureDirectory, runID: freshRunID)
             let newState = FixtureState(store: store, runID: freshRunID)
             state = newState
