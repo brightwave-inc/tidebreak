@@ -75,7 +75,6 @@ pub struct CodexSession {
     interrupts_this_turn: AtomicU32,
     control_state: Arc<Mutex<ControlState>>,
     control_state_changed: Arc<Notify>,
-    pending_approvals: Mutex<HashMap<String, Value>>,
 }
 
 struct StdoutReader {
@@ -214,7 +213,6 @@ impl CodexSession {
                 interrupt: None,
             })),
             control_state_changed: Arc::new(Notify::new()),
-            pending_approvals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1223,7 +1221,24 @@ impl CodexSession {
                 *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
         }
-        let events = self.parser.lock().expect("codex parser").push_line(line);
+        let (events, rejected_elicitations) = {
+            let mut parser = self.parser.lock().expect("codex parser");
+            let events = parser.push_line(line);
+            (events, parser.take_rejected_elicitations())
+        };
+        for reply in rejected_elicitations {
+            if let Err(error) = self.write_message(&reply).await {
+                self.spec
+                    .sink
+                    .emit(HarnessEvent::HarnessNotice {
+                        level: tidebreak_core::HarnessNoticeLevel::Error,
+                        message: format!(
+                            "Could not decline the unsupported Codex MCP request: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
         let terminal = events.iter().any(|event| {
             matches!(
                 event,
@@ -1256,18 +1271,7 @@ impl CodexSession {
                 *self.resume_ref.lock().expect("codex resume") = Some(resume.clone());
             }
             if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
-                if let Some(id) = self
-                    .parser
-                    .lock()
-                    .expect("codex parser")
-                    .pending_approval_rpc_id(&harness_ref.call_id)
-                {
-                    self.pending_approvals
-                        .lock()
-                        .expect("codex approvals")
-                        .insert(harness_ref.call_id.clone(), id.clone());
-                }
-                if self.spec.permission_mode == PermissionMode::Allow {
+                if self.permission_mode() == PermissionMode::Allow {
                     // Allow is the engine's unsupervised posture. A request
                     // that still arrives must not park a card.
                     let _ = self
@@ -1378,39 +1382,21 @@ impl HarnessSession for CodexSession {
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        let rpc_id = self
-            .pending_approvals
-            .lock()
-            .expect("codex approvals")
-            .remove(&approval.call_id)
-            .or_else(|| {
-                self.parser
-                    .lock()
-                    .expect("codex parser")
-                    .take_pending_approval(&approval.call_id)
-            })
-            .ok_or_else(|| {
+        let response = {
+            let mut parser = self.parser.lock().expect("codex parser");
+            let pending = parser.pending_approval(&approval.call_id).ok_or_else(|| {
                 HarnessError::Other(format!(
                     "no parked approval with call_id {}",
-                    approval.call_id
+                    approval.call_id,
                 ))
             })?;
-        // Captured channel carries accept/decline only — no rejection string,
-        // and none of the richer decision variants (caps say so; this is the
-        // backstop).
-        let token = match decision {
-            ApprovalDecision::Approve => "accept",
-            ApprovalDecision::Deny { .. } => "decline",
-            ApprovalDecision::ApproveWithGrant { .. }
-            | ApprovalDecision::Answers { .. }
-            | ApprovalDecision::PlanDecision { .. } => {
-                return Err(HarnessError::DecisionUnsupported(
-                    "the codex approval channel takes accept or decline".into(),
-                ));
-            }
+            // Validate before consuming the request. An unsupported decision
+            // must leave the tool available for an accept or decline reply.
+            let response = pending.response(&decision)?;
+            parser.take_pending_approval(&approval.call_id);
+            response
         };
-        self.write_message(&json!({ "id": rpc_id, "result": { "decision": token } }))
-            .await?;
+        self.write_message(&response).await?;
         self.spec
             .sink
             .emit(HarnessEvent::ApprovalResolved {
