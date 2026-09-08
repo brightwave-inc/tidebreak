@@ -176,14 +176,6 @@ pub(crate) struct BrowserUploadFile {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawScreenshotPrivacyScan {
-    sensitive_fields: usize,
-    uninspectable_regions: usize,
-    changed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RawTextProbe {
     contains: bool,
     uninspectable_regions: usize,
@@ -854,10 +846,7 @@ pub(crate) async fn browser_screenshot(
         .as_ref()
         .is_some_and(|engine| engine.capabilities.screenshot)
     {
-        return Err(
-            "browser screenshot requires human takeover because this engine cannot prove closed-shadow privacy"
-                .to_owned(),
-        );
+        return Err("browser screenshots are not available on this platform yet".to_owned());
     }
     let origin = host_snapshot
         .url
@@ -873,7 +862,9 @@ pub(crate) async fn browser_screenshot(
             capability_id,
             &browser_id,
             &origin,
-            BrowserGrantCapability::BrowserObserveOrigin,
+            // Decision 93: capture requires the grant taken under the
+            // disclosure that visible pixels reach the selected model.
+            BrowserGrantCapability::BrowserCaptureVisibleTab,
             "screenshot",
             None,
             BrowserDispatchEffect::Observe,
@@ -929,37 +920,12 @@ async fn capture_screenshot(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    let privacy_watch = format!("__tidebreak_screenshot_privacy_{}", Uuid::new_v4().simple());
-    let initial_privacy: RawScreenshotPrivacyScan =
-        evaluate_json(&webview, &screenshot_privacy_script(&privacy_watch, false)?).await?;
-    if initial_privacy.sensitive_fields > 0 || initial_privacy.uninspectable_regions > 0 {
-        let _ = evaluate_json::<RawScreenshotPrivacyScan>(
-            &webview,
-            &screenshot_privacy_script(&privacy_watch, true)?,
-        )
-        .await;
-        return Err(screenshot_human_takeover_message(&initial_privacy));
-    }
-
-    let image_result =
-        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await;
-    let final_privacy: RawScreenshotPrivacyScan = evaluate_json(
-        &webview,
-        &screenshot_privacy_script(&privacy_watch, true)?,
-    )
-    .await
-    .map_err(|error| {
-        format!(
-            "browser screenshot requires human takeover because the privacy scan could not be completed: {error}"
-        )
-    })?;
-    if final_privacy.sensitive_fields > 0
-        || final_privacy.uninspectable_regions > 0
-        || final_privacy.changed
-    {
-        return Err(screenshot_human_takeover_message(&final_privacy));
-    }
-    let image_base64 = image_result?;
+    // Decision 93: the capture grant's disclosure covers everything visible
+    // in the tab, so capture proceeds without a redaction pre-scan. The
+    // document-epoch fence above and the atomic completion below still refuse
+    // a page that changed underneath the snapshot.
+    let image_base64 =
+        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
 
     // One atomic completion: recheck capability, workspace, visibility,
     // halt, controller, grant, instance, document epoch, and stored
@@ -983,17 +949,6 @@ async fn capture_screenshot(
         image_base64,
         mime_type: "image/png".to_owned(),
     })
-}
-
-fn screenshot_human_takeover_message(scan: &RawScreenshotPrivacyScan) -> String {
-    if scan.uninspectable_regions > 0 {
-        return "browser screenshot requires human takeover because cross-origin or closed-shadow content cannot be checked for sensitive fields".to_owned();
-    }
-    if scan.sensitive_fields > 0 {
-        return "browser screenshot requires human takeover because the page contains a password, file, or verification-code field".to_owned();
-    }
-    "browser screenshot requires human takeover because the page changed during privacy-safe capture"
-        .to_owned()
 }
 
 #[cfg(target_os = "macos")]
@@ -1353,12 +1308,17 @@ fn native_action_requires_confirmation(
     }
     match action {
         BrowserAction::Select { .. } => true,
-        BrowserAction::Click | BrowserAction::Check { .. } | BrowserAction::Press { .. } => {
-            target_consequential
-        }
+        BrowserAction::Click { .. }
+        | BrowserAction::Check { .. }
+        | BrowserAction::Press { .. }
+        | BrowserAction::KeyChord { .. }
+        | BrowserAction::RightClick { .. }
+        | BrowserAction::DoubleClick { .. }
+        | BrowserAction::Drag { .. } => target_consequential,
         BrowserAction::Focus
-        | BrowserAction::Hover
+        | BrowserAction::Hover { .. }
         | BrowserAction::Fill { .. }
+        | BrowserAction::Scroll { .. }
         | BrowserAction::ScrollIntoView => false,
     }
 }
@@ -1942,11 +1902,16 @@ fn native_pending_event_kind(
             | NativeActionDispatchPhase::FillInsert => NativePendingEventKind::Presentation,
             _ => NativePendingEventKind::None,
         },
-        tidebreak_core::BrowserAction::Click
+        tidebreak_core::BrowserAction::Click { .. }
         | tidebreak_core::BrowserAction::Check { .. }
-        | tidebreak_core::BrowserAction::Hover
+        | tidebreak_core::BrowserAction::Hover { .. }
+        | tidebreak_core::BrowserAction::RightClick { .. }
+        | tidebreak_core::BrowserAction::DoubleClick { .. }
+        | tidebreak_core::BrowserAction::Drag { .. }
+        | tidebreak_core::BrowserAction::Scroll { .. }
         | tidebreak_core::BrowserAction::ScrollIntoView => NativePendingEventKind::Mouse,
         tidebreak_core::BrowserAction::Press { .. }
+        | tidebreak_core::BrowserAction::KeyChord { .. }
         | tidebreak_core::BrowserAction::Select { .. } => NativePendingEventKind::Presentation,
         tidebreak_core::BrowserAction::Focus => match phase {
             NativeActionDispatchPhase::Initial => NativePendingEventKind::Presentation,
@@ -2167,7 +2132,9 @@ async fn finish_native_action(
     let resolution_script = native_action_resolution_script(target, &arguments.action)
         .map_err(NativeInputFailure::Engine)?;
     match &arguments.action {
-        tidebreak_core::BrowserAction::Focus | tidebreak_core::BrowserAction::Press { .. } => {
+        tidebreak_core::BrowserAction::Focus
+        | tidebreak_core::BrowserAction::Press { .. }
+        | tidebreak_core::BrowserAction::KeyChord { .. } => {
             let phase = if matches!(arguments.action, tidebreak_core::BrowserAction::Focus) {
                 NativeActionDispatchPhase::FocusVerify
             } else {
@@ -2485,15 +2452,40 @@ unsafe fn dispatch_native_action(
         .window()
         .ok_or_else(|| NativeInputFailure::Engine("browser window is not available".to_owned()))?;
     ensure_active_browser_window(&window)?;
-    let window_point =
-        native_window_point(native_view, resolution).map_err(NativeInputFailure::Engine)?;
+    let pointer_offset = match action {
+        tidebreak_core::BrowserAction::Click { at }
+        | tidebreak_core::BrowserAction::Hover { at }
+        | tidebreak_core::BrowserAction::RightClick { at }
+        | tidebreak_core::BrowserAction::DoubleClick { at } => *at,
+        tidebreak_core::BrowserAction::Drag { from, .. } => *from,
+        _ => None,
+    };
+    let window_point = native_window_point(native_view, resolution, pointer_offset)
+        .map_err(NativeInputFailure::Engine)?;
     let screen_point = window.convertPointToScreen(window_point);
 
     match action {
-        tidebreak_core::BrowserAction::Click | tidebreak_core::BrowserAction::Check { .. } => {
+        tidebreak_core::BrowserAction::Click { .. }
+        | tidebreak_core::BrowserAction::Check { .. } => {
             send_native_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
         }
-        tidebreak_core::BrowserAction::Hover => {
+        tidebreak_core::BrowserAction::RightClick { .. } => {
+            send_native_right_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::DoubleClick { .. } => {
+            send_native_double_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Drag { to, .. } => {
+            let end_point = native_window_point(native_view, resolution, Some(*to))
+                .map_err(NativeInputFailure::Engine)?;
+            send_native_drag(&window, window_point, end_point)
+                .map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Scroll { delta_x, delta_y } => {
+            send_native_wheel_at(view, &window, resolution, *delta_x as f64, *delta_y as f64)
+                .map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Hover { .. } => {
             send_native_hover(view, &window, window_point).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Focus => {
@@ -2526,6 +2518,15 @@ unsafe fn dispatch_native_action(
             } else {
                 native_browser_responder(view, &window)?;
                 send_native_key(&window, window_point, key).map_err(NativeInputFailure::Engine)?;
+            }
+        }
+        tidebreak_core::BrowserAction::KeyChord { key, modifiers } => {
+            if matches!(phase, NativeActionDispatchPhase::Initial) {
+                acquire_native_target_focus(view, &window, screen_point, resolution)?;
+            } else {
+                native_browser_responder(view, &window)?;
+                send_native_key_chord(&window, window_point, key, modifiers)
+                    .map_err(NativeInputFailure::Engine)?;
             }
         }
         tidebreak_core::BrowserAction::Select { .. } => {
@@ -2655,6 +2656,7 @@ unsafe fn ensure_active_browser_window(
 fn native_window_point(
     view: &objc2_app_kit::NSView,
     resolution: &NativeActionResolution,
+    offset: Option<tidebreak_core::BrowserPoint>,
 ) -> Result<objc2_foundation::NSPoint, String> {
     let x = resolution
         .x
@@ -2676,13 +2678,17 @@ fn native_window_point(
         .viewport_height
         .filter(|value| *value > 0.0)
         .ok_or_else(|| "browser viewport has no height".to_owned())?;
-    native_window_point_for_css(
-        view,
-        x + width / 2.0,
-        y + height / 2.0,
-        viewport_width,
-        viewport_height,
-    )
+    // Element-relative points are clamped into the element's live bounds so a
+    // proposed coordinate can never reach outside the re-resolved target.
+    let (point_x, point_y) = match offset {
+        Some(offset) if offset.is_well_formed() => (
+            x + offset.x.clamp(0.0, width),
+            y + offset.y.clamp(0.0, height),
+        ),
+        Some(_) => return Err("browser native input coordinates are not valid".to_owned()),
+        None => (x + width / 2.0, y + height / 2.0),
+    };
+    native_window_point_for_css(view, point_x, point_y, viewport_width, viewport_height)
 }
 
 #[cfg(target_os = "macos")]
@@ -2746,6 +2752,126 @@ fn send_native_click(
     )
     .ok_or_else(|| "could not create native mouse-up input".to_owned())?;
     window.sendEvent(&down);
+    window.sendEvent(&up);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_right_click(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    let timestamp = native_event_timestamp();
+    for (event_type, pressure) in [
+        (NSEventType::RightMouseDown, 1.0),
+        (NSEventType::RightMouseUp, 0.0),
+    ] {
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            event_type,
+            point,
+            NSEventModifierFlags::empty(),
+            timestamp,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            pressure,
+        )
+        .ok_or_else(|| "could not create native right-click input".to_owned())?;
+        window.sendEvent(&event);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_double_click(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    let timestamp = native_event_timestamp();
+    for click_count in [1_isize, 2] {
+        for (event_type, pressure) in [
+            (NSEventType::LeftMouseDown, 1.0),
+            (NSEventType::LeftMouseUp, 0.0),
+        ] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                point,
+                NSEventModifierFlags::empty(),
+                timestamp,
+                window.windowNumber(),
+                None,
+                0,
+                click_count,
+                pressure,
+            )
+            .ok_or_else(|| "could not create native double-click input".to_owned())?;
+            window.sendEvent(&event);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_drag(
+    window: &objc2_app_kit::NSWindow,
+    from: objc2_foundation::NSPoint,
+    to: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    const DRAG_STEPS: usize = 8;
+
+    let timestamp = native_event_timestamp();
+    let down = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseDown,
+        from,
+        NSEventModifierFlags::empty(),
+        timestamp,
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    )
+    .ok_or_else(|| "could not create native drag-start input".to_owned())?;
+    window.sendEvent(&down);
+    for step in 1..=DRAG_STEPS {
+        let progress = step as f64 / DRAG_STEPS as f64;
+        let point = objc2_foundation::NSPoint::new(
+            from.x + (to.x - from.x) * progress,
+            from.y + (to.y - from.y) * progress,
+        );
+        let dragged = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDragged,
+            point,
+            NSEventModifierFlags::empty(),
+            native_event_timestamp(),
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        )
+        .ok_or_else(|| "could not create native drag-move input".to_owned())?;
+        window.sendEvent(&dragged);
+    }
+    let up = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseUp,
+        to,
+        NSEventModifierFlags::empty(),
+        native_event_timestamp(),
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        0.0,
+    )
+    .ok_or_else(|| "could not create native drag-end input".to_owned())?;
     window.sendEvent(&up);
     Ok(())
 }
@@ -2926,7 +3052,8 @@ fn native_event_timestamp() -> f64 {
 #[cfg(target_os = "macos")]
 fn native_key(key: &str) -> Result<(u16, String), String> {
     use objc2_app_kit::{
-        NSDeleteFunctionKey, NSDownArrowFunctionKey, NSLeftArrowFunctionKey,
+        NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEndFunctionKey, NSHomeFunctionKey,
+        NSLeftArrowFunctionKey, NSPageDownFunctionKey, NSPageUpFunctionKey,
         NSRightArrowFunctionKey, NSUpArrowFunctionKey,
     };
 
@@ -2941,9 +3068,128 @@ fn native_key(key: &str) -> Result<(u16, String), String> {
         "ArrowRight" => (0x7c, native_function_character(NSRightArrowFunctionKey)?),
         "Backspace" => (0x33, '\u{8}'.to_string()),
         "Delete" => (0x75, native_function_character(NSDeleteFunctionKey)?),
+        "Home" => (0x73, native_function_character(NSHomeFunctionKey)?),
+        "End" => (0x77, native_function_character(NSEndFunctionKey)?),
+        "PageUp" => (0x74, native_function_character(NSPageUpFunctionKey)?),
+        "PageDown" => (0x79, native_function_character(NSPageDownFunctionKey)?),
+        single if tidebreak_core::valid_browser_chord_key(single) => {
+            let character = single
+                .chars()
+                .next()
+                .ok_or_else(|| "browser key is empty".to_owned())?;
+            (native_character_key_code(character), single.to_owned())
+        }
         _ => return Err("browser key is not supported by the native adapter".to_owned()),
     };
     Ok(mapping)
+}
+
+/// US-ANSI virtual key codes for the printable characters a chord may anchor.
+/// Unknown characters use code 0; WebKit consumes the event's characters, so
+/// the exact virtual code only refines page-visible `keyCode` values.
+#[cfg(target_os = "macos")]
+fn native_character_key_code(character: char) -> u16 {
+    match character.to_ascii_lowercase() {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0b,
+        'q' => 0x0c,
+        'w' => 0x0d,
+        'e' => 0x0e,
+        'r' => 0x0f,
+        'y' => 0x10,
+        't' => 0x11,
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '=' => 0x18,
+        '9' => 0x19,
+        '7' => 0x1a,
+        '-' => 0x1b,
+        '8' => 0x1c,
+        '0' => 0x1d,
+        ']' => 0x1e,
+        'o' => 0x1f,
+        'u' => 0x20,
+        '[' => 0x21,
+        'i' => 0x22,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        '\'' => 0x27,
+        'k' => 0x28,
+        ';' => 0x29,
+        '\\' => 0x2a,
+        ',' => 0x2b,
+        '/' => 0x2c,
+        'n' => 0x2d,
+        'm' => 0x2e,
+        '.' => 0x2f,
+        '`' => 0x32,
+        _ => 0x00,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_modifier_flags(
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> objc2_app_kit::NSEventModifierFlags {
+    use objc2_app_kit::NSEventModifierFlags;
+    use tidebreak_core::BrowserModifier;
+
+    let mut flags = NSEventModifierFlags::empty();
+    for modifier in modifiers {
+        flags |= match modifier {
+            BrowserModifier::Shift => NSEventModifierFlags::Shift,
+            BrowserModifier::Control => NSEventModifierFlags::Control,
+            BrowserModifier::Alt => NSEventModifierFlags::Option,
+            BrowserModifier::Meta => NSEventModifierFlags::Command,
+        };
+    }
+    flags
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_key_chord(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+    key: &str,
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventType};
+
+    let (key_code, character) = native_key(key)?;
+    let flags = native_modifier_flags(modifiers);
+    let characters = objc2_foundation::NSString::from_str(&character);
+    let timestamp = native_event_timestamp();
+    for event_type in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            event_type,
+            point,
+            flags,
+            timestamp,
+            window.windowNumber(),
+            None,
+            &characters,
+            &characters,
+            false,
+            key_code,
+        )
+        .ok_or_else(|| format!("could not create native {key} chord input"))?;
+        window.sendEvent(&event);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3058,6 +3304,33 @@ fn send_native_scroll(
     Ok(())
 }
 
+/// Send one bounded model-requested wheel step at the re-resolved target,
+/// reusing the same phased CGEvent path as scroll-into-view but with the
+/// model's explicit CSS-pixel deltas instead of a computed centering plan.
+#[cfg(target_os = "macos")]
+fn send_native_wheel_at(
+    view: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+    resolution: &NativeActionResolution,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<(), String> {
+    let x = resolution
+        .x
+        .ok_or_else(|| "browser scroll target has no horizontal position".to_owned())?;
+    let y = resolution
+        .y
+        .ok_or_else(|| "browser scroll target has no vertical position".to_owned())?;
+    let width = resolution.width.unwrap_or_default();
+    let height = resolution.height.unwrap_or_default();
+    let mut planned = resolution.clone();
+    planned.scroll_x = Some(x + width / 2.0);
+    planned.scroll_y = Some(y + height / 2.0);
+    planned.scroll_delta_x = Some(delta_x);
+    planned.scroll_delta_y = Some(delta_y);
+    send_native_scroll(view, window, &planned)
+}
+
 #[cfg(target_os = "macos")]
 fn native_scroll_delta_for_css(
     delta_x: f64,
@@ -3140,6 +3413,31 @@ fn native_action_resolution_script(
     native_action_resolution_script_for_phase(target, action, NativeActionDispatchPhase::Initial)
 }
 
+/// Element-relative points the resolution script hit-tests instead of the
+/// element centre. Empty means "use the centre".
+fn action_hit_points(action: &tidebreak_core::BrowserAction) -> Vec<serde_json::Value> {
+    use tidebreak_core::BrowserAction;
+
+    let point = |point: &tidebreak_core::BrowserPoint| {
+        serde_json::json!({ "x": point.x, "y": point.y })
+    };
+    match action {
+        BrowserAction::Click { at: Some(at) }
+        | BrowserAction::Hover { at: Some(at) }
+        | BrowserAction::RightClick { at: Some(at) }
+        | BrowserAction::DoubleClick { at: Some(at) } => vec![point(at)],
+        BrowserAction::Drag { from, to } => {
+            let mut points = Vec::new();
+            if let Some(from) = from {
+                points.push(point(from));
+            }
+            points.push(point(to));
+            points
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn native_action_resolution_script_for_phase(
     target: &BrowserTargetRecord,
     action: &tidebreak_core::BrowserAction,
@@ -3174,9 +3472,19 @@ fn native_action_resolution_script_for_phase(
             "sensitive": target.fingerprint.sensitive,
         },
         "action": match action {
-            tidebreak_core::BrowserAction::Click => serde_json::json!({ "type": "click" }),
+            tidebreak_core::BrowserAction::Click { .. } => serde_json::json!({ "type": "click" }),
             tidebreak_core::BrowserAction::Focus => serde_json::json!({ "type": "focus" }),
-            tidebreak_core::BrowserAction::Hover => serde_json::json!({ "type": "hover" }),
+            tidebreak_core::BrowserAction::Hover { .. } => serde_json::json!({ "type": "hover" }),
+            tidebreak_core::BrowserAction::RightClick { .. } => {
+                serde_json::json!({ "type": "right_click" })
+            }
+            tidebreak_core::BrowserAction::DoubleClick { .. } => {
+                serde_json::json!({ "type": "double_click" })
+            }
+            tidebreak_core::BrowserAction::Drag { .. } => serde_json::json!({ "type": "drag" }),
+            tidebreak_core::BrowserAction::Scroll { delta_x, delta_y } => {
+                serde_json::json!({ "type": "scroll", "deltaX": delta_x, "deltaY": delta_y })
+            }
             tidebreak_core::BrowserAction::Fill { value } => {
                 serde_json::json!({ "type": "fill", "value": value })
             }
@@ -3189,10 +3497,17 @@ fn native_action_resolution_script_for_phase(
             tidebreak_core::BrowserAction::Press { key } => {
                 serde_json::json!({ "type": "press", "key": key })
             }
+            tidebreak_core::BrowserAction::KeyChord { key, .. } => {
+                serde_json::json!({ "type": "key_chord", "key": key })
+            }
             tidebreak_core::BrowserAction::ScrollIntoView => {
                 serde_json::json!({ "type": "scroll_into_view" })
             }
         },
+        // Element-relative points the page must hit-test instead of the
+        // element centre, so canvas-style coordinates are validated where the
+        // input will actually land.
+        "points": action_hit_points(action),
     });
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     Ok(NATIVE_ACTION_RESOLUTION_SCRIPT
@@ -3241,14 +3556,6 @@ fn wait_text_script(text: &str) -> Result<String, String> {
 
 fn inspect_overlay_script() -> String {
     INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
-}
-
-fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, String> {
-    let watch_key = serde_json::to_string(watch_key).map_err(|error| error.to_string())?;
-    Ok(SCREENSHOT_PRIVACY_SCRIPT
-        .replace("__WATCH_KEY__", &watch_key)
-        .replace("__FINISH__", if finish { "true" } else { "false" })
-        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY))
 }
 
 struct NativeUploadAuthorization {
@@ -4248,116 +4555,6 @@ const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
 })()
 "#;
 
-const SCREENSHOT_PRIVACY_SCRIPT: &str = r#"
-(() => {
-  const WATCH_KEY = __WATCH_KEY__;
-  const FINISH = __FINISH__;
-  const clean = (value, limit = 240) => String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, limit);
-  __SENSITIVE_FIELD_POLICY__
-
-  const hashText = (seed, value) => {
-    let hash = seed >>> 0;
-    for (const character of String(value || "")) {
-      hash ^= character.codePointAt(0);
-      hash = Math.imul(hash, 16777619) >>> 0;
-    }
-    return hash;
-  };
-
-  const scanRoot = (root, doc, win, observers, state) => {
-    if (!FINISH) {
-      const observer = new win.MutationObserver(() => { state.changed = true; });
-      observer.observe(root, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-      });
-      observers.push(observer);
-    }
-
-    let sensitiveFields = 0;
-    let uninspectableRegions = 0;
-    let signature = 2166136261;
-    for (const element of root.querySelectorAll("input, textarea, [contenteditable]:not([contenteditable='false']), [role='textbox']")) {
-      signature = hashText(signature, element.localName);
-      signature = hashText(signature, element.getAttribute("type"));
-      signature = hashText(signature, element.getAttribute("name"));
-      signature = hashText(signature, element.id);
-      signature = hashText(signature, "value" in element ? element.value : element.textContent);
-      if (tidebreakIsSensitiveField(element, doc)) sensitiveFields += 1;
-    }
-    for (const element of root.querySelectorAll("*")) {
-      if (element.shadowRoot) {
-        const child = scanRoot(element.shadowRoot, doc, win, observers, state);
-        sensitiveFields += child.sensitiveFields;
-        uninspectableRegions += child.uninspectableRegions;
-        signature = hashText(signature, child.signature);
-      } else if (element.localName?.includes("-")) {
-        uninspectableRegions += 1;
-      }
-    }
-    for (const frame of root.querySelectorAll("iframe")) {
-      if (!FINISH) {
-        const markFrameChanged = () => { state.changed = true; };
-        frame.addEventListener("load", markFrameChanged, true);
-        state.listeners.push([frame, "load", markFrameChanged]);
-      }
-      try {
-        const childDoc = frame.contentDocument;
-        const childWin = frame.contentWindow;
-        if (!childDoc || !childWin) throw new Error("frame unavailable");
-        if (!FINISH) {
-          const markFrameChanged = () => { state.changed = true; };
-          childWin.addEventListener("pagehide", markFrameChanged, true);
-          state.listeners.push([childWin, "pagehide", markFrameChanged]);
-        }
-        const child = scanRoot(childDoc, childDoc, childWin, observers, state);
-        sensitiveFields += child.sensitiveFields;
-        uninspectableRegions += child.uninspectableRegions;
-        signature = hashText(signature, child.signature);
-      } catch (_) {
-        uninspectableRegions += 1;
-      }
-    }
-    return { sensitiveFields, uninspectableRegions, signature };
-  };
-
-  let state = window[WATCH_KEY];
-  if (!FINISH) {
-    if (state) {
-      for (const observer of state.observers || []) observer.disconnect();
-    }
-    state = { changed: false, observers: [], listeners: [], signature: null };
-    window[WATCH_KEY] = state;
-  } else if (!state) {
-    return JSON.stringify({ sensitiveFields: 0, uninspectableRegions: 0, changed: true });
-  }
-
-  const result = scanRoot(document, document, window, state.observers, state);
-  if (!FINISH) {
-    state.signature = result.signature;
-  } else if (state.signature !== result.signature) {
-    state.changed = true;
-  }
-  if (FINISH) {
-    for (const observer of state.observers) observer.disconnect();
-    for (const [target, event, listener] of state.listeners || []) {
-      target.removeEventListener(event, listener, true);
-    }
-    delete window[WATCH_KEY];
-  }
-  return JSON.stringify({
-    sensitiveFields: result.sensitiveFields,
-    uninspectableRegions: result.uninspectableRegions,
-    changed: Boolean(state.changed),
-  });
-})()
-"#;
-
 const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
 (() => {
   const payload = __PAYLOAD__;
@@ -4746,33 +4943,41 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     }
   }
 
-  const localX = rect.left + rect.width / 2;
-  const localY = rect.top + rect.height / 2;
-  if (localX < 0 || localY < 0 || localX >= view.innerWidth || localY >= view.innerHeight) {
-    return result("target_obscured", "The target is outside the visible viewport.");
-  }
-  const hit = doc.elementFromPoint(localX, localY);
-  if (!hit || (hit !== element && !element.contains(hit))) {
-    return result("target_obscured", "Another element is covering the target.");
-  }
-  const topX = offsetX + localX;
-  const topY = offsetY + localY;
-  for (const entry of frameChain) {
-    const parentView = entry.doc.defaultView;
-    if (!parentView) return result("stale_target", "The target frame is unavailable.");
-    const parentX = topX - entry.offsetX;
-    const parentY = topY - entry.offsetY;
-    if (
-      parentX < 0
-      || parentY < 0
-      || parentX >= parentView.innerWidth
-      || parentY >= parentView.innerHeight
-    ) {
-      return result("target_obscured", "The target frame is outside the visible viewport.");
+  const requestedPoints = Array.isArray(payload.points) && payload.points.length
+    ? payload.points.map((point) => ({
+      x: rect.left + Math.min(Math.max(Number(point.x) || 0, 0), rect.width),
+      y: rect.top + Math.min(Math.max(Number(point.y) || 0, 0), rect.height),
+    }))
+    : [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }];
+  for (const requested of requestedPoints) {
+    const localX = requested.x;
+    const localY = requested.y;
+    if (localX < 0 || localY < 0 || localX >= view.innerWidth || localY >= view.innerHeight) {
+      return result("target_obscured", "The target is outside the visible viewport.");
     }
-    const parentHit = entry.doc.elementFromPoint(parentX, parentY);
-    if (!parentHit || (parentHit !== entry.frame && !entry.frame.contains(parentHit))) {
-      return result("target_obscured", "Another element is covering the target frame.");
+    const hit = doc.elementFromPoint(localX, localY);
+    if (!hit || (hit !== element && !element.contains(hit))) {
+      return result("target_obscured", "Another element is covering the target.");
+    }
+    const topX = offsetX + localX;
+    const topY = offsetY + localY;
+    for (const entry of frameChain) {
+      const parentView = entry.doc.defaultView;
+      if (!parentView) return result("stale_target", "The target frame is unavailable.");
+      const parentX = topX - entry.offsetX;
+      const parentY = topY - entry.offsetY;
+      if (
+        parentX < 0
+        || parentY < 0
+        || parentX >= parentView.innerWidth
+        || parentY >= parentView.innerHeight
+      ) {
+        return result("target_obscured", "The target frame is outside the visible viewport.");
+      }
+      const parentHit = entry.doc.elementFromPoint(parentX, parentY);
+      if (!parentHit || (parentHit !== entry.frame && !entry.frame.contains(parentHit))) {
+        return result("target_obscured", "Another element is covering the target frame.");
+      }
     }
   }
 
@@ -5905,7 +6110,6 @@ mod tests {
     fn every_browser_surface_uses_the_shared_sensitive_field_policy() {
         let snapshot = snapshot_script(25, "__marker");
         let inspect = inspect_overlay_script();
-        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
         let target = BrowserTargetRecord {
             frame_path: vec![],
             selector: "input:nth-of-type(1)".to_owned(),
@@ -5926,7 +6130,7 @@ mod tests {
             native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Focus)
                 .unwrap();
 
-        for script in [snapshot, inspect, screenshot, action] {
+        for script in [snapshot, inspect, action] {
             assert!(script.contains("const tidebreakIsSensitiveField"));
             assert!(script.contains("aria-describedby"));
             assert!(script.contains("inputmode"));
@@ -5974,9 +6178,8 @@ mod tests {
     }
 
     #[test]
-    fn actions_and_screenshots_fail_closed_for_sensitive_or_uninspectable_fields() {
+    fn native_actions_fail_closed_for_sensitive_or_uninspectable_fields() {
         let inspect = inspect_overlay_script();
-        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
         assert!(inspect.contains("attachShadow({ mode: \"closed\" })"));
         assert!(inspect.contains("window.requestAnimationFrame(() =>"));
         assert!(inspect.contains("new observed.win.MutationObserver(() => schedule())"));
@@ -5994,13 +6197,6 @@ mod tests {
         assert!(inspect.contains("target.removeEventListener(type, schedule, true)"));
         assert!(inspect.contains("addMask(entries, frameRect"));
         assert!(inspect.contains("Sensitive content · human takeover"));
-        assert!(screenshot.contains("tidebreakIsSensitiveField(element, doc)"));
-        assert!(screenshot.contains("if (tidebreakIsSensitiveField(element, doc))"));
-        assert!(screenshot.contains("uninspectableRegions += 1"));
-        assert!(screenshot.contains("state.changed = true"));
-        assert!(!screenshot.contains("attributeFilter"));
-        assert!(screenshot.contains("state.listeners.push([frame, \"load\""));
-        assert!(screenshot.contains("state.listeners.push([childWin, \"pagehide\""));
 
         let target = BrowserTargetRecord {
             frame_path: vec![],

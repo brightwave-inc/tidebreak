@@ -993,9 +993,9 @@ fn parse_browser_act(
                 })?);
             }
             "--ref" => parse_string_flag(&mut args, &mut target_ref, "--ref")?,
-            "--click" => set_browser_action(&mut action, BrowserAction::Click)?,
+            "--click" => set_browser_action(&mut action, BrowserAction::Click { at: None })?,
             "--focus" => set_browser_action(&mut action, BrowserAction::Focus)?,
-            "--hover" => set_browser_action(&mut action, BrowserAction::Hover)?,
+            "--hover" => set_browser_action(&mut action, BrowserAction::Hover { at: None })?,
             "--fill" => {
                 let value = required_flag_value(&mut args, "--fill")?;
                 set_browser_action(&mut action, BrowserAction::Fill { value })?;
