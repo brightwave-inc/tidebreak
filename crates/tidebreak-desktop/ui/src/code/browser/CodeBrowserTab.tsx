@@ -928,12 +928,12 @@ function CodeBrowserTabSession({
   useEffect(() => {
     const surface = viewportSurfaceRef.current;
     if (!surface || !host.available()) return;
-    let frame: number | null = null;
+    let cancelMeasurement: (() => void) | null = null;
 
     const sync = () => {
-      if (frame !== null) window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
+      if (cancelMeasurement !== null) return;
+      cancelMeasurement = scheduleBrowserMeasurement(() => {
+        cancelMeasurement = null;
         const bounds = readBrowserBounds(surface);
         if (!bounds) return;
         if (!nativeReady.current) {
@@ -988,7 +988,7 @@ function CodeBrowserTabSession({
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", sync);
-      if (frame !== null) window.cancelAnimationFrame(frame);
+      cancelMeasurement?.();
     };
   }, [
     browserId,
@@ -1464,21 +1464,23 @@ function ViewportSurface({
   useEffect(() => {
     const el = surfaceRef.current;
     if (!el) return;
-    let frame: number | null = null;
+    let cancelMeasurement: (() => void) | null = null;
     const sync = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
+      if (cancelMeasurement !== null) return;
+      cancelMeasurement = scheduleBrowserMeasurement(() => {
+        cancelMeasurement = null;
         const rect = surfaceRef.current?.getBoundingClientRect();
         onViewportBoundsChange(rect && rect.width > 0 ? rect.width : null);
       });
     };
     const observer = new ResizeObserver(sync);
     observer.observe(el);
+    window.addEventListener("resize", sync);
     sync();
     return () => {
       observer.disconnect();
-      if (frame !== null) window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", sync);
+      cancelMeasurement?.();
     };
   }, [surfaceRef, onViewportBoundsChange]);
 
@@ -1533,4 +1535,22 @@ function sameBrowserBounds(
       left.width === right.width &&
       left.height === right.height,
   );
+}
+
+/** Native child views can pause the renderer's animation frames during resize. */
+function scheduleBrowserMeasurement(measure: () => void): () => void {
+  let pending = true;
+  const cancel = () => {
+    pending = false;
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(timer);
+  };
+  const run = () => {
+    if (!pending) return;
+    cancel();
+    measure();
+  };
+  const frame = window.requestAnimationFrame(run);
+  const timer = window.setTimeout(run, NATIVE_REVEAL_FALLBACK_MS);
+  return cancel;
 }

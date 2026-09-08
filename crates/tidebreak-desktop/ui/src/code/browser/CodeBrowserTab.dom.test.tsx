@@ -690,6 +690,76 @@ describe("CodeBrowserTab", () => {
     expect(input).toHaveValue("example.com/second");
   });
 
+  it("resizes the native page when animation frames pause after full screen", async () => {
+    vi.useFakeTimers();
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const runtime = browserHost({ existing: true });
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(
+        <CodeBrowserTab
+          workspaceId="workspace-1"
+          browserId="browser-1"
+          initialUrl="https://example.com"
+          host={runtime.host}
+        />,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    runtime.calls.length = 0;
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({
+      x: 120,
+      y: 180,
+      width: 600,
+      height: 400,
+      top: 180,
+      right: 720,
+      bottom: 580,
+      left: 120,
+      toJSON: () => ({}),
+    });
+    await act(async () => {
+      fireEvent(window, new Event("resize"));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    const boundsCalls = () =>
+      runtime.calls.filter(({ action }) => action.type === "set_bounds");
+    expect(boundsCalls().map(({ action }) => action)).toEqual([
+      {
+        type: "set_bounds",
+        bounds: { x: 120, y: 180, width: 600, height: 400 },
+      },
+    ]);
+    expect(
+      screen.getByRole("button", { name: /Viewport: Fit, rendered at 600px/ }),
+    ).toBeInTheDocument();
+    await act(async () => {
+      for (const callback of frames) callback(200);
+    });
+    expect(boundsCalls()).toHaveLength(1);
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({
+      x: 120,
+      y: 180,
+      width: 320,
+      height: 400,
+      top: 180,
+      right: 440,
+      bottom: 580,
+      left: 120,
+      toJSON: () => ({}),
+    });
+    await act(async () => {
+      fireEvent(window, new Event("resize"));
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(boundsCalls()).toHaveLength(1);
+  });
+
   it.each([
     { label: "newly created", existing: false },
     { label: "restored", existing: true },
