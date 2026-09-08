@@ -679,7 +679,14 @@ async fn execute_receipt(
         .receipts
         .save_computer_use(&receipt)
         .map_err(private_receipt_error)?;
-    let resolution = execute_operation(app, state, context, &claim.call).await;
+    let resolution = execute_operation(
+        app,
+        state,
+        context,
+        &claim.call,
+        CaptureDelivery::PublishToChat,
+    )
+    .await;
     receipt.resolution = Some(resolution);
     state
         .receipts
@@ -786,6 +793,21 @@ fn is_computer_use_call(call: &ToolCallRecord) -> bool {
 
 // MARK: - Execution
 
+/// How a capture's PNG leaves the executor: published into the chat's image
+/// store (the renderer / transcript path), or handed back inline for the
+/// session-native transport, which carries pixels in its own result frame
+/// and has no chat blob store to publish into.
+pub(crate) enum CaptureDelivery<'a> {
+    PublishToChat,
+    Inline(&'a mut Vec<SessionCaptureImage>),
+}
+
+/// One capture image returned inline to the session-native transport.
+pub(crate) struct SessionCaptureImage {
+    pub(crate) media_type: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
 /// What one parsed call wants done: a broker operation, or a purely local one.
 #[derive(Debug)]
 enum CuAction {
@@ -804,6 +826,7 @@ async fn execute_operation(
     state: &HostAccess,
     context: AuthoritativeContext,
     call: &ToolCallRecord,
+    delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     let action = match build_action(cu, call) {
@@ -823,7 +846,9 @@ async fn execute_operation(
                     completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
             }
         }
-        CuAction::Broker(request) => dispatch_broker(app, state, context, call, request).await,
+        CuAction::Broker(request) => {
+            dispatch_broker(app, state, context, call, request, delivery).await
+        }
     }
 }
 
@@ -1105,6 +1130,7 @@ async fn dispatch_broker(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     request: OperationRequest,
+    delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     let acting = acts_on_host(&call.name);
@@ -1155,10 +1181,10 @@ async fn dispatch_broker(
             }
             dispatch_confirmation(app, state, call, held).await
         }
-        Ok(result) => map_result(app, state, context, call, result).await,
+        Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
             BrokerFailure::ConsentRequired => {
-                dispatch_consent(app, state, context, call, request).await
+                dispatch_consent(app, state, context, call, request, delivery).await
             }
             BrokerFailure::Resolution(resolution) => resolution,
         },
@@ -1232,6 +1258,7 @@ async fn dispatch_consent(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     request: OperationRequest,
+    delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     let capability = consent_capability(call, &request);
@@ -1332,7 +1359,7 @@ async fn dispatch_consent(
                 dispatch_confirmation(app, state, call, held).await
             }
         }
-        Ok(result) => map_result(app, state, context, call, result).await,
+        Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
             BrokerFailure::Resolution(resolution) => resolution,
             BrokerFailure::ConsentRequired => unavailable(
@@ -1464,6 +1491,7 @@ async fn map_result(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     result: OperationResult,
+    delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     match result {
@@ -1492,7 +1520,7 @@ async fn map_result(
             }))
         }
         OperationResult::CuCaptureScreen(capture) => {
-            finish_capture(app, state, context, call, capture).await
+            finish_capture(app, state, context, call, capture, delivery).await
         }
         OperationResult::CuReadAppContent(tree) => {
             if let Some(bundle_id) = call
@@ -1562,6 +1590,7 @@ async fn finish_capture(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     capture: tidebreak_host_broker::CuCaptureScreenResult,
+    delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     // The handoff is single-use; a replayed redeem fails as unknown, so it is
@@ -1596,26 +1625,51 @@ async fn finish_capture(
             "The screen capture could not be read. Capture again.",
         );
     };
-    let app_state = app.state::<std::sync::Arc<AppState>>();
-    // A capture without its image is not a usable result — the model called
-    // this tool to see. Publish failure fails the call.
-    let published = match crate::image_attachments::publish_image_bytes(
-        app_state.inner(),
-        state,
-        context.chat_id,
-        bytes,
-    )
-    .await
-    {
-        Ok(published) => published,
-        Err(_) => {
-            return unavailable(
-                "image_publish_failed",
-                "The screenshot could not be attached to this conversation. Capture again.",
-            )
+    let (image_refs, inline_images) = match delivery {
+        CaptureDelivery::PublishToChat => {
+            let app_state = app.state::<std::sync::Arc<AppState>>();
+            // A capture without its image is not a usable result — the model
+            // called this tool to see. Publish failure fails the call.
+            let published =
+                match crate::image_attachments::publish_image_bytes(
+                    app_state.inner(),
+                    state,
+                    context.chat_id,
+                    bytes,
+                )
+                .await
+                {
+                    Ok(published) => published,
+                    Err(_) => return unavailable(
+                        "image_publish_failed",
+                        "The screenshot could not be attached to this conversation. Capture again.",
+                    ),
+                };
+            (capture_image_refs(&published), None)
+        }
+        CaptureDelivery::Inline(sink) => {
+            // The session-native transport carries the pixels in its own
+            // result frame; identity is content-addressed the same way a
+            // published attachment's would be.
+            let media_type = tidebreak_core::ImageMediaType::parse(&capture.media_type)
+                .unwrap_or(tidebreak_core::ImageMediaType::Png);
+            let blob = tidebreak_core::DocumentBlob::from_bytes(&bytes);
+            let image_ref = ImageRef {
+                blob_id: blob.id,
+                media_type,
+                width: capture.width,
+                height: capture.height,
+                byte_len: bytes.len() as u64,
+            };
+            (vec![image_ref], Some((sink, media_type, bytes)))
         }
     };
-    let image_refs = capture_image_refs(&published);
+    if let Some((sink, media_type, bytes)) = inline_images {
+        sink.push(SessionCaptureImage {
+            media_type: media_type.as_str().to_owned(),
+            bytes,
+        });
+    }
     // Mark the table this capture's marks belong to, so a later "click mark N"
     // resolves here before the broker ever sees it.
     let scope = call
@@ -1723,6 +1777,110 @@ fn unavailable(code: &str, message: &str) -> StoredResolution {
         result: serde_json::json!({ "status": "unavailable", "message": message }).to_string(),
         error_code: code.to_owned(),
         error_detail: None,
+    }
+}
+
+// MARK: - Session-native transport entry point
+
+/// The terminal shape one session-native operation resolves to, decoupled
+/// from the durable chat receipt format.
+pub(crate) enum SessionNativeResolution {
+    Completed {
+        result: serde_json::Value,
+    },
+    Failed {
+        result: serde_json::Value,
+        error_code: String,
+    },
+}
+
+/// One session-native operation's outcome: the resolution plus any capture
+/// images returned inline.
+pub(crate) struct SessionNativeOutput {
+    pub(crate) resolution: SessionNativeResolution,
+    pub(crate) images: Vec<SessionCaptureImage>,
+    /// Whether the operation synthesizes input or moves focus — the class
+    /// whose interrupted or lost outcome must be treated as unknown rather
+    /// than safely absent.
+    pub(crate) acts_on_host: bool,
+}
+
+/// Execute one native computer-use operation for a code session.
+///
+/// Same executor, same authority: the broker authorizes against per-session
+/// grants (the session id is the conversation-scoped grant subject), a grant
+/// miss parks behind the same native consent card, the acting-dispatch gate
+/// gives the operation exclusive desktop input ownership, and the user's
+/// Stop latch short-circuits control exactly as it does for chat calls. The
+/// only difference is transport: capture pixels return inline instead of
+/// publishing into a chat blob store, because the session-native channel
+/// carries its own bounded image frames.
+pub(crate) async fn execute_session_native_operation(
+    app: &AppHandle,
+    state: &HostAccess,
+    session_id: SessionId,
+    call_id: CallId,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Result<SessionNativeOutput, String> {
+    let context = crate::host_access::session_native_context(session_id.0)?;
+    let call = session_call_record(session_id, call_id, name, arguments);
+    let mut images = Vec::new();
+    let resolution = execute_operation(
+        app,
+        state,
+        context,
+        &call,
+        CaptureDelivery::Inline(&mut images),
+    )
+    .await;
+    let resolution = match resolution {
+        StoredResolution::Completed { result, .. } => SessionNativeResolution::Completed {
+            result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
+        },
+        StoredResolution::Failed {
+            result, error_code, ..
+        } => SessionNativeResolution::Failed {
+            result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
+            error_code,
+        },
+    };
+    Ok(SessionNativeOutput {
+        resolution,
+        images,
+        acts_on_host: acts_on_host(name),
+    })
+}
+
+/// A synthetic call record for the session-native path. The executor reads
+/// only identity, subject, name, and arguments from it; every durable-lease
+/// field stays empty because the session channel owns its own request-id
+/// recovery instead of the chat control plane's leases.
+fn session_call_record(
+    session_id: SessionId,
+    call_id: CallId,
+    name: &str,
+    arguments: serde_json::Value,
+) -> ToolCallRecord {
+    ToolCallRecord {
+        id: call_id,
+        chat_id: session_id,
+        turn_id: tidebreak_core::TurnId::new(),
+        provider_id: String::new(),
+        name: name.to_owned(),
+        arguments,
+        raw_arguments: None,
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
     }
 }
 
