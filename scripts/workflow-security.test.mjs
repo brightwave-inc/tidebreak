@@ -2368,15 +2368,25 @@ test("universal macOS release and staging packages contain both slices", () => {
     /"lipo",\s*\["-create", \.\.\.stagedSidecars, "-output", destination\]/,
   );
 
-  // Production compiles one real target per runner, combines exactly the app
-  // and two sidecars, then gives the signed job the same universal archive
-  // contract it consumed before the split.
+  // A separately packaged computer-use helper may join the app and two
+  // sidecars. Its exact input paths and output remain part of this policy.
   assertPerArchMacosCompile(releasePrepare, "prepare_macos");
+  const includesComputerUseHelper = releaseCombine.includes(
+    'cu_helper="crates/tidebreak-desktop/binaries/tidebreak-cu-helper-universal-apple-darwin"',
+  );
   assert.equal(
     releaseCombine.split("lipo -create").length - 1,
-    3,
-    "combine_macos must join the app binary and both sidecars",
+    includesComputerUseHelper ? 4 : 3,
+    "combine_macos must join the app, both sidecars, and any declared computer-use helper",
   );
+  if (includesComputerUseHelper) {
+    const combineShell = releaseCombine.replace(/[ \t]*\\\n[ \t]*/g, " ");
+    assert.match(
+      combineShell,
+      /lipo -create "\$arm_root\/crates\/tidebreak-desktop\/binaries\/tidebreak-cu-helper-aarch64-apple-darwin" "\$x86_root\/crates\/tidebreak-desktop\/binaries\/tidebreak-cu-helper-x86_64-apple-darwin" -output "\$PREPARED_ROOT\/\$cu_helper"/,
+    );
+    assert.match(releaseCombine, /for file in [^\n]*"\$cu_helper"[^\n]*; do/);
+  }
   assertPerArchSlicesAreJoined(releaseCombine, "combine_macos");
   assert.match(releaseCombine, /tidebreak-prepared-macos-aarch64-apple-darwin-/);
   assert.match(releaseCombine, /tidebreak-prepared-macos-x86_64-apple-darwin-/);
