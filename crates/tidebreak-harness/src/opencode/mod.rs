@@ -444,6 +444,7 @@ mod tests {
             &[],
             4096,
             None,
+            None,
         )
         .unwrap();
         assert!(!plan

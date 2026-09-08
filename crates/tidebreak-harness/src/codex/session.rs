@@ -787,6 +787,7 @@ pub(crate) fn compose_app_server_plan(
     cwd: &std::path::Path,
     extra_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&crate::NativeChannelSpec>,
     relay_key_env: Option<&str>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
@@ -801,16 +802,16 @@ pub(crate) fn compose_app_server_plan(
         // and control characters in a Windows or unusual path are turned
         // into valid JSON string characters. Reject non-UTF-8 paths
         // explicitly rather than silently replacing characters.
-        let bridge_path = spec.bridge_command().to_str().ok_or_else(|| {
-            HarnessError::Other(format!(
-                "browser bridge command path is not valid UTF-8: {}",
-                spec.bridge_command().display()
-            ))
-        })?;
-        let escaped = serde_json::to_string(bridge_path)
-            .expect("serializing a valid &str to JSON cannot fail");
+        let escaped = escaped_bridge_path(spec.bridge_command(), "browser")?;
         argv.push(
             format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"),
+        );
+    }
+    if let Some(spec) = native {
+        argv.push("-c".into());
+        let escaped = escaped_bridge_path(spec.bridge_command(), "native")?;
+        argv.push(
+            format!("mcp_servers.tb-native={{command={escaped},args=[\"computer-mcp\"],env_vars=[\"TIDEBREAK_NATIVE_CAPFILE\"]}}"),
         );
     }
     let mut env = extra_env.to_vec();
@@ -824,6 +825,21 @@ pub(crate) fn compose_app_server_plan(
     };
     validate_launch_plan(&plan)?;
     Ok(plan)
+}
+
+/// JSON-escape a bridge path for a Codex `-c mcp_servers.…` override,
+/// refusing non-UTF-8 paths rather than silently replacing characters.
+fn escaped_bridge_path(
+    bridge_command: &std::path::Path,
+    channel: &str,
+) -> Result<String, HarnessError> {
+    let bridge_path = bridge_command.to_str().ok_or_else(|| {
+        HarnessError::Other(format!(
+            "{channel} bridge command path is not valid UTF-8: {}",
+            bridge_command.display()
+        ))
+    })?;
+    Ok(serde_json::to_string(bridge_path).expect("serializing a valid &str to JSON cannot fail"))
 }
 
 /// `thread/start` sandbox + approvalPolicy for a permission mode.
@@ -877,6 +893,7 @@ impl CodexSession {
             &self.spec.worktree,
             &self.spec.extra_env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
             self.spec.relay_key_env.as_deref(),
         )?;
         let mut command = Command::new(&plan.argv[0]);
