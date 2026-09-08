@@ -54,9 +54,11 @@ async fn browser() -> (Browser, String) {
             std::fs::read_to_string(browser._profile.path().join("DevToolsActivePort"))
         {
             let mut lines = text.lines();
-            let port = lines.next().unwrap();
-            let path = lines.next().unwrap();
-            return (browser, format!("ws://127.0.0.1:{port}{path}"));
+            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                if port.parse::<u16>().is_ok() && path.starts_with("/devtools/browser/") {
+                    return (browser, format!("ws://127.0.0.1:{port}{path}"));
+                }
+            }
         }
         assert!(
             browser.child.try_wait().unwrap().is_none(),
@@ -97,7 +99,7 @@ async fn fixture() -> Fixture {
                     format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/denied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 } else {
                     let body = if path == "/denied" {
-                        "<body><button>Private target</button><p>secret destination</p></body>"
+                        r#"<body><button onclick="this.textContent='Private clicked'">Private target</button><p>secret destination</p></body>"#
                             .into()
                     } else if path == "/frames" {
                         format!("<body><button>Outer</button><iframe src='http://localhost:{port}/denied'></iframe></body>")
@@ -189,7 +191,7 @@ async fn setup(
             ChromeConnectionSpec {
                 connection_id: "fixture".into(),
                 owner: scope.owner.clone(),
-                workspace: scope.workspace.clone(),
+                workspace: scope.workspace,
                 endpoint_label: "isolated fixture".into(),
                 websocket_endpoint: endpoint,
                 grant,
@@ -257,6 +259,19 @@ async fn real_chrome_reproduces_controls_and_observes_results() {
         .unwrap()
         .iter()
         .any(|n| n["name"] == "Name" && n["value"] == "Ada"));
+    ok(
+        &service,
+        &scope,
+        CHROME_ACT_TOOL,
+        act_args(&s, "Name", json!({"type":"fill","value":""})),
+    )
+    .await;
+    let s = snap(&service, &scope, target).await;
+    assert!(s["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["name"] == "Name" && n["value"] == ""));
     ok(
         &service,
         &scope,
@@ -386,6 +401,31 @@ async fn real_chrome_fences_identity_origins_stale_nodes_and_stop() {
     )
     .await;
     assert!(denied.outcome != ComputerUseOutcome::Completed);
+    let framed = ok(
+        &service,
+        &scope,
+        CHROME_NEW_TAB_TOOL,
+        json!({"url":format!("{}frames",fixture.url())}),
+    )
+    .await;
+    let framed_target = framed["targetRef"].as_str().unwrap();
+    let mut framed_snapshot = snap(&service, &scope, framed_target).await;
+    for _ in 0..40 {
+        if framed_snapshot["frames"].as_array().unwrap().len() > 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        framed_snapshot = snap(&service, &scope, framed_target).await;
+    }
+    assert!(framed_snapshot["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|frame| frame["status"] == "unsupported_frame"));
+    let denied_capture=run(&service,&scope,CHROME_SCREENSHOT_TOOL,json!({"targetRef":framed_target,"snapshotId":framed_snapshot["snapshotId"],"documentEpoch":framed_snapshot["documentEpoch"]})).await;
+    assert!(
+        denied_capture.outcome == ComputerUseOutcome::Rejected && denied_capture.images.is_empty()
+    );
     service.ownership().trip();
     let stopped = run(
         &service,
@@ -405,5 +445,65 @@ async fn real_chrome_fences_identity_origins_stale_nodes_and_stop() {
     )
     .await;
     assert!(revoked.outcome == ComputerUseOutcome::Rejected);
+    service.uninstall_connection("fixture").unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome; runs only against an isolated temporary profile"]
+async fn real_chrome_attaches_only_selected_tabs_and_controls_cross_origin_frames() {
+    let fixture = fixture().await;
+    let (_browser, service, scope, cdp) = setup(ChromeConnectionGrant::DeveloperAllSites).await;
+    let target = cdp
+        .command(
+            "Target.createTarget",
+            json!({"url":format!("{}frames",fixture.url())}),
+        )
+        .await
+        .unwrap();
+    let target_id = target["targetId"].as_str().unwrap();
+    let discovered = service.discover_tabs("fixture").await.unwrap();
+    assert!(discovered.iter().any(|tab| tab.target_id == target_id));
+    let empty = ok(&service, &scope, CHROME_LIST_TABS_TOOL, json!({})).await;
+    assert!(empty["tabs"].as_array().unwrap().is_empty());
+    let tab = service
+        .attach_existing_tab(&scope, "fixture", target_id)
+        .await
+        .unwrap();
+    let other = ChromeScope {
+        session: SessionId::new(),
+        ..scope.clone()
+    };
+    assert!(service
+        .attach_existing_tab(&other, "fixture", target_id)
+        .await
+        .is_err());
+    let mut snapshot = snap(&service, &scope, &tab.target_ref).await;
+    for _ in 0..30 {
+        if snapshot["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["name"] == "Private target")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        snapshot = snap(&service, &scope, &tab.target_ref).await;
+    }
+    ok(
+        &service,
+        &scope,
+        CHROME_ACT_TOOL,
+        act_args(&snapshot, "Private target", json!({"type":"click"})),
+    )
+    .await;
+    let snapshot = snap(&service, &scope, &tab.target_ref).await;
+    node(&snapshot, "Private clicked");
+    let result=run(&service,&scope,CHROME_SCREENSHOT_TOOL,json!({"targetRef":tab.target_ref,"snapshotId":snapshot["snapshotId"],"documentEpoch":snapshot["documentEpoch"]})).await;
+    assert!(
+        result.outcome == ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
     service.uninstall_connection("fixture").unwrap();
 }

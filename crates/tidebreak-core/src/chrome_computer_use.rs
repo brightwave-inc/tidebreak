@@ -467,12 +467,12 @@ pub enum ChromeAction {
     },
     /// Fill an input, textarea, or contenteditable with the given value.
     Fill {
-        #[schemars(length(min = 1, max = MAX_CHROME_ACTION_VALUE_CHARS))]
+        #[schemars(length(max = MAX_CHROME_ACTION_VALUE_CHARS))]
         value: String,
     },
     /// Select one `<option>` by its value attribute.
     Select {
-        #[schemars(length(min = 1, max = MAX_CHROME_ACTION_VALUE_CHARS))]
+        #[schemars(length(max = MAX_CHROME_ACTION_VALUE_CHARS))]
         value: String,
     },
     /// Check or uncheck a checkbox or radio input.
@@ -500,7 +500,9 @@ impl ChromeAction {
         match self {
             Self::Click | Self::DoubleClick | Self::Hover | Self::Check { .. } => true,
             Self::Type { text } => Self::value_is_well_formed(text),
-            Self::Fill { value } | Self::Select { value } => Self::value_is_well_formed(value),
+            Self::Fill { value } | Self::Select { value } => {
+                value.chars().count() <= MAX_CHROME_ACTION_VALUE_CHARS
+            }
             Self::Press { key } => !key.is_empty() && key.chars().count() <= 64,
             Self::Scroll { x, y } => {
                 x.is_none_or(|value| value.is_finite() && (-100_000.0..=100_000.0).contains(&value))
@@ -1027,13 +1029,41 @@ mod tests {
                 "{}",
                 spec.name
             );
-            for needle in ["grant", "endpoint", "user-data", "profile path", "ws://"] {
-                assert!(
-                    !spec.description.to_ascii_lowercase().contains(needle),
-                    "{} describes {needle}",
-                    spec.name
-                );
+            fn check_properties(schema: &Value) {
+                match schema {
+                    Value::Object(object) => {
+                        if let Some(properties) =
+                            object.get("properties").and_then(Value::as_object)
+                        {
+                            for name in properties.keys() {
+                                assert!(
+                                    ![
+                                        "grant",
+                                        "endpoint",
+                                        "websocketEndpoint",
+                                        "profile",
+                                        "profilePath",
+                                        "connectionId",
+                                        "targetId"
+                                    ]
+                                    .contains(&name.as_str()),
+                                    "model schema accepts host authority: {name}"
+                                );
+                            }
+                        }
+                        for value in object.values() {
+                            check_properties(value);
+                        }
+                    }
+                    Value::Array(values) => {
+                        for value in values {
+                            check_properties(value);
+                        }
+                    }
+                    _ => {}
+                }
             }
+            check_properties(&spec.input_schema);
         }
     }
 
@@ -1087,7 +1117,7 @@ mod tests {
                 "action": {"type": "click"}
             })
         ));
-        assert!(!validate_chrome_computer_use_arguments(
+        assert!(validate_chrome_computer_use_arguments(
             CHROME_ACT_TOOL,
             &json!({
                 "targetRef": "ct-1",
