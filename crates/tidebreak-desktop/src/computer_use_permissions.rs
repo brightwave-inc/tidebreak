@@ -65,11 +65,43 @@ async fn check_access(webview: &Webview, state: &HostAccess) -> Result<(), Strin
     )
 }
 
-/// Use the running bundle, including its display name in a dev profile.
-/// The configured release identifier may differ from the bundle macOS sees.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct AppIdentity {
+    name: Option<String>,
+    identifier: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn select_app_identity(
+    registered_bundle: Option<AppIdentity>,
+    main_bundle: AppIdentity,
+    package_name: &str,
+) -> (String, Option<String>) {
+    let identity = registered_bundle.unwrap_or(main_bundle);
+    (
+        identity
+            .name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| package_name.to_owned()),
+        identity
+            .identifier
+            .filter(|identifier| !identifier.trim().is_empty()),
+    )
+}
+
+/// A wrapped dev executable can embed metadata that differs from its app bundle.
+/// Prefer the application registered with macOS and retain unbundled fallbacks.
 #[cfg(target_os = "macos")]
 fn app_identity(app: &AppHandle) -> (String, Option<String>) {
+    use objc2_app_kit::NSRunningApplication;
     use objc2_foundation::{NSBundle, NSString};
+
+    let running = NSRunningApplication::currentApplication();
+    let registered_bundle = running.bundleURL().map(|_| AppIdentity {
+        name: running.localizedName().map(|value| value.to_string()),
+        identifier: running.bundleIdentifier().map(|value| value.to_string()),
+    });
     let bundle = NSBundle::mainBundle();
     let name = ["CFBundleDisplayName", "CFBundleName"]
         .into_iter()
@@ -80,11 +112,14 @@ fn app_identity(app: &AppHandle) -> (String, Option<String>) {
                 .ok()
                 .map(|name| name.to_string())
                 .filter(|name| !name.trim().is_empty())
-        })
-        .unwrap_or_else(|| app.package_info().name.clone());
-    (
-        name,
-        bundle.bundleIdentifier().map(|value| value.to_string()),
+        });
+    select_app_identity(
+        registered_bundle,
+        AppIdentity {
+            name,
+            identifier: bundle.bundleIdentifier().map(|value| value.to_string()),
+        },
+        &app.package_info().name,
     )
 }
 
@@ -193,6 +228,79 @@ pub(crate) async fn open_computer_use_permission_settings(
 mod tests {
     use super::*;
     use tidebreak_host_broker::computer_use::PermissionStatus;
+
+    #[test]
+    fn registered_app_identity_wins_over_embedded_development_metadata() {
+        let identity = select_app_identity(
+            Some(AppIdentity {
+                name: Some("WK Acceptance".into()),
+                identifier: Some("io.brightwave.tidebreak.wkacceptance.test".into()),
+            }),
+            AppIdentity {
+                name: Some("Tidebreak".into()),
+                identifier: Some("io.brightwave.tidebreak".into()),
+            },
+            "Tidebreak",
+        );
+        assert_eq!(
+            identity,
+            (
+                "WK Acceptance".into(),
+                Some("io.brightwave.tidebreak.wkacceptance.test".into()),
+            ),
+        );
+    }
+
+    #[test]
+    fn unbundled_process_keeps_main_bundle_and_package_fallbacks() {
+        assert_eq!(
+            select_app_identity(
+                None,
+                AppIdentity {
+                    name: Some("Tidebreak Dev".into()),
+                    identifier: Some("io.brightwave.tidebreak.dev".into()),
+                },
+                "Tidebreak",
+            ),
+            (
+                "Tidebreak Dev".into(),
+                Some("io.brightwave.tidebreak.dev".into())
+            ),
+        );
+        for name in [None, Some(" ".into())] {
+            assert_eq!(
+                select_app_identity(
+                    None,
+                    AppIdentity {
+                        name,
+                        identifier: None
+                    },
+                    "Tidebreak",
+                ),
+                ("Tidebreak".into(), None),
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_registered_identity_never_borrows_another_bundle_identifier() {
+        for identifier in [None, Some(" ".into())] {
+            assert_eq!(
+                select_app_identity(
+                    Some(AppIdentity {
+                        name: None,
+                        identifier
+                    }),
+                    AppIdentity {
+                        name: Some("Embedded app".into()),
+                        identifier: Some("io.brightwave.tidebreak".into()),
+                    },
+                    "Tidebreak",
+                ),
+                ("Tidebreak".into(), None),
+            );
+        }
+    }
 
     #[test]
     fn setup_requires_main_webview_and_local_computer_authority() {
