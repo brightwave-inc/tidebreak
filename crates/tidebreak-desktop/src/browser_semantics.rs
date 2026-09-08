@@ -6,7 +6,7 @@
 //! its ref; navigation or a replaced target returns `stale_target` without an
 //! action.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -101,6 +101,8 @@ struct RawSemanticNode {
     sensitive: bool,
     consequential: bool,
     actions: Vec<String>,
+    #[serde(default)]
+    action_execution_modes: BTreeMap<String, Vec<tidebreak_core::BrowserExecutionMode>>,
     bounds: BrowserElementBounds,
     selector: Option<String>,
     frame_path: Vec<String>,
@@ -312,6 +314,7 @@ async fn capture_semantic_snapshot(
             checked: node.checked,
             sensitive: node.sensitive,
             actions: node.actions,
+            action_execution_modes: node.action_execution_modes,
             bounds: node.bounds,
         });
     }
@@ -4847,9 +4850,10 @@ const SNAPSHOT_SCRIPT: &str = r#"
       && rect.width > 0
       && rect.height > 0;
   };
+  const isNativePopupSelect = (element) => element.localName === "select" && !element.multiple && element.size <= 1;
   const actionsFor = (element, role, sensitive) => {
-    const nativePopupSelect = element.localName === "select" && !element.multiple && element.size <= 1;
-    if (sensitive || nativePopupSelect) return ["human_takeover"];
+    if (sensitive) return ["human_takeover"];
+    if (isNativePopupSelect(element)) return ["select", "human_takeover"];
     const actions = ["focus", "hover", "scroll_into_view"];
     if (["button", "link", "checkbox", "radio", "tab", "canvas"].includes(role)) actions.unshift("click");
     actions.push("right_click", "double_click", "drag", "scroll", "key_chord");
@@ -4910,6 +4914,9 @@ const SNAPSHOT_SCRIPT: &str = r#"
         sensitive,
         consequential,
         actions: interactive ? actionsFor(element, role, sensitive) : [],
+        actionExecutionModes: interactive && !sensitive && isNativePopupSelect(element)
+          ? { select: ["background"] }
+          : {},
         bounds: {
           x: Number((offsetX + rect.x).toFixed(2)),
           y: Number((offsetY + rect.y).toFixed(2)),
@@ -7699,7 +7706,7 @@ mod tests {
         assert!(script.contains("const value = !interactive || sensitive"));
         assert!(script.contains("text: sensitive ? null : (text || null)"));
         assert!(script.contains("interactive && !sensitive && element.href"));
-        assert!(script.contains("if (sensitive || nativePopupSelect) return [\"human_takeover\"]"));
+        assert!(script.contains("if (sensitive) return [\"human_takeover\"]"));
     }
 
     #[test]

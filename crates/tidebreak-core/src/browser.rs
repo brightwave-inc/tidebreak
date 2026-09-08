@@ -5,6 +5,8 @@
 //! host must derive the caller's browser capability, enforce origin consent,
 //! and resolve the opaque browser id before doing any work.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -390,6 +392,10 @@ pub struct BrowserSemanticNode {
     pub checked: Option<bool>,
     pub sensitive: bool,
     pub actions: Vec<String>,
+    /// Optional restrictions for individual actions. Other actions retain
+    /// the execution-mode rules of `browser_act`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub action_execution_modes: BTreeMap<String, Vec<BrowserExecutionMode>>,
     pub bounds: BrowserElementBounds,
 }
 
@@ -1423,7 +1429,7 @@ pub fn browser_screenshot_tool_spec() -> ToolSpec {
 pub fn browser_act_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActArgs>(
         BROWSER_ACT_TOOL,
-        "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. By default, execution_mode is background: bounded synthetic DOM actions preserve native keyboard focus. Results report executionMode and inputMethod. DOM events are not trusted input; CSS hover, keys, drag, and native controls may require foreground mode. Foreground input requires separate approval to take keyboard focus for that action. Never silently retry a DOM action as native input. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
+        "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. By default, execution_mode is background: bounded synthetic DOM actions preserve native keyboard focus. Results report executionMode and inputMethod. If a snapshot node lists actionExecutionModes for an action, use one of those execution_mode values. Popup select controls allow select only in background mode; native popup interaction requires human takeover. DOM events are not trusted input; CSS hover, keys, drag, and native controls may require foreground mode. Foreground input requires separate approval to take keyboard focus for that action. Never silently retry a DOM action as native input. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
     )
 }
 
@@ -1761,6 +1767,7 @@ mod tests {
                 checked: None,
                 sensitive: false,
                 actions: vec!["click".to_owned()],
+                action_execution_modes: BTreeMap::new(),
                 bounds: BrowserElementBounds {
                     x: 10.0,
                     y: 20.0,
@@ -1780,6 +1787,20 @@ mod tests {
         assert_eq!(value["contentTrust"], "untrusted_page");
         assert_eq!(value["nodes"][0]["ref"], "@e1");
         assert_eq!(value["frames"][0]["status"], "unsupported_frame");
+        assert!(value["nodes"][0].get("actionExecutionModes").is_none());
+        let restored: BrowserPageSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(restored.nodes[0].action_execution_modes.is_empty());
+        let mut restricted = value["nodes"][0].clone();
+        restricted["actionExecutionModes"] = serde_json::json!({ "select": ["background"] });
+        let restricted: BrowserSemanticNode = serde_json::from_value(restricted).unwrap();
+        assert_eq!(
+            restricted.action_execution_modes["select"],
+            vec![BrowserExecutionMode::Background]
+        );
+        assert_eq!(
+            serde_json::to_value(restricted).unwrap()["actionExecutionModes"],
+            serde_json::json!({ "select": ["background"] })
+        );
     }
 
     #[test]
