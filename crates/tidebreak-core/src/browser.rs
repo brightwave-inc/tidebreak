@@ -1504,6 +1504,23 @@ mod tests {
     }
 
     #[test]
+    fn fill_accepts_empty_text_to_clear_the_field_without_relaxing_the_size_limit() {
+        let request = |value| {
+            json!({
+                "browser_id": "browser-1", "snapshot_id": "snapshot-1", "document_epoch": 1,
+                "ref": "@e1", "action": { "type": "fill", "value": value },
+            })
+        };
+        assert!(validate_browser_act_arguments(&request("".to_owned())));
+        assert!(validate_browser_act_arguments(&request(
+            "x".repeat(MAX_BROWSER_ACTION_VALUE_CHARS)
+        )));
+        assert!(!validate_browser_act_arguments(&request(
+            "x".repeat(MAX_BROWSER_ACTION_VALUE_CHARS + 1)
+        )));
+    }
+
+    #[test]
     fn old_action_results_remain_native_and_new_results_report_input_method() {
         let legacy = json!({
             "browserId": "browser-1", "snapshotId": "snapshot-1", "documentEpoch": 1,
