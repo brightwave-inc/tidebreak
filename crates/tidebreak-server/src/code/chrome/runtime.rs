@@ -105,6 +105,7 @@ impl Drop for Connection {
 }
 #[derive(Clone)]
 struct Frame {
+    cdp_session: String,
     id: String,
     loader: String,
     url: String,
@@ -115,7 +116,7 @@ struct Snapshot {
     id: String,
     epoch: u64,
     frames: Vec<Frame>,
-    nodes: HashMap<String, (i64, String)>,
+    nodes: HashMap<String, (i64, String, String)>,
 }
 #[derive(Clone)]
 struct Tab {
@@ -209,11 +210,12 @@ impl Access {
         BrowserOrigin::from_url(url).is_some_and(|origin| self.grant.covers(&origin))
     }
     async fn frames(&self, session: &str) -> Result<Vec<Frame>, String> {
-        let value = self
-            .command(Some(session), "Page.getFrameTree", json!({}))
-            .await?;
-        let mut frames = Vec::new();
-        fn walk(value: &Value, out: &mut Vec<Frame>, parent_url: &str) -> Result<(), String> {
+        fn walk(
+            value: &Value,
+            out: &mut Vec<Frame>,
+            parent_url: &str,
+            cdp_session: &str,
+        ) -> Result<(), String> {
             if out.len() >= 128 {
                 return Err("Chrome page has too many frames".into());
             }
@@ -225,6 +227,7 @@ impl Access {
                 url
             };
             out.push(Frame {
+                cdp_session: cdp_session.into(),
                 id: frame["id"].as_str().unwrap_or("").into(),
                 loader: frame["loaderId"].as_str().unwrap_or("").into(),
                 url: url.into(),
@@ -232,15 +235,62 @@ impl Access {
             });
             if let Some(children) = value["childFrames"].as_array() {
                 for child in children {
-                    walk(child, out, url)?
+                    walk(child, out, url, cdp_session)?;
                 }
             }
             Ok(())
         }
-        walk(&value["frameTree"], &mut frames, "")?;
+        let value = self
+            .command(Some(session), "Page.getFrameTree", json!({}))
+            .await?;
+        let mut frames = Vec::new();
+        walk(&value["frameTree"], &mut frames, "", session)?;
         if frames.first().is_none_or(|frame| !self.permits(&frame.url)) {
             return Err("Chrome page origin is outside the approved scope".into());
         }
+        let mut seen = HashSet::from([session.to_owned()]);
+        loop {
+            let children = self
+                .cdp
+                .attached_sessions()
+                .into_iter()
+                .filter(|child| {
+                    child
+                        .parent_session
+                        .as_ref()
+                        .is_some_and(|parent| seen.contains(parent))
+                        && !seen.contains(&child.session_id)
+                })
+                .collect::<Vec<_>>();
+            if children.is_empty() {
+                break;
+            }
+            for child in children {
+                if seen.len() >= 128 {
+                    return Err("Chrome page has too many frame sessions".into());
+                }
+                seen.insert(child.session_id.clone());
+                self.command(
+                    Some(&child.session_id),
+                    "Target.setAutoAttach",
+                    json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"exclude":true}]}),
+                )
+                .await?;
+                let tree = self
+                    .command(Some(&child.session_id), "Page.getFrameTree", json!({}))
+                    .await?;
+                let mut child_frames = Vec::new();
+                walk(&tree["frameTree"], &mut child_frames, "", &child.session_id)?;
+                for frame in child_frames {
+                    if let Some(old) = frames.iter_mut().find(|old| old.id == frame.id) {
+                        *old = frame;
+                    } else {
+                        frames.push(frame);
+                    }
+                }
+            }
+        }
+        frames[1..].sort_by(|a, b| a.id.cmp(&b.id));
         Ok(frames)
     }
 }
@@ -301,7 +351,7 @@ impl ChromeComputerUseService {
     }
     pub fn revoke_session(&self, id: &SessionId) {
         let mut inner = self.inner.lock().unwrap();
-        inner.revoked.insert(id.clone());
+        inner.revoked.insert(*id);
         if let Some(state) = inner.sessions.remove(id) {
             state.cancel.cancel();
         }
@@ -315,7 +365,7 @@ impl ChromeComputerUseService {
             .values()
             .find(|c| c.spec.owner == scope.owner && c.spec.workspace == scope.workspace);
         ChromeAdapterState {
-            available: connection.is_some()
+            available: connection.is_some_and(|connection| connection.cdp.is_connected())
                 && !inner.revoked.contains(&scope.session)
                 && !scope.cancel.is_cancelled()
                 && !self.ownership.is_tripped(),
@@ -347,18 +397,6 @@ impl ChromeComputerUseService {
         if inner.revoked.contains(&scope.session) {
             return Err("Chrome session is revoked".into());
         }
-        let session = inner
-            .sessions
-            .entry(scope.session.clone())
-            .or_insert_with(|| SessionState {
-                owner: scope.owner.clone(),
-                workspace: scope.workspace.clone(),
-                cancel: CancelToken::new(),
-            });
-        if session.owner != scope.owner || session.workspace != scope.workspace {
-            return Err("Chrome session belongs to another owner or workspace".into());
-        }
-        let cancel = session.cancel.clone();
         let c = inner
             .connections
             .values()
@@ -368,8 +406,27 @@ impl ChromeComputerUseService {
                     && connection.is_none_or(|id| c.spec.connection_id == id)
             })
             .ok_or("No approved Chrome connection for this owner and workspace")?;
+        if !c.cdp.is_connected() {
+            return Err("Chrome connection is closed; reconnect Chrome".into());
+        }
+        let cdp = c.cdp.clone();
+        let grant = c.spec.grant.clone();
+        let connection_id = c.spec.connection_id.clone();
+        let connection_cancel = c.cancel.clone();
+        let session = inner
+            .sessions
+            .entry(scope.session)
+            .or_insert_with(|| SessionState {
+                owner: scope.owner.clone(),
+                workspace: scope.workspace,
+                cancel: CancelToken::new(),
+            });
+        if session.owner != scope.owner || session.workspace != scope.workspace {
+            return Err("Chrome session belongs to another owner or workspace".into());
+        }
+        let cancel = session.cancel.clone();
         let fence = Fence {
-            connection: c.cancel.clone(),
+            connection: connection_cancel,
             session: cancel,
             call: scope.cancel.clone(),
             ownership: self.ownership.clone(),
@@ -377,9 +434,9 @@ impl ChromeComputerUseService {
         };
         fence.check()?;
         Ok(Access {
-            cdp: c.cdp.clone(),
-            grant: c.spec.grant.clone(),
-            connection: c.spec.connection_id.clone(),
+            cdp,
+            grant,
+            connection: connection_id,
             fence,
         })
     }
@@ -479,6 +536,13 @@ impl ChromeComputerUseService {
         for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
             access.command(Some(&session), method, json!({})).await?;
         }
+        access
+            .command(
+                Some(&session),
+                "Target.setAutoAttach",
+                json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,"filter":[{"type":"iframe","exclude":false},{"exclude":true}]}),
+            )
+            .await?;
         let frames = access.frames(&session).await?;
         let frame = &frames[0];
         let summary = ChromeTabSummary {
@@ -494,8 +558,8 @@ impl ChromeComputerUseService {
             Tab {
                 connection: access.connection.clone(),
                 owner: scope.owner.clone(),
-                workspace: scope.workspace.clone(),
-                session: scope.session.clone(),
+                workspace: scope.workspace,
+                session: scope.session,
                 target_id: target.into(),
                 cdp_session: session,
                 summary: summary.clone(),
@@ -545,7 +609,7 @@ impl ChromeComputerUseService {
         );
         if mutating {
             let mut inner = self.inner.lock().unwrap();
-            let key = (scope.session.clone(), call.request_id);
+            let key = (scope.session, call.request_id);
             if let Some(receipt) = inner.receipts.get(&key) {
                 return if receipt.call == *call {
                     ChromeCallOutcome {
@@ -629,7 +693,7 @@ impl ChromeComputerUseService {
                 .lock()
                 .unwrap()
                 .receipts
-                .get_mut(&(scope.session.clone(), call.request_id))
+                .get_mut(&(scope.session, call.request_id))
             {
                 receipt.result = response.result.clone();
             }
@@ -816,7 +880,7 @@ impl ChromeComputerUseService {
                 });
                 continue;
             }
-            let context=access.command(Some(&tab.cdp_session),"Page.createIsolatedWorld",json!({"frameId":frame.id,"worldName":"tidebreak-computer-use","grantUniveralAccess":false})).await;
+            let context=access.command(Some(&frame.cdp_session),"Page.createIsolatedWorld",json!({"frameId":frame.id,"worldName":"tidebreak-computer-use","grantUniveralAccess":false})).await;
             let Ok(context) = context else {
                 frames.push(ChromeSemanticFrame {
                     name: frame.name.clone(),
@@ -831,7 +895,7 @@ impl ChromeComputerUseService {
             let options = json!({"max":args.bounded_max_nodes().saturating_sub(nodes.len()),"prefix":format!("n-{index}"),"snapshot":snapshot_id,"frame":frame.id});
             let result = access
                 .eval(
-                    &tab.cdp_session,
+                    &frame.cdp_session,
                     Some(context),
                     format!("({SNAPSHOT_SCRIPT})({options})"),
                 )
@@ -842,7 +906,10 @@ impl ChromeComputerUseService {
                     .map_err(|e| format!("Chrome snapshot is invalid: {e}"))?;
             for node in projected {
                 if let Some(reference) = &node.target_ref {
-                    references.insert(reference.clone(), (context, frame.id.clone()));
+                    references.insert(
+                        reference.clone(),
+                        (context, frame.id.clone(), frame.cdp_session.clone()),
+                    );
                 }
                 nodes.push(node);
             }
@@ -943,7 +1010,12 @@ impl ChromeComputerUseService {
             return Err("Chrome viewport is unavailable".into());
         }
         let scale = (args.max_width.unwrap_or(MAX_CHROME_SCREENSHOT_DIMENSION) as f64 / width)
-            .min(args.max_height.unwrap_or(MAX_CHROME_SCREENSHOT_DIMENSION) as f64 / height)
+            .min(
+                args.max_height
+                    .filter(|value| *value > 0)
+                    .unwrap_or(MAX_CHROME_SCREENSHOT_DIMENSION) as f64
+                    / height,
+            )
             .min(1.0);
         let image=access.command(Some(&tab.cdp_session),"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false,"clip":{"x":viewport["pageX"].as_f64().unwrap_or(0.0),"y":viewport["pageY"].as_f64().unwrap_or(0.0),"width":width,"height":height,"scale":scale}})).await?;
         self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
@@ -975,7 +1047,7 @@ impl ChromeComputerUseService {
         reference: &str,
         mut options: Value,
     ) -> Result<(f64, f64), String> {
-        let (context, frame) = snapshot
+        let (context, frame, frame_session) = snapshot
             .nodes
             .get(reference)
             .ok_or("Chrome node ref is absent from this snapshot")?;
@@ -985,7 +1057,7 @@ impl ChromeComputerUseService {
         options["ref"] = json!(reference);
         let result = access
             .eval(
-                &tab.cdp_session,
+                frame_session,
                 Some(*context),
                 format!("({PROBE_SCRIPT})({options})"),
             )
@@ -1068,9 +1140,11 @@ impl ChromeComputerUseService {
      self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x,"y":y})).await?;
      self.mouse(&access,&tab,&snapshot,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1})).await?;
      let drag=async {for step in 1..=12 {let t=f64::from(step)/12.0;self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x+(dx-x)*t,"y":y+(dy-y)*t,"button":"left","buttons":1})).await?;tokio::time::sleep(Duration::from_millis(16)).await;}Ok::<(),String>(())}.await;
-     // Release held input even when Stop interrupts a drag.
-     let released=access.cdp.command_in_session(&tab.cdp_session,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":dx,"y":dy,"button":"left","buttons":0,"clickCount":1}));
-     let _=tokio::time::timeout(Duration::from_secs(2),released).await;drag?;
+     if let Err(error)=drag {
+       let _=tokio::time::timeout(Duration::from_secs(2),access.cdp.command_in_session(&tab.cdp_session,"Input.cancelDragging",json!({}))).await;
+       return Err(error);
+     }
+     self.mouse(&access,&tab,&snapshot,json!({"type":"mouseReleased","x":dx,"y":dy,"button":"left","buttons":0,"clickCount":1})).await?;
     }
     ChromeAction::Click|ChromeAction::DoubleClick|ChromeAction::Hover|ChromeAction::Scroll{..}=>{
      let(x,y)=self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true})).await?;
@@ -1112,6 +1186,8 @@ impl ChromeComputerUseService {
         args: &ChromeWaitArgs,
     ) -> Result<ChromeWaitResult, String> {
         let (access, mut tab) = self.tab(scope, &args.target_ref)?;
+        self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
+            .await?;
         let start = tab.summary.url.clone();
         let deadline =
             tokio::time::Instant::now() + Duration::from_millis(args.bounded_timeout_ms());
@@ -1163,6 +1239,8 @@ impl ChromeComputerUseService {
         args: &ChromeDiagnosticsArgs,
     ) -> Result<ChromeDiagnosticsResult, String> {
         let (access, mut tab) = self.tab(scope, &args.target_ref)?;
+        self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
+            .await?;
         let frames = access.frames(&tab.cdp_session).await?;
         self.refresh(&mut tab, &frames)?;
         // A narrow page grant cannot attribute console messages from other frames.
@@ -1287,10 +1365,9 @@ impl ChromeComputerUseService {
 }
 fn ensure_same_document(before: &[Frame], after: &[Frame]) -> Result<(), String> {
     if before.len() != after.len()
-        || before
-            .iter()
-            .zip(after)
-            .any(|(a, b)| a.id != b.id || a.loader != b.loader || a.url != b.url)
+        || before.iter().zip(after).any(|(a, b)| {
+            a.id != b.id || a.loader != b.loader || a.url != b.url || a.cdp_session != b.cdp_session
+        })
     {
         Err("Chrome document or frame changed; take a fresh snapshot".into())
     } else {

@@ -103,7 +103,7 @@ impl CdpTransport for WebSocketTransport {
         loop {
             match self.stream.next().await {
                 Some(Ok(WsMessage::Text(text))) => {
-                    let bytes = text.as_bytes().len();
+                    let bytes = text.len();
                     if bytes > MAX_WS_MESSAGE_BYTES {
                         return Err(CdpError(format!(
                             "chrome message too large: {} bytes",
@@ -489,6 +489,13 @@ struct PendingCommand {
     reply: oneshot::Sender<Result<Value, CdpError>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AttachedSession {
+    pub session_id: String,
+    pub parent_session: Option<String>,
+    pub target_id: String,
+}
+
 /// One multiplexed DevTools protocol session. Commands carry an optional
 /// `sessionId` so attached targets share one transport while staying
 /// isolated in Chrome's session namespace.
@@ -497,6 +504,7 @@ pub struct CdpSession {
     commands: mpsc::UnboundedSender<CdpCommandMsg>,
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     events: std::sync::Arc<Mutex<Vec<CdpEvent>>>,
+    attachments: std::sync::Arc<Mutex<HashMap<String, AttachedSession>>>,
 }
 
 impl CdpSession {
@@ -511,12 +519,14 @@ impl CdpSession {
     pub fn with_transport(transport: impl CdpTransport + 'static) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let attachments = std::sync::Arc::new(Mutex::new(HashMap::new()));
         let session = Self {
+            attachments: attachments.clone(),
             commands: command_tx,
             next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             events: events.clone(),
         };
-        tokio::spawn(reader_loop(transport, command_rx, events));
+        tokio::spawn(reader_loop(transport, command_rx, events, attachments));
         session
     }
 
@@ -574,6 +584,14 @@ impl CdpSession {
         events.clone()
     }
 
+    pub fn is_connected(&self) -> bool {
+        !self.commands.is_closed()
+    }
+
+    pub fn attached_sessions(&self) -> Vec<AttachedSession> {
+        self.attachments.lock().unwrap().values().cloned().collect()
+    }
+
     /// Close the protocol task and transport.
     pub fn close(&self) {
         let _ = self.commands.send(CdpCommandMsg::Shutdown);
@@ -584,6 +602,7 @@ async fn reader_loop(
     mut transport: impl CdpTransport,
     mut commands: mpsc::UnboundedReceiver<CdpCommandMsg>,
     history: std::sync::Arc<Mutex<Vec<CdpEvent>>>,
+    attachments: std::sync::Arc<Mutex<HashMap<String, AttachedSession>>>,
 ) {
     let mut pending: HashMap<u64, PendingCommand> = HashMap::new();
     loop {
@@ -628,6 +647,23 @@ async fn reader_loop(
                                 continue;
                             }
                         };
+                        match parsed["method"].as_str() {
+                            Some("Target.attachedToTarget") => {
+                                if let Some(session_id) = parsed["params"]["sessionId"].as_str() {
+                                    attachments.lock().unwrap().insert(session_id.into(), AttachedSession {
+                                        session_id: session_id.into(),
+                                        parent_session: parsed["sessionId"].as_str().map(str::to_owned),
+                                        target_id: parsed["params"]["targetInfo"]["targetId"].as_str().unwrap_or("").into(),
+                                    });
+                                }
+                            }
+                            Some("Target.detachedFromTarget") => {
+                                if let Some(session_id) = parsed["params"]["sessionId"].as_str() {
+                                    attachments.lock().unwrap().remove(session_id);
+                                }
+                            }
+                            _ => {}
+                        }
                         if let Some(id) = parsed.get("id").and_then(Value::as_u64) {
                             if let Some(pending_command) = pending.remove(&id) {
                                 let result = if let Some(error) = parsed.get("error") {
