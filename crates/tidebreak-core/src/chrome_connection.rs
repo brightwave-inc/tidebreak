@@ -14,7 +14,7 @@ pub const CHROME_CONNECTION_STATE_TOOL: &str = "chrome_connection_state";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChromeConnectionMode {
-    /// Launch visible Chrome with a separate temporary profile for this session.
+    /// Launch Chrome without a foreground window, with a temporary profile for this session.
     Managed,
     /// Request access to the default Chrome profile through native consent.
     Existing,
@@ -35,7 +35,7 @@ pub fn chrome_connection_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec::for_args::<ChromeConnectArgs>(
             CHROME_CONNECT_TOOL,
-            "Request a Chrome connection for this coding session. Use managed to launch visible Chrome with a temporary isolated profile for app testing. Use existing only when the task needs the user's signed-in Chrome profile. The native host asks permission; existing Chrome also asks the user to approve remote debugging. The host discovers the local endpoint. After connection, use chrome_* tools. A stopped connection resumes only after fresh native consent.",
+            "Request a Chrome connection for this coding session. Use managed to start Chrome in the background with a temporary isolated profile for app testing. New tabs preserve focus; chrome_activate_tab explicitly brings a tab forward. Use existing only when the task needs the user's signed-in Chrome profile. The native host asks permission; existing Chrome also asks the user to approve remote debugging. The host discovers the local endpoint. After connection, use chrome_* tools. A stopped connection resumes only after fresh native consent.",
         ),
         ToolSpec::for_args::<ChromeConnectionEmptyArgs>(
             CHROME_DISCONNECT_TOOL,

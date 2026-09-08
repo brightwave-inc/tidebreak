@@ -359,6 +359,11 @@ impl ChromeRuntimeAdapter {
                 if paused {
                     rejected(call, "Chrome is stopped. Request chrome_connect and wait for native approval to resume.", "stopped")
                 } else if let Some(connection) = &state.connection {
+                    if call.name == tidebreak_core::CHROME_ACTIVATE_TAB_TOOL
+                        && !native_focus_consent(&self.app).await.unwrap_or(false)
+                    {
+                        return rejected(call, "Bringing Chrome forward was not approved.", "foreground_not_approved");
+                    }
                     let active_scope = ChromeScope {
                         cancel: stop.clone(),
                         ..scope.clone()
@@ -642,14 +647,30 @@ fn view(session: &Session, state: &SessionState, scope: &ChromeScope) -> ChromeC
     }
 }
 
+async fn native_focus_consent(app: &AppHandle) -> Result<bool, String> {
+    let (send, receive) = oneshot::channel();
+    let mut dialog = app.dialog()
+        .message("Bring the shared Chrome tab to the front? This can change your keyboard focus. Other Chrome actions run in the background.")
+        .title("Bring Chrome forward?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Bring forward".into(), "Keep working".into()));
+    if let Some(window) = app.get_window("main") { dialog = dialog.parent(&window); }
+    dialog.show_with_result(move |answer| {
+        let accepted = matches!(answer, MessageDialogResult::Ok)
+            || matches!(answer, MessageDialogResult::Custom(ref value) if value == "Bring forward");
+        let _ = send.send(accepted);
+    });
+    receive.await.map_err(|_| "Chrome focus prompt closed.".to_owned())
+}
+
 async fn native_consent(
     app: &AppHandle,
     mode: ChromeConnectionMode,
     resume: bool,
 ) -> Result<bool, String> {
     let message = match mode {
-        ChromeConnectionMode::Managed => "Allow Tidebreak to open and control a visible Chrome window with a separate temporary profile for this coding session?\n\nThe agent can open and change pages, read all tabs in this profile, capture screenshots, and inspect console and network diagnostics. Visible content and diagnostics can be sent to the selected model and provider. This profile does not contain your existing Chrome sign-ins. Stop pauses control; disconnect closes this browser and removes its temporary profile.",
-        ChromeConnectionMode::Existing => "Allow Tidebreak to control your running Google Chrome browser for this coding session?\n\nThis shares all web tabs exposed by that Chrome instance, including signed-in pages and tabs from other profiles it exposes. The agent can read and change those pages, capture screenshots, and inspect console and network diagnostics. Page content and diagnostics can be sent to the selected model and provider. This access covers the whole connected Chrome instance, not one site.\n\nChrome 144 or later must be running. In Chrome's remote debugging page, enable remote debugging and approve Chrome's own connection prompt. Tidebreak opens that page after you continue. Disconnect leaves your Chrome open.",
+        ChromeConnectionMode::Managed => "Allow Tidebreak to start and control Chrome in the background with a separate temporary profile for this coding session?\n\nThe agent can open and change pages, read all tabs in this profile, capture screenshots, and inspect console and network diagnostics. Visible content and diagnostics can be sent to the selected model and provider. This profile does not contain your existing Chrome sign-ins. Stop pauses control; disconnect closes this browser and removes its temporary profile.",
+        ChromeConnectionMode::Existing => "Allow Tidebreak to control your running Google Chrome browser for this coding session?\n\nThis shares all web tabs exposed by that Chrome instance, including signed-in pages and tabs from other profiles it exposes. The agent can read and change those pages, capture screenshots, and inspect console and network diagnostics. Page content and diagnostics can be sent to the selected model and provider. This access covers the whole connected Chrome instance, not one site.\n\nChrome 144 or later must be running. In Chrome's remote debugging page, enable remote debugging and approve Chrome's own connection prompt. Tidebreak opens that page in the background after you continue. Bring Chrome forward when you are ready to approve its connection prompt. Disconnect leaves your Chrome open.",
     };
     let (send, receive) = oneshot::channel();
     let mut dialog = app
@@ -790,8 +811,7 @@ fn managed_arguments(profile: &Path) -> Vec<std::ffi::OsString> {
         "--remote-debugging-address=127.0.0.1".into(),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        "--new-window".into(),
-        "about:blank".into(),
+        "--no-startup-window".into(),
     ]
 }
 
@@ -804,6 +824,7 @@ fn open_remote_debugging_settings(binary: &Path) -> Result<(), String> {
             .and_then(Path::parent)
             .ok_or_else(|| "Could not locate the Google Chrome app bundle.".to_owned())?;
         let status = Command::new("/usr/bin/open")
+            .arg("-g")
             .arg("-a")
             .arg(app_bundle)
             .arg(EXISTING_SETUP_URL)

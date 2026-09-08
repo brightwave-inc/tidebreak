@@ -41,6 +41,7 @@ mod browser_url_observer;
 mod channel;
 mod chat_debug;
 mod chrome_runtime_adapter;
+mod computer_runtime_adapter;
 mod client_execution;
 mod code_browser;
 mod code_editor;
@@ -973,6 +974,9 @@ pub fn run() {
             browser_url_observer::detach_all_browser_url_observers();
         }
         tauri::RunEvent::Exit => {
+            if let Some(runtime) = app.try_state::<Arc<computer_runtime_adapter::DesktopComputerRuntime>>() {
+                tauri::async_runtime::block_on(runtime.shutdown());
+            }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
         }
         _ => {}
@@ -1051,9 +1055,13 @@ async fn boot_server(
     // Native computer use for code sessions rides the same trusted bridge
     // executable. The adapter is installed on every platform; it reports
     // unavailable off macOS, so no channel is minted there.
-    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = Arc::new(
-        native_runtime_adapter::DesktopNativeRuntime::new(app.clone()),
-    );
+    let computer_runtime = Arc::new(computer_runtime_adapter::DesktopComputerRuntime::new(
+        app.clone(),
+        app.path().app_cache_dir().map_err(|error| error.to_string())?,
+        app.path().home_dir().map_err(|error| error.to_string())?,
+    ));
+    app.manage(computer_runtime.clone());
+    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = computer_runtime;
     let native_binding = tidebreak_server::NativeChannelBinding::new(
         native_runtime,
         desktop_sibling_exe("tidebreak")?,

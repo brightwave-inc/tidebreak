@@ -255,14 +255,14 @@ impl ComputerUseState {
 
     /// Whether the user has halted control. Checked before every control
     /// round-trip so a Stop always lands first.
-    fn is_halted(&self) -> bool {
+    pub(crate) fn is_halted(&self) -> bool {
         *self.halt.borrow()
     }
 
     /// Await the next halt, returning immediately if already halted. A halt
     /// that fired between the pre-dispatch check and here is still observed:
     /// the watch receiver starts from the current value, not the next change.
-    async fn wait_for_halt(&self) {
+    pub(crate) async fn wait_for_halt(&self) {
         let mut rx = self.halt.subscribe();
         while !*rx.borrow_and_update() {
             if rx.changed().await.is_err() {
@@ -509,6 +509,9 @@ pub(crate) async fn stop_computer_use_control(
         .await?;
     state.computer_use.halt.send_replace(true);
     emit_state(&app, &state.computer_use);
+    if let Some(runtime) = app.try_state::<std::sync::Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>() {
+        runtime.stop_all_chrome();
+    }
     let cancelled = state.broker.cancel_native_actions();
     state.computer_use.halt().await;
     cancelled.map_err(|error| error.to_string())
@@ -1843,6 +1846,10 @@ pub(crate) async fn execute_session_native_operation(
         } => SessionNativeResolution::Failed {
             result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
             error_code,
+        },
+        StoredResolution::Cancelled { result } => SessionNativeResolution::Failed {
+            result: serde_json::from_str(&result).unwrap_or(serde_json::Value::Null),
+            error_code: "computer_use_cancelled".to_owned(),
         },
     };
     Ok(SessionNativeOutput {
