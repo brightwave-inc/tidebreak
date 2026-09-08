@@ -11,11 +11,19 @@ OUT_DIR="${1:?usage: scripts/computer-use-fixture/build.sh <output-directory>}"
 MAIN_SOURCE="$SOURCE_DIR/main.swift"
 INFO_SOURCE="$SOURCE_DIR/Info.plist"
 SCRIPT_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build.sh"
+REPO_ROOT="$(git -C "$SOURCE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 
-if [[ "$OUT_DIR" == "/" || "$OUT_DIR" == "$HOME" || "$OUT_DIR" == "$SOURCE_DIR" ]]; then
+if [[ "$OUT_DIR" == "/" || "$OUT_DIR" == "$HOME" || "$OUT_DIR" == "$SOURCE_DIR" || "$OUT_DIR" == "$REPO_ROOT" ]]; then
     echo "computer-use-fixture: refusing a broad build directory" >&2
     exit 2
 fi
+
+case "$OUT_DIR" in
+    "$REPO_ROOT"/*)
+        echo "computer-use-fixture: build output must live outside the repository" >&2
+        exit 2
+        ;;
+esac
 
 APP_DIR="$OUT_DIR/ComputerUseFixture.app"
 CONTENTS="$APP_DIR/Contents"
@@ -70,7 +78,7 @@ cp "$INFO_SOURCE" "$RESOURCES_DIR/Info.plist"
 codesign --force --deep --sign - "$APP_DIR"
 \`\`\`
 
-Run from a checkout at commit \`$(git -C "$SOURCE_DIR/.." rev-parse HEAD 2>/dev/null || echo unknown)\`.
+Run from a checkout at commit \`$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)\`.
 EOF
 
 echo "computer-use-fixture: built $APP_DIR"
