@@ -219,6 +219,7 @@ struct DispatchState {
     owner: Option<SessionId>,
     cancelled: HashSet<SessionId>,
     revoked: HashSet<SessionId>,
+    stop_revision: u64,
 }
 
 struct ActingOwner<'a> {
@@ -346,6 +347,7 @@ impl ComputerUseState {
     ) -> Result<bool, E> {
         let mut state = lock(&self.dispatch_state);
         lock(&self.foreground_takeovers).retain(|(id, _)| *id != session.0);
+        state.stop_revision = state.stop_revision.saturating_add(1);
         if revoked {
             state.cancelled.remove(&session);
             state.revoked.insert(session);
@@ -366,7 +368,8 @@ impl ComputerUseState {
     }
 
     fn stop_all<E>(&self, cancel_helper: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
-        let _state = lock(&self.dispatch_state);
+        let mut state = lock(&self.dispatch_state);
+        state.stop_revision = state.stop_revision.saturating_add(1);
         self.halt.send_replace(true);
         lock(&self.foreground_takeovers).clear();
         cancel_helper()
@@ -419,17 +422,29 @@ impl ComputerUseState {
             .map_err(|_| ())
     }
 
-    fn resume_with<E>(&self, resume_helper: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+    fn stop_revision(&self) -> u64 {
+        lock(&self.dispatch_state).stop_revision
+    }
+
+    fn resume_with<E>(
+        &self,
+        approved_revision: u64,
+        resume_helper: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
         let mut state = lock(&self.dispatch_state);
+        if state.stop_revision != approved_revision {
+            return Ok(false);
+        }
         resume_helper()?;
         state.cancelled.clear();
         self.halt.send_replace(false);
-        Ok(())
+        Ok(true)
     }
 
     #[cfg(test)]
     fn resume(&self) {
-        self.resume_with(|| Ok::<_, ()>(())).unwrap();
+        self.resume_with(self.stop_revision(), || Ok::<_, ()>(()))
+            .unwrap();
     }
 
     fn snapshot(&self) -> ComputerUseSnapshot {
@@ -667,6 +682,7 @@ pub(crate) async fn resume_computer_use_control(
     state
         .require_local(crate::host_authority::Authority::ComputerUse)
         .await?;
+    let approved_revision = state.computer_use.stop_revision();
     if native_binary_choice(
         &app,
         "Resume computer control?",
@@ -677,10 +693,13 @@ pub(crate) async fn resume_computer_use_control(
     {
         // A new helper generation must not revive input that is still draining.
         let _dispatch = state.computer_use.acting_dispatch.lock().await;
-        state
+        let resumed = state
             .computer_use
-            .resume_with(|| state.broker.resume_native_actions())
+            .resume_with(approved_revision, || state.broker.resume_native_actions())
             .map_err(|error| error.to_string())?;
+        if !resumed {
+            return Err("Computer control was stopped again while Resume waited. Choose Resume again if you want to continue.".to_owned());
+        }
         emit_state(&app, &state.computer_use);
     }
     Ok(())
@@ -2621,6 +2640,30 @@ mod tests {
         assert!(cu.dispatch_acting(owner, || async {}).await.is_ok());
         cu.resume();
         assert!(cu.dispatch_acting(queued, || async {}).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_new_stop_invalidates_resume_waiting_for_the_dispatch_gate() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let gate = cu.acting_dispatch.lock().await;
+        cu.stop_all(|| Ok::<_, ()>(())).unwrap();
+        let approved_revision = cu.stop_revision();
+        let resume_cu = cu.clone();
+        let (waiting, waiting_rx) = oneshot::channel();
+        let resume = tokio::spawn(async move {
+            waiting.send(()).unwrap();
+            let _gate = resume_cu.acting_dispatch.lock().await;
+            resume_cu.resume_with(approved_revision, || -> Result<(), ()> {
+                panic!("an older Resume must not replace the helper's stopped generation");
+            })
+        });
+        waiting_rx.await.unwrap();
+        cu.stop_all(|| Ok::<_, ()>(())).unwrap();
+        drop(gate);
+        assert!(!resume.await.unwrap().unwrap());
+        assert!(cu.is_halted());
+        cu.resume();
+        assert!(!cu.is_halted());
     }
 
     #[tokio::test]
