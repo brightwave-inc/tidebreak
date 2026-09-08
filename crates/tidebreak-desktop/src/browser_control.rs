@@ -20,9 +20,7 @@ pub(crate) use tidebreak_core::{
 use tidebreak_core::{
     BrowserEngineName, BrowserGrantCapability, BrowserOrigin, BrowserOriginScope, OwnerId,
 };
-#[cfg(any(target_os = "macos", test))]
-use tokio::sync::OwnedMutexGuard;
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::browser_grants::{BrowserGrant, BrowserGrantStore};
@@ -346,6 +344,8 @@ struct BrowserAgentCapability {
     workspace_id: String,
     controller_label: String,
     expires_at: Instant,
+    /// Session Stop survives capability rotation and new-tab proposals.
+    stopped: bool,
 }
 
 #[derive(Clone)]
@@ -906,6 +906,7 @@ impl BrowserRegistry {
                 workspace_id: workspace_id.to_owned(),
                 controller_label: clean_controller_text(controller_label, 80, "Agent"),
                 expires_at: Instant::now() + ttl,
+                stopped: false,
             },
         );
         capability_id
@@ -959,6 +960,7 @@ impl BrowserRegistry {
                 workspace_id: workspace_id.to_owned(),
                 controller_label: controller_label.clone(),
                 expires_at: Instant::now() + AGENT_CAPABILITY_TTL,
+                stopped: previous.stopped,
             },
         );
         for record in state.records.values_mut() {
@@ -1030,6 +1032,9 @@ impl BrowserRegistry {
         }
 
         let owner_id = record.owner_id.clone();
+        let stopped_owner = record.controller_capability_id;
+        let _stopped_dispatches =
+            lock_stopped_browser_dispatches(&state, stopped_owner, workspace_id)?;
         let mut next = state.grants.clone();
         if let Some(grant) = next.iter_mut().find(|grant| {
             grant.owner_id == owner_id && grant.workspace_id == workspace_id && grant.scope == scope
@@ -1045,6 +1050,7 @@ impl BrowserRegistry {
         }
         persist_browser_grants(&state, &next)?;
         state.grants = next;
+        resume_stopped_browser_session(&mut state, stopped_owner, workspace_id);
 
         {
             let record = state
@@ -1318,6 +1324,10 @@ impl BrowserRegistry {
         if !grants_cover(&state, &record.owner_id, workspace_id, &origin, required) {
             return Ok(None);
         }
+        let stopped_owner = record.controller_capability_id;
+        let _stopped_dispatches =
+            lock_stopped_browser_dispatches(&state, stopped_owner, workspace_id)?;
+        resume_stopped_browser_session(&mut state, stopped_owner, workspace_id);
         let record = state
             .records
             .get_mut(browser_id)
@@ -1574,29 +1584,78 @@ impl BrowserRegistry {
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
     }
 
+    #[cfg(test)]
     pub(crate) async fn stop_agent_control(
         &self,
         browser_id: &str,
         workspace_id: &str,
     ) -> Result<BrowserSnapshot, String> {
-        let gate = {
+        self.stop_agent_control_with(browser_id, workspace_id, |_| {})
+            .await
+    }
+
+    /// Publish every halted tab before waiting for its current action to finish.
+    pub(crate) async fn stop_agent_control_with(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        mut publish: impl FnMut(&BrowserSnapshot),
+    ) -> Result<BrowserSnapshot, String> {
+        let (gates, snapshots) = {
             let mut state = self.lock();
             let record = state
                 .records
-                .get_mut(browser_id)
+                .get(browser_id)
                 .ok_or_else(|| "browser session is not registered".to_owned())?;
             ensure_workspace(browser_id, workspace_id, record)?;
-            record.dispatch.halt.send_replace(true);
-            if record.controller.kind == BrowserControllerKind::Agent {
-                record.controller.halted = true;
-                record.controller.action = None;
-                record.controller.takeover_required = false;
+            let capability_id = record.controller_capability_id;
+            if let Some(capability) = capability_id.and_then(|id| state.capabilities.get_mut(&id)) {
+                capability.stopped = true;
+            }
+            // Stop every tab this session owns before waiting on any dispatch.
+            // Other code/chat sessions retain their independent browser access.
+            let mut gates = Vec::new();
+            let mut affected = Vec::new();
+            for (id, record) in &mut state.records {
+                if record.workspace_id != workspace_id
+                    || (id != browser_id
+                        && (capability_id.is_none()
+                            || record.controller_capability_id != capability_id))
+                {
+                    continue;
+                }
+                record.dispatch.halt.send_replace(true);
+                if record.controller.kind == BrowserControllerKind::Agent {
+                    record.controller.halted = true;
+                    record.controller.action = None;
+                    record.controller.takeover_required = false;
+                }
                 record.semantic_snapshot = None;
                 record.screenshot_epoch = None;
+                gates.push(Arc::clone(&record.dispatch.gate));
+                affected.push(id.clone());
             }
-            Arc::clone(&record.dispatch.gate)
+            if let Some(capability_id) = capability_id {
+                state
+                    .confirmations
+                    .retain(|_, confirmation| confirmation.capability_id != capability_id);
+            }
+            affected.sort();
+            let snapshots = affected
+                .iter()
+                .map(|id| {
+                    let record = &state.records[id];
+                    record.snapshot(id, agent_access_for_record(&state, record))
+                })
+                .collect::<Vec<_>>();
+            (gates, snapshots)
         };
-        let _dispatch = gate.lock().await;
+        for snapshot in &snapshots {
+            publish(snapshot);
+        }
+        for gate in gates {
+            let _dispatch = gate.lock().await;
+        }
         self.snapshot(browser_id, workspace_id)
     }
 
@@ -2633,11 +2692,98 @@ fn active_capability(
     state: &BrowserRegistryState,
     capability_id: Uuid,
 ) -> Result<&BrowserAgentCapability, String> {
-    state
+    let capability = state
         .capabilities
         .get(&capability_id)
         .filter(|capability| capability.expires_at > Instant::now())
-        .ok_or_else(|| "browser capability is unavailable".to_owned())
+        .ok_or_else(|| "browser capability is unavailable".to_owned())?;
+    if capability.stopped {
+        return Err("browser control was stopped by the user".to_owned());
+    }
+    Ok(capability)
+}
+
+/// Keep Resume behind every dispatch that Stop is still draining.
+fn lock_stopped_browser_dispatches(
+    state: &BrowserRegistryState,
+    capability_id: Option<Uuid>,
+    workspace_id: &str,
+) -> Result<Vec<OwnedMutexGuard<()>>, String> {
+    let Some(capability_id) = capability_id else {
+        return Ok(Vec::new());
+    };
+    if !state
+        .capabilities
+        .get(&capability_id)
+        .is_some_and(|capability| capability.workspace_id == workspace_id && capability.stopped)
+    {
+        return Ok(Vec::new());
+    }
+    state
+        .records
+        .values()
+        .filter(|record| {
+            record.workspace_id == workspace_id
+                && record.controller_capability_id == Some(capability_id)
+        })
+        .map(|record| {
+            Arc::clone(&record.dispatch.gate)
+                .try_lock_owned()
+                .map_err(|_| {
+                    "browser control is still stopping; try Share again after it stops".to_owned()
+                })
+        })
+        .collect()
+}
+
+/// Only trusted Share/Resume on a stopped session's tab re-arms that session.
+/// If all of its tabs are closed, the caller must end and restart the session.
+fn resume_stopped_browser_session(
+    state: &mut BrowserRegistryState,
+    capability_id: Option<Uuid>,
+    workspace_id: &str,
+) {
+    let Some(capability_id) = capability_id else {
+        return;
+    };
+    let Some(capability) = state.capabilities.get_mut(&capability_id) else {
+        return;
+    };
+    if capability.workspace_id != workspace_id || !capability.stopped {
+        return;
+    }
+    capability.stopped = false;
+    let resumable = state
+        .records
+        .iter()
+        .filter(|(_, record)| {
+            record.workspace_id == workspace_id
+                && record.controller_capability_id == Some(capability_id)
+                && !record.resetting
+                && record.paused_origin.is_none()
+                && current_origin(record).is_some_and(|origin| {
+                    grants_cover(
+                        state,
+                        &record.owner_id,
+                        workspace_id,
+                        &origin,
+                        BrowserGrantCapability::BrowserObserveOrigin,
+                    )
+                })
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in resumable {
+        let record = state
+            .records
+            .get_mut(&id)
+            .expect("resumable browser exists");
+        record.dispatch.halt.send_replace(false);
+        record.controller = BrowserController::default();
+        record.controller_capability_id = None;
+        record.semantic_snapshot = None;
+        record.screenshot_epoch = None;
+    }
 }
 
 fn current_origin(record: &BrowserRecord) -> Option<BrowserOrigin> {

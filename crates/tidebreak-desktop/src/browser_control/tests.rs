@@ -3019,3 +3019,192 @@ async fn human_takeover_ends_the_opening_agents_close_authority() {
         .unwrap_err()
         .contains("not opened"));
 }
+
+#[tokio::test]
+async fn stopped_agent_cannot_open_a_replacement_tab() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    let result = registry.authorize_agent_open(capability, &OwnerId::local(), &origin);
+    assert!(
+        result.is_err(),
+        "Stop allowed a replacement tab: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn stopped_session_survives_rotation_and_resumes_only_from_its_own_tab() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    registry.expire_agent_capability_for_test(capability);
+    let replacement = registry
+        .rotate_expired_agent_capability(capability, "workspace-1", "Code agent")
+        .unwrap();
+    assert!(registry
+        .authorize_agent_open(replacement, &OwnerId::local(), &origin)
+        .unwrap_err()
+        .contains("stopped"));
+    let other = registry.issue_agent_capability("workspace-1", "Other agent");
+    assert!(registry
+        .authorize_agent_open(other, &OwnerId::local(), &origin)
+        .is_ok());
+    registry
+        .resume_shared_browser("browser-1", "workspace-1")
+        .unwrap()
+        .unwrap();
+    assert!(registry
+        .authorize_agent_open(replacement, &OwnerId::local(), &origin)
+        .is_ok());
+    assert!(registry
+        .begin_agent_control(replacement, "browser-1")
+        .is_ok());
+}
+
+#[tokio::test]
+async fn stop_cancels_owned_tabs_and_waits_for_their_dispatches() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    for (id, owner) in [
+        ("browser-2", capability),
+        (
+            "browser-other",
+            registry.issue_agent_capability("workspace-1", "Other agent"),
+        ),
+    ] {
+        let instance = registry
+            .register(id, "workspace-1", "https://example.com".into(), true)
+            .unwrap();
+        registry
+            .page_finished(id, "workspace-1", instance, "https://example.com".into())
+            .unwrap();
+        registry.begin_agent_control(owner, id).unwrap();
+    }
+    let second_dispatch = Arc::clone(&registry.lock().records["browser-2"].dispatch.gate);
+    let held = second_dispatch.lock().await;
+    let stopping = registry.clone();
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let published_in_stop = Arc::clone(&published);
+    let task = tokio::spawn(async move {
+        stopping
+            .stop_agent_control_with("browser-1", "workspace-1", |snapshot| {
+                published_in_stop.lock().unwrap().push(snapshot.clone());
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "Stop must wait for the other owned tab to drain"
+    );
+    {
+        let snapshots = published.lock().unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.browser_id.as_str())
+                .collect::<Vec<_>>(),
+            ["browser-1", "browser-2"],
+            "Stop must publish every affected tab before dispatches drain"
+        );
+        assert!(snapshots.iter().all(|snapshot| {
+            snapshot
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller.halted)
+                && snapshot
+                    .agent_access
+                    .as_ref()
+                    .is_some_and(|access| access.halted)
+        }));
+    }
+    assert!(
+        registry
+            .snapshot("browser-2", "workspace-1")
+            .unwrap()
+            .controller
+            .unwrap()
+            .halted
+    );
+    assert!(
+        !registry
+            .snapshot("browser-other", "workspace-1")
+            .unwrap()
+            .controller
+            .unwrap()
+            .halted
+    );
+    assert!(registry
+        .authorize_agent_open(capability, &OwnerId::local(), &origin)
+        .is_err());
+    assert!(registry
+        .resume_shared_browser("browser-1", "workspace-1")
+        .unwrap_err()
+        .contains("still stopping"));
+    assert!(registry
+        .authorize_agent_open(capability, &OwnerId::local(), &origin)
+        .unwrap_err()
+        .contains("stopped"));
+    drop(held);
+    task.await.unwrap().unwrap();
+    registry
+        .resume_shared_browser("browser-2", "workspace-1")
+        .unwrap()
+        .unwrap();
+    assert!(registry
+        .begin_agent_control(capability, "browser-1")
+        .is_ok());
+    assert!(registry
+        .begin_agent_control(capability, "browser-2")
+        .is_ok());
+}
+
+#[tokio::test]
+async fn closing_stopped_tab_does_not_rearm_its_session() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    registry.lock().records.remove("browser-1");
+    assert!(registry
+        .authorize_agent_open(capability, &OwnerId::local(), &origin)
+        .unwrap_err()
+        .contains("stopped"));
+}
+
+#[tokio::test]
+async fn sharing_an_unrelated_tab_does_not_resume_a_stopped_session() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    let instance = registry
+        .register(
+            "browser-unrelated",
+            "workspace-1",
+            "https://example.com".into(),
+            true,
+        )
+        .unwrap();
+    registry
+        .page_finished(
+            "browser-unrelated",
+            "workspace-1",
+            instance,
+            "https://example.com".into(),
+        )
+        .unwrap();
+    registry
+        .resume_shared_browser("browser-unrelated", "workspace-1")
+        .unwrap()
+        .unwrap();
+    assert!(registry
+        .authorize_agent_open(capability, &OwnerId::local(), &origin)
+        .unwrap_err()
+        .contains("stopped"));
+}

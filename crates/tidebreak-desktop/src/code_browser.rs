@@ -405,12 +405,15 @@ pub(crate) async fn code_browser_command(
                 registry.remove(&request.browser_id, &request.workspace_id)?;
                 return Err("browser session is not open".to_owned());
             }
-            let snapshot = registry
-                .stop_agent_control(&request.browser_id, &request.workspace_id)
-                .await?;
-            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
-            emit_controller_event(&app, &snapshot);
-            Ok(snapshot)
+            registry
+                .stop_agent_control_with(&request.browser_id, &request.workspace_id, |snapshot| {
+                    let _ = crate::browser_semantics::clear_browser_ghost_cursor(
+                        &app,
+                        &snapshot.browser_id,
+                    );
+                    emit_controller_event(&app, snapshot);
+                })
+                .await
         }
         CodeBrowserAction::TakeHumanControl => {
             if existing.is_none() {
@@ -1332,6 +1335,7 @@ async fn share_browser_with_agent(
     if let Some((snapshot, pending_navigation)) =
         registry.resume_shared_browser(browser_id, workspace_id)?
     {
+        emit_workspace_browser_controllers(app, registry, workspace_id);
         // Consent persisted before the screenshot disclosure lacks capture.
         // Re-sharing is the explicit moment to offer the upgraded disclosure;
         // declining keeps the original observation/control consent working.
@@ -1382,6 +1386,7 @@ async fn share_browser_with_agent(
             BrowserGrantCapability::BrowserDiagnoseOrigin,
         ],
     )?;
+    emit_workspace_browser_controllers(app, registry, workspace_id);
     let pending_navigation = registry.take_pending_navigation(browser_id, workspace_id)?;
     Ok((snapshot, pending_navigation))
 }
@@ -2090,6 +2095,19 @@ fn emit_navigation_paused_event(app: &AppHandle, snapshot: BrowserSnapshot, orig
             origin: Some(origin),
         },
     );
+}
+
+/// Share can resume every tab that the same stopped session controls.
+fn emit_workspace_browser_controllers(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    workspace_id: &str,
+) {
+    for browser in registry.list_for_workspace(workspace_id) {
+        if let Ok(snapshot) = registry.snapshot(&browser.browser_id, workspace_id) {
+            emit_controller_event(app, &snapshot);
+        }
+    }
 }
 
 pub(crate) fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {
