@@ -33,6 +33,15 @@ pub const BROWSER_ACT_TOOL: &str = "browser_act";
 /// Attach one exact conversation output or connected file to a re-resolved
 /// file-input target after fresh native confirmation.
 pub const BROWSER_UPLOAD_TOOL: &str = "browser_upload";
+/// Open a new in-app browser tab owned by the current workspace and session.
+pub const BROWSER_OPEN_TOOL: &str = "browser_open";
+/// Close one live in-app browser tab after rechecking session authority.
+pub const BROWSER_CLOSE_TOOL: &str = "browser_close";
+/// Activate one existing in-app browser tab, making it visible and focused.
+pub const BROWSER_ACTIVATE_TOOL: &str = "browser_activate";
+/// Read bounded page diagnostics (console, page errors, optional network) for
+/// a shared tab under the host's developer-diagnostics authority.
+pub const BROWSER_DIAGNOSTICS_TOOL: &str = "browser_diagnostics";
 
 /// The complete set of browser tools this contract supports.
 ///
@@ -40,7 +49,7 @@ pub const BROWSER_UPLOAD_TOOL: &str = "browser_upload";
 /// Semantic act and upload require trusted native interaction and register
 /// only when the engine adapter reports
 /// [`BrowserEngineCapabilities::semantic_actions`] as true.
-pub const BROWSER_TOOLS: [&str; 7] = [
+pub const BROWSER_TOOLS: [&str; 11] = [
     BROWSER_LIST_TOOL,
     BROWSER_NAVIGATE_TOOL,
     BROWSER_SNAPSHOT_TOOL,
@@ -48,6 +57,10 @@ pub const BROWSER_TOOLS: [&str; 7] = [
     BROWSER_SCREENSHOT_TOOL,
     BROWSER_ACT_TOOL,
     BROWSER_UPLOAD_TOOL,
+    BROWSER_OPEN_TOOL,
+    BROWSER_CLOSE_TOOL,
+    BROWSER_ACTIVATE_TOOL,
+    BROWSER_DIAGNOSTICS_TOOL,
 ];
 
 /// Maximum wire length of an opaque browser id.
@@ -100,6 +113,7 @@ pub struct BrowserEngineCapabilities {
     pub semantic_snapshot: bool,
     pub semantic_actions: bool,
     pub screenshot: bool,
+    pub developer_diagnostics: bool,
     pub cross_origin_frames: bool,
     pub profile_reset: bool,
 }
@@ -124,6 +138,12 @@ pub enum BrowserGrantCapability {
     BrowserObserveOrigin,
     /// Navigate and synthesize input within the granted origin.
     BrowserControlOrigin,
+    /// Capture visible tab pixels after the user's disclosed screenshot
+    /// permission. It does not include any other screen content.
+    BrowserCaptureVisibleTab,
+    /// Read bounded page diagnostics for this origin under explicit
+    /// developer-diagnostics consent.
+    BrowserDiagnoseOrigin,
     /// Upload from or export to an explicitly bounded Tidebreak resource.
     BrowserTransferFiles,
 }
@@ -732,33 +752,87 @@ pub enum BrowserAction {
     Press { key: String },
     /// Scroll the element into the centre of the viewport.
     ScrollIntoView,
+    /// Right-click the element (context menu where the page supplies one).
+    RightClick,
+    /// Double-click the element.
+    DoubleClick,
+    /// Press and release one mouse button after moving the pointer; drags and
+    /// drops cannot be honored by isolated WebKit input on this contract yet.
+    Drag { button: BrowserMouseButton },
+    /// Scroll the visible tab by one bounded wheel step.
+    Scroll { delta_x: i64, delta_y: i64 },
+    /// Run one native key chord. Modifiers are host-name based and minimal,
+    /// avoiding platform shortcuts that escape the page.
+    KeyChord { key: String, modifiers: Vec<BrowserModifier> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserModifier {
+    Shift,
+    Control,
+    Option,
+    Command,
 }
 
 impl BrowserAction {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         match self {
-            Self::Click | Self::Focus | Self::Hover | Self::ScrollIntoView => true,
+            Self::Click
+            | Self::Focus
+            | Self::Hover
+            | Self::ScrollIntoView
+            | Self::RightClick
+            | Self::DoubleClick
+            | Self::Drag { .. } => true,
+            Self::Scroll { delta_x, delta_y } => {
+                let bounded = |value: i64| (-65_536..=65_536).contains(&value);
+                bounded(*delta_x) && bounded(*delta_y) && (*delta_x != 0 || *delta_y != 0)
+            }
+            Self::KeyChord { key, modifiers } => {
+                key_press_is_well_formed(key)
+                    && modifiers.len() <= 4
+                    && !modifiers
+                        .iter()
+                        .any(|modifier| modifiers.iter().filter(|candidate| candidate == modifier).count() > 1)
+            }
             Self::Fill { value } | Self::Select { value } => {
                 !value.is_empty() && value.chars().count() <= MAX_BROWSER_ACTION_VALUE_CHARS
             }
             Self::Check { .. } => true,
             Self::Press { key } => {
-                matches!(
-                    key.as_str(),
-                    "Enter"
-                        | "Escape"
-                        | "Tab"
-                        | " "
-                        | "ArrowUp"
-                        | "ArrowDown"
-                        | "ArrowLeft"
-                        | "ArrowRight"
-                        | "Backspace"
-                        | "Delete"
-                )
+                key_press_is_well_formed(key)
             }
         }
+    }
+
+    fn key_press_is_well_formed(key: &str) -> bool {
+        matches!(
+            key,
+            "Enter"
+                | "Escape"
+                | "Tab"
+                | " "
+                | "ArrowUp"
+                | "ArrowDown"
+                | "ArrowLeft"
+                | "ArrowRight"
+                | "Backspace"
+                | "Delete"
+                | "Home"
+                | "End"
+                | "PageUp"
+                | "PageDown"
+        )
     }
 
     #[must_use]
@@ -772,6 +846,11 @@ impl BrowserAction {
             Self::Check { .. } => "check",
             Self::Press { .. } => "press",
             Self::ScrollIntoView => "scroll_into_view",
+            Self::RightClick => "right_click",
+            Self::DoubleClick => "double_click",
+            Self::Drag { .. } => "drag",
+            Self::Scroll { .. } => "scroll",
+            Self::KeyChord { .. } => "key_chord",
         }
     }
 
@@ -780,6 +859,7 @@ impl BrowserAction {
         match self {
             Self::Fill { value } | Self::Select { value } => Some(value),
             Self::Press { key } => Some(key),
+            Self::KeyChord { key, .. } => Some(key),
             _ => None,
         }
     }
