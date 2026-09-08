@@ -117,6 +117,8 @@ function nativeFixture(options = {}) {
         return { outcome: "completed" };
       case "computer_list_windows":
         return { windows: [{ id: 1, title: "Computer Use Fixture", visible: true }] };
+      case "computer_focus_window":
+        return { outcome: "completed" };
       case "computer_read_app_content": {
         let nodes = tree();
         if (options.missingCheckbox) {
@@ -323,6 +325,7 @@ test("the adapter emits the expected shared tool names", async () => {
   const names = new Set(fixture.calls.map(([name]) => name));
   for (const name of [
     "computer_launch_app",
+    "computer_focus_window",
     "computer_list_windows",
     "computer_read_app_content",
     "computer_capture_screen",

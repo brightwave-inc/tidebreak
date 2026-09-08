@@ -29,9 +29,8 @@ that an interaction happened from a tool success string.
 
 ## Build and run
 
-Requires macOS with Xcode Command Line Tools (Swift, `clang`/`swiftc`, and
-`osacompile` are used). macOS 14 or newer is recommended; the pop-up menu APIs
-below require macOS 13.
+Requires macOS with Xcode Command Line Tools (`swiftc` and `codesign`). macOS
+14 or newer is recommended; the pop-up menu APIs below require macOS 13.
 
 Build into a caller-specified ignored temp directory:
 
