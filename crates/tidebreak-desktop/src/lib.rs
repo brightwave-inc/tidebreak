@@ -40,6 +40,7 @@ mod browser_semantics;
 mod browser_url_observer;
 mod channel;
 mod chat_debug;
+mod chrome_runtime_adapter;
 mod client_execution;
 mod code_browser;
 mod code_editor;

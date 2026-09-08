@@ -29,6 +29,7 @@ pub mod bus;
 pub mod chat_titling;
 pub mod chatgpt_runtime;
 pub mod code;
+pub use code::chrome;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 pub mod connected_apps;
