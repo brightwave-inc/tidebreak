@@ -99,3 +99,4 @@
 0088  0088-a-slack-session-runs-where-the-deployment-can-run-it.md
 0089  0089-service-principals.md
 0090  0090-a-session-acts-as-one-forge-identity.md
+0092  0092-workspace-grants.md

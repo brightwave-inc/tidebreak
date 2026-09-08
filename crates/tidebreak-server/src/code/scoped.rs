@@ -66,6 +66,7 @@ pub struct ScopedCode {
     owner: OwnerId,
     owner_kind: Option<String>,
     allow_unscoped_delivery: bool,
+    is_service: bool,
 }
 
 impl ScopedCode {
@@ -80,6 +81,7 @@ impl ScopedCode {
             owner: auth.principal.owner_id(),
             owner_kind: auth.principal.session_owner_kind().map(str::to_owned),
             allow_unscoped_delivery: auth.principal.is_admin(),
+            is_service: auth.principal.is_service(),
         })
     }
 
@@ -138,6 +140,7 @@ impl ScopedCode {
             owner,
             allow_unscoped_delivery: false,
             owner_kind: None,
+            is_service: false,
         }
     }
 
@@ -968,16 +971,83 @@ impl ScopedCode {
     // Adapter grants and the connect handshake (docs/slack-sessions.md).
     // ------------------------------------------------------------------
 
+    pub fn is_admin(&self) -> bool {
+        self.allow_unscoped_delivery
+    }
+
+    pub fn is_service(&self) -> bool {
+        self.is_service
+    }
+
     pub async fn list_adapter_grants(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
         self.runtime.list_adapter_grants(&self.owner).await
     }
 
+    pub async fn list_workspace_grants_all_owners(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
+        self.runtime.list_workspace_grants_all_owners().await
+    }
+
+    pub async fn list_channel_repository_confirms(
+        &self,
+        grant_id: tidebreak_core::CodeGrantId,
+    ) -> Result<Vec<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
+        self.runtime
+            .list_channel_repository_confirms(grant_id)
+            .await
+    }
+
+    pub async fn start_workspace_handshake(
+        &self,
+        channel_kind: &str,
+        workspace_identity: &str,
+        display: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
+    ) -> Result<(tidebreak_core::CodeConnectHandshake, String, String), ServerError> {
+        if !self.is_service {
+            return Err(ServerError::forbidden(
+                "only a service principal can start a workspace grant",
+            ));
+        }
+        self.runtime
+            .start_workspace_handshake(
+                &self.owner,
+                channel_kind,
+                workspace_identity,
+                display,
+                lease,
+            )
+            .await
+    }
+
+    pub async fn revoke_adapter_grant_as_admin(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        reason: &str,
+    ) -> Result<Option<tidebreak_core::CodeExternalGrant>, ServerError> {
+        if !self.allow_unscoped_delivery {
+            return Err(ServerError::forbidden("administrator access is required"));
+        }
+        self.runtime
+            .revoke_adapter_grant_any_owner(id, reason)
+            .await
+    }
+
     pub async fn list_adapter_grant_profiles(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
         self.runtime.list_adapter_grant_profiles(&self.owner).await
+    }
+
+    pub async fn list_workspace_grant_profiles_all_owners(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        self.runtime
+            .list_workspace_grant_profiles_all_owners()
+            .await
     }
 
     pub async fn revoke_adapter_grant(

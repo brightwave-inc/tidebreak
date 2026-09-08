@@ -1861,6 +1861,7 @@ pub mod code_external_grant {
         pub created_at: DateTimeUtc,
         pub revoked_at: Option<DateTimeUtc>,
         pub revoked_reason: Option<String>,
+        pub kind: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1911,6 +1912,33 @@ pub mod code_connect_handshake {
         pub expires_at: DateTimeUtc,
         pub approved_at: Option<DateTimeUtc>,
         pub completed_at: Option<DateTimeUtc>,
+        pub kind: String,
+        pub approved_by: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_channel_repository_confirm {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_channel_repository_confirm")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub grant_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub channel_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository: String,
+        pub set_by_identity: String,
+        pub set_by_display: String,
+        pub state: String,
+        pub confirmed_by: Option<String>,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

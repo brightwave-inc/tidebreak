@@ -150,12 +150,23 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
                     <ChannelAvatar grant={grant} />
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium">
-                        {grant.display_name ?? grant.external_identity}
+                        {grant.kind === "workspace"
+                          ? `Workspace ${grant.workspace_name ?? grant.workspace_identity}`
+                          : (grant.display_name ?? grant.external_identity)}
                       </p>
-                      {grant.display_name && (
+                      {grant.kind !== "workspace" && grant.display_name && (
                         <p className="truncate font-mono text-xs text-muted-foreground">
                           {grant.external_identity}
                         </p>
+                      )}
+                      {grant.kind === "workspace" && grant.channels && grant.channels.length > 0 && (
+                        <ul className="mt-1 text-xs text-muted-foreground">
+                          {grant.channels.map((channel) => (
+                            <li key={`${channel.channel_id}:${channel.repository}`}>
+                              {channel.channel_id} · {channel.repository} ({channel.state})
+                            </li>
+                          ))}
+                        </ul>
                       )}
                       <p className="text-xs text-muted-foreground">
                         {grant.revoked_at

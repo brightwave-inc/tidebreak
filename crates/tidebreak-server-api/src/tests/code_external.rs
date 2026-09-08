@@ -2030,3 +2030,340 @@ async fn a_refused_borrow_answers_the_helper_and_journals_the_reason() {
         assert!(!row.2.is_empty(), "the row names a remedy");
     }
 }
+
+async fn workspace_grant_app() -> (Router, Arc<CodeRuntime>, RepoId, OwnerId, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("workspace-grant.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let fake = Arc::new(FakeProvisioner::default());
+    let runtime = Arc::new(
+        CodeRuntime::new(
+            db,
+            dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_remote_sessions(RemoteSessions::new(fake.clone(), remote_settings())),
+    );
+    let service = OwnerId::new("user:channel").unwrap();
+    let repo = CodeRepo {
+        id: RepoId::new(),
+        owner: service.clone(),
+        root_path: dir.path().join("repo").display().to_string(),
+        display_name: "tools".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "tidebreak/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: None,
+        origin_host: Some("github.com".into()),
+        origin_owner: Some("acme".into()),
+        origin_name: Some("tools".into()),
+    };
+    insert_repo(&runtime.db, &repo).await.unwrap();
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(
+        &tokens_file,
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\nchannel {CAROL_TOKEN} service\n"),
+    )
+    .unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let mut state = AppState::new(
+        config,
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime.clone());
+    state.adapter_bootstrap_tokens = Some(Arc::new(crate::auth::AdapterBootstrapTokens::for_test(
+        ADAPTER_BOOTSTRAP_TOKEN,
+    )));
+    (app(state), runtime, repo.id, service, dir)
+}
+
+async fn call_json(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    bearer: &str,
+    body: Option<serde_json::Value>,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    let builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    let request = match body {
+        Some(body) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+#[tokio::test]
+async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_it() {
+    let (router, runtime, repo_id, service, _dir) = workspace_grant_app().await;
+
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        "/code/grants/workspace",
+        ALICE_TOKEN,
+        Some(serde_json::json!({
+            "channel_kind": "slack",
+            "workspace_identity": "T1",
+            "display": "Acme Corp",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, started) = call_json(
+        &router,
+        "POST",
+        "/code/grants/workspace",
+        CAROL_TOKEN,
+        Some(serde_json::json!({
+            "channel_kind": "slack",
+            "workspace_identity": "T1",
+            "display": "Acme Corp",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let nonce = started["nonce"].as_str().unwrap();
+    let confirmation_token = started["confirmation_token"].as_str().unwrap();
+    let handshake_id = started["id"].as_str().unwrap();
+
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/deployment/code/grants/workspace/{handshake_id}/approve"),
+        BOB_TOKEN,
+        Some(serde_json::json!({ "csrf": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, page) = call_json(
+        &router,
+        "GET",
+        &format!("/deployment/code/grants/workspace/{handshake_id}"),
+        ALICE_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let csrf = page["csrf"].as_str().unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/deployment/code/grants/workspace/{handshake_id}/approve"),
+        ALICE_TOKEN,
+        Some(serde_json::json!({ "csrf": csrf })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, status_body) = call_json(
+        &router,
+        "GET",
+        &format!("/external/connect/{nonce}/status"),
+        confirmation_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status_body["state"], "approved");
+
+    let (status, completed) = call_json(
+        &router,
+        "POST",
+        &format!("/external/connect/{nonce}/complete"),
+        confirmation_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["grant"]["kind"], "workspace");
+    let grant_token = completed["token"].as_str().unwrap().to_owned();
+    let grant_id = completed["grant"]["id"].as_str().unwrap().to_owned();
+
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &grant_token,
+        Some(serde_json::json!({
+            "external_key": "T1/C1/1.1",
+            "repo_id": repo_id,
+            "channel_id": "C1",
+            "set_by": { "identity": "U1", "display": "Casey" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["kind"], "repository_unconfirmed");
+
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/deployment/code/grants/workspace/{grant_id}/channels/C1/repositories/confirm"),
+        ALICE_TOKEN,
+        Some(serde_json::json!({ "repository": "acme/tools" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &grant_token,
+        Some(serde_json::json!({
+            "external_key": "T1/C1/1.1",
+            "repo_id": repo_id,
+            "channel_id": "C1",
+            "set_by": { "identity": "U1", "display": "Casey" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &service, "T1/C1/1.1").await;
+
+    let (status, named) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/messages"),
+        &grant_token,
+        Some(serde_json::json!({
+            "text": "ship it",
+            "event_id": "Ev-ws",
+            "channel_ts": "1700000099.000100",
+            "actor": { "external_identity": "U9", "display": "Ines" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(named["outcome"], "new_turn");
+    let turn_id: tidebreak_core::TurnId = serde_json::from_value(named["turn_id"].clone()).unwrap();
+    let turn = tidebreak_core::db::code::get_turn(&runtime.db, &service, turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        turn.actor
+            .as_ref()
+            .and_then(|actor| actor.external_identity.as_deref()),
+        Some("U9")
+    );
+    assert_eq!(
+        turn.actor
+            .as_ref()
+            .and_then(|actor| actor.display.as_deref()),
+        Some("Ines")
+    );
+
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &format!("/external/code/sessions/{session_id}/access"),
+        &grant_token,
+        Some(serde_json::json!({
+            "contributors": [
+                { "external_identity": "U9" },
+                { "external_identity": "U8" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let rows = tidebreak_core::db::code::list_session_access(&runtime.db, &service, session_id)
+        .await
+        .unwrap();
+    let subjects: Vec<_> = rows.iter().map(|row| row.subject.as_str()).collect();
+    assert!(subjects.contains(&"external:slack:U9"));
+    assert!(subjects.contains(&"external:slack:U8"));
+
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/code/grants/{grant_id}/revoke"),
+        ALICE_TOKEN,
+        Some(serde_json::json!({ "reason": "cut the workspace" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/messages"),
+        &grant_token,
+        Some(serde_json::json!({
+            "text": "still there",
+            "event_id": "Ev-after",
+            "channel_ts": "1700000100.000100",
+            "actor": { "external_identity": "U9", "display": "Ines" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_person_grant_refuses_a_body_actor() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({ "external_key": "T1/C-actor/1.1", "repo_id": repo_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-actor/1.1").await;
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/messages"),
+        &pair.token,
+        Some(serde_json::json!({
+            "text": "nope",
+            "event_id": "Ev-actor",
+            "channel_ts": "1700000111.000100",
+            "actor": { "external_identity": "U9", "display": "Ines" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

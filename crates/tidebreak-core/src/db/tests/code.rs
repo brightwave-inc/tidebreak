@@ -5787,6 +5787,8 @@ async fn connect_completion_is_owner_bound_and_atomic() {
         "Acme Corp",
         Some("https://example.com/avatar.png"),
         chrono::Duration::minutes(15),
+        crate::code::CodeGrantKind::Person,
+        None,
     )
     .await
     .unwrap();
@@ -5845,6 +5847,7 @@ async fn connect_completion_is_owner_bound_and_atomic() {
         "slack",
         "U-existing",
         "T-existing",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("conflicting-token"),
         &fake_hash("existing-refresh"),
     )
@@ -5934,6 +5937,7 @@ async fn workspace_revoke_updates_the_whole_scope() {
             "slack",
             user,
             workspace,
+            crate::code::CodeGrantKind::Person,
             &fake_hash(token),
             &fake_hash(&format!("{token}-refresh")),
         )
@@ -5980,6 +5984,7 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
         "slack",
         "U1",
         "T1",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("token-1"),
         &fake_hash("refresh-1"),
     )
@@ -5998,6 +6003,7 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
         "slack",
         "U1",
         "T1",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("token-x"),
         &fake_hash("refresh-x"),
     )
@@ -6075,6 +6081,7 @@ async fn a_replayed_rotated_refresh_revokes_the_grant() {
         "slack",
         "U1",
         "T1",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("token-5"),
         &fake_hash("refresh-5"),
     )
@@ -6098,6 +6105,7 @@ async fn an_old_generation_refresh_replay_still_revokes() {
         "slack",
         "U1",
         "T1",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("token-1"),
         &fake_hash("refresh-1"),
     )
@@ -6141,6 +6149,7 @@ async fn an_old_generation_refresh_replay_still_revokes() {
         "slack",
         "U2",
         "T1",
+        crate::code::CodeGrantKind::Person,
         &fake_hash("u2-token"),
         &fake_hash("u2-refresh"),
     )
@@ -6152,6 +6161,7 @@ async fn an_old_generation_refresh_replay_still_revokes() {
         channel_kind: Set("slack".to_owned()),
         external_identity: Set("U2".to_owned()),
         workspace_identity: Set("T1".to_owned()),
+        kind: Set("person".to_owned()),
         token_hash: Set(fake_hash("raced-token")),
         refresh_hash: Set(fake_hash("raced-refresh")),
         rotated_at: Set(None),

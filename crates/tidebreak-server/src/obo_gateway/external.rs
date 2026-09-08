@@ -157,10 +157,20 @@ impl ExternalDelegations {
             }
             return Err(reconnect());
         }
-        let handshake =
+        let handshake = if row.kind.is_workspace() {
+            tidebreak_core::db::code::live_workspace_handshake_for_grant(&self.db, owner, grant)
+                .await?
+                .or(
+                    tidebreak_core::db::code::completed_connect_handshake_for_grant(
+                        &self.db, owner, grant,
+                    )
+                    .await?,
+                )
+        } else {
             tidebreak_core::db::code::completed_connect_handshake_for_grant(&self.db, owner, grant)
                 .await?
-                .ok_or_else(reconnect)?;
+        }
+        .ok_or_else(reconnect)?;
         Ok(handshake.id)
     }
 

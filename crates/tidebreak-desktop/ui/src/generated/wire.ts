@@ -1359,6 +1359,11 @@ export type CodeGithubRepositories = { repositories: Array<CodeGithubRepository>
 export type CodeGithubRepository = { full_name: string, private: boolean, description?: string, };
 
 /**
+ * One channel and repository a workspace grant has named.
+ */
+export type CodeGrantChannelSnapshot = { channel_id: string, repository: string, state: string, set_by_identity: string, set_by_display: string, };
+
+/**
  * Identifies one adapter grant: a channel user's link to this machine.
  */
 export type CodeGrantId = string;
@@ -1369,6 +1374,10 @@ export type CodeGrantId = string;
  * kept.
  */
 export type CodeGrantSnapshot = { id: CodeGrantId,
+/**
+ * `person` or `workspace`. Absent on older snapshots means person.
+ */
+kind?: string,
 /**
  * Which channel family linked (for example `slack`).
  */
@@ -1399,7 +1408,11 @@ avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: strin
  * Why the grant was revoked, in owner-facing words. A theft-triggered
  * revoke reaches the owner here.
  */
-revoked_reason?: string, };
+revoked_reason?: string,
+/**
+ * Channels and repositories a workspace grant covers.
+ */
+channels?: Array<CodeGrantChannelSnapshot>, };
 
 /**
  * State of one warm harness install, returned by

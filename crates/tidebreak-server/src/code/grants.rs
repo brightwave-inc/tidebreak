@@ -177,6 +177,7 @@ impl super::runtime::CodeRuntime {
             channel_kind,
             external_identity,
             workspace_identity,
+            tidebreak_core::CodeGrantKind::Person,
             &hash_adapter_token(&pair.token),
             &hash_adapter_token(&pair.refresh),
         )
@@ -311,6 +312,8 @@ impl super::runtime::CodeRuntime {
             &workspace_name,
             avatar_url.as_deref(),
             chrono::Duration::minutes(15),
+            tidebreak_core::CodeGrantKind::Person,
+            None,
         )
         .await?;
         Ok((handshake, nonce, confirmation_token))
@@ -418,6 +421,74 @@ impl super::runtime::CodeRuntime {
         Ok(Some((grant, pair)))
     }
 
+    /// Start a workspace handshake owned by a service principal. On a gateway
+    /// machine, enroll the delegation here with the service's own lease.
+    pub async fn start_workspace_handshake(
+        &self,
+        owner: &OwnerId,
+        channel_kind: &str,
+        workspace_identity: &str,
+        display: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
+    ) -> Result<(tidebreak_core::CodeConnectHandshake, String, String), ServerError> {
+        let channel_kind = validated_channel_kind(channel_kind)?;
+        let workspace_identity =
+            bounded_connect_value("workspace_identity", workspace_identity, 256)?;
+        let display = bounded_connect_value("display", display, 256)?;
+        let nonce = mint_secret("tbn");
+        let confirmation_token = mint_secret("tbc");
+        let csrf = uuid::Uuid::new_v4().simple().to_string();
+        let handshake = tidebreak_core::db::code::insert_connect_handshake(
+            &self.db,
+            &hash_adapter_token(&nonce),
+            &hash_adapter_token(&confirmation_token),
+            &csrf,
+            &channel_kind,
+            &workspace_identity,
+            &workspace_identity,
+            "tidebreak-slack",
+            &display,
+            None,
+            chrono::Duration::minutes(15),
+            tidebreak_core::CodeGrantKind::Workspace,
+            Some(owner),
+        )
+        .await?;
+        if let Some(external) = self
+            .harness_llm()
+            .and_then(|relay| relay.external_delegations().cloned())
+        {
+            let lease = lease.ok_or_else(|| {
+                ServerError::unauthorized("sign in again to start this workspace connection")
+            })?;
+            lease
+                .enroll_external_delegation(&external, owner, handshake.id)
+                .await?;
+        }
+        Ok((handshake, nonce, confirmation_token))
+    }
+
+    pub async fn view_workspace_handshake(
+        &self,
+        id: tidebreak_core::CodeHandshakeId,
+    ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
+        Ok(tidebreak_core::db::code::view_workspace_handshake_all_owners(&self.db, id).await?)
+    }
+
+    pub async fn approve_workspace_handshake(
+        &self,
+        id: tidebreak_core::CodeHandshakeId,
+        csrf: &str,
+        admin: &OwnerId,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        Ok(
+            tidebreak_core::db::code::approve_workspace_handshake_all_owners(
+                &self.db, id, csrf, admin,
+            )
+            .await?,
+        )
+    }
+
     /// Every grant the owner holds, for the desktop grants list.
     pub async fn list_adapter_grants(
         &self,
@@ -426,12 +497,73 @@ impl super::runtime::CodeRuntime {
         Ok(tidebreak_core::db::code::list_external_grants(&self.db, owner).await?)
     }
 
+    pub async fn list_workspace_grants_all_owners(
+        &self,
+    ) -> Result<Vec<CodeExternalGrant>, ServerError> {
+        Ok(tidebreak_core::db::code::list_workspace_grants_all_owners(&self.db).await?)
+    }
+
+    pub async fn list_channel_repository_confirms(
+        &self,
+        grant_id: CodeGrantId,
+    ) -> Result<Vec<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
+        Ok(tidebreak_core::db::code::list_channel_repository_confirms(&self.db, grant_id).await?)
+    }
+
+    pub async fn confirm_channel_repository(
+        &self,
+        grant_id: CodeGrantId,
+        channel_id: &str,
+        repository: &str,
+        admin: &OwnerId,
+    ) -> Result<Option<tidebreak_core::CodeChannelRepositoryConfirm>, ServerError> {
+        let grant = tidebreak_core::db::code::get_external_grant_all_owners(&self.db, grant_id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("grant not found"))?;
+        if !grant.kind.is_workspace() {
+            return Err(ServerError::not_found("grant not found"));
+        }
+        Ok(tidebreak_core::db::code::confirm_channel_repository(
+            &self.db, grant_id, channel_id, repository, admin,
+        )
+        .await?)
+    }
+
+    pub async fn revoke_adapter_grant_any_owner(
+        &self,
+        grant_id: CodeGrantId,
+        reason: &str,
+    ) -> Result<Option<CodeExternalGrant>, ServerError> {
+        let Some(grant) =
+            tidebreak_core::db::code::get_external_grant_all_owners(&self.db, grant_id).await?
+        else {
+            return Ok(None);
+        };
+        if !grant.kind.is_workspace() {
+            return Ok(None);
+        }
+        let revoked =
+            tidebreak_core::db::code::revoke_external_grant_all_owners(&self.db, grant_id, reason)
+                .await?;
+        if revoked.is_some() {
+            self.grant_revocations().publish(grant_id);
+        }
+        self.revoke_gateway_delegation(&grant.owner, grant_id).await;
+        Ok(revoked)
+    }
+
     /// Human-facing names retained from completed approval handshakes.
     pub async fn list_adapter_grant_profiles(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
         Ok(tidebreak_core::db::code::list_connect_grant_profiles(&self.db, owner).await?)
+    }
+
+    pub async fn list_workspace_grant_profiles_all_owners(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        Ok(tidebreak_core::db::code::list_workspace_grant_profiles_all_owners(&self.db).await?)
     }
 
     /// Revoke every live grant a channel workspace holds. The grants list

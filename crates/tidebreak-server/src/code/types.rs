@@ -34,6 +34,10 @@ use tidebreak_core::{
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct CodeGrantSnapshot {
     pub id: tidebreak_core::CodeGrantId,
+    /// `person` or `workspace`. Absent on older snapshots means person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
     /// Which channel family linked (for example `slack`).
     pub channel_kind: String,
     /// The channel's identity for the linked user.
@@ -66,12 +70,27 @@ pub struct CodeGrantSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revoked_reason: Option<String>,
+    /// Channels and repositories a workspace grant covers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channels: Option<Vec<CodeGrantChannelSnapshot>>,
+}
+
+/// One channel and repository a workspace grant has named.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CodeGrantChannelSnapshot {
+    pub channel_id: String,
+    pub repository: String,
+    pub state: String,
+    pub set_by_identity: String,
+    pub set_by_display: String,
 }
 
 impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
     fn from(grant: tidebreak_core::CodeExternalGrant) -> Self {
         Self {
             id: grant.id,
+            kind: Some(grant.kind.as_str().to_owned()),
             channel_kind: grant.channel_kind,
             external_identity: grant.external_identity,
             display_name: None,
@@ -82,6 +101,7 @@ impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
             created_at: grant.created_at,
             revoked_at: grant.revoked_at,
             revoked_reason: grant.revoked_reason,
+            channels: None,
         }
     }
 }
@@ -103,6 +123,15 @@ impl CodeGrantSnapshot {
             Some(profile) => snapshot.with_profile(profile),
             None => snapshot,
         }
+    }
+
+    pub fn with_channels(mut self, channels: Vec<CodeGrantChannelSnapshot>) -> Self {
+        self.channels = if channels.is_empty() {
+            None
+        } else {
+            Some(channels)
+        };
+        self
     }
 }
 

@@ -29,6 +29,7 @@ import {
   codeDeliverySearchFrom,
 } from "./code/CodeDeliveryPage";
 import { ConnectApprovalRoute } from "./ConnectApprovalRoute";
+import { WorkspaceApprovalRoute } from "./WorkspaceApprovalRoute";
 
 const CodeHome = lazyRouteComponent(
   () => import("./code/CodeHome"),
@@ -386,9 +387,16 @@ const connectApprovalRoute = createRoute({
   component: ConnectApprovalRoute,
 });
 
+const workspaceApprovalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workspace-grant/$id",
+  component: WorkspaceApprovalRoute,
+});
+
 export const routeTree = rootRoute.addChildren([
   homeRoute,
   connectApprovalRoute,
+  workspaceApprovalRoute,
   appsRoute,
   appDetailRoute,
   pluginsRoute,

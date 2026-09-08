@@ -44,23 +44,59 @@ fn confirmation_token(headers: &HeaderMap) -> Result<&str, ServerError> {
 
 /// `GET /code/grants` — every grant the owner holds, revoked ones
 /// included so a theft-triggered revoke and its reason stay visible.
+async fn snapshot_grant(
+    code: &ScopedCode,
+    grant: tidebreak_core::CodeExternalGrant,
+    profile: Option<tidebreak_core::CodeGrantProfile>,
+) -> Result<CodeGrantSnapshot, ServerError> {
+    let mut snapshot = CodeGrantSnapshot::from_grant_and_profile(grant.clone(), profile);
+    if grant.kind.is_workspace() {
+        let channels = code
+            .list_channel_repository_confirms(grant.id)
+            .await?
+            .into_iter()
+            .map(|row| crate::code::types::CodeGrantChannelSnapshot {
+                channel_id: row.channel_id,
+                repository: row.repository,
+                state: row.state.as_str().to_owned(),
+                set_by_identity: row.set_by_identity,
+                set_by_display: row.set_by_display,
+            })
+            .collect();
+        snapshot = snapshot.with_channels(channels);
+    }
+    Ok(snapshot)
+}
+
+/// `GET /code/grants` — every grant the owner holds, revoked ones
+/// included so a theft-triggered revoke and its reason stay visible.
+/// Admins also see workspace grants owned by the service principal.
 pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>>, ServerError> {
-    let grants = code.list_adapter_grants().await?;
+    let mut grants = code.list_adapter_grants().await?;
+    if code.is_admin() {
+        for grant in code.list_workspace_grants_all_owners().await? {
+            if !grants.iter().any(|existing| existing.id == grant.id) {
+                grants.push(grant);
+            }
+        }
+    }
     let mut profiles: std::collections::HashMap<_, _> = code
         .list_adapter_grant_profiles()
         .await?
         .into_iter()
         .map(|profile| (profile.grant_id, profile))
         .collect();
-    Ok(Json(
-        grants
-            .into_iter()
-            .map(|grant| {
-                let profile = profiles.remove(&grant.id);
-                CodeGrantSnapshot::from_grant_and_profile(grant, profile)
-            })
-            .collect(),
-    ))
+    if code.is_admin() {
+        for profile in code.list_workspace_grant_profiles_all_owners().await? {
+            profiles.entry(profile.grant_id).or_insert(profile);
+        }
+    }
+    let mut snapshots = Vec::new();
+    for grant in grants {
+        let profile = profiles.remove(&grant.id);
+        snapshots.push(snapshot_grant(&code, grant, profile).await?);
+    }
+    Ok(Json(snapshots))
 }
 
 #[derive(serde::Deserialize)]
@@ -77,10 +113,19 @@ pub async fn revoke_grant(
     Json(body): Json<RevokeGrantBody>,
 ) -> Result<Json<CodeGrantSnapshot>, ServerError> {
     let reason = body.reason.as_deref().unwrap_or("revoked by the owner");
-    let grant = code
-        .revoke_adapter_grant(id, reason)
-        .await?
-        .ok_or_else(|| ServerError::not_found("grant not found"))?;
+    let grant = if code.is_admin() {
+        match code.revoke_adapter_grant_as_admin(id, reason).await? {
+            Some(grant) => grant,
+            None => code
+                .revoke_adapter_grant(id, reason)
+                .await?
+                .ok_or_else(|| ServerError::not_found("grant not found"))?,
+        }
+    } else {
+        code.revoke_adapter_grant(id, reason)
+            .await?
+            .ok_or_else(|| ServerError::not_found("grant not found"))?
+    };
     Ok(Json(CodeGrantSnapshot::from(grant)))
 }
 
@@ -268,4 +313,112 @@ pub async fn connect_complete(
         token: pair.token,
         refresh: pair.refresh,
     }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceGrantStartBody {
+    pub channel_kind: String,
+    pub workspace_identity: String,
+    pub display: String,
+}
+
+/// `POST /code/grants/workspace` — a service principal starts a workspace
+/// handshake. The adapter then polls status and completes as for a person.
+pub async fn start_workspace_grant(
+    code: ScopedCode,
+    lease: Option<axum::Extension<crate::auth::GatewayAuthLease>>,
+    Json(body): Json<WorkspaceGrantStartBody>,
+) -> Result<(StatusCode, Json<WorkspaceGrantStartResponse>), ServerError> {
+    let (handshake, nonce, confirmation_token) = code
+        .start_workspace_handshake(
+            &body.channel_kind,
+            &body.workspace_identity,
+            &body.display,
+            lease.as_ref().map(|lease| &lease.0),
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(WorkspaceGrantStartResponse {
+            id: handshake.id,
+            nonce,
+            confirmation_token,
+            expires_at: handshake.expires_at,
+        }),
+    ))
+}
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceGrantStartResponse {
+    pub id: tidebreak_core::CodeHandshakeId,
+    pub nonce: String,
+    pub confirmation_token: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `GET /deployment/code/grants/workspace/{id}` — what the admin approval
+/// page renders.
+pub async fn view_workspace_grant(
+    State(state): State<AppState>,
+    Path(id): Path<tidebreak_core::CodeHandshakeId>,
+) -> Result<Json<CodeConnectPage>, ServerError> {
+    let runtime = adapter_runtime(&state)?;
+    let (handshake, csrf) = runtime
+        .view_workspace_handshake(id)
+        .await?
+        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
+    Ok(Json(CodeConnectPage {
+        channel_kind: handshake.channel_kind,
+        display_name: handshake.display_name,
+        workspace_name: handshake.workspace_name,
+        avatar_url: handshake.avatar_url,
+        state: handshake.state.as_str().to_owned(),
+        csrf,
+        expires_at: handshake.expires_at,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceApproveBody {
+    pub csrf: String,
+}
+
+/// `POST /deployment/code/grants/workspace/{id}/approve`
+pub async fn approve_workspace_grant(
+    State(state): State<AppState>,
+    auth: crate::principal::AuthContext,
+    Path(id): Path<tidebreak_core::CodeHandshakeId>,
+    Json(body): Json<WorkspaceApproveBody>,
+) -> Result<StatusCode, ServerError> {
+    let runtime = adapter_runtime(&state)?;
+    runtime
+        .approve_workspace_handshake(id, &body.csrf, &auth.principal.owner_id())
+        .await?
+        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct ConfirmRepositoryBody {
+    pub repository: String,
+}
+
+/// `POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/confirm`
+pub async fn confirm_workspace_channel_repository(
+    State(state): State<AppState>,
+    auth: crate::principal::AuthContext,
+    Path((id, channel_id)): Path<(tidebreak_core::CodeGrantId, String)>,
+    Json(body): Json<ConfirmRepositoryBody>,
+) -> Result<StatusCode, ServerError> {
+    let runtime = adapter_runtime(&state)?;
+    runtime
+        .confirm_channel_repository(
+            id,
+            &channel_id,
+            &body.repository,
+            &auth.principal.owner_id(),
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("repository confirmation not found"))?;
+    Ok(StatusCode::NO_CONTENT)
 }

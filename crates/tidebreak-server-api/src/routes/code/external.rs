@@ -109,6 +109,19 @@ pub struct ExternalSessionBody {
     /// sandbox session is always `allow`, so any other value is refused.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Required under a workspace grant.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Who named this repository as the channel default. Required when a
+    /// workspace grant creates a pending confirmation.
+    #[serde(default)]
+    pub set_by: Option<ExternalSetBy>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalSetBy {
+    pub identity: String,
+    pub display: String,
 }
 
 #[derive(serde::Serialize)]
@@ -141,6 +154,70 @@ pub async fn external_get_or_create(
             ));
         }
     };
+    if grant.kind.is_workspace() {
+        let channel_id = body
+            .channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ServerError::bad_request_kind(
+                    "channel_id_required",
+                    "a workspace grant names the channel that will run this session",
+                )
+            })?;
+        let repo = runtime.get_repo(&grant.owner, repo_id).await?;
+        let repository = match (
+            repo.origin_owner.as_deref(),
+            repo.origin_name.as_deref(),
+            body.repository.as_deref(),
+        ) {
+            (Some(owner), Some(name), _) => format!("{owner}/{name}"),
+            (_, _, Some(origin)) => origin.to_owned(),
+            _ => {
+                return Err(ServerError::bad_request_kind(
+                    "repo_origin_unknown",
+                    "the repository records no origin to confirm",
+                ));
+            }
+        };
+        let existing = tidebreak_core::db::code::get_external_binding(
+            &runtime.db,
+            &grant.owner,
+            &grant.channel_kind,
+            &body.external_key,
+        )
+        .await?;
+        if existing.is_none()
+            && !tidebreak_core::db::code::channel_repository_is_confirmed(
+                &runtime.db,
+                grant.id,
+                channel_id,
+                &repository,
+            )
+            .await?
+        {
+            let set_by = body.set_by.as_ref().ok_or_else(|| {
+                ServerError::bad_request_kind(
+                    "set_by_required",
+                    "name who set this channel's repository",
+                )
+            })?;
+            tidebreak_core::db::code::ensure_pending_channel_repository(
+                &runtime.db,
+                grant.id,
+                channel_id,
+                &repository,
+                &set_by.identity,
+                &set_by.display,
+            )
+            .await?;
+            return Err(ServerError::conflict_kind(
+                "repository_unconfirmed",
+                "an admin has not confirmed this channel's repository",
+            ));
+        }
+    }
     let resolution = runtime
         .external_get_or_create(
             &grant.owner,
@@ -200,6 +277,15 @@ pub struct ExternalMessageBody {
     pub channel_ts: String,
     /// Display name the channel supplied, when available.
     pub display: Option<String>,
+    /// Required under a workspace grant: the person who sent the message.
+    #[serde(default)]
+    pub actor: Option<ExternalActor>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalActor {
+    pub external_identity: String,
+    pub display: String,
 }
 
 #[derive(serde::Serialize)]
@@ -221,9 +307,26 @@ pub async fn external_messages(
     Json(body): Json<ExternalMessageBody>,
 ) -> Result<Json<ExternalMessageResponse>, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
-    // The turn is attributed to the channel identity behind the grant, not to
-    // the shared principal that owns the session (decision 0086). The display
-    // name is whatever the channel sent, and nothing more.
+    if grant.kind.is_workspace() {
+        if body.actor.is_none() {
+            return Err(ServerError::bad_request_kind(
+                "actor_required",
+                "a workspace grant names the person who sent this message",
+            ));
+        }
+    } else if body.actor.is_some() {
+        return Err(ServerError::bad_request_kind(
+            "actor_not_allowed",
+            "a person grant takes the actor from the linked identity, not the body",
+        ));
+    }
+    let (external_identity, display) = if let Some(actor) = body.actor {
+        (Some(actor.external_identity), Some(actor.display))
+    } else {
+        (Some(grant.external_identity.clone()), body.display)
+    };
+    // The turn is attributed to the channel identity, not to the shared
+    // principal that owns the session (decision 0086).
     let outcome = runtime
         .external_submit_message(
             &grant.owner,
@@ -235,9 +338,9 @@ pub async fn external_messages(
                 channel_ts: body.channel_ts,
                 actor: tidebreak_core::TurnActor {
                     principal: None,
-                    display: body.display,
+                    display,
                     channel_kind: Some(grant.channel_kind.clone()),
-                    external_identity: Some(grant.external_identity.clone()),
+                    external_identity,
                 },
             },
         )
@@ -260,6 +363,45 @@ pub async fn external_messages(
         },
     };
     Ok(Json(response))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalAccessBody {
+    pub contributors: Vec<ExternalContributor>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExternalContributor {
+    pub external_identity: String,
+}
+
+/// `PUT /external/code/sessions/{id}/access` — workspace grants only.
+pub async fn external_session_access(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path(id): Path<SessionId>,
+    Json(body): Json<ExternalAccessBody>,
+) -> Result<StatusCode, ServerError> {
+    if !grant.kind.is_workspace() {
+        return Err(ServerError::not_found("code session not found"));
+    }
+    let runtime = require_bound(&state, &grant, id).await?;
+    let identities: Vec<String> = body
+        .contributors
+        .into_iter()
+        .map(|row| row.external_identity)
+        .collect();
+    tidebreak_core::db::code::replace_external_session_contributors(
+        &runtime.db,
+        &grant.owner,
+        id,
+        &grant.channel_kind,
+        &identities,
+        chrono::Utc::now(),
+    )
+    .await?
+    .ok_or_else(|| ServerError::not_found("code session not found"))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `WS /external/code/sessions/{id}/events?after=` — the desktop event

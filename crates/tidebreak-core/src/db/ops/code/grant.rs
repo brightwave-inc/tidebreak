@@ -10,7 +10,7 @@
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
-use crate::code::{CodeExternalGrant, CodeGrantId, GrantRotation};
+use crate::code::{CodeExternalGrant, CodeGrantId, CodeGrantKind, GrantRotation};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -21,6 +21,8 @@ fn grant_from_model(model: entities::code_external_grant::Model) -> Result<CodeE
     Ok(CodeExternalGrant {
         id: CodeGrantId(model.id),
         owner: OwnerId::new(&model.owner)?,
+        kind: CodeGrantKind::from_str(&model.kind)
+            .ok_or_else(|| AgentError::Store("invalid stored grant kind".into()))?,
         channel_kind: model.channel_kind,
         external_identity: model.external_identity,
         workspace_identity: model.workspace_identity,
@@ -45,6 +47,7 @@ pub async fn mint_external_grant(
     channel_kind: &str,
     external_identity: &str,
     workspace_identity: &str,
+    kind: CodeGrantKind,
     token_hash: &str,
     refresh_hash: &str,
 ) -> Result<CodeExternalGrant> {
@@ -81,6 +84,7 @@ pub async fn mint_external_grant(
     let grant = CodeExternalGrant {
         id: CodeGrantId::new(),
         owner: owner.clone(),
+        kind,
         channel_kind: channel_kind.to_owned(),
         external_identity: external_identity.to_owned(),
         workspace_identity: workspace_identity.to_owned(),
@@ -95,6 +99,7 @@ pub async fn mint_external_grant(
         channel_kind: Set(grant.channel_kind.clone()),
         external_identity: Set(grant.external_identity.clone()),
         workspace_identity: Set(grant.workspace_identity.clone()),
+        kind: Set(kind.as_str().to_owned()),
         token_hash: Set(token_hash.to_owned()),
         refresh_hash: Set(refresh_hash.to_owned()),
         rotated_at: Set(None),
@@ -288,6 +293,46 @@ pub async fn revoke_external_grant(
     Ok(Some(grant))
 }
 
+/// Revoke one grant by id, any owner. Used when an admin revokes a workspace
+/// grant they do not own.
+pub async fn revoke_external_grant_all_owners(
+    store: &DbStore,
+    grant_id: CodeGrantId,
+    reason: &str,
+) -> Result<Option<CodeExternalGrant>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(row) = entities::code_external_grant::Entity::find_by_id(grant_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if row.revoked_at.is_some() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(grant_from_model(row)?));
+    }
+    let now = database_now(&transaction).await?;
+    entities::code_external_grant::ActiveModel {
+        id: Set(grant_id.0),
+        revoked_at: Set(Some(now)),
+        revoked_reason: Set(Some(reason.to_owned())),
+        ..Default::default()
+    }
+    .update(&transaction)
+    .await
+    .map_err(store_err)?;
+    let updated = entities::code_external_grant::Entity::find_by_id(grant_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store("grant disappeared mid-revoke".into()))?;
+    let grant = grant_from_model(updated)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(grant))
+}
+
 /// Revoke every live grant one channel workspace holds for an owner.
 ///
 /// The matching read, updates, and returned snapshots share one transaction,
@@ -381,4 +426,32 @@ pub async fn get_external_grant(
         .map_err(store_err)?
         .map(grant_from_model)
         .transpose()
+}
+
+/// One grant by id, regardless of owner. Admin surfaces use this for
+/// workspace grants the caller does not own.
+pub async fn get_external_grant_all_owners(
+    store: &DbStore,
+    grant_id: CodeGrantId,
+) -> Result<Option<CodeExternalGrant>> {
+    entities::code_external_grant::Entity::find_by_id(grant_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(grant_from_model)
+        .transpose()
+}
+
+/// Every workspace-kind grant on the machine, newest first.
+pub async fn list_workspace_grants_all_owners(store: &DbStore) -> Result<Vec<CodeExternalGrant>> {
+    use sea_orm::QueryOrder;
+    entities::code_external_grant::Entity::find()
+        .filter(entities::code_external_grant::Column::Kind.eq(CodeGrantKind::Workspace.as_str()))
+        .order_by_desc(entities::code_external_grant::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(grant_from_model)
+        .collect()
 }

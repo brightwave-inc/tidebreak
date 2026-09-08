@@ -93,6 +93,8 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260904_000012_turn_actor",
             "m20260907_000013_session_owner_kind",
             "m20260908_000014_session_acts_as",
+            "m20260908_000015_code_grant_kind",
+            "m20260908_000016_code_channel_repository_confirm",
         ]
     );
     assert!(db

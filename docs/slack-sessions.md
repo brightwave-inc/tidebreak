@@ -230,7 +230,10 @@ principal's acts as the App's bot. Hosted git names that choice on every
 borrow, and the gateway answers or refuses by name. This page does not yet
 let the channel pick the identity; get-or-create keeps today's default.
 
-A Slack user does not run until they hold a grant.
+A Slack user does not run until they hold a grant. Channel sessions run
+under a workspace grant instead: a service principal starts that
+handshake, an admin approves "run channel sessions for Slack workspace T
+as tidebreak-slack", and the adapter completes it the same way.
 
 On first mention from an unmapped user, the adapter stores the pending
 message against a one-time handshake nonce and posts an ephemeral connect
@@ -265,7 +268,7 @@ Trust boundaries, stated rather than implied:
   fences the workspace's grants for re-connect rather than guessing at
   remapped IDs.
 
-A machine session's own `git` and `gh` borrow the person's forge
+A machine session's own `git` and `gh` borrow the session owner's forge
 credential per call through the machine's loopback route, so the engine
 never holds a token. When that borrow is refused, the helper prints
 `Tidebreak: git credential refused (<status>): <reason>` to the engine's
@@ -276,13 +279,19 @@ session; the adapter posts it in the thread, with the connect card when
 the connection ended, so a push that stops is never a bare authentication
 failure nobody can act on.
 
-Only the session owner's messages reach the session. Anyone else's reply
-gets an acknowledging reaction from the bot and, once per user per
-thread, an ephemeral notice that says what they can do: who the owner
-is, that the agent does not read the thread, and how to connect
+The shared identity's forge credential is the ceiling; the admin
+confirmation per channel and repository is the gate. A person grant still
+spends that person's forge access. A workspace grant spends the
+deployment credential the service principal already uses (decision 89).
+
+Only the session owner's messages reach a person-grant session. Anyone
+else's reply gets an acknowledging reaction from the bot and, once per
+user per thread, an ephemeral notice that says what they can do: who the
+owner is, that the agent does not read the thread, and how to connect
 themselves. Non-owner text never reaches the engine, even as context —
-a channel is an injection surface and the engine runs with the owner's
-unscoped forge token. Collaborator steer is a later grant.
+a channel is an injection surface. Under a workspace grant the adapter
+sends the actor on each message and mirrors private-channel membership
+into session access rows (decision 86).
 
 ## Thread and session
 
@@ -391,19 +400,20 @@ on the workspace:
 
 Bare GitHub URLs in prose are context, never clone intent.
 
-The first use of any repository under a grant requires owner
+The first use of any repository under a person grant requires owner
 confirmation: an owner-only button ("Run in `org/name`? Set by @who as
 this channel's default"), verified by the interaction payload's user id,
-recorded machine-side against the grant. This is the gate that makes the
-channel default safe — Slack exposes no reliable channel-authority
-concept, so in practice any member can set a default, and without the
-gate a default is a routing attack: point it at a readable repository
-whose contents prompt-inject an Allow engine holding the victim's
-unscoped token. With the gate, a changed default cannot silently
-redirect anyone. Setting or changing a default also posts a visible
-notice naming who changed it. This confirmation is session-lifecycle
-consent, not an engine approval; the ban on approving engine actions
-from Slack stands.
+recorded machine-side against the grant. Under a workspace grant the
+same pair is an admin confirmation per channel and repository. This is
+the gate that makes the channel default safe — Slack exposes no reliable
+channel-authority concept, so in practice any member can set a default,
+and without the gate a default is a routing attack: point it at a
+readable repository whose contents prompt-inject an engine holding the
+shared identity's forge credential. With the gate, a changed default
+cannot silently redirect anyone. Setting or changing a default also
+posts a visible notice naming who changed it. This confirmation is
+session-lifecycle consent, not an engine approval; the ban on approving
+engine actions from Slack stands.
 
 The GitHub App installation intersected with the person's access is the
 allowlist, refused with a human-readable rendering: outside the App
