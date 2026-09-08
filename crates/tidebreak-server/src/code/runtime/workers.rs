@@ -279,27 +279,30 @@ impl CodeRuntime {
         };
 
         // Mint a native computer-use channel only when the desktop native
-        // runtime is present. The session-private capfile path is injected
-        // through TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app
-        // token enters argv or the model. Absent runtime = no channel and no
-        // native tools on any harness.
-        let native_capfile = match (self.native_runtime.as_ref(), session.workspace_id) {
-            (Some(_), Some(workspace)) => Some(
-                self.native_tokens
+        // runtime, its bridge executable, and a workspace are all present.
+        // The session-private capfile path is injected through
+        // TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app token
+        // enters argv or the model. Absent runtime or bridge = no capfile,
+        // no channel, and no native tools on any harness.
+        let native = match (
+            self.native_runtime.as_ref(),
+            self.native_bridge_command.as_ref(),
+            session.workspace_id,
+        ) {
+            (Some(runtime), Some(bridge), Some(workspace)) if runtime.is_available() => {
+                let capfile = self
+                    .native_tokens
                     .issue(NativeSubject {
                         owner: session.owner.clone(),
                         workspace,
                         session: session.id,
                     })
-                    .map_err(ServerError::internal)?,
-            ),
-            _ => None,
-        };
-        let native = match (native_capfile, self.browser_bridge_command.as_ref()) {
-            (Some(capfile), Some(bridge)) => Some(tidebreak_harness::NativeChannelSpec::new(
-                capfile,
-                bridge.clone(),
-            )),
+                    .map_err(ServerError::internal)?;
+                Some(tidebreak_harness::NativeChannelSpec::new(
+                    capfile,
+                    bridge.clone(),
+                ))
+            }
             _ => None,
         };
 

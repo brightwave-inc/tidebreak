@@ -108,8 +108,7 @@ impl NativeTokenRegistry {
         }
         #[cfg(unix)]
         {
-            #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
             if let Err(e) =
                 std::fs::set_permissions(&self.capfile_dir, std::fs::Permissions::from_mode(0o700))
             {
@@ -252,8 +251,7 @@ fn write_capfile(
             .map_err(|e| format!("could not create native capfile temp file: {e}"))?;
         #[cfg(unix)]
         {
-            #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("could not set native capfile temp mode: {e}"))?;
         }
