@@ -79,6 +79,7 @@ export function useLiveResource<T>({
   load,
   errorMessage,
   debounceMs = DEFAULT_DEBOUNCE_MS,
+  enabled = true,
 }: {
   /** Identity of what is being loaded; a change clears `data` and reloads. */
   key: string;
@@ -86,6 +87,8 @@ export function useLiveResource<T>({
   load: () => Promise<T>;
   errorMessage: string;
   debounceMs?: number;
+  /** Do not read or retain worktree data while the workspace is remote. */
+  enabled?: boolean;
 }): LiveResource<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +101,8 @@ export function useLiveResource<T>({
 
   // Every load carries the generation it started in; a response from an older
   // generation belongs to a key we have moved off, or to an unmounted view.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const generationRef = useRef(0);
   const inFlightRef = useRef<{
     generation: number;
@@ -108,6 +113,7 @@ export function useLiveResource<T>({
   const seenRef = useRef<{ key: string; revision: number }>({ key, revision });
 
   const run = useCallback(function run(): Promise<void> {
+    if (!enabledRef.current) return Promise.resolve();
     const inFlight = inFlightRef.current;
     if (inFlight) {
       pendingRef.current = true;
@@ -154,15 +160,17 @@ export function useLiveResource<T>({
     pendingRef.current = false;
     setData(null);
     setError(null);
-    void run();
+    setRefreshing(enabled);
+    if (enabled) void run();
     return () => {
       // Retire this generation so a late response cannot land on the next key
       // or on an unmounted view.
       generationRef.current += 1;
     };
-  }, [key, run]);
+  }, [key, run, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     if (seenRef.current.key !== key) {
       // The reset effect above already reloaded for this key.
       seenRef.current = { key, revision };
@@ -181,7 +189,7 @@ export function useLiveResource<T>({
         timerRef.current = null;
       }
     };
-  }, [key, revision, debounceMs, run]);
+  }, [key, revision, debounceMs, run, enabled]);
 
   return { data, error, refreshing, refresh: run, adopt };
 }

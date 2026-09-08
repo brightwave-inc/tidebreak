@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import type { ApiClient } from "@/api/client";
 import type {
   CodeWorkspacePrSnapshot,
@@ -10,6 +10,10 @@ import { CodeInspector, type InspectorTab } from "@/code/CodeInspector";
 import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 
 type InspectorScenario =
+  | "sandbox"
+  | "sandbox-pr"
+  | "placement-loading"
+  | "placement-failure"
   | "ready"
   | "merge-ready"
   | "merge-queued"
@@ -363,8 +367,29 @@ function InspectorStory({
           }
         : pullRequest;
   const storyWorkspace =
-    scenario === "empty" ? workspace : { ...workspace, pr: storyPr };
-  const storySnapshot = { ...prSnapshot, pr: storyPr };
+    scenario === "empty" ||
+    scenario === "sandbox" ||
+    scenario.startsWith("placement-")
+      ? workspace
+      : { ...workspace, pr: storyPr };
+  const storySnapshot = {
+    ...prSnapshot,
+    remote: scenario.startsWith("sandbox"),
+    pr: scenario === "sandbox" ? undefined : storyPr,
+  };
+  const resource = resourceFor(
+    scenario === "empty"
+      ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
+      : storySnapshot,
+  );
+  if (scenario.startsWith("placement-")) {
+    resource.data = null;
+    resource.refreshing = scenario === "placement-loading";
+    resource.error =
+      scenario === "placement-failure"
+        ? "Could not load workspace status. Check your connection."
+        : null;
+  }
 
   return (
     <div className="h-[720px] min-w-0 overflow-hidden rounded-xl border border-border-subtle bg-background shadow-sm">
@@ -374,11 +399,7 @@ function InspectorStory({
         workspaceId={workspace.id}
         workspace={storyWorkspace}
         contentRevision={0}
-        prResource={resourceFor(
-          scenario === "empty"
-            ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
-            : storySnapshot,
-        )}
+        prResource={resource}
         initialTab={tab}
         onOpenFile={fn()}
         onOpenDiff={fn()}
@@ -473,4 +494,29 @@ export const Compact: Story = {
       </div>
     ),
   ],
+};
+
+export const SandboxFiles: Story = {
+  args: { scenario: "sandbox" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Files are in the sandbox")).toBeVisible();
+    await expect(canvas.queryByRole("searchbox")).not.toBeInTheDocument();
+  },
+};
+
+export const SandboxChanges: Story = {
+  args: { tab: "source", scenario: "sandbox" },
+};
+
+export const SandboxWithPullRequest: Story = {
+  args: { scenario: "sandbox-pr" },
+};
+
+export const WorkspacePlacementLoading: Story = {
+  args: { scenario: "placement-loading" },
+};
+
+export const WorkspacePlacementFailure: Story = {
+  args: { scenario: "placement-failure" },
 };
