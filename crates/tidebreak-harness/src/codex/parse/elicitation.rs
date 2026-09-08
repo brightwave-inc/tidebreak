@@ -74,6 +74,7 @@ pub(super) struct ActiveMcpCall {
     server: String,
     tool: String,
     arguments: Value,
+    confirmation_requested: bool,
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -135,16 +136,16 @@ impl CodexStreamParser {
                 if self.active_turns.get(thread).map(String::as_str) != Some(turn) {
                     return;
                 }
-                self.active_mcp_calls.insert(
-                    id.into(),
-                    ActiveMcpCall {
+                self.active_mcp_calls
+                    .entry(id.into())
+                    .or_insert_with(|| ActiveMcpCall {
                         thread_id: thread.into(),
                         turn_id: turn.into(),
                         server: server.into(),
                         tool: tool.into(),
                         arguments: arguments.clone(),
-                    },
-                );
+                        confirmation_requested: false,
+                    });
             }
             "item/completed" => {
                 if let Some(id) = params.pointer("/item/id").and_then(Value::as_str) {
@@ -174,6 +175,10 @@ impl CodexStreamParser {
                         .values()
                         .any(|pending| pending.rpc_id == *id)
                 {
+                    self.active_mcp_calls
+                        .get_mut(&call_id)
+                        .expect("matched MCP call")
+                        .confirmation_requested = true;
                     self.pending_approvals.insert(
                         call_id.clone(),
                         PendingApproval {
@@ -196,16 +201,31 @@ impl CodexStreamParser {
         }
         // Do not turn forms, URLs, malformed confirmations, or uncorrelated
         // tool requests into consent. Reply even in Allow mode.
+        let mut events = vec![HarnessEvent::HarnessNotice {
+            level: HarnessNoticeLevel::Warning,
+            message: "Tidebreak does not support this MCP form, URL, or unverified tool confirmation. The request cannot proceed.".into(),
+        }];
         if let Some(id) = value.get("id") {
+            // A duplicate request id is protocol drift. The decline also
+            // settles its earlier card; do not let a delayed decision send
+            // accept while the server's resolved notification is in flight.
+            self.pending_approvals.retain(|call_id, pending| {
+                if pending.rpc_id == *id {
+                    events.push(HarnessEvent::ApprovalResolved {
+                        harness_ref: HarnessApprovalRef::engine(call_id.clone()),
+                        decision: ApprovalDecision::Deny { feedback: None },
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
             self.rejected_elicitations.push(json!({
                 "id": id,
                 "result": { "action": "decline", "content": null, "_meta": null },
             }));
         }
-        vec![HarnessEvent::HarnessNotice {
-            level: HarnessNoticeLevel::Warning,
-            message: "Tidebreak does not support this MCP form, URL, or unverified tool confirmation. The request cannot proceed.".into(),
-        }]
+        events
     }
 
     fn mcp_confirmation(&self, params: &Value) -> Option<(String, Value)> {
@@ -239,7 +259,7 @@ impl CodexStreamParser {
                     )
         });
         let (call_id, call) = matches.next()?;
-        if matches.next().is_some() {
+        if matches.next().is_some() || call.confirmation_requested {
             return None;
         }
         let mut raw = params.clone();

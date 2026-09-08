@@ -1877,3 +1877,36 @@ async fn unsupported_mcp_elicitation_declines_without_parking_even_in_allow_mode
         session.park().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn duplicate_mcp_elicitation_rejects_stale_approval_before_server_resolution() {
+    let sink = Arc::new(RecordingSink::default());
+    let session = unit_session(sink.clone());
+    let capture = include_str!("../../../fixtures/codex/0.153.0/mcp-approval-approve.ndjson");
+    let frames: Vec<Value> = capture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
+        .collect();
+    for frame in &frames[..3] {
+        session.emit_parsed(&frame.to_string()).await;
+    }
+    // No serverRequest/resolved or item/completed frame has arrived.
+    session.emit_parsed(&frames[2].to_string()).await;
+    let result = session
+        .decide(
+            HarnessApprovalRef::engine("call_fixture"),
+            ApprovalDecision::Approve,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(HarnessError::Other(ref message)) if message.contains("no parked approval"))
+    );
+    assert!(sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event,
+        HarnessEvent::ApprovalResolved { harness_ref, decision: ApprovalDecision::Deny { .. } }
+        if harness_ref.call_id == "call_fixture")));
+}

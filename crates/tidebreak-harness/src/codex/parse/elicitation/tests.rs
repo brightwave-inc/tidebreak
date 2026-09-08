@@ -213,3 +213,45 @@ fn resolved_or_finished_requests_cannot_be_decided_again() {
         );
     }
 }
+
+#[test]
+fn duplicate_elicitation_decline_settles_only_its_pending_approval() {
+    let (mut parser, request) = start_and_request();
+    parser.push_line(&request.to_string());
+    parser.push_line(&json!({"id":9,"method":"item/commandExecution/requestApproval","params":{"itemId":"unrelated-call"}}).to_string());
+    let events = parser.push_line(&request.to_string());
+    assert!(matches!(events.as_slice(), [
+        HarnessEvent::HarnessNotice { .. },
+        HarnessEvent::ApprovalResolved { harness_ref, decision: ApprovalDecision::Deny { .. } }
+    ] if harness_ref.call_id == "call_fixture"));
+    assert!(parser.pending_approval("call_fixture").is_none());
+    assert!(parser.pending_approval("unrelated-call").is_some());
+    assert_eq!(
+        parser.take_rejected_elicitations(),
+        vec![json!({"id":0,"result":{"action":"decline","content":null,"_meta":null}})]
+    );
+    // A repeated item or request cannot reopen the declined confirmation.
+    parser.push_line(&frames(APPROVE)[1].to_string());
+    let events = parser.push_line(&request.to_string());
+    assert!(matches!(
+        events.as_slice(),
+        [HarnessEvent::HarnessNotice { .. }]
+    ));
+    assert!(parser.pending_approval("call_fixture").is_none());
+}
+
+#[test]
+fn decided_mcp_confirmation_cannot_reopen_before_tool_completion() {
+    let (mut parser, request) = start_and_request();
+    parser.push_line(&request.to_string());
+    parser.push_line(
+        &json!({"dir":"out","msg":{"id":0,"result":{"action":"accept","content":{},"_meta":null}}})
+            .to_string(),
+    );
+    let events = parser.push_line(&request.to_string());
+    assert!(matches!(
+        events.as_slice(),
+        [HarnessEvent::HarnessNotice { .. }]
+    ));
+    assert!(parser.pending_approval("call_fixture").is_none());
+}
