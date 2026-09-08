@@ -2827,6 +2827,8 @@ async fn a_person_grant_refuses_a_body_actor() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 fn long_command_approval_script() -> Vec<tidebreak_harness::HarnessEvent> {
     use tidebreak_harness::{HarnessApprovalRef, HarnessEvent};
     let cmd = "x".repeat(600);
