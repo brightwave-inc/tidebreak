@@ -459,6 +459,9 @@ pub enum OperationRequest {
     /// the full model surface.
     CuCaptureScreenDetailed {
         target: CaptureTargetWire,
+        /// Draw and return numbered element marks. Defaults to true.
+        #[serde(default = "default_annotate_capture")]
+        annotate: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -549,6 +552,10 @@ pub enum OperationRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<f64>,
     },
+}
+
+fn default_annotate_capture() -> bool {
+    true
 }
 
 /// A deterministic native condition on the wire.
@@ -877,6 +884,9 @@ pub struct CuCaptureScreenResult {
     pub width: u32,
     pub height: u32,
     pub media_type: String,
+    /// Screenshot crop in global top-left logical coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinate_frame: Option<crate::computer_use::WindowFrame>,
     /// The numbered Set-of-Marks badges drawn over the capture, so a later
     /// control op can resolve "mark N" back to an element address.
     pub marks: Vec<Mark>,

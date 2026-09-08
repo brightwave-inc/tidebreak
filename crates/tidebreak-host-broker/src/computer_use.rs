@@ -25,9 +25,9 @@ use crate::set_of_marks::Mark;
 /// request at a time (its stdio loop is synchronous), so a hung helper would
 /// wedge the entire sidecar. Generous: a screenshot / AX read is normally well
 /// under a second, but a busy WindowServer or a slow shareable-content query
-/// can take a few seconds; 30s leaves headroom while still guaranteeing
+/// can take a few seconds; 40s leaves headroom for a 30s condition wait while guaranteeing
 /// recovery.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+const HELPER_TIMEOUT: Duration = Duration::from_secs(40);
 /// How often to poll the child for exit while waiting.
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Cap on retained helper stdout/stderr. The helper already bounds the AX tree,
@@ -40,6 +40,8 @@ const MAX_HELPER_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// a packaged build the broker resolves the helper from a stable bundled
 /// location instead.
 pub const HELPER_PATH_ENV: &str = "TIDEBREAK_CU_HELPER_PATH";
+/// Host-owned cancellation generation, never supplied by a model tool call.
+pub const HELPER_CANCEL_PATH_ENV: &str = "TIDEBREAK_CU_CANCEL_PATH";
 
 /// What a screen capture targets. Scoped per the broker's capability model: a
 /// whole-display capture needs the `Screen` scope; an app capture needs the
@@ -143,11 +145,13 @@ pub struct PermissionStatus {
 /// Metadata for a completed capture. The PNG bytes are written to the
 /// broker-provided path; only these dimensions come back over the helper's
 /// stdout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaptureMeta {
     pub width: u32,
     pub height: u32,
     pub media_type: String,
+    /// Screenshot crop in global top-left logical coordinates.
+    pub coordinate_frame: Option<WindowFrame>,
 }
 
 /// A bounded accessibility-tree read. `tree` is opaque nested JSON the helper
@@ -517,7 +521,10 @@ impl HelperBackend {
     /// write `request` to stdin (then EOF), and wait for exit with a timeout —
     /// killing a hung helper so it cannot wedge the single-threaded broker. The
     /// helper replies `{"ok":true,"result":..}` or `{"ok":false,"code":..,..}`.
-    fn run(&self, request: Value) -> Result<Value, BackendError> {
+    fn run(&self, mut request: Value) -> Result<Value, BackendError> {
+        if let Some(path) = std::env::var_os(HELPER_CANCEL_PATH_ENV) {
+            attach_input_cancellation(&mut request, Path::new(&path))?;
+        }
         let bytes = serde_json::to_vec(&request).map_err(|e| {
             BackendError::new(
                 BackendErrorKind::OperationFailed,
@@ -633,6 +640,43 @@ impl HelperBackend {
     }
 }
 
+/// Read the host's generation before spawning input. A stopped or missing
+/// generation refuses input even when Stop races the broker's dispatch queue.
+fn attach_input_cancellation(request: &mut Value, path: &Path) -> Result<(), BackendError> {
+    if !matches!(
+        request.get("op").and_then(Value::as_str),
+        Some(
+            "click"
+                | "type_text"
+                | "key_press"
+                | "scroll"
+                | "focus_window"
+                | "launch_app"
+                | "hover"
+                | "drag"
+                | "resize_window"
+                | "wait_condition"
+        )
+    ) {
+        return Ok(());
+    }
+    let generation = std::fs::read_to_string(path).map_err(|_| {
+        BackendError::new(
+            BackendErrorKind::Yielded,
+            "Computer control is stopped or unavailable.",
+        )
+    })?;
+    if uuid::Uuid::parse_str(generation.trim()).is_err() {
+        return Err(BackendError::new(
+            BackendErrorKind::Yielded,
+            "Computer control was stopped.",
+        ));
+    }
+    request["cancel_path"] = json!(path.to_string_lossy());
+    request["cancel_generation"] = json!(generation.trim());
+    Ok(())
+}
+
 /// Drain a child pipe to EOF on a detached thread, retaining at most
 /// [`MAX_HELPER_OUTPUT_BYTES`] (overflow is read-and-discarded so the child
 /// never blocks on a full pipe). Returns a handle yielding the retained bytes.
@@ -724,6 +768,7 @@ impl ComputerUseBackend for HelperBackend {
             width: meta.width,
             height: meta.height,
             media_type: meta.media_type,
+            coordinate_frame: meta.coordinate_frame,
         })
     }
 
@@ -1088,6 +1133,8 @@ struct CaptureResultJson {
     width: u32,
     height: u32,
     media_type: String,
+    #[serde(default)]
+    coordinate_frame: Option<WindowFrame>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,6 +1226,29 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         FakeHelper { _dir: dir, path }
+    }
+
+    #[test]
+    fn stopped_generation_refuses_input_but_preserves_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("generation");
+        let mut drag = json!({"op": "drag"});
+        assert_eq!(
+            attach_input_cancellation(&mut drag, &path)
+                .unwrap_err()
+                .kind,
+            BackendErrorKind::Yielded
+        );
+        std::fs::write(&path, "stopped").unwrap();
+        assert!(attach_input_cancellation(&mut drag, &path).is_err());
+        let mut read = json!({"op": "read_ax_tree"});
+        attach_input_cancellation(&mut read, &path).unwrap();
+        assert!(read.get("cancel_generation").is_none());
+        let generation = uuid::Uuid::new_v4().to_string();
+        std::fs::write(&path, &generation).unwrap();
+        attach_input_cancellation(&mut drag, &path).unwrap();
+        assert_eq!(drag["cancel_generation"], generation);
+        assert_eq!(drag["cancel_path"], path.to_string_lossy().as_ref());
     }
 
     #[test]
