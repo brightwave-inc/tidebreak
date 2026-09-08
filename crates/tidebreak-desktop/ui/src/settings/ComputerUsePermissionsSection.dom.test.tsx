@@ -32,6 +32,16 @@ function host(overrides: Partial<ComputerUsePermissionHost> = {}) {
   };
 }
 
+function pending<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(cleanup);
 
 describe("ComputerUsePermissionsSection", () => {
@@ -113,6 +123,77 @@ describe("ComputerUsePermissionsSection", () => {
     },
   );
 
+  it.each(["before", "after"] as const)(
+    "checks status after a request when a stale focus read resolves %s it",
+    async (focusOrder) => {
+      const request = pending<ComputerUsePermissionStatus>();
+      const focusRead = pending<ComputerUsePermissionStatus>();
+      const native = host({
+        status: vi
+          .fn()
+          .mockResolvedValueOnce(missing)
+          .mockReturnValueOnce(focusRead.promise)
+          .mockResolvedValue({ ...missing, accessibility: true }),
+        request: vi.fn(() => request.promise),
+      });
+      render(<ComputerUsePermissionsSection host={native} />);
+      await userEvent.click(
+        await screen.findByRole("button", {
+          name: "Request macOS permissions",
+        }),
+      );
+      act(() => window.dispatchEvent(new Event("focus")));
+      if (focusOrder === "before") {
+        await act(async () => focusRead.resolve(missing));
+      }
+      await act(async () =>
+        request.resolve({ ...missing, accessibility: true }),
+      );
+      await screen.findByText(/macOS permissions are ready/);
+      if (focusOrder === "after") {
+        await act(async () => focusRead.resolve(missing));
+      }
+      expect(native.status).toHaveBeenCalledTimes(3);
+      expect(screen.queryByText("Not allowed")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["before", "after"] as const)(
+    "keeps request errors when a focus read resolves %s the request fails",
+    async (focusOrder) => {
+      const request = pending<ComputerUsePermissionStatus>();
+      const focusRead = pending<ComputerUsePermissionStatus>();
+      const native = host({
+        status: vi
+          .fn()
+          .mockResolvedValueOnce(missing)
+          .mockReturnValueOnce(focusRead.promise),
+        request: vi.fn(() => request.promise),
+      });
+      render(<ComputerUsePermissionsSection host={native} />);
+      await userEvent.click(
+        await screen.findByRole("button", {
+          name: "Request macOS permissions",
+        }),
+      );
+      act(() => window.dispatchEvent(new Event("focus")));
+      if (focusOrder === "before") {
+        await act(async () => focusRead.resolve(missing));
+      }
+      await act(async () => request.reject(new Error("request failed")));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "permissions could not be requested",
+      );
+      if (focusOrder === "after") {
+        await act(async () => focusRead.resolve(missing));
+      }
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "permissions could not be requested",
+      );
+      expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+    },
+  );
+
   it("keeps a permission request result from replacing a later refresh", async () => {
     let resolve!: (status: ComputerUsePermissionStatus) => void;
     const readStatus = vi.fn().mockResolvedValue(missing);
@@ -135,6 +216,61 @@ describe("ComputerUsePermissionsSection", () => {
     await act(async () => resolve(missing));
     expect(screen.queryByText("Not allowed")).not.toBeInTheDocument();
   });
+
+  it("keeps a later focus result while the post-request read is pending", async () => {
+    const request = pending<ComputerUsePermissionStatus>();
+    const postRequestRead = pending<ComputerUsePermissionStatus>();
+    const native = host({
+      status: vi
+        .fn()
+        .mockResolvedValueOnce(missing)
+        .mockResolvedValueOnce(missing)
+        .mockReturnValueOnce(postRequestRead.promise)
+        .mockResolvedValue({ ...missing, accessibility: true }),
+      request: vi.fn(() => request.promise),
+    });
+    render(<ComputerUsePermissionsSection host={native} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Request macOS permissions" }),
+    );
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => request.resolve(missing));
+    expect(native.status).toHaveBeenCalledTimes(3);
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText(/macOS permissions are ready/);
+    await act(async () => postRequestRead.resolve(missing));
+    expect(screen.queryByText("Not allowed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "ignores an old host request's %s after the host changes",
+    async (outcome) => {
+      const request = pending<ComputerUsePermissionStatus>();
+      const oldHost = host({ request: vi.fn(() => request.promise) });
+      const replacement = host({
+        status: vi.fn().mockResolvedValue({ ...missing, accessibility: true }),
+      });
+      const view = render(<ComputerUsePermissionsSection host={oldHost} />);
+      await userEvent.click(
+        await screen.findByRole("button", {
+          name: "Request macOS permissions",
+        }),
+      );
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      view.rerender(<ComputerUsePermissionsSection host={replacement} />);
+      await screen.findByText(/macOS permissions are ready/);
+      expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+      await act(async () => {
+        if (outcome === "success") request.resolve(missing);
+        else request.reject(new Error("old request failed"));
+      });
+      expect(oldHost.status).toHaveBeenCalledTimes(2);
+      expect(replacement.status).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.queryByText("Not allowed")).not.toBeInTheDocument();
+    },
+  );
 
   it("keeps a late old status read from replacing a newer result", async () => {
     let resolve!: (status: ComputerUsePermissionStatus) => void;

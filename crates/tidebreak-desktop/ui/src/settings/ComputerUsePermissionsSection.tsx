@@ -25,6 +25,7 @@ export function ComputerUsePermissionsSection({
     null,
   );
   const generation = useRef(0);
+  const requestGeneration = useRef(0);
   const mounted = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -49,35 +50,47 @@ export function ComputerUsePermissionsSection({
 
   useEffect(() => {
     mounted.current = true;
+    setRequesting(false);
     void refresh();
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
     return () => {
       mounted.current = false;
       generation.current += 1;
+      requestGeneration.current += 1;
       window.removeEventListener("focus", onFocus);
     };
   }, [refresh]);
 
   async function request() {
     const current = ++generation.current;
+    const requestId = ++requestGeneration.current;
+    const isCurrentRequest = () =>
+      mounted.current && requestId === requestGeneration.current;
     setLoading(false);
     setRequesting(true);
     setError(null);
     try {
       const next = await host.request();
-      if (mounted.current && current === generation.current) {
+      if (!isCurrentRequest()) return;
+      if (current === generation.current) {
         setStatus(next);
         setLoading(false);
+      } else {
+        // A focus read can observe permissions before the request completes.
+        await refresh();
       }
     } catch {
-      if (mounted.current && current === generation.current) {
+      if (isCurrentRequest()) {
+        // An older status read must not clear this request's error.
+        generation.current += 1;
+        setLoading(false);
         setError(
           "macOS permissions could not be requested. Open System Settings to enable them, then refresh.",
         );
       }
     } finally {
-      if (mounted.current) setRequesting(false);
+      if (isCurrentRequest()) setRequesting(false);
     }
   }
 
