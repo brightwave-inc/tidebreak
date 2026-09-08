@@ -1,26 +1,28 @@
-//! Hard blocklist of applications the computer-use surface may never capture,
-//! read, drive, or hold a grant over — independent of consent state.
+//! Applications that computer use cannot access, regardless of consent.
 //!
-//! The list is broker-authoritative (the native helper carries a defensive
-//! mirror): consent lives in the grant store, and a grant the user somehow
-//! holds over one of these bundles must still not authorize anything. Two
-//! entry shapes share one list: a plain bundle id matches exactly or as a
-//! dotted prefix (`com.apple.Terminal` also blocks a hypothetical
-//! `com.apple.Terminal.helper`), and an entry written with a trailing dot is
-//! a pure prefix (`io.brightwave.` blocks the product's own bundle id and
-//! anything under it, so the agent can never drive the app it lives in).
+//! The broker enforces this list, and the native helper mirrors it. Tidebreak's
+//! own app family and OS security surfaces stay under human control. Other
+//! development apps use explicit app grants, including terminals and editors
+//! that can run local commands. Decision 93 defines the consent boundary.
 
-/// Blocked bundle ids and (trailing-dot) bundle-id prefixes.
+/// Bundle ids blocked exactly and at a dotted boundary.
 pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
-    // Tidebreak itself — the agent must never capture or drive the surface it
-    // is being watched through.
+    // Reserve Tidebreak's app family for the controlling host. A separate
+    // development target needs its own bundle id and isolated profile.
     "io.brightwave.tidebreak",
-    "io.brightwave.",
-    // Terminals, IDEs, editors, and command launchers: a ControlApp grant
-    // over any of these reaches unsandboxed local execution (focus the
-    // integrated shell, type a command, press Return) and would bypass the
-    // sandboxed exec path. A bundle-id list cannot enumerate every app that
-    // embeds a shell; this is the common class. See decision record 0013.
+    // OS security and credential surfaces.
+    "com.apple.loginwindow",
+    "com.apple.SecurityAgent",
+    "com.apple.CoreAuthUI",
+    "com.apple.coreauthd",
+    "com.apple.systempreferences",
+    "com.apple.keychainaccess",
+];
+
+// Common development apps and command launchers need consent that explains
+// local command execution. This list changes disclosure, never authorization:
+// every app can expose commands, so app grants remain the authority.
+const DEVELOPMENT_CONTROL_BUNDLES: &[&str] = &[
     "com.apple.Terminal",
     "com.googlecode.iterm2",
     "dev.warp.",
@@ -45,19 +47,22 @@ pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
     "org.vim.MacVim",
     "com.runningwithcrayons.Alfred",
     "com.raycast.macos",
-    // OS security and credential surfaces.
-    "com.apple.loginwindow",
-    "com.apple.SecurityAgent",
-    "com.apple.systempreferences",
-    "com.apple.keychainaccess",
 ];
 
-/// Whether `bundle_id` is blocked from every computer-use operation and from
-/// grant creation. Matches each entry exactly or as a dotted prefix, so a
-/// lookalike suffix (`xcom.apple.Terminal`) does not match while anything
-/// nested under a listed id does.
+/// Whether an app is unavailable for every computer-use operation and grant.
+/// Dotted boundaries protect app helpers without matching lookalike suffixes.
 pub fn is_blocked_control_bundle(bundle_id: &str) -> bool {
-    BLOCKED_CONTROL_BUNDLES.iter().any(|entry| {
+    bundle_matches(BLOCKED_CONTROL_BUNDLES, bundle_id)
+}
+
+/// Whether app-control consent should call out local command execution.
+/// A false result does not certify that the app cannot execute commands.
+pub fn is_development_control_bundle(bundle_id: &str) -> bool {
+    bundle_matches(DEVELOPMENT_CONTROL_BUNDLES, bundle_id)
+}
+
+fn bundle_matches(entries: &[&str], bundle_id: &str) -> bool {
+    entries.iter().any(|entry| {
         let base = entry.strip_suffix('.').unwrap_or(entry);
         bundle_id == base
             || (bundle_id.len() > base.len()
@@ -71,54 +76,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_and_dotted_prefix_entries_match() {
+    fn controlling_host_and_security_surfaces_remain_blocked() {
         for blocked in [
             "io.brightwave.tidebreak",
+            "io.brightwave.tidebreak.staging",
             "io.brightwave.tidebreak.helper",
-            "io.brightwave.anything",
-            "com.apple.Terminal",
-            "com.apple.Terminal.helper",
+            "com.apple.loginwindow",
             "com.apple.SecurityAgent",
-            "dev.warp.Warp-Stable",
-            "net.kovidgoyal.kitty",
-            "org.alacritty",
-            "io.alacritty",
-            "com.github.wez.wezterm",
-            "com.mitchellh.ghostty",
-            "com.microsoft.VSCode",
-            "com.microsoft.VSCodeInsiders",
-            "com.visualstudio.code.oss",
-            "com.todesktop.230313mzl4w4u92",
-            "com.exafunction.windsurf",
-            "com.apple.dt.Xcode",
-            "com.jetbrains.intellij",
-            "com.jetbrains.CLion",
-            "com.sublimetext.4",
-            "com.panic.Nova",
-            "com.google.android.studio",
-            "dev.zed.Zed",
-            "org.gnu.Emacs",
-            "org.vim.MacVim",
-            "com.runningwithcrayons.Alfred",
-            "com.raycast.macos",
+            "com.apple.SecurityAgent.helper",
+            "com.apple.CoreAuthUI",
+            "com.apple.coreauthd",
+            "com.apple.systempreferences",
+            "com.apple.keychainaccess",
         ] {
             assert!(is_blocked_control_bundle(blocked), "{blocked}");
         }
     }
 
     #[test]
-    fn lookalikes_and_unrelated_apps_are_not_blocked() {
-        for allowed in [
-            "xcom.apple.Terminal",
-            "com.apple.Terminalized",
-            "io.brightwavex.tidebreak",
+    fn development_apps_are_available_and_identified_for_stronger_consent() {
+        for entry in DEVELOPMENT_CONTROL_BUNDLES {
+            let bundle_id = entry.strip_suffix('.').unwrap_or(entry);
+            assert!(!is_blocked_control_bundle(bundle_id), "{bundle_id}");
+            assert!(is_development_control_bundle(bundle_id), "{bundle_id}");
+        }
+        for bundle_id in [
+            "com.apple.Terminal.helper",
+            "dev.warp.Warp-Stable",
+            "com.jetbrains.intellij",
+            "com.jetbrains.CLion",
+            "com.sublimetext.4",
+        ] {
+            assert!(!is_blocked_control_bundle(bundle_id), "{bundle_id}");
+            assert!(is_development_control_bundle(bundle_id), "{bundle_id}");
+        }
+    }
+
+    #[test]
+    fn separate_products_and_isolated_development_targets_are_available() {
+        for bundle_id in [
+            "io.brightwave.another-product",
+            "dev.tidebreak.fixture",
+            "dev.tidebreak.desktop-test",
             "com.apple.Notes",
             "com.microsoft.Word",
+        ] {
+            assert!(!is_blocked_control_bundle(bundle_id), "{bundle_id}");
+        }
+    }
+
+    #[test]
+    fn bundle_matching_does_not_classify_lookalike_names() {
+        for bundle_id in [
+            "xcom.apple.SecurityAgent",
+            "com.apple.SecurityAgentish",
+            "io.brightwavex.tidebreak",
+            "com.apple.Terminalized",
             "com.jetbrainsx.intellij",
-            "com.example.Mail",
             "",
         ] {
-            assert!(!is_blocked_control_bundle(allowed), "{allowed}");
+            assert!(!is_blocked_control_bundle(bundle_id), "{bundle_id}");
+            assert!(!is_development_control_bundle(bundle_id), "{bundle_id}");
         }
     }
 }

@@ -1,0 +1,39 @@
+harness = "grok"
+version = "1.0.13"
+date = "2026-09-08"
+observed_version_command = "grok --version"
+observed_version = "grok 1.0.13 (5e9a58528b76) [stable]"
+integration_path = "print-streaming-json"
+scenarios = ["image-read"]
+
+[capture]
+notes = """
+The installed official CLI runs in an isolated GROK_HOME against a localhost
+Chat Completions fixture. The fixture requests read_file for a generated
+64-by-64 PNG, then records the next outbound model request. No external model
+runs. The tool update contains image content, and the next request contains
+the same PNG bytes in an image_url block. The probe qualifies tool image
+transport; it does not qualify model vision quality or direct user attachments.
+"""
+
+[redaction]
+notes = """
+Local paths become /workspace/capture.png. Session and request identifiers
+become fixture identifiers. available_commands entries are removed because
+they name unrelated local skills. The recorded request retains only its model
+and image-bearing tool message. It omits system text, tools, and headers.
+The image is a generated solid red square. Its bytes are unchanged.
+"""
+
+verified = [
+  "read_file accepts target_file and reads a local PNG in headless mode",
+  "tool_call_update carries image content and ReadFile.ImageContent",
+  "the next Chat Completions request carries a tool-role image_url block",
+  "the image data URL carries the same PNG bytes as the tool update",
+]
+
+not_verified = [
+  "real model visual interpretation",
+  "direct user image attachments through the Tidebreak adapter",
+  "earlier Grok versions",
+]
