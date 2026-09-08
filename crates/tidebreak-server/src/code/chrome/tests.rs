@@ -898,6 +898,27 @@ async fn nested_cross_session_click_adds_one_owner_per_session_boundary() {
     );
     assert_eq!(moved["params"]["x"], 190.0);
     assert_eq!(moved["params"]["y"], 240.0);
+    let focus = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "Emulation.setFocusEmulationEnabled")
+        .map(|request| {
+            (
+                request["sessionId"].as_str().unwrap().to_owned(),
+                request["params"]["enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        focus,
+        [
+            ("S1".into(), true),
+            ("S2".into(), true),
+            ("S1".into(), false),
+            ("S2".into(), false)
+        ]
+    );
     let owners = log
         .lock()
         .unwrap()
@@ -980,5 +1001,331 @@ async fn unresolved_cross_session_parent_refuses_before_mouse_input() {
             .unwrap()
             .iter()
             .any(|request| request["method"] == "Input.dispatchMouseEvent"));
+    }
+}
+
+#[tokio::test]
+async fn background_input_scopes_page_focus_without_browser_activation() {
+    let (service, scope, log) = scripted_connection(page_reply);
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(
+                &target,
+                &snapshot,
+                "n-0-0",
+                json!({"type":"press","key":"Enter"}),
+            ),
+        )
+        .await
+        .result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    let entries = log.lock().unwrap();
+    let sequence = entries
+        .iter()
+        .filter_map(|request| match request["method"].as_str()? {
+            "Emulation.setFocusEmulationEnabled" => Some(if request["params"]["enabled"] == true {
+                "enable"
+            } else {
+                "disable"
+            }),
+            "Input.dispatchKeyEvent" => request["params"]["type"].as_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sequence, ["enable", "keyDown", "keyUp", "disable"]);
+    assert!(!entries.iter().any(|request| matches!(
+        request["method"].as_str(),
+        Some("Page.bringToFront" | "Target.activateTarget")
+    )));
+}
+
+#[tokio::test]
+async fn ended_authority_restores_page_focus_before_returning() {
+    for end in ["stop", "revoke", "cancel"] {
+        let (service, scope, requests, replies) = connection();
+        let inject = replies.clone();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        respond(requests, replies, log.clone(), |request| {
+            if key_event(request, "keyDown")
+                || (request["method"] == "Emulation.setFocusEmulationEnabled"
+                    && request["params"]["enabled"] == false)
+            {
+                Scripted::Hold
+            } else {
+                page_reply(request)
+            }
+        });
+        let (target, snapshot) = controlled_tab(&service, &scope).await;
+        let mut task = dispatched(
+            &service,
+            &scope,
+            act(
+                &target,
+                &snapshot,
+                "n-0-0",
+                json!({"type":"press","key":"Enter"}),
+            ),
+        )
+        .await;
+        logged(&log, |request| key_event(request, "keyDown")).await;
+        match end {
+            "stop" => service.ownership().trip(),
+            "revoke" => service.revoke_session(&scope.session),
+            _ => scope.cancel.cancel(),
+        };
+        let reset = logged(&log, |request| {
+            request["method"] == "Emulation.setFocusEmulationEnabled"
+                && request["params"]["enabled"] == false
+        })
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut task)
+                .await
+                .is_err(),
+            "{end} returned before page focus reset"
+        );
+        inject
+            .send(CdpFrame::Text(
+                json!({"id":reset["id"],"result":{}}).to_string(),
+            ))
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(result.outcome, ComputerUseOutcome::Completed);
+    }
+}
+
+#[tokio::test]
+async fn page_focus_setup_failure_refuses_without_input_or_activation() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if request["method"] == "Emulation.setFocusEmulationEnabled"
+            && request["params"]["enabled"] == true
+        {
+            Scripted::Error("emulation unavailable")
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_ne!(result.outcome, ComputerUseOutcome::Completed);
+    assert!(
+        result.text.contains("emulation unavailable"),
+        "{}",
+        result.text
+    );
+    let entries = log.lock().unwrap();
+    assert!(!entries.iter().any(|request| request["method"]
+        .as_str()
+        .is_some_and(|method| method.starts_with("Input.")
+            || method == "Page.bringToFront"
+            || method == "Target.activateTarget")));
+    assert!(entries.iter().any(|request| request["method"]
+        == "Emulation.setFocusEmulationEnabled"
+        && request["params"]["enabled"] == false));
+}
+
+#[tokio::test]
+async fn page_focus_reset_failure_disconnects_before_more_input() {
+    let (service, scope, _log) = scripted_connection(|request| {
+        if request["method"] == "Emulation.setFocusEmulationEnabled"
+            && request["params"]["enabled"] == false
+        {
+            Scripted::Error("reset unavailable")
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_ne!(result.outcome, ComputerUseOutcome::Completed);
+    let result = service
+        .dispatch(
+            &scope,
+            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Rejected);
+    assert!(!service.state(&scope).available);
+}
+
+#[tokio::test]
+async fn dropped_action_restores_page_focus_before_next_input() {
+    let (service, scope, requests, replies) = connection();
+    let inject = replies.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let presses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    respond(requests, replies, log.clone(), move |request| {
+        if key_event(request, "keyDown")
+            && presses.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Scripted::Hold;
+        }
+        if request["method"] == "Emulation.setFocusEmulationEnabled"
+            && request["params"]["enabled"] == false
+            && resets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Scripted::Hold;
+        }
+        page_reply(request)
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let first = dispatched(
+        &service,
+        &scope,
+        act(
+            &target,
+            &snapshot,
+            "n-0-0",
+            json!({"type":"press","key":"Enter"}),
+        ),
+    )
+    .await;
+    logged(&log, |request| key_event(request, "keyDown")).await;
+    first.abort();
+    assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+    let reset = logged(&log, |request| {
+        request["method"] == "Emulation.setFocusEmulationEnabled"
+            && request["params"]["enabled"] == false
+    })
+    .await;
+    let snapshot = service
+        .dispatch(
+            &scope,
+            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+        )
+        .await
+        .result;
+    assert_eq!(snapshot.outcome, ComputerUseOutcome::Completed);
+    let mut next = dispatched(
+        &service,
+        &scope,
+        act(
+            &target,
+            snapshot.data["snapshotId"].as_str().unwrap(),
+            "n-0-0",
+            json!({"type":"press","key":"Enter"}),
+        ),
+    )
+    .await;
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut next)
+        .await
+        .is_err());
+    {
+        let entries = log.lock().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|request| key_event(request, "keyDown"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(
+                    |request| request["method"] == "Emulation.setFocusEmulationEnabled"
+                        && request["params"]["enabled"] == true
+                )
+                .count(),
+            1
+        );
+    }
+    inject
+        .send(CdpFrame::Text(
+            json!({"id":reset["id"],"result":{}}).to_string(),
+        ))
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+}
+
+#[tokio::test]
+async fn disconnect_during_page_input_refuses_further_commands() {
+    for end in ["uninstall", "transport"] {
+        let (service, scope, requests, replies) = connection();
+        let inject = replies.clone();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        respond(requests, replies, log.clone(), |request| {
+            if key_event(request, "keyDown") {
+                Scripted::Hold
+            } else {
+                page_reply(request)
+            }
+        });
+        let (target, snapshot) = controlled_tab(&service, &scope).await;
+        let task = dispatched(
+            &service,
+            &scope,
+            act(
+                &target,
+                &snapshot,
+                "n-0-0",
+                json!({"type":"press","key":"Enter"}),
+            ),
+        )
+        .await;
+        logged(&log, |request| key_event(request, "keyDown")).await;
+        if end == "uninstall" {
+            service.uninstall_connection("test").unwrap();
+        } else {
+            inject.send(CdpFrame::Close).unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            ComputerUseOutcome::Unknown,
+            "{end}: {}",
+            result.text
+        );
+        assert!(!service.state(&scope).available);
+        let before = log.lock().unwrap().len();
+        let result = service
+            .dispatch(
+                &scope,
+                &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+            )
+            .await
+            .result;
+        assert_eq!(result.outcome, ComputerUseOutcome::Rejected);
+        assert_eq!(
+            log.lock().unwrap().len(),
+            before,
+            "{end} sent a command after disconnect"
+        );
     }
 }

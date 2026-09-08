@@ -155,6 +155,7 @@ struct Inner {
 pub struct ChromeComputerUseService {
     inner: Arc<Mutex<Inner>>,
     serial: Arc<tokio::sync::Mutex<()>>,
+    input_cleanup: Arc<tokio::sync::Mutex<()>>,
     ownership: ChromeOwnership,
 }
 #[derive(Clone)]
@@ -189,14 +190,42 @@ struct InputHold {
     cdp: CdpSession,
     session: String,
     releases: Vec<(&'static str, Value)>,
+    focus_sessions: Vec<String>,
+    cleanup_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 impl InputHold {
-    fn new(access: &Access, tab: &Tab) -> Self {
+    fn new(access: &Access, tab: &Tab, cleanup_guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
             cdp: access.cdp.clone(),
             session: tab.cdp_session.clone(),
             releases: Vec::new(),
+            focus_sessions: Vec::new(),
+            cleanup_guard: Some(cleanup_guard),
         }
+    }
+    /// Hidden Chrome tabs can acknowledge pointer input without delivering
+    /// it. Page-level focus emulation keeps their input pipeline active; it
+    /// never calls browser activation or requests native keyboard focus.
+    async fn enable_page_focus(
+        &mut self,
+        access: &Access,
+        snapshot: &Snapshot,
+    ) -> Result<(), String> {
+        for frame in &snapshot.frames {
+            if !access.permits(&frame.url) || self.focus_sessions.contains(&frame.cdp_session) {
+                continue;
+            }
+            // Arm restoration before the enable command can reach Chrome.
+            self.focus_sessions.push(frame.cdp_session.clone());
+            access
+                .command(
+                    Some(&frame.cdp_session),
+                    "Emulation.setFocusEmulationEnabled",
+                    json!({"enabled":true}),
+                )
+                .await?;
+        }
+        Ok(())
     }
     fn arm(&mut self, method: &'static str, params: Value) {
         self.releases.push((method, params));
@@ -205,47 +234,77 @@ impl InputHold {
         self.releases.clear();
     }
     async fn release(&mut self) -> Result<(), String> {
-        let mut failed = false;
-        while let Some((method, params)) = self.releases.first().cloned() {
-            let result = tokio::time::timeout(
-                INPUT_RELEASE_TIMEOUT,
-                self.cdp.command_in_session(&self.session, method, params),
-            )
-            .await;
-            failed |= !matches!(result, Ok(Ok(_)));
-            self.releases.remove(0);
-        }
-        if failed {
-            // A late release must not reach a subsequent action. Closing the
-            // transport refuses queued input until a fresh connection exists.
-            self.cdp.close();
-            return Err("Chrome input cleanup failed. Reconnect before another action.".into());
-        }
-        Ok(())
+        let result = restore_page_input(
+            &self.cdp,
+            &self.session,
+            &self.releases,
+            &self.focus_sessions,
+        )
+        .await;
+        self.releases.clear();
+        self.focus_sessions.clear();
+        result
     }
 }
+
+async fn restore_page_input(
+    cdp: &CdpSession,
+    session: &str,
+    releases: &[(&'static str, Value)],
+    focus_sessions: &[String],
+) -> Result<(), String> {
+    let mut failed = false;
+    for (method, params) in releases {
+        let result = tokio::time::timeout(
+            INPUT_RELEASE_TIMEOUT,
+            cdp.command_in_session(session, method, params.clone()),
+        )
+        .await;
+        failed |= !matches!(result, Ok(Ok(_)));
+    }
+    // Queue all resets before waiting. The total cleanup ceiling does not
+    // grow with the page's number of out-of-process frame sessions.
+    let resets = futures_util::future::join_all(focus_sessions.iter().map(|session| {
+        cdp.command_in_session(
+            session,
+            "Emulation.setFocusEmulationEnabled",
+            json!({"enabled":false}),
+        )
+    }));
+    failed |= match tokio::time::timeout(INPUT_RELEASE_TIMEOUT, resets).await {
+        Ok(results) => results.iter().any(Result::is_err),
+        Err(_) => true,
+    };
+    if failed {
+        // Detaching the DevTools connection clears page emulation and refuses
+        // new input if Chrome did not acknowledge its restoration.
+        cdp.close();
+        return Err("Chrome input cleanup failed. Reconnect before another action.".into());
+    }
+    Ok(())
+}
+
 impl Drop for InputHold {
     fn drop(&mut self) {
-        if self.releases.is_empty() {
+        if self.releases.is_empty() && self.focus_sessions.is_empty() {
             return;
         }
         let cdp = self.cdp.clone();
         let session = std::mem::take(&mut self.session);
         let releases = std::mem::take(&mut self.releases);
+        let focus_sessions = std::mem::take(&mut self.focus_sessions);
+        let cleanup_guard = self.cleanup_guard.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            cdp.close();
             return;
         };
         runtime.spawn(async move {
-            for (method, params) in releases {
-                let _ = tokio::time::timeout(
-                    INPUT_RELEASE_TIMEOUT,
-                    cdp.command_in_session(&session, method, params),
-                )
-                .await;
-            }
+            let _ = restore_page_input(&cdp, &session, &releases, &focus_sessions).await;
+            drop(cleanup_guard);
         });
     }
 }
+
 impl Access {
     async fn command(
         &self,
@@ -1294,8 +1353,11 @@ impl ChromeComputerUseService {
         if let Some(stored) = self.inner.lock().unwrap().tabs.get_mut(&args.target_ref) {
             stored.snapshot = None;
         }
-        let mut hold = InputHold::new(&access, &tab);
+        let cleanup_guard = self.input_cleanup.clone().lock_owned().await;
+        access.fence.check()?;
+        let mut hold = InputHold::new(&access, &tab, cleanup_guard);
         let operation=async {
+   hold.enable_page_focus(&access, &snapshot).await?;
    match &args.action {
     ChromeAction::Fill{value}|ChromeAction::Select{value}=>{self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true,"focus":true,"operation":args.action.kind(),"value":value})).await?;}
     ChromeAction::Check{checked}=>{self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true,"operation":"check","value":checked})).await?;}
