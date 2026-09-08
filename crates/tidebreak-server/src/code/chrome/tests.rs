@@ -68,6 +68,117 @@ fn new_tab() -> ComputerUseCall {
 }
 
 #[tokio::test]
+async fn stop_drains_held_input_before_a_resumed_action_can_press_again() {
+    let (service, scope, requests, replies) = connection();
+    let reply_inject = replies.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let pressed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    respond(requests, replies, log.clone(), move |request| {
+        if key_event(request, "keyDown")
+            && pressed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Scripted::Hold;
+        }
+        if key_event(request, "keyUp")
+            && released.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Scripted::Hold;
+        }
+        page_reply(request)
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let first = dispatched(
+        &service,
+        &scope,
+        act(
+            &target,
+            &snapshot,
+            "n-0-0",
+            json!({"type":"press","key":"Enter"}),
+        ),
+    )
+    .await;
+    logged(&log, |request| key_event(request, "keyDown")).await;
+    service.ownership().trip();
+    let cleanup = logged(&log, |request| key_event(request, "keyUp")).await;
+    service.ownership().resume();
+    let next = tokio::spawn({
+        let service = service.clone();
+        let scope = scope.clone();
+        async move {
+            let snapshot = service
+                .dispatch(
+                    &scope,
+                    &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+                )
+                .await
+                .result;
+            assert_eq!(snapshot.outcome, ComputerUseOutcome::Completed);
+            let snapshot_id = snapshot.data["snapshotId"].as_str().unwrap();
+            service
+                .dispatch(
+                    &scope,
+                    &act(
+                        &target,
+                        snapshot_id,
+                        "n-0-0",
+                        json!({"type":"press","key":"Enter"}),
+                    ),
+                )
+                .await
+                .result
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let first_returned_before_cleanup = first.is_finished();
+    let next_pressed_before_cleanup = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| key_event(request, "keyDown"))
+        .count()
+        > 1;
+    reply_inject
+        .send(CdpFrame::Text(
+            json!({"id":cleanup["id"],"result":{}}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        ComputerUseOutcome::Unknown
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        ComputerUseOutcome::Completed
+    );
+    assert!(
+        !first_returned_before_cleanup,
+        "stopped action returned before its key release completed"
+    );
+    assert!(
+        !next_pressed_before_cleanup,
+        "resumed action pressed a key while old cleanup was still pending"
+    );
+    let inputs = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .map(|request| request["params"]["type"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(inputs, ["keyDown", "keyUp", "keyDown", "keyUp"]);
+}
+
+#[tokio::test]
 async fn stop_drains_a_sent_foreground_activation_before_returning() {
     let (service, scope, requests, replies) = connection();
     let reply_inject = replies.clone();

@@ -204,6 +204,25 @@ impl InputHold {
     fn disarm(&mut self) {
         self.releases.clear();
     }
+    async fn release(&mut self) -> Result<(), String> {
+        let mut failed = false;
+        while let Some((method, params)) = self.releases.first().cloned() {
+            let result = tokio::time::timeout(
+                INPUT_RELEASE_TIMEOUT,
+                self.cdp.command_in_session(&self.session, method, params),
+            )
+            .await;
+            failed |= !matches!(result, Ok(Ok(_)));
+            self.releases.remove(0);
+        }
+        if failed {
+            // A late release must not reach a subsequent action. Closing the
+            // transport refuses queued input until a fresh connection exists.
+            self.cdp.close();
+            return Err("Chrome input cleanup failed. Reconnect before another action.".into());
+        }
+        Ok(())
+    }
 }
 impl Drop for InputHold {
     fn drop(&mut self) {
@@ -1317,6 +1336,9 @@ impl ChromeComputerUseService {
    }
    Ok::<(),String>(())
   }.await;
+        // Keep the service serial gate until every compensating release has
+        // finished. Drop is only a fallback for an unexpectedly aborted task.
+        hold.release().await?;
         operation?;
         Ok(ChromeActResult {
             target_ref: args.target_ref.clone(),

@@ -100,10 +100,12 @@ async fn await_chrome_result(
     stop_chrome: impl FnOnce(),
     operation: impl std::future::Future<Output = ComputerUseResult>,
 ) -> ComputerUseResult {
-    if call.name == tidebreak_core::CHROME_ACTIVATE_TAB_TOOL {
-        // The inner adapter cancels its prompt and queued work, then drains a
-        // sent activation under the shared foreground owner. Dropping that
-        // future here would release ownership while Chrome can still focus.
+    if matches!(
+        call.name.as_str(),
+        tidebreak_core::CHROME_ACTIVATE_TAB_TOOL | tidebreak_core::CHROME_ACT_TOOL
+    ) {
+        // The inner adapter drains active input cleanup and activation. Dropping
+        // it here would allow a resumed action to overtake an old key release.
         return operation.await;
     }
     tokio::select! {
@@ -380,6 +382,15 @@ mod tests {
 
     #[tokio::test]
     async fn outer_chrome_runtime_retains_activation_until_the_inner_drain_finishes() {
+        assert_outer_runtime_drains(tidebreak_core::CHROME_ACTIVATE_TAB_TOOL).await;
+    }
+
+    #[tokio::test]
+    async fn outer_chrome_runtime_retains_page_input_until_the_inner_cleanup_finishes() {
+        assert_outer_runtime_drains(tidebreak_core::CHROME_ACT_TOOL).await;
+    }
+
+    async fn assert_outer_runtime_drains(tool: &'static str) {
         let computer_use =
             Arc::new(crate::client_execution::computer_use::ComputerUseState::default());
         let stop = CancelToken::new();
@@ -391,7 +402,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let call = ComputerUseCall {
                 request_id: Uuid::new_v4(),
-                name: tidebreak_core::CHROME_ACTIVATE_TAB_TOOL.into(),
+                name: tool.into(),
                 arguments: serde_json::json!({"targetRef":"fixture"}),
             };
             await_chrome_result(&host, &call, &inner_stop, || {}, async {

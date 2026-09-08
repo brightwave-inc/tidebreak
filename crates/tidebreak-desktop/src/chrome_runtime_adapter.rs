@@ -626,8 +626,8 @@ impl Drop for ChromeRuntimeAdapter {
     }
 }
 
-/// Chrome page input remains concurrent with native apps. Explicit activation
-/// owns the foreground until its protocol reply arrives, even after Stop.
+/// Chrome page input remains concurrent with native apps. Stop retains active
+/// calls until their input cleanup or foreground activation reply completes.
 async fn dispatch_chrome_operation<T>(
     computer_use: &crate::client_execution::computer_use::ComputerUseState,
     session: SessionId,
@@ -647,6 +647,7 @@ async fn dispatch_chrome_operation<T>(
                 })
                 .await
         } else {
+            started.store(true, Ordering::Release);
             Ok(operation.await)
         }
     };
@@ -657,14 +658,15 @@ async fn dispatch_chrome_operation<T>(
             tokio::select! {
                 _ = cancelled.cancelled() => {},
                 _ = stop.cancelled() => {},
-                _ = computer_use.wait_for_halt(), if foreground => {},
+                _ = computer_use.wait_for_halt() => {},
             }
         } => {
             stop_session();
             if started.load(Ordering::Acquire) {
-                // Only this call's live owner sets the shared halt. A queued
-                // Chrome call must not interrupt another session's native input.
-                computer_use.cancel_session(session, || Ok::<_, ()>(())).unwrap();
+                if foreground {
+                    // A queued Chrome call cannot interrupt another owner.
+                    computer_use.cancel_session(session, || Ok::<_, ()>(())).unwrap();
+                }
                 let _ = dispatch.await;
             }
             Err(())
@@ -1141,6 +1143,58 @@ mod tests {
         assert!(!computer_use.is_halted());
         assert!(computer_use.owns_dispatch(session));
         release.send(()).unwrap();
+        native.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_background_chrome_waits_for_cleanup_without_halting_native_input() {
+        use crate::client_execution::computer_use::ComputerUseState;
+        let computer_use = Arc::new(ComputerUseState::default());
+        let native_session = SessionId::new();
+        let (native_started, native_started_rx) = oneshot::channel();
+        let (release_native, release_native_rx) = oneshot::channel();
+        let native_host = computer_use.clone();
+        let native = tokio::spawn(async move {
+            native_host
+                .test_dispatch_acting(native_session, async {
+                    native_started.send(()).unwrap();
+                    release_native_rx.await.unwrap();
+                })
+                .await
+        });
+        native_started_rx.await.unwrap();
+        let cancel = CancelToken::new();
+        let chrome_cancel = cancel.clone();
+        let (started, started_rx) = oneshot::channel();
+        let (stopped, stopped_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let chrome_host = computer_use.clone();
+        let chrome = tokio::spawn(async move {
+            dispatch_chrome_operation(
+                &chrome_host,
+                SessionId::new(),
+                false,
+                &chrome_cancel,
+                &CancelToken::new(),
+                || {
+                    stopped.send(()).unwrap();
+                },
+                async {
+                    started.send(()).unwrap();
+                    release_rx.await.unwrap();
+                },
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        cancel.cancel();
+        stopped_rx.await.unwrap();
+        assert!(!chrome.is_finished());
+        assert!(!computer_use.is_halted());
+        assert!(computer_use.owns_dispatch(native_session));
+        release.send(()).unwrap();
+        assert!(chrome.await.unwrap().is_err());
+        release_native.send(()).unwrap();
         native.await.unwrap().unwrap();
     }
 
