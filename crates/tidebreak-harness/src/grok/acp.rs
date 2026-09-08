@@ -40,8 +40,33 @@ pub(super) struct Control {
 struct Permission {
     rpc_id: Value,
     tool_id: String,
+    tool_binding: ToolBinding,
     allow_once: String,
     reject_once: String,
+}
+
+#[derive(PartialEq, Eq)]
+struct ToolBinding {
+    name: String,
+    input: Value,
+    raw_input: Value,
+}
+
+impl ToolBinding {
+    fn from_tool(tool: &Value) -> Option<Self> {
+        Some(Self {
+            name: tool.pointer("/_meta/x.ai~1tool/name")?.as_str()?.to_owned(),
+            input: tool
+                .pointer("/_meta/x.ai~1tool/input")
+                .or_else(|| tool.get("rawInput"))?
+                .clone(),
+            raw_input: tool.get("rawInput")?.clone(),
+        })
+    }
+}
+
+fn valid_rpc_id(value: &Value) -> bool {
+    value.is_string() || value.is_i64() || value.is_u64()
 }
 
 struct Reader {
@@ -111,7 +136,7 @@ fn permission_reply(id: &Value, option: Option<&str>) -> Value {
 /// Match the exact active tool and the one-use choices before showing consent.
 fn parse_permission(value: &Value, state: &Control) -> Option<Permission> {
     let id = value.get("id")?;
-    if !id.is_string() && !id.is_i64() && !id.is_u64() {
+    if !valid_rpc_id(id) {
         return None;
     }
     let params = value.get("params")?;
@@ -127,17 +152,8 @@ fn parse_permission(value: &Value, state: &Control) -> Option<Permission> {
     let tool = params.get("toolCall")?;
     let tool_id = tool.get("toolCallId")?.as_str()?;
     let observed = state.tools.get(tool_id)?;
-    let name = tool.pointer("/_meta/x.ai~1tool/name")?.as_str()?;
-    if observed.pointer("/_meta/x.ai~1tool/name")?.as_str()? != name {
-        return None;
-    }
-    let input = tool
-        .pointer("/_meta/x.ai~1tool/input")
-        .or_else(|| tool.get("rawInput"))?;
-    let observed_input = observed
-        .pointer("/_meta/x.ai~1tool/input")
-        .or_else(|| observed.get("rawInput"))?;
-    if input != observed_input || tool.get("rawInput")? != observed.get("rawInput")? {
+    let tool_binding = ToolBinding::from_tool(tool)?;
+    if tool_binding != ToolBinding::from_tool(observed)? {
         return None;
     }
     let choices = params.get("options")?.as_array()?;
@@ -157,6 +173,7 @@ fn parse_permission(value: &Value, state: &Control) -> Option<Permission> {
     Some(Permission {
         rpc_id: id.clone(),
         tool_id: tool_id.to_owned(),
+        tool_binding,
         allow_once: one("allow_once")?,
         reject_once: one("reject_once")?,
     })
@@ -481,7 +498,19 @@ impl GrokSession {
                     if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
                         if matches!(update.get("status").and_then(Value::as_str), Some("completed" | "failed")) {
                             state.tools.remove(id);
-                        } else if update.get("rawInput").is_some() { state.tools.insert(id.to_owned(), update.clone()); }
+                        } else if kind == "tool_call" {
+                            state.tools.insert(id.to_owned(), update.clone());
+                        } else if let Some(observed) = state.tools.get_mut(id) {
+                            if let Some(input) = update.get("rawInput") {
+                                observed["rawInput"] = input.clone();
+                            }
+                            if let Some(metadata) = update.pointer("/_meta/x.ai~1tool").and_then(Value::as_object) {
+                                let mut merged = observed.pointer("/_meta/x.ai~1tool")
+                                    .and_then(Value::as_object).cloned().unwrap_or_default();
+                                merged.extend(metadata.iter().map(|(key, value)| (key.clone(), value.clone())));
+                                observed["_meta"] = json!({"x.ai/tool":merged});
+                            }
+                        }
                     }
                 }
                 drop(state);
@@ -491,7 +520,7 @@ impl GrokSession {
                 }
                 Ok(())
             }
-            Some(_) if value.get("id").is_some() => {
+            Some(_) if value.get("id").is_some_and(valid_rpc_id) => {
                 self.acp.lock().await.write(&json!({"jsonrpc":"2.0","id":value["id"],"error":{"code":-32601,"message":"Tidebreak does not support this Grok client request"}})).await
             }
             _ => Ok(()),
@@ -499,7 +528,13 @@ impl GrokSession {
     }
 
     async fn request_acp_permission(&self, value: Value) -> Result<(), HarnessError> {
-        let id = value.get("id").cloned().unwrap_or(Value::Null);
+        let Some(id) = value.get("id").filter(|id| valid_rpc_id(id)).cloned() else {
+            self.spec.sink.emit(HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Warning,
+                message: "Grok sent an approval request without a valid string or integer ID; Tidebreak ignored it".into(),
+            }).await;
+            return Ok(());
+        };
         let mut state = self.acp.lock().await;
         let unique = state.seen.insert(id.to_string());
         let permission = unique.then(|| parse_permission(&value, &state)).flatten();
@@ -565,8 +600,26 @@ impl GrokSession {
             .pending
             .remove(&approval.call_id)
             .ok_or_else(|| HarnessError::ApprovalWaiterMissing(approval.call_id.clone()))?;
-        if state.stopped || !state.active || !state.tools.contains_key(&permission.tool_id) {
-            return Err(HarnessError::ApprovalWaiterMissing(approval.call_id));
+        let binding_matches = state
+            .tools
+            .get(&permission.tool_id)
+            .and_then(ToolBinding::from_tool)
+            .is_some_and(|binding| binding == permission.tool_binding);
+        if state.stopped || !state.active || !binding_matches {
+            let _ = state
+                .write(&permission_reply(&permission.rpc_id, None))
+                .await;
+            drop(state);
+            self.spec
+                .sink
+                .emit(HarnessEvent::ApprovalResolved {
+                    harness_ref: approval.clone(),
+                    decision: ApprovalDecision::Deny { feedback: None },
+                })
+                .await;
+            return Err(HarnessError::ApprovalBindingMismatch(
+                "the Grok tool changed or finished while its approval was waiting".into(),
+            ));
         }
         let option = if matches!(decision, ApprovalDecision::Approve) {
             &permission.allow_once

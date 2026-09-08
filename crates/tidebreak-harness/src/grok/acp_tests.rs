@@ -422,3 +422,134 @@ async fn acp_applies_turn_model_and_effort_before_prompting() {
     assert!(index("session/set_mode") < index("session/prompt"));
     assert_eq!(calls[index("session/set_mode")]["params"]["modeId"], "high");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_revalidates_the_tool_after_an_update_while_approval_waits() {
+    for changed in ["raw_input", "metadata_input", "name"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, sink) = session(dir.path(), PermissionMode::Auto, false);
+        let running = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(turn()).await }
+        });
+        let approval = wait_approval(&sink).await;
+        let (_, original) = captured_permission();
+        let tool_id = original["params"]["toolCall"]["toolCallId"].clone();
+        let mut update = json!({"sessionUpdate":"tool_call_update", "toolCallId":tool_id});
+        match changed {
+            "raw_input" => update["rawInput"] = json!({"command":"changed command"}),
+            "metadata_input" => {
+                update["_meta"] = json!({"x.ai/tool":{"input":{"command":"changed command"}}})
+            }
+            "name" => update["_meta"] = json!({"x.ai/tool":{"name":"different_tool"}}),
+            _ => unreachable!(),
+        }
+        session.handle_acp_frame(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":update}}), &mut GrokStreamParser::new(), false).await.unwrap();
+        assert!(
+            matches!(
+                session
+                    .decide(approval.clone(), ApprovalDecision::Approve)
+                    .await,
+                Err(HarnessError::ApprovalBindingMismatch(_))
+            ),
+            "changed {changed} was approved"
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(3), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            TurnOutcome::Clean
+        );
+        assert!(
+            !dir.path().join("executed").exists(),
+            "changed {changed} executed"
+        );
+        assert!(sink.events.lock().unwrap().iter().any(|event| matches!(event,
+            HarnessEvent::ApprovalResolved {harness_ref,decision:ApprovalDecision::Deny{..}} if harness_ref.call_id == approval.call_id)));
+        let calls: Vec<Value> = std::fs::read_to_string(dir.path().join("record"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let reply = calls
+            .iter()
+            .find(|call| call["id"] == 0 && call.get("result").is_some())
+            .unwrap();
+        assert_eq!(reply["result"]["outcome"], json!({"outcome":"cancelled"}));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_does_not_echo_malformed_rpc_ids_or_create_approval_waiters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, sink) = session(dir.path(), PermissionMode::Auto, false);
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move { session.run_turn(turn()).await }
+    });
+    let approval = wait_approval(&sink).await;
+    let (_, original) = captured_permission();
+    for malformed in [
+        None,
+        Some(Value::Null),
+        Some(json!(true)),
+        Some(json!([0])),
+        Some(json!({"id":0})),
+        Some(json!(1.5)),
+    ] {
+        let mut request = original.clone();
+        if let Some(id) = malformed {
+            request["id"] = id;
+        } else {
+            request.as_object_mut().unwrap().remove("id");
+        }
+        session.request_acp_permission(request).await.unwrap();
+    }
+    {
+        let state = session.acp.lock().await;
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.seen.len(), 1);
+    }
+    session
+        .decide(approval, ApprovalDecision::Deny { feedback: None })
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        TurnOutcome::Clean
+    );
+    let calls: Vec<Value> = std::fs::read_to_string(dir.path().join("record"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let replies: Vec<_> = calls
+        .iter()
+        .filter(|call| call.get("result").is_some())
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["id"], 0);
+    assert_eq!(
+        sink.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                event,
+                HarnessEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Warning,
+                    ..
+                }
+            ))
+            .count(),
+        6
+    );
+}
