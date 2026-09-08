@@ -55,6 +55,7 @@ pub mod blob;
 pub mod browser;
 pub mod cancel;
 pub mod chat_journal;
+pub mod chrome_computer_use;
 pub mod citation;
 pub mod client_tools;
 pub mod code;
@@ -212,6 +213,29 @@ pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
     DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
     DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+};
+
+pub use chrome_computer_use::{
+    chrome_act_tool_spec, chrome_activate_tab_tool_spec, chrome_close_tab_tool_spec,
+    chrome_computer_use_tool_specs, chrome_diagnostics_tool_spec, chrome_list_tabs_tool_spec,
+    chrome_navigate_tool_spec, chrome_new_tab_tool_spec, chrome_screenshot_tool_spec,
+    chrome_snapshot_tool_spec, chrome_wait_tool_spec, is_chrome_computer_use_tool,
+    valid_chrome_target_ref, valid_chrome_url, validate_chrome_computer_use_arguments,
+    ChromeActArgs, ChromeActResult, ChromeActStatus, ChromeAction, ChromeConnectionGrant,
+    ChromeConsoleEntry, ChromeDiagnosticsArgs, ChromeDiagnosticsResult, ChromeFrameStatus,
+    ChromeGrantCapability, ChromeListTabsArgs, ChromeListTabsResult, ChromeNavigateArgs,
+    ChromeNavigateResult, ChromeNetworkEntry, ChromeNewTabArgs, ChromeOriginScope,
+    ChromePageSnapshot, ChromeScreenshotArgs, ChromeScreenshotResult, ChromeSemanticFrame,
+    ChromeSemanticNode, ChromeSemanticNodeKind, ChromeSnapshotArgs, ChromeTabMutationResult,
+    ChromeTabRefArgs, ChromeTabSummary, ChromeViewport, ChromeWaitArgs, ChromeWaitCondition,
+    ChromeWaitResult, ChromeWaitStatus, CHROME_ACTIVATE_TAB_TOOL, CHROME_ACT_TOOL,
+    CHROME_CLOSE_TAB_TOOL, CHROME_DIAGNOSTICS_TOOL, CHROME_LIST_TABS_TOOL, CHROME_NAVIGATE_TOOL,
+    CHROME_NEW_TAB_TOOL, CHROME_SCREENSHOT_TOOL, CHROME_SNAPSHOT_TOOL, CHROME_USE_TOOLS,
+    CHROME_WAIT_TOOL, DEFAULT_CHROME_DIAGNOSTICS_ENTRIES, DEFAULT_CHROME_SNAPSHOT_NODES,
+    DEFAULT_CHROME_WAIT_TIMEOUT_MS, MAX_CHROME_ACTION_VALUE_CHARS, MAX_CHROME_DIAGNOSTICS_ENTRIES,
+    MAX_CHROME_DIAGNOSTICS_ENTRY_CHARS, MAX_CHROME_SCREENSHOT_DIMENSION,
+    MAX_CHROME_SCREENSHOT_PNG_BYTES, MAX_CHROME_SNAPSHOT_NODES, MAX_CHROME_TARGET_REF_CHARS,
+    MAX_CHROME_URL_CHARS, MAX_CHROME_WAIT_TIMEOUT_MS,
 };
 pub use computer_use::{
     computer_capture_screen_tool_spec, computer_click_tool_spec, computer_drag_tool_spec,
