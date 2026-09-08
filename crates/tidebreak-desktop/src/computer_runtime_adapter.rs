@@ -125,6 +125,7 @@ impl DesktopComputerRuntime {
     pub(crate) async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         self.stop_all_chrome();
+        self.native.shutdown().await;
         self.chrome.shutdown().await;
     }
 }
@@ -137,7 +138,7 @@ impl NativeRuntime for DesktopComputerRuntime {
         if !is_chrome_session_tool(&call.name) { return self.native.execute(scope, call).await }
         // The native adapter validates the same host-derived subject before a
         // Chrome request can create state or display its native consent prompt.
-        self.native.result_for_call(scope, call).await?;
+        self.native.validate_scope(scope).await?;
         self.app.state::<HostAccess>().require_local(crate::host_authority::Authority::ComputerUse)
             .await.map_err(NativeRuntimeError::NotAuthorized)?;
         let session = self.session(scope)?;
@@ -172,7 +173,7 @@ impl NativeRuntime for DesktopComputerRuntime {
 
     async fn result_for_call(&self, scope: &NativeRuntimeScope, call: &ComputerUseCall) -> Result<Option<ComputerUseResult>, NativeRuntimeError> {
         if !is_chrome_session_tool(&call.name) { return self.native.result_for_call(scope, call).await }
-        self.native.result_for_call(scope, call).await?;
+        self.native.validate_scope(scope).await?;
         let session = self.session(scope)?;
         let result = session.journal.lock().unwrap_or_else(|p| p.into_inner()).recall(call);
         result
