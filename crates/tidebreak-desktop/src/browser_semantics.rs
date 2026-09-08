@@ -5805,8 +5805,7 @@ async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
     with_browser_webview(webview, move |view| unsafe {
         let Some(mtm) = objc2::MainThreadMarker::new() else {
             if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
-                let _ = sender
-                    .send(Err("browser JavaScript requires the main thread".to_owned()));
+                let _ = sender.send(Err("browser JavaScript requires the main thread".to_owned()));
             }
             return;
         };

@@ -1103,7 +1103,9 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
             let mut browser_id = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--browser-id" => parse_string_flag(&mut args, &mut browser_id, "--browser-id")?,
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
                     other => return Err(format!("unknown browser close argument {other:?}")),
                 }
             }
@@ -1116,7 +1118,9 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
             let mut browser_id = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--browser-id" => parse_string_flag(&mut args, &mut browser_id, "--browser-id")?,
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
                     other => return Err(format!("unknown browser activate argument {other:?}")),
                 }
             }
@@ -1131,7 +1135,9 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
             let mut max_entries = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--browser-id" => parse_string_flag(&mut args, &mut browser_id, "--browser-id")?,
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
                     "--after-sequence" => {
                         if after_sequence.is_some() {
                             return Err("duplicate --after-sequence".to_string());
@@ -1156,9 +1162,7 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                         }
                         max_entries = Some(entries);
                     }
-                    other => {
-                        return Err(format!("unknown browser diagnostics argument {other:?}"))
-                    }
+                    other => return Err(format!("unknown browser diagnostics argument {other:?}")),
                 }
             }
             let Some(browser_id) = browser_id else {
@@ -1506,7 +1510,9 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Close { browser_id } => {
             let args = BrowserCloseArgs { browser_id };
             if !args.is_well_formed() {
-                return Err(AgentError::msg("browser close arguments are not well-formed"));
+                return Err(AgentError::msg(
+                    "browser close arguments are not well-formed",
+                ));
             }
             let result = browser_close(&client, &args)
                 .await
@@ -2225,9 +2231,11 @@ fn write_screenshot_output(
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|error| ClientFailure::ToolFailed {
-        detail: format!("could not open screenshot output file: {error}"),
-    })?;
+    let mut file = options
+        .open(path)
+        .map_err(|error| ClientFailure::ToolFailed {
+            detail: format!("could not open screenshot output file: {error}"),
+        })?;
     file.write_all(&fitted.bytes)
         .and_then(|()| file.sync_all())
         .map_err(|error| ClientFailure::ToolFailed {
@@ -2290,7 +2298,9 @@ fn decode_and_fit_screenshot(
         "image/jpeg" => image::ImageFormat::Jpeg,
         other => {
             return Err(ClientFailure::ToolFailed {
-                detail: format!("screenshot mime type must be image/png or image/jpeg, got {other}"),
+                detail: format!(
+                    "screenshot mime type must be image/png or image/jpeg, got {other}"
+                ),
             });
         }
     };
@@ -2324,12 +2334,11 @@ fn decode_and_fit_screenshot(
     }
 
     // Read dimensions from the header without decoding pixels.
-    let (width, height) =
-        image::ImageReader::with_format(std::io::Cursor::new(&bytes), format)
-            .into_dimensions()
-            .map_err(|_| ClientFailure::ToolFailed {
-                detail: "screenshot image header could not be read".to_string(),
-            })?;
+    let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format)
+        .into_dimensions()
+        .map_err(|_| ClientFailure::ToolFailed {
+            detail: "screenshot image header could not be read".to_string(),
+        })?;
 
     if width == 0 || height == 0 {
         return Err(ClientFailure::ToolFailed {

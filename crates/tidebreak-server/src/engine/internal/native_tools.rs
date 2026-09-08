@@ -20,8 +20,10 @@ use std::time::Duration;
 use serde_json::Value;
 use uuid::Uuid;
 
+use tidebreak_core::computer_session::{
+    computer_session_tool_specs, validate_computer_session_arguments,
+};
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
-use tidebreak_core::computer_session::{computer_session_tool_specs, validate_computer_session_arguments};
 use tidebreak_core::{
     ApprovalClass, DocumentBlob, ImageData, ImageMediaType, ImageRef, Result as CoreResult, Tool,
     ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec, MAX_IMAGE_DIMENSION,

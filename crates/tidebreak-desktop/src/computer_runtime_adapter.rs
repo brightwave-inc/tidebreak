@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tauri::{AppHandle, Manager};
-use tidebreak_core::computer_session::{is_chrome_session_tool, ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
+use tidebreak_core::computer_session::{
+    is_chrome_session_tool, ComputerUseCall, ComputerUseOutcome, ComputerUseResult,
+};
 use tidebreak_core::{CancelToken, DocumentBlob, SessionId};
 use tidebreak_server::chrome::ChromeScope;
 use tidebreak_server::{NativeRuntime, NativeRuntimeError, NativeRuntimeScope};
@@ -47,32 +49,53 @@ struct ChromeJournal {
 }
 
 impl ChromeJournal {
-    fn recall(&self, call: &ComputerUseCall) -> Result<Option<ComputerUseResult>, NativeRuntimeError> {
-        let Some(prior) = self.fingerprints.get(&call.request_id) else { return Ok(None) };
-        if prior != &fingerprint(call) { return Err(NativeRuntimeError::RequestConflict) }
+    fn recall(
+        &self,
+        call: &ComputerUseCall,
+    ) -> Result<Option<ComputerUseResult>, NativeRuntimeError> {
+        let Some(prior) = self.fingerprints.get(&call.request_id) else {
+            return Ok(None);
+        };
+        if prior != &fingerprint(call) {
+            return Err(NativeRuntimeError::RequestConflict);
+        }
         Ok(Some(self.results.get(&call.request_id).cloned().unwrap_or_else(|| unknown(call, "The stored result expired. Inspect the target before issuing a new action."))))
     }
 
     fn begin(&mut self, call: &ComputerUseCall) -> Result<(), NativeRuntimeError> {
         if self.fingerprints.len() >= MAX_REQUESTS {
-            return Err(NativeRuntimeError::Unsupported("more requests in this session; start a new coding session".into()));
+            return Err(NativeRuntimeError::Unsupported(
+                "more requests in this session; start a new coding session".into(),
+            ));
         }
         self.fingerprints.insert(call.request_id, fingerprint(call));
-        self.finish(call, unknown(call, "The operation may have started. Inspect the target before issuing a new action."));
+        self.finish(
+            call,
+            unknown(
+                call,
+                "The operation may have started. Inspect the target before issuing a new action.",
+            ),
+        );
         Ok(())
     }
 
     fn finish(&mut self, call: &ComputerUseCall, result: ComputerUseResult) {
-        if !self.results.contains_key(&call.request_id) { self.order.push_back(call.request_id); }
+        if !self.results.contains_key(&call.request_id) {
+            self.order.push_back(call.request_id);
+        }
         self.results.insert(call.request_id, result);
         while self.order.len() > MAX_RESULTS {
-            if let Some(id) = self.order.pop_front() { self.results.remove(&id); }
+            if let Some(id) = self.order.pop_front() {
+                self.results.remove(&id);
+            }
         }
     }
 }
 
 fn fingerprint(call: &ComputerUseCall) -> String {
-    DocumentBlob::from_bytes(&serde_json::to_vec(call).expect("computer call is JSON")).id.to_string()
+    DocumentBlob::from_bytes(&serde_json::to_vec(call).expect("computer call is JSON"))
+        .id
+        .to_string()
 }
 
 fn unknown(call: &ComputerUseCall, message: &str) -> ComputerUseResult {
@@ -87,7 +110,12 @@ fn unknown(call: &ComputerUseCall, message: &str) -> ComputerUseResult {
 }
 
 fn chrome_scope(scope: &NativeRuntimeScope, cancel: CancelToken) -> ChromeScope {
-    ChromeScope { owner: scope.owner.clone(), workspace: scope.workspace, session: scope.session, cancel }
+    ChromeScope {
+        owner: scope.owner.clone(),
+        workspace: scope.workspace,
+        session: scope.session,
+        cancel,
+    }
 }
 
 impl DesktopComputerRuntime {
@@ -101,24 +129,46 @@ impl DesktopComputerRuntime {
         }
     }
 
-    fn session(&self, scope: &NativeRuntimeScope) -> Result<Arc<ChromeSession>, NativeRuntimeError> {
-        if self.shutting_down.load(Ordering::Acquire) { return Err(NativeRuntimeError::SessionEnded) }
+    fn session(
+        &self,
+        scope: &NativeRuntimeScope,
+    ) -> Result<Arc<ChromeSession>, NativeRuntimeError> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(NativeRuntimeError::SessionEnded);
+        }
         let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
-        let session = sessions.entry(scope.session).or_insert_with(|| Arc::new(ChromeSession {
-            scope: scope.clone(), gate: tokio::sync::Mutex::new(()), stop: Mutex::new(CancelToken::new()),
-            revoked: AtomicBool::new(false), journal: Mutex::new(ChromeJournal::default()),
-        }));
-        if session.scope != *scope { return Err(NativeRuntimeError::NotAuthorized("This session belongs to a different owner or workspace.".into())) }
-        if session.revoked.load(Ordering::Acquire) { return Err(NativeRuntimeError::SessionEnded) }
+        let session = sessions.entry(scope.session).or_insert_with(|| {
+            Arc::new(ChromeSession {
+                scope: scope.clone(),
+                gate: tokio::sync::Mutex::new(()),
+                stop: Mutex::new(CancelToken::new()),
+                revoked: AtomicBool::new(false),
+                journal: Mutex::new(ChromeJournal::default()),
+            })
+        });
+        if session.scope != *scope {
+            return Err(NativeRuntimeError::NotAuthorized(
+                "This session belongs to a different owner or workspace.".into(),
+            ));
+        }
+        if session.revoked.load(Ordering::Acquire) {
+            return Err(NativeRuntimeError::SessionEnded);
+        }
         Ok(session.clone())
     }
 
     /// Stop is synchronous, so queued input sees cancellation before any drain.
     pub(crate) fn stop_all_chrome(&self) {
-        for session in self.sessions.lock().unwrap_or_else(|p| p.into_inner()).values() {
+        for session in self
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
             let stop = session.stop.lock().unwrap_or_else(|p| p.into_inner());
             stop.cancel();
-            self.chrome.stop_session(&chrome_scope(&session.scope, stop.clone()));
+            self.chrome
+                .stop_session(&chrome_scope(&session.scope, stop.clone()));
         }
     }
 
@@ -132,31 +182,98 @@ impl DesktopComputerRuntime {
 
 #[async_trait]
 impl NativeRuntime for DesktopComputerRuntime {
-    fn is_available(&self) -> bool { self.native.is_available() }
+    fn is_available(&self) -> bool {
+        self.native.is_available()
+    }
 
-    async fn execute(&self, scope: &NativeRuntimeScope, call: &ComputerUseCall) -> Result<ComputerUseResult, NativeRuntimeError> {
-        if !is_chrome_session_tool(&call.name) { return self.native.execute(scope, call).await }
+    async fn execute(
+        &self,
+        scope: &NativeRuntimeScope,
+        call: &ComputerUseCall,
+    ) -> Result<ComputerUseResult, NativeRuntimeError> {
+        if !is_chrome_session_tool(&call.name) {
+            let activity = crate::computer_use_action::activity_for_call(
+                scope.session,
+                call,
+                crate::computer_use_action::ComputerUseActionSource::Native,
+            );
+            if let Some(activity) = &activity {
+                crate::computer_use_action::emit_computer_use_action(&self.app, activity);
+            }
+            let result = self.native.execute(scope, call).await;
+            if let Some(activity) = activity {
+                let (success, code) = match &result {
+                    Ok(result) => (
+                        result.outcome == ComputerUseOutcome::Completed,
+                        result.error_code.as_deref(),
+                    ),
+                    Err(NativeRuntimeError::UnknownOutcome) => (false, Some("interrupted")),
+                    Err(_) => (false, None),
+                };
+                crate::computer_use_action::finish_call_activity(
+                    &self.app, activity, success, code,
+                );
+            }
+            return result;
+        }
         // The native adapter validates the same host-derived subject before a
         // Chrome request can create state or display its native consent prompt.
         self.native.validate_scope(scope).await?;
-        self.app.state::<HostAccess>().require_local(crate::host_authority::Authority::ComputerUse)
-            .await.map_err(NativeRuntimeError::NotAuthorized)?;
+        self.app
+            .state::<HostAccess>()
+            .require_local(crate::host_authority::Authority::ComputerUse)
+            .await
+            .map_err(NativeRuntimeError::NotAuthorized)?;
         let session = self.session(scope)?;
-        let queued_stop = session.stop.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let queued_stop = session
+            .stop
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let _gate = session.gate.lock().await;
-        if session.revoked.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire) { return Err(NativeRuntimeError::SessionEnded) }
-        if let Some(result) = session.journal.lock().unwrap_or_else(|p| p.into_inner()).recall(call)? { return Ok(result) }
+        if session.revoked.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire) {
+            return Err(NativeRuntimeError::SessionEnded);
+        }
+        if let Some(result) = session
+            .journal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recall(call)?
+        {
+            return Ok(result);
+        }
         let host = self.app.state::<HostAccess>();
-        if host.computer_use.is_halted() { return Err(NativeRuntimeError::NotAuthorized("Computer control is stopped. Resume it in Tidebreak before requesting Chrome control.".into())) }
+        if host.computer_use.is_halted() {
+            return Err(NativeRuntimeError::NotAuthorized("Computer control is stopped. Resume it in Tidebreak before requesting Chrome control.".into()));
+        }
         let reconnect = call.name == tidebreak_core::chrome_connection::CHROME_CONNECT_TOOL;
-        if queued_stop.is_cancelled() && !reconnect { return Err(NativeRuntimeError::NotAuthorized("Chrome is stopped. Request chrome_connect to obtain native approval to resume.".into())) }
+        if queued_stop.is_cancelled() && !reconnect {
+            return Err(NativeRuntimeError::NotAuthorized(
+                "Chrome is stopped. Request chrome_connect to obtain native approval to resume."
+                    .into(),
+            ));
+        }
         let stop = {
             let mut stop = session.stop.lock().unwrap_or_else(|p| p.into_inner());
-            if stop.is_cancelled() && reconnect { *stop = CancelToken::new(); }
+            if stop.is_cancelled() && reconnect {
+                *stop = CancelToken::new();
+            }
             stop.clone()
         };
-        session.journal.lock().unwrap_or_else(|p| p.into_inner()).begin(call)?;
+        session
+            .journal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .begin(call)?;
         let active_scope = chrome_scope(scope, stop.clone());
+        let activity = crate::computer_use_action::activity_for_call(
+            scope.session,
+            call,
+            crate::computer_use_action::ComputerUseActionSource::Chrome,
+        );
+        if let Some(activity) = &activity {
+            crate::computer_use_action::emit_computer_use_action(&self.app, activity);
+        }
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => unknown(call, "Chrome was stopped. Inspect the target before issuing a new action."),
@@ -167,15 +284,37 @@ impl NativeRuntime for DesktopComputerRuntime {
             },
             result = self.chrome.execute(&active_scope, call) => result,
         };
-        session.journal.lock().unwrap_or_else(|p| p.into_inner()).finish(call, result.clone());
+        if let Some(activity) = activity {
+            crate::computer_use_action::finish_call_activity(
+                &self.app,
+                activity,
+                result.outcome == ComputerUseOutcome::Completed,
+                result.error_code.as_deref(),
+            );
+        }
+        session
+            .journal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .finish(call, result.clone());
         Ok(result)
     }
 
-    async fn result_for_call(&self, scope: &NativeRuntimeScope, call: &ComputerUseCall) -> Result<Option<ComputerUseResult>, NativeRuntimeError> {
-        if !is_chrome_session_tool(&call.name) { return self.native.result_for_call(scope, call).await }
+    async fn result_for_call(
+        &self,
+        scope: &NativeRuntimeScope,
+        call: &ComputerUseCall,
+    ) -> Result<Option<ComputerUseResult>, NativeRuntimeError> {
+        if !is_chrome_session_tool(&call.name) {
+            return self.native.result_for_call(scope, call).await;
+        }
         self.native.validate_scope(scope).await?;
         let session = self.session(scope)?;
-        let result = session.journal.lock().unwrap_or_else(|p| p.into_inner()).recall(call);
+        let result = session
+            .journal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recall(call);
         result
     }
 
@@ -192,12 +331,18 @@ impl NativeRuntime for DesktopComputerRuntime {
         self.native.revoke_session(scope);
         if let Ok(session) = self.session(scope) {
             session.revoked.store(true, Ordering::Release);
-            let stop = session.stop.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let stop = session
+                .stop
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
             stop.cancel();
             let scope = chrome_scope(scope, stop);
             self.chrome.stop_session(&scope);
             let chrome = self.chrome.clone();
-            tauri::async_runtime::spawn(async move { chrome.revoke_session(&scope).await; });
+            tauri::async_runtime::spawn(async move {
+                chrome.revoke_session(&scope).await;
+            });
         }
     }
 }
@@ -205,18 +350,32 @@ impl NativeRuntime for DesktopComputerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn call() -> ComputerUseCall { ComputerUseCall { request_id: Uuid::new_v4(), name: "chrome_act".into(), arguments: serde_json::json!({"target_ref":"tab-1"}) } }
+    fn call() -> ComputerUseCall {
+        ComputerUseCall {
+            request_id: Uuid::new_v4(),
+            name: "chrome_act".into(),
+            arguments: serde_json::json!({"target_ref":"tab-1"}),
+        }
+    }
     #[test]
     fn expired_results_never_repeat_an_action() {
         let mut journal = ChromeJournal::default();
         let first = call();
         journal.begin(&first).unwrap();
-        for _ in 0..MAX_RESULTS { journal.begin(&call()).unwrap(); }
+        for _ in 0..MAX_RESULTS {
+            journal.begin(&call()).unwrap();
+        }
         let recovered = journal.recall(&first).unwrap().unwrap();
         assert_eq!(recovered.outcome, ComputerUseOutcome::Unknown);
         assert_eq!(journal.results.len(), MAX_RESULTS);
-        let changed = ComputerUseCall { arguments: serde_json::json!({"target_ref":"tab-2"}), ..first };
-        assert!(matches!(journal.recall(&changed), Err(NativeRuntimeError::RequestConflict)));
+        let changed = ComputerUseCall {
+            arguments: serde_json::json!({"target_ref":"tab-2"}),
+            ..first
+        };
+        assert!(matches!(
+            journal.recall(&changed),
+            Err(NativeRuntimeError::RequestConflict)
+        ));
     }
     #[test]
     fn recovery_reads_do_not_create_new_requests() {
