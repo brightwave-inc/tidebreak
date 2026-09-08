@@ -469,6 +469,11 @@ reuses its existing certificate wait, trust bundle, harness adapter, and
 `assistant_record` journal ingestion. The browser and desktop therefore
 render the same session without a separate Slack transcript UI.
 
+The supervised engine receives Gateway's `SANDBOX_PROXY_ENDPOINT` through
+explicit HTTP proxy settings. The endpoint must name a loopback IP address
+and a nonzero port. Missing or invalid proxy settings fail before the first
+turn; ambient proxy credentials do not pass into the engine.
+
 The machine declares its endpoint and profile through
 `TIDEBREAK_RUNTIME_ENDPOINT` and `TIDEBREAK_RUNTIME_PROFILE`, plus
 `TIDEBREAK_RUNTIME_ENGINE=claude_code` for this image. The configured engine

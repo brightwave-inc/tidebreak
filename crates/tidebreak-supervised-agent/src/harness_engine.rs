@@ -63,6 +63,9 @@ const SANDBOX_PLACEHOLDER_TOKEN: &str = "mg-sandbox-placeholder";
 /// `/compat/openai` are the protocol roots hanging off it.
 pub const GATEWAY_URL_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_GATEWAY_URL";
 
+/// The credential-free loopback listener Gateway permits the workload to reach.
+pub const PROXY_ENDPOINT_VARIABLE: &str = "SANDBOX_PROXY_ENDPOINT";
+
 /// Environment variable name the wiring carries the credential under, for
 /// engines whose clients read it from the environment.
 pub const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
@@ -74,6 +77,8 @@ pub struct GatewayInference {
     pub placeholder_credential: String,
     /// The gateway root every engine's protocol base derives from.
     pub gateway_url: String,
+    /// HTTP proxy URL derived from Gateway's loopback listener, without credentials.
+    pub proxy_url: String,
 }
 
 /// Resolves the inference contract from the environment.
@@ -86,12 +91,14 @@ pub fn gateway_inference_from_env() -> Result<Option<GatewayInference>, String> 
     resolve_gateway_inference(
         read_trimmed(PLACEHOLDER_TOKEN_VARIABLE),
         read_trimmed(GATEWAY_URL_VARIABLE),
+        read_trimmed(PROXY_ENDPOINT_VARIABLE),
     )
 }
 
 fn resolve_gateway_inference(
     placeholder: Option<String>,
     gateway_url: Option<String>,
+    proxy_endpoint: Option<String>,
 ) -> Result<Option<GatewayInference>, String> {
     let Some(placeholder_credential) = placeholder else {
         return Ok(None);
@@ -112,9 +119,17 @@ fn resolve_gateway_inference(
             "{GATEWAY_URL_VARIABLE} is not an http(s) URL: {gateway_url}"
         ));
     }
+    let proxy = proxy_endpoint
+        .as_deref()
+        .and_then(|endpoint| endpoint.parse::<std::net::SocketAddr>().ok())
+        .filter(|address| address.ip().is_loopback() && address.port() != 0)
+        .ok_or_else(|| {
+            format!("{PROXY_ENDPOINT_VARIABLE} must name a loopback IP address and nonzero port")
+        })?;
     Ok(Some(GatewayInference {
         placeholder_credential,
         gateway_url,
+        proxy_url: format!("http://{proxy}"),
     }))
 }
 
@@ -201,6 +216,15 @@ impl HarnessEngine {
                         key: &inference.placeholder_credential,
                     },
                 );
+                // The shared child filter excludes ambient proxy settings. Wire
+                // only Gateway's validated loopback listener after that filter;
+                // the packet rules still deny every route around the sidecar.
+                for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                    env.push((name.to_owned(), inference.proxy_url.clone()));
+                }
+                for name in ["NO_PROXY", "no_proxy"] {
+                    env.push((name.to_owned(), "localhost,127.0.0.1,::1".to_owned()));
+                }
                 // gh requires a token to issue requests. Only the public dummy
                 // enters the engine; Gateway injects the connected app credential.
                 env.push(("GH_TOKEN".to_owned(), SANDBOX_PLACEHOLDER_TOKEN.to_owned()));
@@ -950,6 +974,7 @@ mod tests {
         engine.spec.gateway_inference = Some(GatewayInference {
             placeholder_credential: SANDBOX_PLACEHOLDER_TOKEN.to_owned(),
             gateway_url: "https://gateway.internal:8443/".to_owned(),
+            proxy_url: "http://127.0.0.1:15080".to_owned(),
         });
         engine.start_turn(request("go")).await.unwrap();
 
@@ -1001,6 +1026,7 @@ mod tests {
         let error = resolve_gateway_inference(
             Some("fixture-real-secret".into()),
             Some("https://gateway.invalid".into()),
+            Some("127.0.0.1:15080".into()),
         )
         .unwrap_err();
         assert!(error.contains("public sandbox placeholder"));
@@ -1012,17 +1038,119 @@ mod tests {
     /// at a destination the confinement boundary refuses.
     #[test]
     fn a_placeholder_without_a_gateway_url_is_refused() {
-        let error = resolve_gateway_inference(Some(SANDBOX_PLACEHOLDER_TOKEN.to_owned()), None)
-            .unwrap_err();
+        let error =
+            resolve_gateway_inference(Some(SANDBOX_PLACEHOLDER_TOKEN.to_owned()), None, None)
+                .unwrap_err();
         assert!(error.contains(GATEWAY_URL_VARIABLE));
         let error = resolve_gateway_inference(
             Some(SANDBOX_PLACEHOLDER_TOKEN.to_owned()),
             Some("gateway.internal:8443".to_owned()),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("http"));
         // No placeholder: a hand-run agent, no wiring, no complaint.
-        assert!(resolve_gateway_inference(None, None).unwrap().is_none());
+        assert!(resolve_gateway_inference(None, None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn sandbox_inference_requires_a_credential_free_loopback_proxy() {
+        for endpoint in [
+            None,
+            Some("proxy.example:15080"),
+            Some("10.0.0.1:15080"),
+            Some("127.0.0.1:0"),
+            Some("http://127.0.0.1:15080"),
+            Some("fixture-secret@127.0.0.1:15080"),
+        ] {
+            let error = resolve_gateway_inference(
+                Some(SANDBOX_PLACEHOLDER_TOKEN.into()),
+                Some("https://gateway.example".into()),
+                endpoint.map(str::to_owned),
+            )
+            .unwrap_err();
+            assert!(error.contains(PROXY_ENDPOINT_VARIABLE));
+            assert!(!error.contains("fixture-secret"));
+        }
+        for endpoint in ["127.0.0.1:15080", "[::1]:15080"] {
+            let inference = resolve_gateway_inference(
+                Some(SANDBOX_PLACEHOLDER_TOKEN.into()),
+                Some("https://gateway.example".into()),
+                Some(endpoint.into()),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(inference.proxy_url, format!("http://{endpoint}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_real_engine_child_receives_only_the_supervised_proxy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("engine");
+        // Exercise the real adapter's environment filtering and subprocess
+        // launch. A captured SessionSpec alone misses this boundary.
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+set -eu
+[ "$HTTP_PROXY" = "http://127.0.0.1:15080" ]
+[ "$HTTPS_PROXY" = "$HTTP_PROXY" ]
+[ "$http_proxy" = "$HTTP_PROXY" ]
+[ "$https_proxy" = "$HTTP_PROXY" ]
+[ "$NO_PROXY" = "localhost,127.0.0.1,::1" ]
+[ "$no_proxy" = "$NO_PROXY" ]
+[ "${ALL_PROXY-unset}" = unset ]
+[ "${GITHUB_TOKEN-unset}" = unset ]
+[ "$ANTHROPIC_AUTH_TOKEN" = mg-sandbox-placeholder ]
+[ "$GH_TOKEN" = mg-sandbox-placeholder ]
+IFS= read -r request
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"proxy reached the engine","session_id":"proxy-fixture","usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut spec_probe = probe(true);
+        spec_probe.binary_path = Some(binary);
+        spec_probe.env.extend([
+            ("HOME".into(), dir.path().as_os_str().to_owned()),
+            (
+                "HTTPS_PROXY".into(),
+                "http://fixture-secret@proxy.example:8080".into(),
+            ),
+            (
+                "ALL_PROXY".into(),
+                "http://fixture-secret@proxy.example:8080".into(),
+            ),
+            ("NO_PROXY".into(), "*".into()),
+            ("GITHUB_TOKEN".into(), "fixture-secret".into()),
+        ]);
+        let mut engine = HarnessEngine::new(HarnessEngineSpec {
+            adapter: tidebreak_harness::builtin_registry()
+                .get(HarnessKind::ClaudeCode)
+                .unwrap(),
+            probe: spec_probe,
+            model: None,
+            reasoning_effort: None,
+            worktree: dir.path().to_owned(),
+            allowed_read_roots: Vec::new(),
+            trust_env: Vec::new(),
+            gateway_inference: Some(GatewayInference {
+                placeholder_credential: SANDBOX_PLACEHOLDER_TOKEN.into(),
+                gateway_url: "https://gateway.example".into(),
+                proxy_url: "http://127.0.0.1:15080".into(),
+            }),
+        });
+        let mut turn = engine.start_turn(request("check proxy")).await.unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(5), turn.wait())
+            .await
+            .expect("the engine child must finish");
+        assert_eq!(end, TurnEnd::Completed { success: true });
     }
 
     #[tokio::test]
