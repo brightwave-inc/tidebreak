@@ -64,6 +64,7 @@ use crate::state::AppState;
 pub struct ScopedCode {
     runtime: Arc<CodeRuntime>,
     owner: OwnerId,
+    owner_kind: Option<String>,
     allow_unscoped_delivery: bool,
 }
 
@@ -77,6 +78,7 @@ impl ScopedCode {
         Ok(Self {
             runtime,
             owner: auth.principal.owner_id(),
+            owner_kind: auth.principal.session_owner_kind().map(str::to_owned),
             allow_unscoped_delivery: auth.principal.is_admin(),
         })
     }
@@ -135,6 +137,7 @@ impl ScopedCode {
             runtime,
             owner,
             allow_unscoped_delivery: false,
+            owner_kind: None,
         }
     }
 
@@ -556,7 +559,12 @@ impl ScopedCode {
         permission_mode_ceiling: Option<tidebreak_core::PermissionMode>,
     ) -> Result<tidebreak_core::CodeWatch, ServerError> {
         self.runtime
-            .start_watch(&self.owner, id, permission_mode_ceiling)
+            .start_watch(
+                &self.owner,
+                self.owner_kind.as_deref(),
+                id,
+                permission_mode_ceiling,
+            )
             .await
     }
 
@@ -640,7 +648,13 @@ impl ScopedCode {
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         self.runtime
-            .create_session(&self.owner, workspace_id, harness, settings)
+            .create_session(
+                &self.owner,
+                self.owner_kind.as_deref(),
+                workspace_id,
+                harness,
+                settings,
+            )
             .await
     }
 
@@ -649,7 +663,7 @@ impl ScopedCode {
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         self.runtime
-            .create_internal_session(&self.owner, settings)
+            .create_internal_session(&self.owner, self.owner_kind.as_deref(), settings)
             .await
     }
 
@@ -660,7 +674,13 @@ impl ScopedCode {
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         self.runtime
-            .create_remote_session(&self.owner, workspace_id, harness, settings)
+            .create_remote_session(
+                &self.owner,
+                self.owner_kind.as_deref(),
+                workspace_id,
+                harness,
+                settings,
+            )
             .await
     }
 

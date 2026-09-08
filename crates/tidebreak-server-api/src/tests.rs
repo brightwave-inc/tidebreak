@@ -3003,12 +3003,33 @@ async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
             }
         }
     };
+    // A granted bearer is read back as a principal before the page gets it,
+    // so a service identity never lands a browser session (decision 0089).
+    let fake_principal = |headers: axum::http::HeaderMap| async move {
+        use axum::response::IntoResponse as _;
+        match headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            Some("Bearer mg_at_minted") => axum::Json(serde_json::json!({
+                "user_id": "73eaa9e8-f60a-4f84-96cf-6a9d2bbd6d55",
+                "is_admin": false,
+            }))
+            .into_response(),
+            _ => StatusCode::UNAUTHORIZED.into_response(),
+        }
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
         axum::serve(
             listener,
-            Router::new().route("/oauth/handoff/token", axum_post(fake_gateway)),
+            Router::new()
+                .route("/oauth/handoff/token", axum_post(fake_gateway))
+                .route(
+                    "/api/v1/tidebreak/principal",
+                    axum::routing::get(fake_principal),
+                ),
         )
         .await
         .unwrap();

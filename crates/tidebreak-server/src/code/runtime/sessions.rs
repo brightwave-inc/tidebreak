@@ -6,12 +6,14 @@ impl CodeRuntime {
     pub async fn create_session(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         self.create_session_of_kind(
             owner,
+            owner_kind,
             workspace_id,
             SessionKind::Interactive,
             harness,
@@ -29,13 +31,22 @@ impl CodeRuntime {
     pub async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         kind: SessionKind,
         harness: HarnessKind,
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         let session = self
-            .create_session_of_kind_unattached(owner, workspace_id, kind, harness, settings, None)
+            .create_session_of_kind_unattached(
+                owner,
+                owner_kind,
+                workspace_id,
+                kind,
+                harness,
+                settings,
+                None,
+            )
             .await?;
         self.attach_and_spawn_worker(session).await
     }
@@ -44,6 +55,7 @@ impl CodeRuntime {
     pub(super) async fn create_session_of_kind_unattached(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         kind: SessionKind,
         harness: HarnessKind,
@@ -180,6 +192,7 @@ impl CodeRuntime {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
+            owner_kind: owner_kind.map(str::to_owned),
             workspace_id: Some(workspace_id),
             kind,
             harness_kind: harness,
@@ -233,6 +246,7 @@ impl CodeRuntime {
     pub async fn create_internal_session(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         NewSessionSettings {
             permission_mode,
             model,
@@ -274,6 +288,7 @@ impl CodeRuntime {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
+            owner_kind: owner_kind.map(str::to_owned),
             workspace_id: None,
             kind: SessionKind::Interactive,
             harness_kind: harness,

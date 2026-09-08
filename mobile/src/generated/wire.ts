@@ -4852,6 +4852,10 @@ export type SessionLifecycle = "created" | "idle" | "running" | "fenced" | "ende
  */
 export type SessionSnapshot = { id: SessionId,
 /**
+ * `service` when a deployment service owns the session; absent means person.
+ */
+owner_kind?: string,
+/**
  * `None` for a session that binds no workspace: the in-process
  * engine's (decision 0048 step 5).
  */

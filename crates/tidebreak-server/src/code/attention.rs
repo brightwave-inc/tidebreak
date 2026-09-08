@@ -773,6 +773,7 @@ mod tests {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
+            owner_kind: None,
             workspace_id: Some(WorkspaceId::new()),
             kind: SessionKind::Interactive,
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,

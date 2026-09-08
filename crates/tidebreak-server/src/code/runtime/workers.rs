@@ -633,6 +633,7 @@ mod tests {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
+            owner_kind: None,
             workspace_id: None,
             kind: SessionKind::Interactive,
             harness_kind: harness,

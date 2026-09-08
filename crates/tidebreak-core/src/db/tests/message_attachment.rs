@@ -768,6 +768,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             visibility: crate::SessionVisibility::Private,
             id: session_id,
             owner: crate::OwnerId::local(),
+            owner_kind: None,
             workspace_id: Some(workspace_id),
             kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,

@@ -1759,6 +1759,7 @@ mod remote_pr_tests {
             .unwrap();
         let session = CodeRuntime::remote_session_value(
             owner,
+            None,
             workspace,
             HarnessKind::Codex,
             NewSessionSettings::default(),

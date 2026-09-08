@@ -71,6 +71,7 @@ where
     entities::session::ActiveModel {
         id: Set(session.id.0),
         owner: Set(session.owner.as_str().to_owned()),
+        owner_kind: Set(session.owner_kind.clone()),
         workspace_id: Set(session.workspace_id.map(|workspace| workspace.0)),
         kind: Set(session.kind.as_str().to_owned()),
         harness_kind: Set(session.harness_kind.as_str().to_owned()),
@@ -1232,6 +1233,7 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
     Ok(Session {
         id: SessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
+        owner_kind: row.owner_kind,
         workspace_id: row.workspace_id.map(WorkspaceId),
         kind,
         harness_kind,

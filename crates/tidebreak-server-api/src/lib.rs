@@ -1171,6 +1171,7 @@ pub fn app(state: AppState) -> Router {
     // gateway-authenticated machine.
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
+        .route("/auth/token-sign-in", post(auth::static_token_sign_in))
         .route("/auth/handoff", get(auth::handoff))
         .route("/auth/oidc/start", get(auth::oidc_start))
         .route("/auth/oidc/callback", get(auth::oidc_callback))

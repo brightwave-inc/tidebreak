@@ -232,6 +232,10 @@ pub struct SessionExternalOrigin {
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
     pub id: tidebreak_core::SessionId,
+    /// `service` when a deployment service owns the session; absent means person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner_kind: Option<String>,
     /// `None` for a session that binds no workspace: the in-process
     /// engine's (decision 0048 step 5).
     pub workspace_id: Option<WorkspaceId>,
@@ -274,6 +278,7 @@ impl From<Session> for SessionSnapshot {
     fn from(session: Session) -> Self {
         Self {
             id: session.id,
+            owner_kind: session.owner_kind,
             workspace_id: session.workspace_id,
             kind: session.kind,
             harness_kind: session.harness_kind,
