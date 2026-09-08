@@ -2938,10 +2938,7 @@ function parseInternalApprovalRequest(
 ): import("../generated/wire").InternalApprovalRequest | null {
   if (!isRecord(value)) return null;
   if (value.kind === "questions" || value.kind === "plan") {
-    if (
-      !onlyKeys(value, ["kind", "turn_id"]) ||
-      !wireId(value.turn_id)
-    ) {
+    if (!onlyKeys(value, ["kind", "turn_id"]) || !wireId(value.turn_id)) {
       return null;
     }
     return { kind: value.kind, turn_id: value.turn_id };
@@ -2961,7 +2958,8 @@ function parseInternalApprovalRequest(
     typeof value.tool_name !== "string" ||
     !APPROVAL_CLASSES.has(value.class as string) ||
     !TOOL_APPROVAL_KINDS.has(value.approval as string) ||
-    (value.auto_judging !== undefined && typeof value.auto_judging !== "boolean") ||
+    (value.auto_judging !== undefined &&
+      typeof value.auto_judging !== "boolean") ||
     (value.preview_truncated !== undefined &&
       typeof value.preview_truncated !== "boolean") ||
     (value.grant_scopes !== undefined && !Array.isArray(value.grant_scopes))

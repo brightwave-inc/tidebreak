@@ -99,7 +99,7 @@ fn already_settled_error(approval: &Approval) -> ServerError {
         .unwrap_or("someone else");
     ServerError::conflict_kind_with(
         "already_settled",
-        format!("this card was already settled by {who}"),
+        format!("this card is no longer awaiting a decision: it was settled by {who}"),
         serde_json::json!({ "actor": approval.actor }),
     )
 }
