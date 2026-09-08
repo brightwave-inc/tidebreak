@@ -40,6 +40,9 @@ pub(super) struct InternalSession {
     #[allow(dead_code)]
     session_id: SessionId,
     chat_id: SessionId,
+    /// Session-native computer-use tools built from the session's capability
+    /// file (decision 93). Empty when the session holds no native channel.
+    native_tools: Vec<Arc<dyn tidebreak_core::Tool>>,
     active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals acknowledged through [`HarnessSession::decide`].
     decided: Mutex<HashSet<CallId>>,
@@ -110,6 +113,15 @@ impl InternalSession {
             .ensure_foreground_agent_run(chat_id)
             .await
             .map_err(store_error)?;
+        // The native channel is the same token-scoped authority every
+        // external harness gets; ignoring it silently would advertise a
+        // capability the session cannot use. A channel the engine cannot
+        // read fails the launch instead.
+        let native_tools = match spec.native.as_ref() {
+            Some(native) => super::native_tools::native_session_tools(native)
+                .map_err(|error| HarnessError::Other(format!("native channel: {error}")))?,
+            None => Vec::new(),
+        };
         let session = Self {
             state,
             db,
@@ -119,6 +131,7 @@ impl InternalSession {
             owner: spec.owner,
             session_id: spec.session_id,
             chat_id,
+            native_tools,
             active: Mutex::new(None),
             decided: Mutex::new(HashSet::new()),
         };
@@ -543,7 +556,7 @@ impl InternalSession {
         loop {
             let outcome = self
                 .driver
-                .run_turn(turn, lease_token)
+                .run_turn(turn, lease_token, &self.native_tools)
                 .await
                 .map_err(|error| HarnessError::Other(error.to_string()))?;
             match outcome {
