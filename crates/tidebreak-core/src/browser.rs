@@ -1058,9 +1058,9 @@ impl BrowserAction {
                 valid_browser_chord_key(key)
                     && !modifiers.is_empty()
                     && modifiers.len() <= 4
-                    && modifiers
-                        .iter()
-                        .all(|modifier| modifiers.iter().filter(|held| *held == modifier).count() == 1)
+                    && modifiers.iter().all(|modifier| {
+                        modifiers.iter().filter(|held| *held == modifier).count() == 1
+                    })
             }
             Self::Fill { value } | Self::Select { value } => {
                 !value.is_empty() && value.chars().count() <= MAX_BROWSER_ACTION_VALUE_CHARS
@@ -1921,23 +1921,43 @@ mod tests {
                 "action": action
             }))
         };
-        assert!(act(json!({ "type": "click", "at": { "x": 100.0, "y": 60.0 } })));
+        assert!(act(
+            json!({ "type": "click", "at": { "x": 100.0, "y": 60.0 } })
+        ));
         assert!(act(json!({ "type": "double_click" })));
-        assert!(act(json!({ "type": "right_click", "at": { "x": 4.0, "y": 4.0 } })));
-        assert!(act(json!({ "type": "hover", "at": { "x": 0.0, "y": 0.0 } })));
+        assert!(act(
+            json!({ "type": "right_click", "at": { "x": 4.0, "y": 4.0 } })
+        ));
+        assert!(act(
+            json!({ "type": "hover", "at": { "x": 0.0, "y": 0.0 } })
+        ));
         assert!(act(json!({
             "type": "drag",
             "from": { "x": 10.0, "y": 10.0 },
             "to": { "x": 200.0, "y": 90.0 }
         })));
-        assert!(act(json!({ "type": "drag", "to": { "x": 200.0, "y": 90.0 } })));
-        assert!(act(json!({ "type": "scroll", "delta_x": 0, "delta_y": 480 })));
+        assert!(act(
+            json!({ "type": "drag", "to": { "x": 200.0, "y": 90.0 } })
+        ));
+        assert!(act(
+            json!({ "type": "scroll", "delta_x": 0, "delta_y": 480 })
+        ));
 
-        assert!(!act(json!({ "type": "click", "at": { "x": -1.0, "y": 4.0 } })));
-        assert!(!act(json!({ "type": "click", "at": { "x": 20_000.0, "y": 4.0 } })));
-        assert!(!act(json!({ "type": "drag", "to": { "x": 1e300, "y": 0.0 } })));
-        assert!(!act(json!({ "type": "scroll", "delta_x": 0, "delta_y": 0 })));
-        assert!(!act(json!({ "type": "scroll", "delta_x": 0, "delta_y": 70_000 })));
+        assert!(!act(
+            json!({ "type": "click", "at": { "x": -1.0, "y": 4.0 } })
+        ));
+        assert!(!act(
+            json!({ "type": "click", "at": { "x": 20_000.0, "y": 4.0 } })
+        ));
+        assert!(!act(
+            json!({ "type": "drag", "to": { "x": 1e300, "y": 0.0 } })
+        ));
+        assert!(!act(
+            json!({ "type": "scroll", "delta_x": 0, "delta_y": 0 })
+        ));
+        assert!(!act(
+            json!({ "type": "scroll", "delta_x": 0, "delta_y": 70_000 })
+        ));
     }
 
     #[test]
@@ -1994,7 +2014,9 @@ mod tests {
         assert!(validate_browser_activate_arguments(&json!({
             "browser_id": "browser-1"
         })));
-        assert!(!validate_browser_activate_arguments(&json!({ "browser_id": "" })));
+        assert!(!validate_browser_activate_arguments(
+            &json!({ "browser_id": "" })
+        ));
     }
 
     #[test]

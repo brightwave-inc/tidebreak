@@ -1056,6 +1056,7 @@ async fn boot_server(
         Some(local_voice),
         Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
         Some(browser_binding),
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;
