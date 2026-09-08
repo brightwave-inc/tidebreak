@@ -16,6 +16,7 @@
 
 mod adapter;
 pub mod leg;
+mod native_tools;
 mod session;
 
 pub use adapter::InternalAdapter;

@@ -53,6 +53,7 @@ mod host_access;
 mod host_authority;
 mod image_attachments;
 mod menu;
+mod native_runtime_adapter;
 mod node_install;
 mod office_install;
 mod office_pdf;
@@ -1046,6 +1047,16 @@ async fn boot_server(
         browser_runtime,
         desktop_sibling_exe("tidebreak")?,
     );
+    // Native computer use for code sessions rides the same trusted bridge
+    // executable. The adapter is installed on every platform; it reports
+    // unavailable off macOS, so no channel is minted there.
+    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = Arc::new(
+        native_runtime_adapter::DesktopNativeRuntime::new(app.clone()),
+    );
+    let native_binding = tidebreak_server::NativeChannelBinding::new(
+        native_runtime,
+        desktop_sibling_exe("tidebreak")?,
+    );
     let server = tidebreak_server::bind_configured_with_desktop_foreground_browser_executor(
         config,
         client_executor_id,
@@ -1055,6 +1066,7 @@ async fn boot_server(
         Some(local_voice),
         Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
         Some(browser_binding),
+        Some(native_binding),
     )
     .await
     .map_err(|e| e.to_string())?;
