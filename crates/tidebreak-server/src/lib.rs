@@ -1053,6 +1053,10 @@ async fn bind_inner(
     // reading a secret. Keep it before the lock and database so an invalid
     // Vault address leaves no local or shared resources open.
     let credential_storage = credential_storage_plan(&config)?;
+    // Parse the debug-only test engine before opening storage. Fixture smoke
+    // checks must reject a malformed script without a database or credentials.
+    #[cfg(debug_assertions)]
+    let scripted_adapter = scripted_harness::adapter_from_env()?;
     let ProfileSecrets {
         bundle: secret_bundle,
         provider: secrets,
@@ -1360,7 +1364,9 @@ async fn bind_inner(
     // publishes reaches the session's channel too.
     state.events.mirror_into(runtime.bus.clone());
     #[cfg(debug_assertions)]
-    scripted_harness::install_from_env(&mut runtime.adapters)?;
+    if let Some(adapter) = scripted_adapter {
+        runtime.adapters.register(Arc::new(adapter));
+    }
     // Remote sessions need both halves: the configured runtime endpoint and
     // a gateway to mint owner-scoped tokens through. Half a configuration is
     // a boot error, not a silently local deployment.
