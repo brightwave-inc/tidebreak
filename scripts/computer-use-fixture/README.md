@@ -37,13 +37,19 @@ Build into a caller-specified ignored temp directory:
 
 ```sh
 scripts/computer-use-fixture/build.sh /tmp/tidebreak-cu-fixture
-open /tmp/tidebreak-cu-fixture/ComputerUseFixture.app
 ```
 
-The script creates `<directory>/ComputerUseFixture.app`, writes a marker file
-`<directory>/BUILD.repro.md` containing the reproducible build inputs and
-commands, and prints the exact build/run command. If the fixture directory
-already exists, the script rebuilds only when inputs have changed.
+The script creates `/tmp/tidebreak-cu-fixture/ComputerUseFixture.app`, writes
+`/tmp/tidebreak-cu-fixture/BUILD.repro.md` (the exact source hashes and build
+commands), and prints the run command. If the directory already exists, the
+script rebuilds only when the sources changed. Verify the identity before
+launching:
+
+```sh
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+  /tmp/tidebreak-cu-fixture/ComputerUseFixture.app/Contents/Info.plist
+# dev.tidebreak.ComputerUseFixture
+```
 
 ## Interaction and evidence format
 
@@ -54,8 +60,9 @@ open /tmp/tidebreak-cu-fixture/ComputerUseFixture.app --args --fixture-dir /tmp/
 ```
 
 The fixture directory may also be provided as
-`TIDEBREAK_CU_FIXTURE_DIR`. Each launch creates a fresh run id
-(`YYYYMMDD-HHMMSS-uuid-8`), and every event for that run is written under
+`TIDEBREAK_CU_FIXTURE_DIR`, and `--run-id` pins a fresh id. Each launch creates
+a fresh run id (`YYYYMMDD-HHMMSS-uuid-8`), and every event for that run is
+written under
 `events/<run-id>/<zero-padded-sequence>.json`. Reset keeps writing to the
 current run until the reset completes, then writes a final `state_snapshot`
 with the new run id into that same current run as a transition record; the new
@@ -78,9 +85,32 @@ Events: `launch_ready`, `submission`, `text_entry`, `dropdown_selection`,
 event that did not happen are acceptance failures, so re-running the smoke on
 the same fixture directory is not a shortcut.
 
-## Evidence distinction
+## Smoke verification
 
-The smoke runner reads fresh targets, invokes the helper only through the
-bounded adapter, and verifies the fixture's own state records after each real
-UI action. It does not claim a pass from compile, from a helper success string,
-or from a screenshot that happens to exist.
+Build the fixture, launch it with a fresh run id, then run the shipped smoke
+from macOS with the bundled Tidebreak computer CLI:
+
+```sh
+fixture_dir=$(mktemp -d)/tidebreak-cu-fixture
+scripts/computer-use-fixture/build.sh "$fixture_dir"
+run_id="smoke-$(uuidgen)"
+
+open "$fixture_dir/ComputerUseFixture.app" --args \
+  --fixture-dir "$fixture_dir/state" --run-id "$run_id"
+
+node scripts/computer-use-native-smoke.mjs \
+  --cli /Applications/Tidebreak.app/Contents/MacOS/tidebreak \
+  --fixture-dir "$fixture_dir/state" \
+  --run-id "$run_id" \
+  --app-path "$fixture_dir/ComputerUseFixture.app"
+```
+
+The runner never infers a pass from compile, from a helper success string, or
+from a screenshot that happens to exist. Each act is followed by the fixture's
+own atomic JSON evidence: exactly one submission record, a dropdown and
+checkbox transition, hover and drag state, scroll offset, delayed transition,
+and window geometry after resize. Screenshots are saved as PNG files under
+`<fixture-dir>/screenshots/<run-id>/` with a JSON metadata sidecar. Stop,
+takeover, approval surfaces, concurrent ownership, and uncertain-outcome
+recovery require live parent actions and are reported as separate remaining
+gates rather than claimed from the script.
