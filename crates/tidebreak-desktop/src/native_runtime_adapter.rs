@@ -527,11 +527,10 @@ async fn await_session_operation<T>(
 /// a capture's metadata always describe the exact delivered pixels; an
 /// over-budget capture fails with sizing guidance instead.
 ///
-/// Rejections and failures share `Rejected` — the host did not (or will not)
-/// perform the operation, and the text says why and what to do. The honest
-/// unknowns — an acting operation that failed at the transport layer, or one
-/// interrupted mid-dispatch — become `Unknown` so the model inspects the
-/// target before acting again.
+/// Known refusals return `Rejected`. Transport failures, generic acting
+/// failures, and interrupted dispatches return `Unknown`: the helper may have
+/// changed the target before its reply or verification failed. The model must
+/// inspect the target before acting again.
 fn map_output(
     call: &ComputerUseCall,
     output: SessionNativeOutput,
@@ -578,10 +577,14 @@ fn map_output(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("The computer-use operation was not performed.")
                 .to_owned();
-            let outcome = if output.acts_on_host && error_code == "computer_unavailable" {
-                // The broker transport failed after an acting dispatch may
-                // have left this process; whether input landed is unknowable.
-                message = "The host connection ended before the operation was confirmed. Inspect the target before acting again; do not repeat the action automatically.".into();
+            let outcome = if output.acts_on_host
+                && matches!(
+                    error_code.as_str(),
+                    "computer_unavailable" | "operation_failed"
+                ) {
+                // The helper may have changed the target before transport or
+                // post-action verification failed. A failure is not a refusal.
+                message = "The host could not confirm the computer-use operation. Inspect the target before acting again; do not repeat the action automatically.".into();
                 if let Some(data) = result.as_object_mut() {
                     data.insert("message".into(), serde_json::Value::String(message.clone()));
                 }
@@ -904,29 +907,42 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_action_requires_inspection_before_another_action() {
+    fn uncertain_actions_are_unknown_while_observation_failures_and_denials_are_rejected() {
         let one = call(
             "computer_click",
             serde_json::json!({"app_id": "com.example"}),
         );
-        let result = map_output(
-            &one,
-            SessionNativeOutput {
-                resolution: SessionNativeResolution::Failed {
-                    result: serde_json::json!({"message": "Try again."}),
-                    error_code: "computer_unavailable".into(),
+        for (acts_on_host, error_code, expected) in [
+            (true, "computer_unavailable", ComputerUseOutcome::Unknown),
+            (true, "operation_failed", ComputerUseOutcome::Unknown),
+            (false, "computer_unavailable", ComputerUseOutcome::Rejected),
+            (false, "operation_failed", ComputerUseOutcome::Rejected),
+            (true, "requires_foreground", ComputerUseOutcome::Rejected),
+            (true, "control_yielded", ComputerUseOutcome::Rejected),
+        ] {
+            let result = map_output(
+                &one,
+                SessionNativeOutput {
+                    resolution: SessionNativeResolution::Failed {
+                        result: serde_json::json!({"message": "fixture failure"}),
+                        error_code: error_code.into(),
+                    },
+                    images: vec![],
+                    acts_on_host,
                 },
-                images: vec![],
-                acts_on_host: true,
-            },
-        )
-        .unwrap();
-        assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
-        assert!(result
-            .text
-            .contains("Inspect the target before acting again"));
-        assert!(!result.text.contains("Try again"));
-        assert_eq!(result.data["message"], result.text);
+            )
+            .unwrap();
+            assert_eq!(
+                result.outcome, expected,
+                "{error_code}, acts={acts_on_host}"
+            );
+            if expected == ComputerUseOutcome::Unknown {
+                assert!(result
+                    .text
+                    .contains("Inspect the target before acting again"));
+                assert_eq!(result.data["message"], result.text);
+            }
+        }
     }
 
     #[test]
