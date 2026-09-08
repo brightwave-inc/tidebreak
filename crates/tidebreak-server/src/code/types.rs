@@ -304,6 +304,10 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub external_origin: Option<SessionExternalOrigin>,
+    /// Every conversation that reaches this session, in creation order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub external_origins: Option<Vec<SessionExternalOrigin>>,
     /// Where the engine runs, fixed at creation (decision 0088).
     pub execution_location: ExecutionLocation,
     /// Whose forge identity this session borrows as (decision 0090).
@@ -312,6 +316,24 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub acts_as: Option<tidebreak_core::ActsAs>,
+}
+
+impl SessionSnapshot {
+    /// Keep the original provenance field while exposing every binding.
+    pub fn set_external_origins(
+        &mut self,
+        bindings: impl IntoIterator<Item = tidebreak_core::CodeExternalBinding>,
+    ) {
+        let origins: Vec<_> = bindings
+            .into_iter()
+            .map(|binding| SessionExternalOrigin {
+                channel_kind: binding.channel_kind,
+                external_key: binding.external_key,
+            })
+            .collect();
+        self.external_origin = origins.first().cloned();
+        self.external_origins = (!origins.is_empty()).then_some(origins);
+    }
 }
 
 impl From<Session> for SessionSnapshot {
@@ -338,6 +360,7 @@ impl From<Session> for SessionSnapshot {
             // Provenance is a separate lookup; the handlers that serve the
             // desktop attach it.
             external_origin: None,
+            external_origins: None,
             execution_location: session.execution_location,
             acts_as: Some(acts_as),
         }

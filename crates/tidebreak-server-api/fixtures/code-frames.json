@@ -91,6 +91,16 @@
         "channel_kind": "slack",
         "external_key": "T0/C1/1756700000.000100"
       },
+      "external_origins": [
+        {
+          "channel_kind": "slack",
+          "external_key": "T0/C1/1756700000.000100"
+        },
+        {
+          "channel_kind": "slack",
+          "external_key": "T0/C2/1756700001.000100"
+        }
+      ],
       "fast_mode": false,
       "harness_kind": "claude_code",
       "harness_resume_ref": "9f2c1d4e-resume",
@@ -124,6 +134,16 @@
       },
       "created_at": "2025-09-01T04:13:20Z",
       "execution_location": "sandbox",
+      "external_origins": [
+        {
+          "channel_kind": "slack",
+          "external_key": "T0/C1/1756700000.000100"
+        },
+        {
+          "channel_kind": "slack",
+          "external_key": "T0/C2/1756700001.000100"
+        }
+      ],
       "fast_mode": false,
       "fence_reason": {
         "detail": "the engine forgot the resume ref",

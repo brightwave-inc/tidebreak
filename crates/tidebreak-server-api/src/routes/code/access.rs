@@ -49,7 +49,8 @@ pub async fn set_session_visibility(
     Path(id): Path<SessionId>,
     Json(body): Json<SetSessionVisibilityBody>,
 ) -> Result<Json<SessionSnapshot>, ServerError> {
-    Ok(Json(SessionSnapshot::from(
-        code.set_session_visibility(id, body.visibility).await?,
-    )))
+    let session = code.set_session_visibility(id, body.visibility).await?;
+    Ok(Json(
+        super::sessions::snapshot_with_origin(&code, session).await?,
+    ))
 }

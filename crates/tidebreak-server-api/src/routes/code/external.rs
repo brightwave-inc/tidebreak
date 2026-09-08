@@ -290,6 +290,143 @@ pub async fn external_get_or_create(
 }
 
 #[derive(serde::Deserialize)]
+pub struct ExternalBindingBody {
+    pub external_key: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub set_by: Option<ExternalSetBy>,
+}
+
+/// Attach a conversation to the session this grant already holds.
+pub async fn external_attach_binding(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path(id): Path<SessionId>,
+    Json(body): Json<ExternalBindingBody>,
+) -> Result<(StatusCode, Json<tidebreak_core::CodeExternalBinding>), ServerError> {
+    let runtime = require_bound(&state, &grant, id).await?;
+    let key = body.external_key.trim();
+    if key.is_empty() || key.len() > 1024 || key.chars().any(char::is_control) {
+        return Err(ServerError::bad_request_kind(
+            "invalid_external_key",
+            "a conversation key needs 1 to 1024 bytes and no control characters",
+        ));
+    }
+    if grant.kind.is_workspace() {
+        require_binding_repository(
+            &runtime,
+            &grant,
+            id,
+            body.channel_id.as_deref(),
+            body.set_by.as_ref(),
+        )
+        .await?;
+    }
+    match tidebreak_core::db::code::attach_external_binding(
+        &runtime.db,
+        &grant.owner,
+        grant.id,
+        &grant.channel_kind,
+        key,
+        id,
+    )
+    .await?
+    {
+        ExternalSessionResolution::Created(binding) => Ok((StatusCode::CREATED, Json(*binding))),
+        ExternalSessionResolution::Existing(binding) => Ok((StatusCode::OK, Json(*binding))),
+        ExternalSessionResolution::Ended { .. } => Err(ServerError::conflict_kind(
+            "ended",
+            "the session has ended; start another session to continue",
+        )),
+        ExternalSessionResolution::GrantMismatch => {
+            Err(ServerError::not_found("code session not found"))
+        }
+    }
+}
+
+async fn require_binding_repository(
+    runtime: &crate::code::runtime::CodeRuntime,
+    grant: &CodeExternalGrant,
+    id: SessionId,
+    channel_id: Option<&str>,
+    set_by: Option<&ExternalSetBy>,
+) -> Result<(), ServerError> {
+    let channel_id = channel_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ServerError::bad_request_kind(
+                "channel_id_required",
+                "a workspace grant names the channel that will continue this session",
+            )
+        })?;
+    let session = runtime.get_session(&grant.owner, id).await?;
+    if let Some(workspace_id) = session.workspace_id {
+        let workspace = runtime.get_workspace(&grant.owner, workspace_id).await?;
+        let repo = runtime.get_repo(&grant.owner, workspace.repo_id).await?;
+        let repository = repo
+            .origin_owner
+            .zip(repo.origin_name)
+            .map(|(owner, name)| format!("{owner}/{name}"))
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "repo_origin_unknown",
+                    "the repository records no origin to confirm",
+                )
+            })?;
+        if !tidebreak_core::db::code::channel_repository_is_confirmed(
+            &runtime.db,
+            &grant.owner,
+            grant.id,
+            channel_id,
+            &repository,
+        )
+        .await?
+        {
+            let set_by = set_by.ok_or_else(|| {
+                ServerError::bad_request_kind(
+                    "set_by_required",
+                    "name who set this channel's repository",
+                )
+            })?;
+            tidebreak_core::db::code::ensure_pending_channel_repository(
+                &runtime.db,
+                &grant.owner,
+                grant.id,
+                channel_id,
+                &repository,
+                &set_by.identity,
+                &set_by.display,
+            )
+            .await?;
+            return Err(ServerError::conflict_kind(
+                "repository_unconfirmed",
+                "an administrator must confirm this repository for the destination channel",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// List every conversation attached under the authenticated grant.
+pub async fn external_bindings(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path(id): Path<SessionId>,
+) -> Result<Json<Vec<tidebreak_core::CodeExternalBinding>>, ServerError> {
+    let runtime = require_bound(&state, &grant, id).await?;
+    let bindings =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
+    Ok(Json(
+        bindings
+            .into_iter()
+            .filter(|binding| binding.grant_id == grant.id)
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
 pub struct ExternalMessageBody {
     pub text: String,
     /// The channel's delivery id; replays of it answer from the first row.
@@ -438,6 +575,14 @@ pub async fn external_events(
 ) -> Result<Response, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
     let session = runtime.get_session(&grant.owner, id).await?;
+    let bindings =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
+    let mut session_snapshot = SessionSnapshot::from(session);
+    session_snapshot.set_external_origins(
+        bindings
+            .into_iter()
+            .filter(|binding| binding.grant_id == grant.id),
+    );
     let owner = grant.owner.clone();
     let grant_id = grant.id;
     // Subscribe before deciding to serve, then re-read the durable row while
@@ -457,7 +602,7 @@ pub async fn external_events(
         // lifecycle and the attention snapshot arrive first, as their own
         // frame shape.
         let snapshot = serde_json::json!({
-            "snapshot": SessionSnapshot::from(session),
+            "snapshot": session_snapshot,
         });
         if let Ok(json) = serde_json::to_string(&snapshot) {
             if socket
@@ -519,7 +664,15 @@ pub async fn external_reap(
 ) -> Result<Json<SessionSnapshot>, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
     let session = runtime.reap(&grant.owner, id).await?;
-    Ok(Json(SessionSnapshot::from(session)))
+    let bindings =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
+    let mut snapshot = SessionSnapshot::from(session);
+    snapshot.set_external_origins(
+        bindings
+            .into_iter()
+            .filter(|binding| binding.grant_id == grant.id),
+    );
+    Ok(Json(snapshot))
 }
 
 #[derive(serde::Deserialize)]

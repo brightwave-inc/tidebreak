@@ -471,6 +471,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::external_get_or_create),
         )
         .route(
+            "/external/code/sessions/{id}/bindings",
+            get(routes::code::external_bindings).post(routes::code::external_attach_binding),
+        )
+        .route(
             "/external/code/sessions/{id}/messages",
             post(routes::code::external_messages),
         )

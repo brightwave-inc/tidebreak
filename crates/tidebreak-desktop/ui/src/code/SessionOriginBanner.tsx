@@ -55,14 +55,20 @@ export function externalThreadUrl(
 
 export function SessionOriginBanner({
   origin,
+  origins,
   executionLocation,
   actsAs,
 }: {
   origin: CodeSessionExternalOrigin;
+  origins?: CodeSessionExternalOrigin[];
   executionLocation: ExecutionLocation;
   actsAs?: "person" | "bot";
 }) {
-  const url = externalThreadUrl(origin);
+  const conversations = origins?.length ? origins : [origin];
+  const links = conversations.flatMap((conversation, index) => {
+    const url = externalThreadUrl(conversation);
+    return url ? [{ url, index }] : [];
+  });
   const where =
     executionLocation === "machine" ? "on this machine" : "in a sandbox";
   const who =
@@ -76,19 +82,30 @@ export function SessionOriginBanner({
         className="text-muted-foreground mt-px size-3.5 shrink-0"
         aria-hidden
       />
-      <p className="text-muted-foreground min-w-0 flex-1 text-xs">
-        Started from {channelLabel(origin.channel_kind)}; runs {where}
-        {who}.
-      </p>
-      {url && (
-        <button
-          type="button"
-          className="text-foreground shrink-0 cursor-pointer text-xs underline underline-offset-2 hover:no-underline"
-          onClick={() => void openExternal(url).catch(() => undefined)}
-        >
-          Open the thread
-        </button>
-      )}
+      <div className="flex min-w-0 flex-1 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <p className="text-muted-foreground text-xs">
+          Started from {channelLabel(origin.channel_kind)}; runs {where}
+          {who}.
+          {conversations.length > 1 &&
+            ` Shared across ${conversations.length} conversations.`}
+        </p>
+        {links.length > 0 && (
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {links.map(({ url, index }) => (
+              <button
+                key={url}
+                type="button"
+                className="text-foreground cursor-pointer text-xs underline underline-offset-2 hover:no-underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                onClick={() => void openExternal(url).catch(() => undefined)}
+              >
+                {conversations.length === 1
+                  ? "Open the thread"
+                  : `Open thread ${index + 1}`}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

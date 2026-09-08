@@ -450,6 +450,31 @@ describe("parseCodeSession external origin", () => {
   });
 });
 
+describe("parseCodeSession conversation bindings", () => {
+  const first = { channel_kind: "slack", external_key: "T1/C1/1.1" };
+  const second = { channel_kind: "slack", external_key: "T1/C2/2.2" };
+
+  it("preserves every origin and accepts older snapshots", () => {
+    expect(
+      parseCodeSession({ ...SESSION, external_origins: [first, second] })
+        ?.external_origins,
+    ).toEqual([first, second]);
+    expect(parseCodeSession(SESSION)).not.toBeNull();
+  });
+
+  it("refuses malformed and duplicate origins", () => {
+    for (const external_origins of [
+      null,
+      {},
+      [first, first],
+      [{ ...first, external_key: "" }],
+      [{ ...first, extra: true }],
+    ]) {
+      expect(parseCodeSession({ ...SESSION, external_origins })).toBeNull();
+    }
+  });
+});
+
 describe("parseCodeSessionList", () => {
   it("accepts GET /code/workspaces/{id}/sessions", () => {
     const ended = {
