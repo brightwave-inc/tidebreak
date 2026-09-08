@@ -312,6 +312,8 @@ export async function runNativeSmoke({
   assert.ok(screenshot.width >= 640 && screenshot.height >= 480, "screenshot must be desktop scale");
   assert.ok(screenshot.bytes >= 8 * 1024, "screenshot must contain real pixels");
 
+  await call("computer_focus_window", { app_id: APP_ID, window_id: mainWindowId });
+
   const treeForSelect = await readTree(call);
   const dropdown = findTarget(treeForSelect, "fixture-dropdown");
   await call("computer_click", {

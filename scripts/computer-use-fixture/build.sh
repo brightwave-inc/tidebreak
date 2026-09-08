@@ -18,12 +18,14 @@ if [[ "$OUT_DIR" == "/" || "$OUT_DIR" == "$HOME" || "$OUT_DIR" == "$SOURCE_DIR" 
     exit 2
 fi
 
-case "$OUT_DIR" in
-    "$REPO_ROOT"/*)
-        echo "computer-use-fixture: build output must live outside the repository" >&2
-        exit 2
-        ;;
-esac
+if [[ -n "$REPO_ROOT" ]]; then
+    case "$OUT_DIR" in
+        "$REPO_ROOT"/*)
+            echo "computer-use-fixture: build output must live outside the repository" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 APP_DIR="$OUT_DIR/ComputerUseFixture.app"
 CONTENTS="$APP_DIR/Contents"
