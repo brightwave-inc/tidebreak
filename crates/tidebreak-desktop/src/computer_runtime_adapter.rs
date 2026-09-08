@@ -183,7 +183,7 @@ impl DesktopComputerRuntime {
 #[async_trait]
 impl NativeRuntime for DesktopComputerRuntime {
     fn is_available(&self) -> bool {
-        self.native.is_available()
+        cfg!(target_os = "macos")
     }
 
     async fn execute(
@@ -192,29 +192,7 @@ impl NativeRuntime for DesktopComputerRuntime {
         call: &ComputerUseCall,
     ) -> Result<ComputerUseResult, NativeRuntimeError> {
         if !is_chrome_session_tool(&call.name) {
-            let activity = crate::computer_use_action::activity_for_call(
-                scope.session,
-                call,
-                crate::computer_use_action::ComputerUseActionSource::Native,
-            );
-            if let Some(activity) = &activity {
-                crate::computer_use_action::emit_computer_use_action(&self.app, activity);
-            }
-            let result = self.native.execute(scope, call).await;
-            if let Some(activity) = activity {
-                let (success, code) = match &result {
-                    Ok(result) => (
-                        result.outcome == ComputerUseOutcome::Completed,
-                        result.error_code.as_deref(),
-                    ),
-                    Err(NativeRuntimeError::UnknownOutcome) => (false, Some("interrupted")),
-                    Err(_) => (false, None),
-                };
-                crate::computer_use_action::finish_call_activity(
-                    &self.app, activity, success, code,
-                );
-            }
-            return result;
+            return self.native.execute(scope, call).await;
         }
         // The native adapter validates the same host-derived subject before a
         // Chrome request can create state or display its native consent prompt.
