@@ -434,7 +434,9 @@ fn page_reply(request: &Value) -> Scripted {
         }
         "Page.createIsolatedWorld" => json!({"executionContextId":7}),
         "DOM.getFrameOwner" => json!({"backendNodeId":11}),
-        "DOM.getBoxModel" => json!({"model":{"content":[100.0,50.0]}}),
+        "DOM.getBoxModel" => {
+            json!({"model":{"content":[100.0,50.0,300.0,50.0,300.0,250.0,100.0,250.0]}})
+        }
         "Page.getLayoutMetrics" => {
             json!({"cssVisualViewport":{"clientWidth":800.0,"clientHeight":600.0,"pageX":0.0,"pageY":0.0}})
         }
@@ -442,10 +444,12 @@ fn page_reply(request: &Value) -> Scripted {
             let expression = request["params"]["expression"].as_str().unwrap_or("");
             let value = if expression.contains("title:document.title") {
                 json!({"title":"Fixture","width":800.0,"height":600.0,"scrollX":0.0,"scrollY":0.0})
+            } else if expression == "({width:innerWidth,height:innerHeight})" {
+                json!({"width":400.0,"height":400.0})
             } else if expression.contains("\"prefix\"") {
                 json!({"truncated":false,"nodes":[fixture_node("n-0-0", "F1")]})
             } else {
-                json!({"ok":true,"x":10.0,"y":20.0})
+                json!({"ok":true,"x":10.0,"y":20.0,"viewport":{"width":200.0,"height":200.0}})
             };
             json!({"result":{"value":value}})
         }
@@ -760,8 +764,8 @@ async fn screenshot_refits_capture_scale_to_the_transport_budget() {
 
 #[tokio::test]
 async fn nested_frame_click_uses_the_innermost_owner_in_one_session() {
-    let (service, scope, log) =
-        scripted_connection(|request| match request["method"].as_str().unwrap_or("") {
+    let (service, scope, log) = scripted_connection(|request| {
+        match request["method"].as_str().unwrap_or("") {
             "Page.getFrameTree" => Scripted::Result(json!({"frameTree":{
                 "frame":{"id":"F1","loaderId":"L1","url":PAGE_URL},
                 "childFrames":[{"frame":{"id":"F2","loaderId":"L2","url":PAGE_URL},
@@ -770,8 +774,8 @@ async fn nested_frame_click_uses_the_innermost_owner_in_one_session() {
                 if request["params"]["frameId"] == "F3" { 13 } else { 12 }
             })),
             "DOM.getBoxModel" => Scripted::Result(json!({"model":{"content":
-                if request["params"]["backendNodeId"] == 13 { json!([150.0,180.0]) }
-                else { json!([100.0,120.0]) }
+                if request["params"]["backendNodeId"] == 13 { json!([150.0,180.0,350.0,180.0,350.0,380.0,150.0,380.0]) }
+                else { json!([100.0,120.0,500.0,120.0,500.0,520.0,100.0,520.0]) }
             }})),
             "Runtime.evaluate" => {
                 let expression = request["params"]["expression"].as_str().unwrap_or("");
@@ -787,7 +791,8 @@ async fn nested_frame_click_uses_the_innermost_owner_in_one_session() {
                 }
             }
             _ => page_reply(request),
-        });
+        }
+    });
     let (target, snapshot) = controlled_tab(&service, &scope).await;
     let click = act(&target, &snapshot, "n-2-0", json!({"type":"click"}));
     let result = service.dispatch(&scope, &click).await.result;
@@ -851,9 +856,9 @@ async fn nested_cross_session_click_adds_one_owner_per_session_boundary() {
             })),
             "DOM.getBoxModel" => Scripted::Result(json!({"model":{"content":
                 match request["params"]["backendNodeId"].as_u64().unwrap() {
-                    14 => json!([30.0,40.0]),
-                    13 => json!([150.0,180.0]),
-                    _ => json!([100.0,120.0]),
+                    14 => json!([30.0,40.0,230.0,40.0,230.0,240.0,30.0,240.0]),
+                    13 => json!([150.0,180.0,550.0,180.0,550.0,580.0,150.0,580.0]),
+                    _ => json!([100.0,120.0,500.0,120.0,500.0,520.0,100.0,520.0]),
                 }
             }})),
             "Runtime.evaluate" => {

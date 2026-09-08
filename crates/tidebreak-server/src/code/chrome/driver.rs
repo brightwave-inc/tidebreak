@@ -61,5 +61,5 @@ pub const PROBE_SCRIPT: &str = r#"(args => {
    if(!el.matches('input[type=checkbox],input[type=radio]')) return {ok:false,reason:'invalid_value'};
    if(el.checked!==args.value) el.click();
  }
- return {ok:true,x,y};
+ return {ok:true,x,y,viewport:{width:innerWidth,height:innerHeight}};
 })"#;

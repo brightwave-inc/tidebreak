@@ -1233,11 +1233,11 @@ impl ChromeComputerUseService {
         let mut y = result["y"]
             .as_f64()
             .ok_or("Chrome target has no y coordinate")?;
-        // DOM box coordinates use the root viewport of the queried CDP
-        // session. Add the target frame's owner once, then add only the
-        // owners that cross into an ancestor session. Same-session ancestor
-        // offsets are already included in the innermost owner's box.
-        for (owner_frame, owner_session) in offsets {
+        // Each owner quad maps its child viewport into the queried CDP
+        // session's root viewport. Same-session ancestors are already part
+        // of that quad; map again only at a session boundary.
+        let mut viewport = result["viewport"].clone();
+        for (index, (owner_frame, owner_session)) in offsets.iter().enumerate() {
             let owner = access
                 .command(
                     Some(owner_session),
@@ -1252,12 +1252,16 @@ impl ChromeComputerUseService {
                     json!({"backendNodeId":owner["backendNodeId"]}),
                 )
                 .await?;
-            x += bounds["model"]["content"][0]
-                .as_f64()
-                .ok_or("Chrome frame offset is unavailable")?;
-            y += bounds["model"]["content"][1]
-                .as_f64()
-                .ok_or("Chrome frame offset is unavailable")?;
+            (x, y) = map_frame_point(&bounds["model"]["content"], &viewport, x, y)?;
+            if index + 1 < offsets.len() {
+                viewport = access
+                    .eval(
+                        owner_session,
+                        None,
+                        "({width:innerWidth,height:innerHeight})".into(),
+                    )
+                    .await?;
+            }
         }
         Ok((x, y))
     }
@@ -1536,6 +1540,42 @@ impl ChromeComputerUseService {
         })
     }
 }
+/// Map a child viewport point through its content quad. Rotation, scaling,
+/// and skew are affine; perspective needs a different projection and refuses.
+fn map_frame_point(quad: &Value, viewport: &Value, x: f64, y: f64) -> Result<(f64, f64), String> {
+    const UNAVAILABLE: &str = "Chrome frame geometry is unavailable";
+    let width = viewport["width"].as_f64().ok_or(UNAVAILABLE)?;
+    let height = viewport["height"].as_f64().ok_or(UNAVAILABLE)?;
+    if width <= 0.0 || height <= 0.0 || !width.is_finite() || !height.is_finite() {
+        return Err(UNAVAILABLE.into());
+    }
+    let values = quad
+        .as_array()
+        .filter(|values| values.len() == 8)
+        .ok_or(UNAVAILABLE)?;
+    let mut points = [0.0; 8];
+    for (point, value) in points.iter_mut().zip(values) {
+        *point = value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or(UNAVAILABLE)?;
+    }
+    if (points[0] + points[4] - points[2] - points[6]).abs() > 0.01
+        || (points[1] + points[5] - points[3] - points[7]).abs() > 0.01
+    {
+        return Err("Chrome input does not support perspective-transformed frames".into());
+    }
+    let horizontal = (points[2] - points[0], points[3] - points[1]);
+    let vertical = (points[6] - points[0], points[7] - points[1]);
+    if (horizontal.0 * vertical.1 - horizontal.1 * vertical.0).abs() < 0.01 {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok((
+        points[0] + horizontal.0 * x / width + vertical.0 * y / height,
+        points[1] + horizontal.1 * x / width + vertical.1 * y / height,
+    ))
+}
+
 /// Identify owner boxes whose session-relative offsets reach the top viewport.
 /// The whole chain is validated before a caller sends any geometry commands.
 fn frame_offset_chain<'a>(
@@ -1667,5 +1707,44 @@ fn outcome(
             },
             images: Vec::new(),
         },
+    }
+}
+
+#[cfg(test)]
+mod frame_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_and_rotated_frames_map_viewport_points_through_the_content_quad() {
+        let viewport = json!({"width":200,"height":200});
+        let scaled = json!([100, 120, 460, 120, 460, 480, 100, 480]);
+        assert_eq!(
+            map_frame_point(&scaled, &viewport, 50.0, 75.0).unwrap(),
+            (190.0, 255.0)
+        );
+        let rotated = json!([300, 100, 300, 300, 100, 300, 100, 100]);
+        assert_eq!(
+            map_frame_point(&rotated, &viewport, 50.0, 75.0).unwrap(),
+            (225.0, 150.0)
+        );
+    }
+
+    #[test]
+    fn perspective_or_degenerate_frame_geometry_refuses() {
+        let viewport = json!({"width":200,"height":200});
+        for quad in [
+            json!([0, 0, 100, 0, 80, 100, 20, 100]),
+            json!([0, 0, 0, 0, 0, 0, 0, 0]),
+            json!([0, 0]),
+        ] {
+            assert!(map_frame_point(&quad, &viewport, 50.0, 75.0).is_err());
+        }
+        assert!(map_frame_point(
+            &json!([0, 0, 100, 0, 100, 100, 0, 100]),
+            &json!({"width":0,"height":200}),
+            1.0,
+            1.0
+        )
+        .is_err());
     }
 }
