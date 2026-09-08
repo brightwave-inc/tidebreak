@@ -1,3 +1,4 @@
+import { CodeEditorGroups } from "./CodeEditorGroups";
 import { Button } from "@/components/ui/button";
 import {
   centerEditorTabId,
@@ -349,7 +350,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const splitEditorTabs = chrome.splitEditors.tabs;
   const activeSplitEditor =
     splitEditorTabs[chrome.splitEditors.activeIndex] ?? null;
-  const hasEditorSplit = splitEditorTabs.length > 0;
 
   function editorPanel(
     panel: PanelContent,
@@ -760,32 +760,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onDragEnd={finishTabDrag}
       >
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-          {hasEditorSplit ? (
-            <ResizablePanelGroup
-              orientation="horizontal"
-              className="h-full min-h-0"
-            >
-              <ResizablePanel
-                id="editor-primary"
-                defaultSize="55"
-                minSize="25"
-                className="min-w-0"
-              >
-                {primaryEditorGroup}
-              </ResizablePanel>
-              <ResizableHandle />
-              <ResizablePanel
-                id="editor-split"
-                defaultSize="45"
-                minSize="25"
-                className="min-w-0"
-              >
-                {splitEditorGroup}
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          ) : (
-            primaryEditorGroup
-          )}
+          <CodeEditorGroups
+            primary={primaryEditorGroup}
+            secondary={splitEditorGroup}
+          />
           {draggedTabId && offersSplitDrop(layout, draggedTabId) && (
             <SplitDropZone />
           )}
