@@ -6,7 +6,7 @@
 //! the full canonical native tool set over MCP stdio.
 //!
 //! Both paths use one [`NativeClient`], and both take their tool list and
-//! argument validation from `tidebreak_core::computer_use`: a primitive
+//! argument validation from `tidebreak_core::computer_session`: a primitive
 //! registered there is advertised and accepted here without a bridge change.
 //!
 //! Screenshots come back as real image content. The MCP server publishes
@@ -24,7 +24,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
-use tidebreak_core::computer_use::{computer_use_tool_specs, validate_computer_use_arguments};
+use tidebreak_core::computer_session::{computer_session_tool_specs, validate_computer_session_arguments, is_chrome_session_tool};
 use tidebreak_core::{
     is_computer_use_control_tool, AgentError, ApprovalClass, AutoApproveGate, DocumentBlob,
     ImageData, ImageMediaType, ImageRef, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
@@ -55,7 +55,7 @@ const NATIVE_IMAGE_MAX_BASE64_CHARS: usize = NATIVE_FRAME_MAX_BYTES.div_ceil(3) 
 const ERROR_BODY_MAX_BYTES: usize = 8 * 1024; // 8 KiB
 
 /// Most images one result may carry into MCP content.
-const MAX_RESULT_IMAGES: usize = 4;
+const MAX_RESULT_IMAGES: usize = 3;
 
 /// Widest image (in pixels per side) the bounded recompressor will decode.
 /// Larger captures are refused with sizing guidance instead of decoded.
@@ -682,7 +682,7 @@ fn result_data_without_images(result: &ComputerUseResult) -> Value {
 /// register one MCP tool per canonical native tool spec, and run MCP over
 /// stdio.
 ///
-/// The registry is built dynamically from `computer_use_tool_specs()`, so a
+/// The registry is built dynamically from `computer_session_tool_specs()`, so a
 /// primitive added to the core list is advertised without a bridge change.
 /// Observation tools are read-only; tools that move the mouse, keyboard, or
 /// focus are sensitive. The desktop authorizes every operation independently
@@ -691,7 +691,7 @@ pub(crate) async fn run_computer_mcp() -> Result<()> {
     let cap = NativeCapfile::from_env()?;
     let client = NativeClient::new(&cap)?;
     let mut tools = ToolRegistry::new();
-    for spec in computer_use_tool_specs() {
+    for spec in computer_session_tool_specs() {
         tools = tools.with(Box::new(NativeTool {
             spec,
             client: client.clone(),
@@ -719,7 +719,7 @@ impl Tool for NativeTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        if is_computer_use_control_tool(&self.spec.name) {
+        if is_computer_use_control_tool(&self.spec.name) || is_chrome_session_tool(&self.spec.name) {
             ApprovalClass::Sensitive
         } else {
             ApprovalClass::ReadOnly
@@ -727,7 +727,7 @@ impl Tool for NativeTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        if !validate_computer_use_arguments(&self.spec.name, &args) {
+        if !validate_computer_session_arguments(&self.spec.name, &args) {
             return Ok(mcp_failure(ClientFailure::InvalidArguments {
                 detail: format!("invalid {} arguments", self.spec.name),
             }));
@@ -764,7 +764,7 @@ fn mcp_failure(failure: ClientFailure) -> ToolOutput {
 pub(crate) const COMPUTER_USAGE: &str = "\
 usage: tidebreak computer <tool> --json '<arguments-json>' [--output <path>]
 
-<tool> is any canonical native computer-use tool (run
+<tool> is any canonical native or Chrome computer-use tool (run
 `tidebreak computer list-tools` for the current set, e.g.
 computer_list_windows, computer_capture_screen, computer_click,
 computer_type_text, computer_key_press, computer_scroll,
@@ -825,7 +825,7 @@ pub(crate) fn parse_computer(raw: Vec<String>) -> std::result::Result<ComputerCo
             output: None,
         });
     }
-    let known = computer_use_tool_specs()
+    let known = computer_session_tool_specs()
         .iter()
         .any(|spec| spec.name == tool);
     if !known {
@@ -849,14 +849,14 @@ pub(crate) fn parse_computer(raw: Vec<String>) -> std::result::Result<ComputerCo
 /// path so the caller can read the actual pixels from disk.
 pub(crate) async fn run_computer(command: ComputerCommand) -> Result<()> {
     if command.tool == "list-tools" {
-        for spec in computer_use_tool_specs() {
+        for spec in computer_session_tool_specs() {
             println!("{}", spec.name);
         }
         return Ok(());
     }
     let cap = NativeCapfile::from_env()?;
     let client = NativeClient::new(&cap)?;
-    if !validate_computer_use_arguments(&command.tool, &command.arguments) {
+    if !validate_computer_session_arguments(&command.tool, &command.arguments) {
         return Err(AgentError::msg(format!(
             "{} arguments are not well-formed",
             command.tool
@@ -910,7 +910,7 @@ fn write_image_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| AgentError::msg("--output path has no parent directory"))?;
+        .unwrap_or_else(|| std::path::Path::new("."));
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() {
             return Err(AgentError::msg("--output path is a symlink"));

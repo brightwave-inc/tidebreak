@@ -100,7 +100,7 @@ fn parse_accepts_output_and_list_tools() {
 fn every_canonical_tool_parses_by_name() {
     // The CLI accepts the dynamic core list, so a primitive added there is
     // driveable here without a bridge change.
-    for spec in computer_use_tool_specs() {
+    for spec in computer_session_tool_specs() {
         parse_computer(vec![spec.name.clone(), "--json".into(), "{}".into()])
             .unwrap_or_else(|error| panic!("{} must parse: {error}", spec.name));
     }
@@ -113,7 +113,7 @@ fn control_tools_are_sensitive_and_observation_tools_read_only() {
         token: format!("tbreak_nt_{}", Uuid::new_v4()),
     };
     let client = NativeClient::new(&cap).unwrap();
-    for spec in computer_use_tool_specs() {
+    for spec in computer_session_tool_specs() {
         let name = spec.name.clone();
         let tool = NativeTool {
             spec,
