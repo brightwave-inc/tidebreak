@@ -75,10 +75,20 @@ is `installation_only` cannot attribute it to the person.
    forge repository — a local path, a bare test origin, any host but the
    forge's — borrows nothing and pushes exactly as it does today.
 
-5. **Nothing else changes.** Static-token self-host machines and desktops
-   never build the lender, so every existing git and `gh` path is untouched.
-   Pull-request creation and the delivery reads still ride `gh` and remain
-   unavailable on hosted machines; they are the next slice, not this one.
+5. **Nothing else changes.** Desktops never build the lender, so every
+   existing git and `gh` path on a local machine is untouched. Pull-request
+   creation and the delivery reads still ride `gh` and remain unavailable
+   on hosted machines; they are the next slice, not this one.
+
+## Amendment 2026-09-08: a standalone machine lends its own token
+
+A standalone self-host machine has no gateway to mint from. When you set
+`GH_TOKEN` (or `GITHUB_TOKEN`) on that profile, the server now builds a
+static lender on the same seam: clone, delivery, and a session's loopback
+git helper borrow the token per operation, and the engine child does not
+inherit it. The machine acts as one account. A session that asks to act as
+the person is refused by name. Set `TIDEBREAK_GIT_BOT_LOGIN` so the UI can
+name that account. Desktop profiles still build no lender.
 
 ## Rejected
 

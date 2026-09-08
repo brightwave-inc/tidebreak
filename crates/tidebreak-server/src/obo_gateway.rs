@@ -34,6 +34,9 @@
 //!   [`crate::providers::collect_routes`].
 
 pub mod external;
+pub mod static_lender;
+
+pub use static_lender::StaticGitCredentialLender;
 
 use std::collections::HashMap;
 use std::sync::Arc;

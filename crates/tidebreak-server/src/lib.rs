@@ -1273,6 +1273,30 @@ async fn bind_inner(
         state.mcp.set_host_folders(host.clone());
     }
     state.host_folders = host_folders;
+    // Gateway-authenticated machines borrow per-caller forge credentials
+    // (decision 63). A standalone self-host machine with GH_TOKEN lends that
+    // one account through the same seam so the engine child never holds it.
+    // Desktop profiles never build a lender.
+    let git_credentials: Option<Arc<dyn obo_gateway::GitCredentialLender>> =
+        if let Some(gateway) = state.on_behalf_of_gateway.clone() {
+            Some(gateway)
+        } else if state.config.profile == Profile::SelfHost {
+            obo_gateway::StaticGitCredentialLender::from_env()
+                .map(|lender| Arc::new(lender) as Arc<dyn obo_gateway::GitCredentialLender>)
+        } else {
+            None
+        };
+    let harness_llm = if let Some(gateway) = state.on_behalf_of_gateway.clone() {
+        Some(Arc::new(
+            code::harness_llm::HarnessLlmRelay::new(gateway).with_external_delegations(db.clone()),
+        ))
+    } else if git_credentials.is_some() {
+        // Keys only: the loopback git route authenticates with a session
+        // relay key, but engines keep their own provider credentials.
+        Some(Arc::new(code::harness_llm::HarnessLlmRelay::keys_only()))
+    } else {
+        None
+    };
     let runtime = code::CodeRuntime::new(
         db.clone(),
         state.config.data_dir.clone(),
@@ -1280,22 +1304,8 @@ async fn bind_inner(
         code_host_tool_broker,
         browser_runtime,
         browser_bridge_command,
-        // On a gateway-authenticated hosted machine, git operations borrow
-        // per-caller forge credentials from the same on-behalf-of handle the
-        // router exchanges through (decision 63).
-        state
-            .on_behalf_of_gateway
-            .clone()
-            .map(|gateway| gateway as Arc<dyn obo_gateway::GitCredentialLender>),
-        // And engine inference rides the caller's gateway grant through the
-        // relay, since the hosted image has no provider credentials of its
-        // own (decision 71).
-        state.on_behalf_of_gateway.clone().map(|gateway| {
-            Arc::new(
-                code::harness_llm::HarnessLlmRelay::new(gateway)
-                    .with_external_delegations(db.clone()),
-            )
-        }),
+        git_credentials,
+        harness_llm,
     )
     .with_gateway_runtime(state.gateway.clone())
     // A channel-bound session on this machine's engine starts in the
