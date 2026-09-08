@@ -509,7 +509,9 @@ pub(crate) async fn stop_computer_use_control(
         .await?;
     state.computer_use.halt.send_replace(true);
     emit_state(&app, &state.computer_use);
-    if let Some(runtime) = app.try_state::<std::sync::Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>() {
+    if let Some(runtime) =
+        app.try_state::<std::sync::Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>()
+    {
         runtime.stop_all_chrome();
     }
     let cancelled = state.broker.cancel_native_actions();

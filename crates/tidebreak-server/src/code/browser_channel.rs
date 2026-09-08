@@ -177,7 +177,11 @@ impl BrowserTokenRegistry {
         subject: BrowserSubject,
         bridge_command: &Path,
     ) -> Result<BrowserChannelSpec, String> {
-        self.issue_with_capabilities(subject, bridge_command, BrowserChannelCapabilities::default())
+        self.issue_with_capabilities(
+            subject,
+            bridge_command,
+            BrowserChannelCapabilities::default(),
+        )
     }
 
     /// Mint a channel and record whether its runtime supports native actions.

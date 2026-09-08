@@ -922,7 +922,10 @@ fn browser_mcp_registers_act_only_when_the_capability_is_true() {
         tidebreak_core::BROWSER_ACTIVATE_TOOL,
         tidebreak_core::BROWSER_DIAGNOSTICS_TOOL,
     ] {
-        assert!(disabled.get(tool).is_none(), "{tool} must stay unregistered");
+        assert!(
+            disabled.get(tool).is_none(),
+            "{tool} must stay unregistered"
+        );
     }
     let enabled = browser_tool_registry(
         &client,

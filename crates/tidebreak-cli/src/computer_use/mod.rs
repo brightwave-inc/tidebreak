@@ -23,8 +23,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use tidebreak_core::computer_session::{
+    computer_session_tool_specs, is_chrome_session_tool, validate_computer_session_arguments,
+};
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
-use tidebreak_core::computer_session::{computer_session_tool_specs, validate_computer_session_arguments, is_chrome_session_tool};
 use tidebreak_core::{
     is_computer_use_control_tool, AgentError, ApprovalClass, AutoApproveGate, DocumentBlob,
     ImageData, ImageMediaType, ImageRef, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
@@ -719,7 +721,8 @@ impl Tool for NativeTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        if is_computer_use_control_tool(&self.spec.name) || is_chrome_session_tool(&self.spec.name) {
+        if is_computer_use_control_tool(&self.spec.name) || is_chrome_session_tool(&self.spec.name)
+        {
             ApprovalClass::Sensitive
         } else {
             ApprovalClass::ReadOnly

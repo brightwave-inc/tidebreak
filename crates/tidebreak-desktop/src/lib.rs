@@ -41,13 +41,14 @@ mod browser_url_observer;
 mod channel;
 mod chat_debug;
 mod chrome_runtime_adapter;
-mod computer_runtime_adapter;
 mod client_execution;
 mod code_browser;
 mod code_editor;
 mod code_worktree;
 #[cfg(test)]
 mod command_parity;
+mod computer_runtime_adapter;
+mod computer_use_action;
 mod deep_link;
 mod deliverables;
 mod documents;
@@ -974,7 +975,9 @@ pub fn run() {
             browser_url_observer::detach_all_browser_url_observers();
         }
         tauri::RunEvent::Exit => {
-            if let Some(runtime) = app.try_state::<Arc<computer_runtime_adapter::DesktopComputerRuntime>>() {
+            if let Some(runtime) =
+                app.try_state::<Arc<computer_runtime_adapter::DesktopComputerRuntime>>()
+            {
                 tauri::async_runtime::block_on(runtime.shutdown());
             }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
@@ -1057,7 +1060,9 @@ async fn boot_server(
     // unavailable off macOS, so no channel is minted there.
     let computer_runtime = Arc::new(computer_runtime_adapter::DesktopComputerRuntime::new(
         app.clone(),
-        app.path().app_cache_dir().map_err(|error| error.to_string())?,
+        app.path()
+            .app_cache_dir()
+            .map_err(|error| error.to_string())?,
         app.path().home_dir().map_err(|error| error.to_string())?,
     ));
     app.manage(computer_runtime.clone());

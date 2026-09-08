@@ -151,3 +151,102 @@ mod tests {
         assert!(value.get("captureId").is_none());
     }
 }
+
+/// Build coordinate-free activity until the executor has a verified position.
+/// Callers retain this value so completion keeps the same start timestamp.
+pub(crate) fn activity_for_call(
+    session_id: tidebreak_core::SessionId,
+    call: &tidebreak_core::computer_session::ComputerUseCall,
+    source: ComputerUseActionSource,
+) -> Option<ComputerUseActionEvent> {
+    let action_name = if call.name == "chrome_act" {
+        call.arguments.get("action")?.get("type")?.as_str()?
+    } else {
+        call.name.strip_prefix("computer_")?
+    };
+    let action = match action_name {
+        "click" | "check" | "select" => ComputerUseActionKind::Click,
+        "double_click" => ComputerUseActionKind::DoubleClick,
+        "type_text" | "type" | "fill" => ComputerUseActionKind::Type,
+        "key_press" | "press" => ComputerUseActionKind::Key,
+        "scroll" => ComputerUseActionKind::Scroll,
+        "drag" => ComputerUseActionKind::Drag,
+        "hover" | "focus_window" | "resize_window" | "launch_app" | "return_to_tidebreak" => {
+            ComputerUseActionKind::Move
+        }
+        _ => return None,
+    };
+    let now = action_time_millis();
+    Some(ComputerUseActionEvent {
+        action_id: call.request_id.to_string(),
+        session_id: session_id.to_string(),
+        source,
+        action,
+        phase: ComputerUseActionPhase::Running,
+        execution_mode: if call
+            .arguments
+            .get("execution_mode")
+            .and_then(serde_json::Value::as_str)
+            == Some("foreground")
+        {
+            ComputerUseExecutionMode::Foreground
+        } else {
+            ComputerUseExecutionMode::Background
+        },
+        coordinate_frame: if matches!(source, ComputerUseActionSource::Native) {
+            ComputerUseCoordinateFrame::Screen
+        } else {
+            ComputerUseCoordinateFrame::Viewport
+        },
+        started_at_millis: now,
+        visible_until_millis: now + 30_000,
+        point: None,
+        viewport: None,
+        target_bounds: None,
+        browser_id: None,
+        workspace_id: None,
+        instance_id: None,
+        document_epoch: call
+            .arguments
+            .get("documentEpoch")
+            .and_then(serde_json::Value::as_u64),
+        bundle_id: call
+            .arguments
+            .get("app_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        window_id: call
+            .arguments
+            .get("window_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok()),
+        capture_id: None,
+    })
+}
+
+pub(crate) fn finish_call_activity(
+    app: &AppHandle,
+    mut activity: ComputerUseActionEvent,
+    success: bool,
+    error_code: Option<&str>,
+) {
+    activity.phase = match error_code {
+        Some("requires_foreground" | "foreground_required") => {
+            ComputerUseActionPhase::ForegroundRequired
+        }
+        Some("stopped_by_user" | "interrupted" | "computer_use_cancelled" | "cancelled") => {
+            ComputerUseActionPhase::Cancelled
+        }
+        _ if success => ComputerUseActionPhase::Completed,
+        _ => ComputerUseActionPhase::Failed,
+    };
+    activity.visible_until_millis = action_time_millis() + 1_500;
+    emit_computer_use_action(app, &activity);
+}
+
+fn action_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
