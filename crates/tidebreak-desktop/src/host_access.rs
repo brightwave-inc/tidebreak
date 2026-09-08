@@ -228,6 +228,31 @@ impl HostAccess {
         authoritative_context(chat_id, project_id)
     }
 
+    /// Withdraw every broker grant held by an ended code session's
+    /// conversation-scoped subject. Idempotent; called when the session's
+    /// native computer-use authority is revoked.
+    pub(super) async fn purge_session_native_subject(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(), String> {
+        if session_id.is_nil() {
+            return Err("invalid session id".to_owned());
+        }
+        let result = self
+            .broker
+            .control(ControlRequest::PurgeConversationSubject(
+                tidebreak_host_broker::PurgeConversationSubjectRequest {
+                    conversation_id: session_id,
+                },
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ControlResult::PurgeConversationSubject(_) = result else {
+            return Err("host broker returned an unexpected response".to_owned());
+        };
+        Ok(())
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.broker.shutdown().await;
     }
@@ -547,6 +572,20 @@ impl AuthoritativeContext {
     pub(super) fn foreground_browser_scope(&self) -> String {
         format!("foreground-chat:{}", self.chat_id)
     }
+}
+
+/// Authority for a native computer-use operation issued by a code session.
+///
+/// A code session is not a chat: it has no project row in the chat store, so
+/// its broker subject is always the conversation-scoped one keyed by the
+/// session id. Grants therefore live and die with the session, which is the
+/// whole-session ownership the native channel promises — revoking the
+/// session's conversation subject withdraws everything it was ever granted.
+pub(super) fn session_native_context(session_id: Uuid) -> Result<AuthoritativeContext, String> {
+    if session_id.is_nil() {
+        return Err("invalid session id".to_owned());
+    }
+    authoritative_context(session_id, None)
 }
 
 fn authoritative_context(

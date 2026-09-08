@@ -1029,7 +1029,7 @@ impl LegDriver {
         );
         let started = Instant::now();
         let outcome = async {
-            let outcome = self.run_turn(turn, lease_token).await;
+            let outcome = self.run_turn(turn, lease_token, &[]).await;
             if let Some(provider) = self.exec_folder_context.as_ref() {
                 if let Some(turn_id) = provider.close_write_overlay(chat_id).await {
                     self.events.publish_metadata(
@@ -1189,6 +1189,7 @@ impl LegDriver {
         &self,
         turn: TurnRun,
         lease_token: uuid::Uuid,
+        session_tools: &[Arc<dyn tidebreak_core::Tool>],
     ) -> Result<LegDriverOutcome> {
         if turn.status != TurnRunStatus::Running || turn.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
@@ -1200,6 +1201,17 @@ impl LegDriver {
             .mcp
             .as_ref()
             .map_or_else(|| self.tools.clone(), |mcp| mcp.snapshot());
+        // Session-scoped tools (the code session's native computer-use
+        // channel) join the process-wide surface for this turn only.
+        let tools = if session_tools.is_empty() {
+            tools
+        } else {
+            let mut merged = (*tools).clone();
+            for tool in session_tools {
+                merged.register(Box::new(super::native_tools::SharedTool(tool.clone())));
+            }
+            Arc::new(merged)
+        };
         let mut total_model_steps = turn.model_steps;
         let consumed_steps = usize::try_from(total_model_steps).map_err(|_| {
             AgentError::msg(format!(
