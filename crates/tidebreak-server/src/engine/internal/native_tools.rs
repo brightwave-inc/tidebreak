@@ -226,7 +226,7 @@ async fn read_body_bounded(
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
             return Err(ToolFailure::failed(format!(
                 "the native response exceeded the {max_bytes}-byte frame limit; request a \
-                 smaller capture (scope it to one app with app_id)"
+                 smaller capture (use app_id/max_dimension for native capture or max_width/max_height for Chrome)"
             )));
         }
         buf.extend_from_slice(&chunk);
@@ -388,7 +388,7 @@ fn decode_images(result: &ComputerUseResult) -> Result<Vec<(ImageRef, ImageData)
         if bytes.len() > NATIVE_IMAGE_MAX_BYTES {
             return Err(format!(
                 "native image exceeds the {NATIVE_IMAGE_MAX_BYTES}-byte budget; request a \
-                 smaller capture (scope it to one app with app_id)"
+                 smaller capture (use app_id/max_dimension for native capture or max_width/max_height for Chrome)"
             ));
         }
         let (width, height) = png_dimensions(&bytes)
