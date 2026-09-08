@@ -126,6 +126,7 @@ impl CodeRuntime {
     /// Shape a remote session value bound to `workspace`, uninserted.
     pub(super) fn remote_session_value(
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
@@ -134,7 +135,7 @@ impl CodeRuntime {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
-            owner_kind: None,
+            owner_kind: owner_kind.map(str::to_owned),
             workspace_id: Some(workspace_id),
             kind: SessionKind::Interactive,
             harness_kind: harness,
@@ -254,7 +255,8 @@ impl CodeRuntime {
                     ));
                 }
                 let workspace = self.build_remote_workspace(owner, &repo, title).await?;
-                let session = Self::remote_session_value(owner, workspace.id, harness, settings);
+                let session =
+                    Self::remote_session_value(owner, None, workspace.id, harness, settings);
                 self.validate_remote_execution(&session)?;
                 Ok(tidebreak_core::db::code::resolve_external_session(
                     &self.db,
@@ -359,6 +361,7 @@ impl CodeRuntime {
     pub(crate) async fn create_remote_session(
         &self,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
@@ -384,7 +387,8 @@ impl CodeRuntime {
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
-        let session = Self::remote_session_value(owner, workspace_id, harness, settings);
+        let session =
+            Self::remote_session_value(owner, owner_kind, workspace_id, harness, settings);
         self.validate_remote_execution(&session)?;
         insert_session(&self.db, &session).await?;
         Ok(session)

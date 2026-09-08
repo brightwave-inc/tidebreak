@@ -559,7 +559,12 @@ impl ScopedCode {
         permission_mode_ceiling: Option<tidebreak_core::PermissionMode>,
     ) -> Result<tidebreak_core::CodeWatch, ServerError> {
         self.runtime
-            .start_watch(&self.owner, id, permission_mode_ceiling)
+            .start_watch(
+                &self.owner,
+                self.owner_kind.as_deref(),
+                id,
+                permission_mode_ceiling,
+            )
             .await
     }
 
@@ -669,7 +674,13 @@ impl ScopedCode {
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         self.runtime
-            .create_remote_session(&self.owner, workspace_id, harness, settings)
+            .create_remote_session(
+                &self.owner,
+                self.owner_kind.as_deref(),
+                workspace_id,
+                harness,
+                settings,
+            )
             .await
     }
 

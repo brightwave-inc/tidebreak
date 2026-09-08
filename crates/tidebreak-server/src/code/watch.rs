@@ -305,6 +305,7 @@ impl CodeRuntime {
     pub(crate) async fn start_watch(
         self: &Arc<Self>,
         owner: &OwnerId,
+        owner_kind: Option<&str>,
         workspace_id: WorkspaceId,
         permission_mode_ceiling: Option<PermissionMode>,
     ) -> Result<CodeWatch, ServerError> {
@@ -350,7 +351,7 @@ impl CodeRuntime {
         let session = self
             .create_session_of_kind(
                 owner,
-                None,
+                owner_kind,
                 workspace_id,
                 SessionKind::Watch,
                 harness,

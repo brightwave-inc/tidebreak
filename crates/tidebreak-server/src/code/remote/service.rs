@@ -564,6 +564,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_service_owner_labels_the_remote_session_it_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) =
+            runtime_with_remote_settings(dir.path(), settings()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("service-owned".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                Some("service"),
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.owner_kind.as_deref(), Some("service"));
+        let stored = runtime.get_session(&owner, session.id).await.unwrap();
+        assert_eq!(
+            stored.owner_kind.as_deref(),
+            Some("service"),
+            "the kind is persisted with the session, not only returned"
+        );
+    }
+
+    #[tokio::test]
     async fn a_declared_profile_rejects_settings_before_saving_or_queueing() {
         let dir = tempfile::tempdir().unwrap();
         let mut spawn_settings = settings();
@@ -577,18 +605,25 @@ mod tests {
         let mut unsupported = session_settings();
         unsupported.permission_mode = PermissionMode::Ask;
         assert!(runtime
-            .create_remote_session(&owner, workspace.id, HarnessKind::ClaudeCode, unsupported)
+            .create_remote_session(
+                &owner,
+                None,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                unsupported
+            )
             .await
             .is_err());
         let mut fast = session_settings();
         fast.fast_mode = true;
         assert!(runtime
-            .create_remote_session(&owner, workspace.id, HarnessKind::ClaudeCode, fast)
+            .create_remote_session(&owner, None, workspace.id, HarnessKind::ClaudeCode, fast)
             .await
             .is_err());
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -688,6 +723,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -788,6 +824,7 @@ mod tests {
             creating_runtime
                 .create_remote_session(
                     &creating_owner,
+                    None,
                     workspace.id,
                     HarnessKind::ClaudeCode,
                     session_settings(),
@@ -839,6 +876,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -966,6 +1004,7 @@ mod tests {
             let filler = runtime
                 .create_remote_session(
                     &owner,
+                    None,
                     workspace.id,
                     HarnessKind::ClaudeCode,
                     session_settings(),
@@ -992,6 +1031,7 @@ mod tests {
         let blocked = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1081,6 +1121,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1159,6 +1200,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1214,6 +1256,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1266,6 +1309,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1301,6 +1345,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1329,6 +1374,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
@@ -1422,6 +1468,7 @@ mod tests {
         let session = runtime
             .create_remote_session(
                 &owner,
+                None,
                 workspace.id,
                 HarnessKind::ClaudeCode,
                 session_settings(),
