@@ -86,7 +86,7 @@ export function isVisibleComputerUseAction(
   );
 }
 
-/** Action events are transient. Expired and older events cannot revive a cursor. */
+/** Action events are transient. Expired and older events cannot revive the status. */
 export function useComputerUseAction(
   target?: ComputerUseActionTarget,
   sources?: readonly ComputerUseAction["source"][],
@@ -156,13 +156,13 @@ export function computerUseActionLabel(action: ComputerUseAction): string {
   if (action.phase === "failed") return "Action failed";
   if (action.phase === "cancelled") return "Action stopped";
   const labels: Record<ComputerUseAction["action"], string> = {
-    click: "Clicking",
-    double_click: "Double-clicking",
-    type: "Typing",
-    key: "Pressing a key",
-    scroll: "Scrolling",
-    drag: "Dragging",
-    move: "Moving to a target",
+    click: "Requesting a click",
+    double_click: "Requesting a double-click",
+    type: "Requesting text input",
+    key: "Requesting a key press",
+    scroll: "Requesting a scroll",
+    drag: "Requesting a drag",
+    move: "Requesting a move",
   };
   return action.phase === "completed"
     ? "Action completed"
@@ -181,6 +181,6 @@ export function computerUseModeLabel(action: ComputerUseAction): string {
       ? "Background action"
       : "Foreground action";
   return action.executionMode === "background"
-    ? "Working in the background"
-    : "Using the foreground";
+    ? "Background request"
+    : "Foreground request";
 }

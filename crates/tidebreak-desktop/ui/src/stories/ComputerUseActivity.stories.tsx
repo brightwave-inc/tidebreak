@@ -1,10 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, waitFor } from "storybook/test";
 import { useEffect, useState } from "react";
-import {
-  AgentCursorOverlay,
-  type AgentCursorPreview,
-} from "../AgentCursorOverlay";
 import { ComputerUseActionStatus } from "../ComputerUseActionStatus";
 import { ComputerUseIndicatorView } from "../ComputerUseIndicator";
 import type { ComputerUseAction } from "../computerUseAction";
@@ -21,20 +17,8 @@ const action: ComputerUseAction = {
   browserId: "browser-1",
   workspaceId: "workspace-1",
   documentEpoch: 3,
-  point: { x: 488, y: 237 },
-  viewport: { width: 800, height: 420 },
   startedAtMillis: NOW,
   visibleUntilMillis: NOW + 1200,
-};
-const preview: AgentCursorPreview = {
-  source: "browser",
-  sessionId: "session-1",
-  browserId: "browser-1",
-  workspaceId: "workspace-1",
-  documentEpoch: 3,
-  coordinateFrame: "viewport",
-  width: 800,
-  height: 420,
 };
 
 function PreviewFixture() {
@@ -86,13 +70,9 @@ function BrowserPreview({
             localhost:5173/settings
           </span>
         </div>
-        <ComputerUseActionStatus action={current} now={NOW} />
+        <ComputerUseActionStatus reserveSpace action={current} now={NOW} />
         <div className="relative aspect-[800/420] min-h-80 overflow-hidden">
           <PreviewFixture />
-          <AgentCursorOverlay action={current} preview={preview} now={NOW} />
-        </div>
-        <div className="border-t border-border-subtle px-3 py-2 text-2xs text-muted-foreground">
-          Agent cursor · Your pointer stays free
         </div>
       </div>
     </div>
@@ -106,6 +86,7 @@ function NativeActivity({
   idle = false,
   chrome = false,
   stoppedSessions = 0,
+  executionMode = "background",
 }: {
   phase?: ComputerUseAction["phase"];
   stopped?: boolean;
@@ -113,11 +94,13 @@ function NativeActivity({
   idle?: boolean;
   chrome?: boolean;
   stoppedSessions?: number;
+  executionMode?: ComputerUseAction["executionMode"];
 }) {
   const now = Date.now();
   const native: ComputerUseAction = {
     ...action,
     source: chrome ? "chrome" : "native",
+    executionMode,
     phase,
     action: "type",
     coordinateFrame: "screen",
@@ -129,10 +112,10 @@ function NativeActivity({
   return (
     <div className="grid min-h-dvh place-items-center bg-page-background p-6">
       <div className="max-w-sm text-center">
-        <p className="text-md font-medium">Keep working in your editor</p>
+        <p className="text-md font-medium">Computer use activity</p>
         <p className="mt-2 text-sm text-muted-foreground">
-          Native activity reports the execution mode. The indicator does not
-          move your pointer.
+          Requests stay visible while they await execution. Completed actions
+          report their outcome.
         </p>
       </div>
       <ComputerUseIndicatorView
@@ -169,6 +152,9 @@ export const CompletedBrowser: Story = {
   render: () => <BrowserPreview phase="completed" />,
 };
 export const BackgroundNative: Story = { render: () => <NativeActivity /> };
+export const ForegroundNative: Story = {
+  render: () => <NativeActivity executionMode="foreground" />,
+};
 export const ForegroundRequired: Story = {
   render: () => <NativeActivity phase="foreground_required" />,
 };

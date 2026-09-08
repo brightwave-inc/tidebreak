@@ -44,7 +44,7 @@ async function send(value: ComputerUseAction) {
 }
 
 describe("computer-use action events", () => {
-  it("expires a cursor without another native event", async () => {
+  it("expires activity without another native event", async () => {
     const { result } = renderHook(() => useComputerUseAction());
     await send(action);
     expect(result.current?.actionId).toBe("action-1");

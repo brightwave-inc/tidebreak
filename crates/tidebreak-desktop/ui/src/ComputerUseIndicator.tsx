@@ -163,7 +163,9 @@ export function ComputerUseIndicatorView({
                         ? `Action failed in ${label}`
                         : completed
                           ? `Action completed in ${label}`
-                          : `Tidebreak is controlling ${label}`}
+                          : liveAction?.phase === "running"
+                            ? `Computer use request for ${label}`
+                            : `Computer use: ${label}`}
               </p>
               <p className="text-muted-foreground text-2xs">
                 {snapshot.halted

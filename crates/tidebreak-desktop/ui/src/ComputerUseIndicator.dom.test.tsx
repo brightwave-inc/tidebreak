@@ -46,7 +46,7 @@ describe("ComputerUseIndicator", () => {
     vi.clearAllMocks();
   });
 
-  it("names the app under control and stops it from the banner", async () => {
+  it("names the app and stops it from the banner", async () => {
     mocks.snapshot.active = {
       bundleId: "com.apple.Notes",
       appName: "Notes",
@@ -55,7 +55,7 @@ describe("ComputerUseIndicator", () => {
     };
     render(<ComputerUseIndicator />);
 
-    expect(screen.getByText(/Tidebreak is controlling Notes/)).toBeTruthy();
+    expect(screen.getByText(/Computer use: Notes/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(mocks.stop).toHaveBeenCalledOnce();
   });
@@ -98,9 +98,9 @@ describe("ComputerUseIndicator", () => {
       />,
     );
     expect(
-      screen.getByText("Tidebreak is controlling Google Chrome"),
+      screen.getByText("Computer use request for Google Chrome"),
     ).toBeTruthy();
-    expect(screen.getByText(/Working in the background/)).toBeTruthy();
+    expect(screen.getByText(/Background request/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(mocks.stop).toHaveBeenCalledOnce();
   });
@@ -143,7 +143,7 @@ describe("individually stopped sessions", () => {
         onResume={resume}
       />,
     );
-    expect(screen.getByText("Tidebreak is controlling Editor")).toBeTruthy();
+    expect(screen.getByText("Computer use: Editor")).toBeTruthy();
     expect(
       screen.getByText("2 sessions have stopped computer control."),
     ).toBeTruthy();
