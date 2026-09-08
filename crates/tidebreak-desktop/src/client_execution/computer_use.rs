@@ -160,6 +160,9 @@ pub(crate) struct ActiveControlView {
 pub(crate) struct ComputerUseSnapshot {
     pub(crate) active: Option<ActiveControlView>,
     pub(crate) halted: bool,
+    /// Sessions stopped while another session owns input. They remain paused
+    /// until trusted Resume, without describing the live owner as stopped.
+    pub(crate) stopped_sessions: usize,
 }
 
 /// Indicator bookkeeping, kept separate so the lock is never held across an
@@ -205,6 +208,27 @@ pub(crate) struct ComputerUseState {
     /// never silently become a takeover. Cleared by Stop — after a halt, a
     /// takeover must be re-approved.
     foreground_takeovers: StdMutex<HashSet<(Uuid, String)>>,
+    /// The broker dispatch that actually owns input, plus session stops that
+    /// remain set until the user resumes. Cancellation and owner changes use
+    /// this synchronous lock so a helper is stopped before its future drops.
+    dispatch_state: StdMutex<DispatchState>,
+}
+
+#[derive(Default)]
+struct DispatchState {
+    owner: Option<SessionId>,
+    cancelled: HashSet<SessionId>,
+    revoked: HashSet<SessionId>,
+}
+
+struct ActingOwner<'a> {
+    state: &'a StdMutex<DispatchState>,
+}
+
+impl Drop for ActingOwner<'_> {
+    fn drop(&mut self) {
+        lock(self.state).owner = None;
+    }
 }
 
 impl Default for ComputerUseState {
@@ -216,6 +240,7 @@ impl Default for ComputerUseState {
             halt: tokio::sync::watch::channel(false).0,
             acting_dispatch: tokio::sync::Mutex::new(()),
             foreground_takeovers: StdMutex::new(HashSet::new()),
+            dispatch_state: StdMutex::new(DispatchState::default()),
         }
     }
 }
@@ -295,38 +320,123 @@ impl ComputerUseState {
         }
     }
 
-    async fn halt(&self) {
-        // send_replace, not send: the latch must hold even when no prompt is
-        // currently parked on it (send drops the value with zero receivers).
+    /// Stop only this session. Only its live owner can cancel the shared
+    /// helper; cancelling a queued session leaves another owner running.
+    pub(crate) fn cancel_session<E>(
+        &self,
+        session: SessionId,
+        cancel_helper: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        self.stop_session(session, false, cancel_helper)
+    }
+
+    fn revoke_session<E>(
+        &self,
+        session: SessionId,
+        cancel_helper: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        self.stop_session(session, true, cancel_helper)
+    }
+
+    fn stop_session<E>(
+        &self,
+        session: SessionId,
+        revoked: bool,
+        cancel_helper: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut state = lock(&self.dispatch_state);
+        lock(&self.foreground_takeovers).retain(|(id, _)| *id != session.0);
+        if revoked {
+            state.cancelled.remove(&session);
+            state.revoked.insert(session);
+        } else if !state.revoked.contains(&session) {
+            state.cancelled.insert(session);
+        }
+        if state.owner != Some(session) {
+            return Ok(false);
+        }
         self.halt.send_replace(true);
-        // A Stop withdraws every standing takeover approval: resuming control
-        // later must re-ask before the screen can be taken over again.
         lock(&self.foreground_takeovers).clear();
-        // Make Stop visible immediately, then wait for any action that was
-        // already in flight to drain before reporting the stop complete.
+        cancel_helper()?;
+        Ok(true)
+    }
+
+    pub(crate) fn owns_dispatch(&self, session: SessionId) -> bool {
+        lock(&self.dispatch_state).owner == Some(session)
+    }
+
+    fn stop_all<E>(&self, cancel_helper: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+        let _state = lock(&self.dispatch_state);
+        self.halt.send_replace(true);
+        lock(&self.foreground_takeovers).clear();
+        cancel_helper()
+    }
+
+    pub(crate) async fn drain_acting(&self) {
         let _dispatch = self.acting_dispatch.lock().await;
     }
 
-    async fn dispatch_acting<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
+    #[cfg(test)]
+    async fn halt(&self) {
+        self.stop_all(|| Ok::<_, ()>(())).unwrap();
+        self.drain_acting().await;
+    }
+
+    async fn dispatch_acting<T, F, Fut>(
+        &self,
+        session: SessionId,
+        dispatch: F,
+    ) -> Result<T, StoredResolution>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
         let _dispatch = self.acting_dispatch.lock().await;
-        if self.is_halted() {
-            return Err(stopped_resolution());
-        }
+        let _owner = {
+            let mut state = lock(&self.dispatch_state);
+            if self.is_halted()
+                || state.cancelled.contains(&session)
+                || state.revoked.contains(&session)
+            {
+                return Err(stopped_resolution());
+            }
+            state.owner = Some(session);
+            ActingOwner {
+                state: &self.dispatch_state,
+            }
+        };
         Ok(dispatch().await)
     }
 
-    fn resume(&self) {
+    #[cfg(test)]
+    pub(crate) async fn test_dispatch_acting<T>(
+        &self,
+        session: SessionId,
+        operation: impl std::future::Future<Output = T>,
+    ) -> Result<T, ()> {
+        self.dispatch_acting(session, || operation)
+            .await
+            .map_err(|_| ())
+    }
+
+    fn resume_with<E>(&self, resume_helper: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+        let mut state = lock(&self.dispatch_state);
+        resume_helper()?;
+        state.cancelled.clear();
         self.halt.send_replace(false);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn resume(&self) {
+        self.resume_with(|| Ok::<_, ()>(())).unwrap();
     }
 
     fn snapshot(&self) -> ComputerUseSnapshot {
         ComputerUseSnapshot {
             active: lock(&self.indicator).active.clone(),
             halted: self.is_halted(),
+            stopped_sessions: lock(&self.dispatch_state).cancelled.len(),
         }
     }
 }
@@ -534,15 +644,16 @@ pub(crate) async fn stop_computer_use_control(
     state
         .require_local(crate::host_authority::Authority::ComputerUse)
         .await?;
-    state.computer_use.halt.send_replace(true);
+    let cancelled = state
+        .computer_use
+        .stop_all(|| state.broker.cancel_native_actions());
     emit_state(&app, &state.computer_use);
     if let Some(runtime) =
         app.try_state::<std::sync::Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>()
     {
         runtime.stop_all_chrome();
     }
-    let cancelled = state.broker.cancel_native_actions();
-    state.computer_use.halt().await;
+    state.computer_use.drain_acting().await;
     cancelled.map_err(|error| error.to_string())
 }
 
@@ -564,11 +675,12 @@ pub(crate) async fn resume_computer_use_control(
     )
     .await?
     {
+        // A new helper generation must not revive input that is still draining.
+        let _dispatch = state.computer_use.acting_dispatch.lock().await;
         state
-            .broker
-            .resume_native_actions()
+            .computer_use
+            .resume_with(|| state.broker.resume_native_actions())
             .map_err(|error| error.to_string())?;
-        state.computer_use.resume();
         emit_state(&app, &state.computer_use);
     }
     Ok(())
@@ -910,12 +1022,19 @@ async fn execute_operation(
                 {
                     return resolution;
                 }
-                crate::deep_link::focus_main_window(app);
-                completed(serde_json::json!({
-                    "status": "ok",
-                    "focused": "tidebreak",
-                    "execution_mode": "foreground",
-                }))
+                match cu
+                    .dispatch_acting(call.chat_id, || async {
+                        crate::deep_link::focus_main_window(app);
+                        completed(serde_json::json!({
+                            "status": "ok",
+                            "focused": "tidebreak",
+                            "execution_mode": "foreground",
+                        }))
+                    })
+                    .await
+                {
+                    Ok(resolution) | Err(resolution) => resolution,
+                }
             }
             CuAction::Wait(seconds) => {
                 let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
@@ -1299,6 +1418,7 @@ pub(crate) fn acts_on_host(name: &str) -> bool {
     tidebreak_core::is_computer_use_control_tool(name)
         || name == COMPUTER_SCROLL_TOOL
         || name == COMPUTER_FOCUS_WINDOW_TOOL
+        || name == COMPUTER_RETURN_TO_TIDEBREAK_TOOL
 }
 
 async fn dispatch_broker(
@@ -1353,7 +1473,7 @@ async fn dispatch_broker(
     };
     let result = if acting {
         match cu
-            .dispatch_acting(|| state.broker.operation(envelope))
+            .dispatch_acting(call.chat_id, || state.broker.operation(envelope))
             .await
         {
             Ok(result) => result,
@@ -1531,7 +1651,7 @@ async fn dispatch_consent(
     let acting = acts_on_host(&call.name);
     let result = if acting {
         match cu
-            .dispatch_acting(|| state.broker.operation(envelope))
+            .dispatch_acting(call.chat_id, || state.broker.operation(envelope))
             .await
         {
             Ok(result) => result,
@@ -1636,7 +1756,9 @@ async fn dispatch_confirmation(
     });
     let deadline = tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
     let result = match cu
-        .dispatch_acting(|| state.broker.control_without_retry(confirm, deadline))
+        .dispatch_acting(call.chat_id, || {
+            state.broker.control_without_retry(confirm, deadline)
+        })
         .await
     {
         Ok(result) => result,
@@ -2000,14 +2122,42 @@ pub(crate) struct SessionNativeOutput {
     pub(crate) acts_on_host: bool,
 }
 
-/// Cancel pending native input for an interrupt, a revocation with work in
-/// flight, or process shutdown: latch the executor's Stop — the same latch
-/// the user's Stop button sets, cleared only by a trusted resume, never
-/// automatically — and wait for any acting broker dispatch to drain before
-/// returning. Every cancellation path shares this helper so broker-side
-/// cancellation of long-running synthesized input hooks in exactly once.
-pub(crate) async fn cancel_native_input(state: &HostAccess) {
-    state.computer_use.halt().await;
+/// Latch this session before waking its operation. A live owner also stops
+/// the helper synchronously; the caller then drains that dispatch. A queued
+/// session cannot cancel another session's helper.
+pub(crate) fn cancel_session_native_input(
+    app: &AppHandle,
+    state: &HostAccess,
+    session: SessionId,
+) -> Result<bool, String> {
+    let result = state
+        .computer_use
+        .cancel_session(session, || state.broker.cancel_native_actions())
+        .map_err(|error| error.to_string());
+    emit_state(app, &state.computer_use);
+    result
+}
+
+pub(crate) fn revoke_session_native_input(
+    app: &AppHandle,
+    state: &HostAccess,
+    session: SessionId,
+) -> Result<bool, String> {
+    let result = state
+        .computer_use
+        .revoke_session(session, || state.broker.cancel_native_actions())
+        .map_err(|error| error.to_string());
+    emit_state(app, &state.computer_use);
+    result
+}
+
+pub(crate) fn stop_all_native_input(app: &AppHandle, state: &HostAccess) -> Result<(), String> {
+    let result = state
+        .computer_use
+        .stop_all(|| state.broker.cancel_native_actions())
+        .map_err(|error| error.to_string());
+    emit_state(app, &state.computer_use);
+    result
 }
 
 /// Execute one native computer-use operation for a code session.
@@ -2262,7 +2412,7 @@ mod tests {
         let dispatch_cu = std::sync::Arc::clone(&cu);
         let dispatch = tokio::spawn(async move {
             dispatch_cu
-                .dispatch_acting(|| async move {
+                .dispatch_acting(SessionId::new(), || async move {
                     dispatch_started_tx
                         .send(())
                         .expect("the test observes the in-flight action");
@@ -2313,7 +2463,7 @@ mod tests {
                 .await
                 .expect("the acting request may continue");
             dispatch_cu
-                .dispatch_acting(|| async move {
+                .dispatch_acting(SessionId::new(), || async move {
                     broker_request
                         .send("ordinary_acting_request")
                         .expect("the broker observer remains open");
@@ -2356,7 +2506,7 @@ mod tests {
                 .await
                 .expect("the authorized reissue may continue");
             reissue_cu
-                .dispatch_acting(|| async move {
+                .dispatch_acting(SessionId::new(), || async move {
                     broker_request
                         .send("post_consent_reissue")
                         .expect("the broker observer remains open");
@@ -2397,7 +2547,7 @@ mod tests {
                 .await
                 .expect("the approved action may continue");
             redemption_cu
-                .dispatch_acting(|| async move {
+                .dispatch_acting(SessionId::new(), || async move {
                     broker_request
                         .send(ControlRequest::CuConfirmControlAction(
                             CuConfirmControlActionRequest {
@@ -2424,6 +2574,99 @@ mod tests {
         };
         assert_eq!(error_code, "stopped_by_user");
         assert!(broker_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_queued_session_preserves_the_live_owner() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let owner = SessionId::new();
+        let queued = SessionId::new();
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let owner_cu = cu.clone();
+        let owner_task = tokio::spawn(async move {
+            owner_cu
+                .dispatch_acting(owner, || async move {
+                    started.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let queued_cu = cu.clone();
+        let (queued_started, mut queued_started_rx) = oneshot::channel();
+        let queued_task = tokio::spawn(async move {
+            queued_cu
+                .dispatch_acting(queued, || async move {
+                    queued_started.send(()).unwrap();
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!cu
+            .cancel_session(queued, || -> Result<(), ()> {
+                panic!("a queued session must not signal another owner's helper");
+            })
+            .unwrap());
+        assert!(cu.owns_dispatch(owner));
+        assert!(!cu.is_halted(), "another owner keeps running");
+        assert!(!cu.snapshot().halted);
+        assert_eq!(cu.snapshot().stopped_sessions, 1);
+        assert!(!owner_task.is_finished());
+        release.send(()).unwrap();
+        owner_task.await.unwrap().unwrap();
+        assert!(queued_task.await.unwrap().is_err());
+        assert!(queued_started_rx.try_recv().is_err());
+        assert!(cu.dispatch_acting(queued, || async {}).await.is_err());
+        assert!(cu.dispatch_acting(owner, || async {}).await.is_ok());
+        cu.resume();
+        assert!(cu.dispatch_acting(queued, || async {}).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_stays_revoked_without_offering_resume() {
+        let cu = ComputerUseState::default();
+        let session = SessionId::new();
+        cu.revoke_session(session, || -> Result<(), ()> {
+            panic!("an idle revoke must not stop another helper");
+        })
+        .unwrap();
+        assert_eq!(cu.snapshot().stopped_sessions, 0);
+        assert!(!cu.is_halted());
+        cu.resume();
+        assert!(cu.dispatch_acting(session, || async {}).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_owner_signals_the_helper_before_releasing_ownership() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let owner = SessionId::new();
+        let (started, started_rx) = oneshot::channel();
+        let (helper_cancel, helper_cancel_rx) = oneshot::channel();
+        let signalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner_cu = cu.clone();
+        let observed = signalled.clone();
+        let task = tokio::spawn(async move {
+            owner_cu
+                .dispatch_acting(owner, || async move {
+                    started.send(()).unwrap();
+                    helper_cancel_rx.await.unwrap();
+                    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        assert!(cu
+            .cancel_session(owner, || -> Result<(), ()> {
+                signalled.store(true, std::sync::atomic::Ordering::SeqCst);
+                helper_cancel.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap());
+        task.await.unwrap().unwrap();
+        assert!(!cu.owns_dispatch(owner));
+        assert!(cu.is_halted());
+        assert!(cu.dispatch_acting(owner, || async {}).await.is_err());
     }
 
     #[test]

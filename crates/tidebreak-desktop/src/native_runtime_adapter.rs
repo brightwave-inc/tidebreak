@@ -50,8 +50,8 @@ use tidebreak_server::{NativeRuntime, NativeRuntimeError, NativeRuntimeScope};
 use uuid::Uuid;
 
 use crate::client_execution::computer_use::{
-    cancel_native_input, execute_session_native_operation, SessionNativeOutput,
-    SessionNativeResolution,
+    cancel_session_native_input, execute_session_native_operation, revoke_session_native_input,
+    stop_all_native_input, SessionNativeOutput, SessionNativeResolution,
 };
 use crate::host_access::HostAccess;
 
@@ -73,6 +73,7 @@ const NATIVE_FRAME_MAX_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 pub(crate) struct DesktopNativeRuntime {
     app: AppHandle,
+    available: bool,
     sessions: Mutex<HashMap<SessionId, Arc<SessionNativeState>>>,
 }
 
@@ -94,12 +95,6 @@ struct SessionNativeState {
     cancel: tokio::sync::watch::Sender<u64>,
     /// Set once, never cleared: the session ended.
     revoked: AtomicBool,
-    /// True while an operation that acts on the host (synthesized input,
-    /// focus, scroll) is inside the executor. Cancellation and shutdown
-    /// latch the executor's Stop only when this is set — cancelling a
-    /// session that is idle, queued, or merely reading must not halt
-    /// another session's unrelated native input.
-    in_flight_acting: AtomicBool,
     binding: Mutex<Option<ScopeBinding>>,
     stored: Mutex<StoredResults>,
 }
@@ -120,7 +115,6 @@ impl SessionNativeState {
             gate: tokio::sync::Mutex::new(()),
             cancel: tokio::sync::watch::channel(0).0,
             revoked: AtomicBool::new(false),
-            in_flight_acting: AtomicBool::new(false),
             binding: Mutex::new(None),
             stored: Mutex::new(StoredResults::default()),
         }
@@ -183,6 +177,23 @@ impl SessionNativeState {
                 None => Err(NativeRuntimeError::UnknownOutcome),
             },
         }
+    }
+
+    fn subscribe_at_generation(
+        &self,
+        expected: u64,
+    ) -> Result<tokio::sync::watch::Receiver<u64>, NativeRuntimeError> {
+        let receiver = self.cancel.subscribe();
+        if *receiver.borrow() != expected {
+            return Err(NativeRuntimeError::UnknownOutcome);
+        }
+        Ok(receiver)
+    }
+
+    fn reserve_request(&self, call: &ComputerUseCall) -> Result<(), NativeRuntimeError> {
+        self.admit_new_request()?;
+        self.store(call, unknown_before_dispatch(call));
+        Ok(())
     }
 
     /// Whether a brand-new request may still be admitted.
@@ -248,9 +259,49 @@ fn lock<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Probe once at startup. Permissions are requested by trusted native UX;
+/// missing platform support or an unusable helper is a capability absence.
+fn native_runtime_available(app: &AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if objc2_foundation::NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion
+            < 14
+        {
+            return false;
+        }
+        let Some(helper) =
+            crate::broker::computer_use_helper_path(app.path().resource_dir().ok().as_deref())
+        else {
+            return false;
+        };
+        if !std::fs::metadata(&helper)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        {
+            return false;
+        }
+        std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(helper)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
 impl DesktopNativeRuntime {
     pub(crate) fn new(app: AppHandle) -> Self {
         Self {
+            available: native_runtime_available(&app),
             app,
             sessions: Mutex::new(HashMap::new()),
         }
@@ -288,15 +339,14 @@ impl DesktopNativeRuntime {
     pub(crate) async fn shutdown(&self) {
         let sessions: Vec<Arc<SessionNativeState>> =
             lock(&self.sessions).values().cloned().collect();
-        let mut any_in_flight = false;
+        let state = self.app.state::<HostAccess>();
+        if let Err(error) = stop_all_native_input(&self.app, state.inner()) {
+            eprintln!("tidebreak-desktop: could not stop native input on shutdown: {error}");
+        }
         for session in sessions {
             session.cancel.send_modify(|generation| *generation += 1);
-            any_in_flight |= session.in_flight_acting.load(Ordering::SeqCst);
         }
-        if any_in_flight {
-            let state = self.app.state::<HostAccess>();
-            cancel_native_input(state.inner()).await;
-        }
+        state.computer_use.drain_acting().await;
     }
 }
 
@@ -306,7 +356,7 @@ impl NativeRuntime for DesktopNativeRuntime {
     /// do. Other platforms answer false so the server never mints a channel
     /// or advertises native tools there.
     fn is_available(&self) -> bool {
-        cfg!(target_os = "macos")
+        self.available
     }
 
     async fn execute(
@@ -337,7 +387,10 @@ impl NativeRuntime for DesktopNativeRuntime {
             // The route answers duplicates from `result_for_call`.
             return Err(NativeRuntimeError::Recovered);
         }
-        session.admit_new_request()?;
+        // Reserve the identity before polling the executor. A transport or
+        // result-mapping failure may follow real input and must never replay.
+        session.reserve_request(call)?;
+        let cancelled = session.subscribe_at_generation(queued_at_generation)?;
 
         let state = self.app.state::<HostAccess>();
         let operation = execute_session_native_operation(
@@ -348,14 +401,15 @@ impl NativeRuntime for DesktopNativeRuntime {
             &call.name,
             call.arguments.clone(),
         );
-        let mut cancelled = session.cancel.subscribe();
         let acting = crate::client_execution::computer_use::acts_on_host(&call.name);
-        session.in_flight_acting.store(acting, Ordering::SeqCst);
-        let outcome = tokio::select! {
-            output = operation => Ok(output),
-            _ = cancelled.changed() => Err(()),
-        };
-        session.in_flight_acting.store(false, Ordering::SeqCst);
+        let outcome = await_session_operation(
+            &state.computer_use,
+            scope.session,
+            acting,
+            cancelled,
+            operation,
+        )
+        .await;
         match outcome {
             Ok(output) => {
                 let output = output.map_err(NativeRuntimeError::Failed)?;
@@ -367,11 +421,8 @@ impl NativeRuntime for DesktopNativeRuntime {
                 Ok(result)
             }
             Err(()) => {
-                // The in-flight future was dropped by an interrupt, but an
-                // acting dispatch may already have synthesized input — record
-                // that honestly as an unknown outcome the caller must inspect
-                // before acting again. `cancel_session` has already latched
-                // the executor's Stop for this case.
+                // Interrupted input may have partly acted before the helper
+                // stopped. Retain that uncertainty after draining it.
                 if acting {
                     let unknown = unknown_after_interrupt(call);
                     session.store(call, unknown);
@@ -399,15 +450,16 @@ impl NativeRuntime for DesktopNativeRuntime {
             .await
             .map_err(|_| "native scope is not valid for this session".to_owned())?;
         let session = self.session(scope.session);
+        let state = self.app.state::<HostAccess>();
+        // Signal the actual owner synchronously before waking its operation.
+        // Even on a signal-file failure the helper's fail-closed removal and
+        // the session stop take effect before any future can be dropped.
+        let cancelled = cancel_session_native_input(&self.app, state.inner(), scope.session);
         session.cancel.send_modify(|generation| *generation += 1);
-        // With an operation actually dispatching, cancel the pending input
-        // through the shared executor Stop path — latched until a trusted
-        // resume, never auto-resumed — and wait for the acting dispatch to
-        // drain before reporting the cancellation complete.
-        if session.in_flight_acting.load(Ordering::SeqCst) {
-            let state = self.app.state::<HostAccess>();
-            cancel_native_input(state.inner()).await;
+        if !matches!(cancelled, Ok(false)) {
+            state.computer_use.drain_acting().await;
         }
+        cancelled?;
         Ok(())
     }
 
@@ -417,18 +469,20 @@ impl NativeRuntime for DesktopNativeRuntime {
         // ending access is the fail-closed direction. The binding itself
         // never changes.
         session.revoked.store(true, Ordering::SeqCst);
+        let state = self.app.state::<HostAccess>();
+        let cancelled = revoke_session_native_input(&self.app, state.inner(), scope.session);
+        if let Err(error) = &cancelled {
+            eprintln!("tidebreak-desktop: could not stop revoked native session: {error}");
+        }
         session.cancel.send_modify(|generation| *generation += 1);
-        let in_flight = session.in_flight_acting.load(Ordering::SeqCst);
-        // Withdraw every broker grant the session's conversation subject
-        // accumulated, so nothing outlives the session, and stop any input
-        // still dispatching. Best-effort and async: the tombstone above is
-        // what closes the channel.
+        // The synchronous stop precedes both the wake-up and asynchronous
+        // grant cleanup. No helper input can outlive revocation unnoticed.
         let app = self.app.clone();
         let session_id = scope.session;
         tauri::async_runtime::spawn(async move {
             let state = app.state::<HostAccess>();
-            if in_flight {
-                cancel_native_input(state.inner()).await;
+            if !matches!(cancelled, Ok(false)) {
+                state.computer_use.drain_acting().await;
             }
             if let Err(error) = state.purge_session_native_subject(session_id.0).await {
                 eprintln!(
@@ -436,6 +490,34 @@ impl NativeRuntime for DesktopNativeRuntime {
                 );
             }
         });
+    }
+}
+
+async fn await_session_operation<T>(
+    computer_use: &crate::client_execution::computer_use::ComputerUseState,
+    session: SessionId,
+    acting: bool,
+    mut cancelled: tokio::sync::watch::Receiver<u64>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        _ = async {
+            tokio::select! {
+                _ = cancelled.changed() => {},
+                _ = computer_use.wait_for_halt(), if acting => {},
+            }
+        } => {
+            // Cancellation signals the helper before waking us. Retain its
+            // dispatch until the broker receives the helper's completion;
+            // dropping a waiter must not release input that is still draining.
+            if computer_use.owns_dispatch(session) {
+                let _ = operation.await;
+            }
+            Err(())
+        },
+        output = &mut operation => Ok(output),
     }
 }
 
@@ -536,6 +618,20 @@ fn oversized_result(call: &ComputerUseCall, message: String) -> ComputerUseResul
         text: message,
         data: serde_json::json!({}),
         error_code: Some("result_too_large".to_owned()),
+        images: Vec::new(),
+    }
+}
+
+fn unknown_before_dispatch(call: &ComputerUseCall) -> ComputerUseResult {
+    ComputerUseResult {
+        request_id: call.request_id,
+        outcome: ComputerUseOutcome::Unknown,
+        text:
+            "The operation may have acted, but its final outcome is unavailable. Capture or read \
+               the app before acting again."
+                .to_owned(),
+        data: serde_json::json!({}),
+        error_code: Some("native_outcome_unavailable".to_owned()),
         images: Vec::new(),
     }
 }
@@ -707,6 +803,97 @@ mod tests {
         };
         let result = map_output(&one, output).unwrap();
         assert_eq!(result.error_code.as_deref(), Some("result_too_large"));
+    }
+
+    #[test]
+    fn a_failure_after_reservation_keeps_the_request_non_replayable() {
+        let session = SessionNativeState::new();
+        let call = call("computer_click", serde_json::json!({"app_id":"fixture"}));
+        session.reserve_request(&call).unwrap();
+        // The executor fails before it can replace the reserved receipt.
+        let error: Result<(), NativeRuntimeError> =
+            Err(NativeRuntimeError::Failed("lost reply".into()));
+        assert!(error.is_err());
+        let recovered = session.recall(&call).unwrap().unwrap();
+        assert_eq!(recovered.outcome, ComputerUseOutcome::Unknown);
+        assert_eq!(
+            recovered.error_code.as_deref(),
+            Some("native_outcome_unavailable")
+        );
+        let changed = ComputerUseCall {
+            arguments: serde_json::json!({"app_id":"different"}),
+            ..call.clone()
+        };
+        assert!(matches!(
+            session.recall(&changed),
+            Err(NativeRuntimeError::RequestConflict)
+        ));
+    }
+
+    #[test]
+    fn an_interrupt_before_subscription_is_not_lost() {
+        let session = SessionNativeState::new();
+        let queued_generation = *session.cancel.borrow();
+        session.cancel.send_modify(|generation| *generation += 1);
+        assert!(matches!(
+            session.subscribe_at_generation(queued_generation),
+            Err(NativeRuntimeError::UnknownOutcome)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_keeps_its_future_until_helper_completion() {
+        use crate::client_execution::computer_use::ComputerUseState;
+        use tokio::sync::oneshot;
+        let computer_use = Arc::new(ComputerUseState::default());
+        let session = SessionId::new();
+        let (watch, receiver) = tokio::sync::watch::channel(0);
+        let (entered, entered_rx) = oneshot::channel();
+        let (helper_complete, helper_complete_rx) = oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        struct DropCheck {
+            dropped: Arc<AtomicBool>,
+            cancelled: Arc<AtomicBool>,
+        }
+        impl Drop for DropCheck {
+            fn drop(&mut self) {
+                assert!(
+                    self.cancelled.load(Ordering::SeqCst),
+                    "helper cancellation precedes future drop"
+                );
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        let task_cu = computer_use.clone();
+        let drop_check = DropCheck {
+            dropped: dropped.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let dispatch = task_cu.test_dispatch_acting(session, async move {
+                let _guard = drop_check;
+                entered.send(()).unwrap();
+                helper_complete_rx.await.unwrap();
+            });
+            await_session_operation(&task_cu, session, true, receiver, dispatch).await
+        });
+        entered_rx.await.unwrap();
+        computer_use
+            .cancel_session(session, || -> Result<(), ()> {
+                cancelled.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        watch.send_modify(|generation| *generation += 1);
+        tokio::task::yield_now().await;
+        assert!(computer_use.owns_dispatch(session));
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(!task.is_finished());
+        helper_complete.send(()).unwrap();
+        let _ = task.await.unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!computer_use.owns_dispatch(session));
     }
 
     #[test]

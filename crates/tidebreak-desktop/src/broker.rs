@@ -735,7 +735,7 @@ fn write_native_generation(path: &Path, generation: &str) -> std::io::Result<()>
 }
 
 #[cfg(target_os = "macos")]
-fn computer_use_helper_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn computer_use_helper_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
     let packaged = resource_dir.map(|dir| dir.join("host-broker/tidebreak-cu-helper"));
     if let Some(path) = packaged.filter(|path| path.is_file()) {
         return Some(path);
