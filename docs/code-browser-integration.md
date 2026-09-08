@@ -8,10 +8,18 @@ The managed profile stays separate from your personal browser profile.
 ## Use a shared tab
 
 Open Browser from the foreground chat status menu or from the code workspace.
-Navigate to the page, select **Share with agent**, and confirm the origin in the
-native prompt. Keep the tab visible while the agent acts. Ask the agent to list
-its tabs, read a semantic snapshot, and use the returned element references.
-After each action, the agent must read a fresh snapshot.
+Navigate to the page, select **Share with agent**, and review the origin and
+screenshot disclosure in the native prompt. Keep the tab visible while the agent
+acts. Ask the agent to list its tabs, read a semantic snapshot, and use the
+returned element references. After each action, the agent must read a fresh
+snapshot.
+
+Browser actions use background mode by default. Supported actions use synthetic
+DOM events and show a temporary ghost cursor without moving the hardware pointer
+or taking editor focus. Sites that require trusted input can refuse these events.
+An action that requires native input returns `requires_foreground`; the agent must
+request foreground mode and obtain separate native approval. Foreground mode
+never starts automatically.
 
 Your sharing choice stays saved for this conversation or workspace across app
 restarts. **Only this origin** remembers one origin; **All local sites** covers
@@ -49,7 +57,8 @@ absolute bridge path and an inherited `TIDEBREAK_BROWSER_CAPFILE`. Do not copy
 that capability file, its contents, or its path into prompts or reports.
 A process launched outside Tidebreak does not inherit this connection.
 
-The bridge exposes list, navigate, snapshot, wait, and screenshot operations.
+The bridge exposes list, open, close, navigate, snapshot, wait, and screenshot
+operations. The agent can open tabs for a shared origin and close tabs it owns.
 It advertises `browser_act` when the native runtime supports semantic actions.
 Each operation checks the live capability and origin grant. Foreground uploads
 also resolve an exact conversation output or connected file and require native
@@ -73,8 +82,9 @@ legacy tab from reappearing after restart.
 
 A native webview sits above DOM overlays. `CodeBrowserTab` hides it when dialogs,
 menus, or other app overlays cover the editor. A coalesced `ResizeObserver`
-updates the content rectangle in logical pixels. Hidden tabs do not promise
-background execution.
+updates the content rectangle in logical pixels. Background mode avoids desktop
+input; it still requires a visible, unobscured in-app tab. Agent tabs open beside
+the code editor and preserve its input node and selection.
 
 The external page receives no Tidebreak capability. URL validation accepts only
 HTTP and HTTPS, rejects embedded credentials, and blocks the privileged Vite
@@ -106,18 +116,21 @@ and agent grants remain scoped to their conversation or workspace.
 ## Supported engine and release limits
 
 macOS agent control uses WKWebView through the pinned Tauri and Wry versions.
-The platform adapter advertises semantic actions on macOS. Focus and keyboard
-actions require verified document, frame, and native responder focus. An
-unfocused target that cannot accept native accessibility focus returns
-`unsupported_native`; these actions never substitute an implicit click.
-Windows and Linux
-agent control, background agents, arbitrary signed-in services, personal
-profiles, CAPTCHA handling, and password-manager integration stay deferred.
+The platform adapter advertises semantic actions on macOS. Foreground focus and
+keyboard actions require verified document, frame, and native responder focus.
+An unfocused target that cannot accept native accessibility focus returns
+`unsupported_native`; these actions never substitute an implicit click. Background
+DOM actions use their own target and document checks without requesting native
+focus. Windows and Linux in-app browser control, arbitrary signed-in services,
+personal in-app profiles, CAPTCHA handling, and password-manager integration stay
+deferred. Chrome has a separate adapter; see [computer use](computer-use.md).
 
-WKWebView screenshots remain unavailable while the host cannot establish that
-closed shadow roots conceal no sensitive content. The screenshot capability is
-false and the operation returns an unsupported result. Semantic snapshots remain
-available. Do not weaken this privacy guard to make an acceptance test pass.
+WKWebView screenshots require a visible tab, a fresh snapshot, and the explicit
+capture grant. The native disclosure says that visible pixels reach the selected
+model and provider. Existing sharing without that disclosure does not gain
+capture access. Automatic redaction is not guaranteed, and closed shadow roots
+do not disable disclosed capture. Password and verification fields remain
+redacted in semantic snapshots and require human takeover for actions.
 
 The release gate in issue #2345 requires native foreground and real code-harness
 runs plus signing, staging, universal packaging, notarization, updater, and

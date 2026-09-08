@@ -59,15 +59,21 @@ with the ID returned by `browser_list`. Do not copy capability files or tokens.
 The runner reads the existing fixture state and adds one uniquely named item.
 It does not reset items from other runs.
 
-The runner requires native fill and click, fresh snapshots, stale-reference
-refusal, a bounded load-state wait, and an independent fixture-server read that confirms
-exactly one new item. It checks untrusted page content, sensitive-field
-redaction, and frame boundaries. It stops on an action refusal. The JSON report
-names its scope as `native_cli_smoke` and lists the remaining release gates.
-The cross-origin privacy fixture cannot support text waits or screenshots. The
-runner polls semantic snapshots for the added item. A disabled screenshot
-capability stays unsupported; the release does not require weakening its
-privacy guard.
+The runner requires fill and click in the real WKWebView, fresh snapshots,
+stale-reference refusal, a bounded load-state wait, and an independent
+fixture-server read that confirms exactly one new item. The CLI defaults to
+background DOM actions, so this run does not prove trusted native input. It checks
+untrusted page content, sensitive-field redaction, and frame boundaries. It stops
+on an action refusal. The JSON report names its scope as `native_cli_smoke` and
+lists the remaining release gates.
+
+The runner polls semantic snapshots for the added item and leaves screenshots as
+a separate gate. For capture acceptance, use a fixture containing only test data,
+review the screenshot disclosure, and obtain the native capture grant. Capture a
+fresh snapshot and require a real image from `browser_screenshot`, then verify
+that the image reaches the harness. WKWebView supports disclosed capture even
+when cross-origin frames or closed shadow roots are present; screenshots do not
+promise automatic redaction.
 
 To test the runner's own failure handling, run:
 
@@ -77,29 +83,33 @@ node --test scripts/browser-native-smoke.test.mjs
 
 Those tests inject a fake CLI and do not qualify the native browser.
 
-On macOS, changing the fixture's collapsed **Environment** select returns
-`unsupported_native` before input and requires human takeover. Requesting its
-already selected value remains a no-op. Confirm that a refused change leaves the
-selection and form unchanged, then choose **Take over** to change it yourself.
-Inline listboxes still need native acceptance; the simulated selection tests do
-not establish support.
+In background mode, changing the fixture's **Environment** select uses DOM
+selection. Confirm the resulting value and change event in the fixture. In
+foreground mode, changing a collapsed select remains `unsupported_native` before
+input; requesting its selected value is a no-op. Confirm that a refused foreground
+change leaves the selection and form unchanged, then choose **Take over** to
+change it yourself. Inline listboxes still need foreground acceptance; simulated
+selection tests do not establish native input support.
 
-## Native fill safety
+## Foreground fill safety
 
-After the Todo smoke passes, run the focus and selection race cases inside the
-same Tidebreak coding session:
+After the Todo smoke passes, qualify the focus and selection race cases inside
+the same Tidebreak coding session. Open the fixture with `nativeFillCase` set to
+`replace_on_focus`, `steal_focus`, `replace_on_select`, or
+`steal_focus_on_select`. For each case, use fresh element references and pass
+`--execution-mode foreground` on the browser CLI action. Review the native focus
+approval before the action runs.
 
-```sh
-node scripts/browser-native-fill-safety.mjs \
-  --cli /absolute/path/to/the/bundled/tidebreak \
-  --fixture-origin http://127.0.0.1:41781
-```
+Require `stale_target` for replacement cases and `unsupported_native` for focus
+theft. Verify that the fixture's native event handler ran, then use its
+**Verify native fill values** control to inspect the retained original,
+replacement, and decoy values. All three must remain unchanged. The default
+fixture does not install these event handlers.
 
-The runner opts into four fixture cases that replace the input or move focus
-during native focus and selection. It requires the specific refusal, verifies
-that the native event handler ran, and clicks a verification control to inspect
-the retained original, replacement, and decoy values. All three must remain
-unchanged. The default fixture does not install these event handlers.
+`scripts/browser-native-fill-safety.mjs` retains the old foreground assumptions
+but does not pass the explicit execution mode. It does not qualify these
+foreground races until its action calls request that mode. A background result
+cannot substitute for this gate.
 
 
 ## Recovery fixture
@@ -185,6 +195,12 @@ Complete these gates against the native app before calling the release ready:
   notarization, installation and updater behavior, and package-size changes by
   following `docs/releases.md`. Record artifact hashes and workflow run IDs.
 
+While background actions run, record the hardware pointer, foreground app,
+editor input node, and selection. Check that opening an agent tab, changing page
+state, and taking a screenshot preserve them. Record actual fixture events and
+image bytes; a tool success string does not prove either. Repeat a code edit,
+rebuild, and the UI flow through a real coding session.
+
 Do not infer native or package results from mock tests, a successful compile,
-or an unsigned development launch. Keep screenshots listed as unsupported until
-the native privacy guard can safely advertise that capability.
+or an unsigned development launch. Keep untested capture and input paths listed
+as unqualified. A locked Mac cannot qualify pointer or focus retention.
