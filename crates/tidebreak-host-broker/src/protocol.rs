@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     computer_use::{
-        AxTree, CaptureTarget, ControlMeta, ElementTarget, PermissionStatus, WindowInfo,
+        AxTree, CaptureTarget, ControlMeta, ElementTarget, PermissionStatus, WaitObservation,
+        WindowInfo,
     },
     set_of_marks::Mark,
     AppId, Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId,
@@ -19,7 +20,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -452,6 +453,17 @@ pub enum OperationRequest {
     /// with a handoff identity the trusted desktop redeems through
     /// [`ControlRequest::CuResolveHandoff`].
     CuCaptureScreen { target: CaptureTargetWire },
+    /// Capture with a selected app window and a bounded requested long edge.
+    /// Kept as a separate variant so the original capture shape (used by the
+    /// desktop executor) remains wire-stable while new transports can request
+    /// the full model surface.
+    CuCaptureScreenDetailed {
+        target: CaptureTargetWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_dimension: Option<u32>,
+    },
     /// Read one app's bounded accessibility tree.
     CuReadAppContent {
         bundle_id: String,
@@ -500,12 +512,53 @@ pub enum OperationRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<u32>,
     },
+    /// Launch the registered app for `bundle_id`. No executable/path/args.
+    CuLaunchApp { bundle_id: String },
+    /// Move the pointer over an element or confined point without pressing.
+    CuHover {
+        bundle_id: String,
+        target: ElementTargetWire,
+    },
+    /// Press at `from`, drag through bounded steps, release at `to`.
+    CuDrag {
+        bundle_id: String,
+        from: ElementTargetWire,
+        to: ElementTargetWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    /// Resize one window of the app to a width/height in logical points.
+    CuResizeWindow {
+        bundle_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<u32>,
+        width: f64,
+        height: f64,
+    },
     /// Pause the agent's loop, bounded by the broker. Never reaches the
     /// native helper.
     CuWait {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seconds: Option<f64>,
     },
+    /// Wait until a deterministic app/window/text condition is met, bounded
+    /// by the broker. Pure observation: never types or clicks.
+    CuWaitCondition {
+        bundle_id: String,
+        condition: ConditionWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<f64>,
+    },
+}
+
+/// A deterministic native condition on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ConditionWire {
+    AppRunning,
+    WindowVisible,
+    TextPresent { text: String },
+    TextAbsent { text: String },
 }
 
 /// An element address on the wire: the AX index-path id plus fingerprint from
@@ -555,7 +608,10 @@ impl From<CaptureTargetWire> for CaptureTarget {
     fn from(wire: CaptureTargetWire) -> Self {
         match wire {
             CaptureTargetWire::Display { display_id } => Self::Display { display_id },
-            CaptureTargetWire::App { bundle_id } => Self::App { bundle_id },
+            CaptureTargetWire::App { bundle_id } => Self::App {
+                bundle_id,
+                window_id: None,
+            },
         }
     }
 }
@@ -795,10 +851,16 @@ pub enum OperationResult {
     CuKeyPress(ControlMeta),
     CuScroll(ControlMeta),
     CuFocusWindow(ControlMeta),
+    CuLaunchApp(ControlMeta),
+    CuHover(ControlMeta),
+    CuDrag(ControlMeta),
+    CuResizeWindow(ControlMeta),
     /// How long the broker actually paused, after clamping.
     CuWait {
         seconds: f64,
     },
+    /// How a condition wait resolved.
+    CuWaitCondition(WaitObservation),
     /// A control op's live target classified as consequential, so the broker
     /// did not act. The trusted desktop shows `reason`, and on approval
     /// confirms through [`ControlRequest::CuConfirmControlAction`].

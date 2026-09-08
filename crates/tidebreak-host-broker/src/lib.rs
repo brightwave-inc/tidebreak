@@ -32,7 +32,7 @@ pub use capability::{
 pub use computer_use::{
     AxTree, BackendError, BackendErrorKind, CaptureMeta, CaptureTarget, ComputerUseBackend,
     ControlMeta, ElementDescription, ElementTarget, HelperBackend, PermissionStatus,
-    UnsupportedBackend, WindowFrame, WindowInfo, HELPER_PATH_ENV,
+    UnsupportedBackend, WaitCondition, WaitObservation, WindowFrame, WindowInfo, HELPER_PATH_ENV,
 };
 pub use consequential::{classify, truncate_label, Consequence, ControlOp};
 pub use id::{
@@ -41,8 +41,8 @@ pub use id::{
 };
 pub use path_policy::{RootPolicy, RootPolicyError, ValidatedRoot};
 pub use protocol::{
-    AppFolderPathRequest, AppFolderWriteRequest, CaptureTargetWire, ControlEnvelope,
-    ControlRequest, ControlResponseEnvelope, ControlResult, CuCaptureScreenResult,
+    AppFolderPathRequest, AppFolderWriteRequest, CaptureTargetWire, ConditionWire,
+    ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, CuCaptureScreenResult,
     CuConfirmControlActionRequest, CuGrantAppRequest, CuGrantAppResult, CuListAppGrantsRequest,
     CuNeedsConfirmationResult, CuPermissionStatusResult, CuResolveHandoffRequest,
     CuResolveHandoffResult, CuRevokeAppRequest, DirectoryEntry, ElementTargetWire, EntryKind,

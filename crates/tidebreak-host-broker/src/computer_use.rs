@@ -49,8 +49,12 @@ pub const HELPER_PATH_ENV: &str = "TIDEBREAK_CU_HELPER_PATH";
 pub enum CaptureTarget {
     /// A whole display (the main display when `display_id` is absent).
     Display { display_id: Option<u32> },
-    /// Every window of one app, at full display pixel size.
-    App { bundle_id: String },
+    /// One app — every on-screen window of it, or one named window. The image
+    /// may be downscaled to a bounded long edge.
+    App {
+        bundle_id: String,
+        window_id: Option<u32>,
+    },
 }
 
 /// One on-screen window, as enumerated by the helper.
@@ -94,6 +98,9 @@ pub enum BackendErrorKind {
     /// from `NotFound` so the agent learns to re-read the accessibility tree
     /// and retry rather than treating it as a hard failure.
     StaleElement,
+    /// A raw coordinate target was refused because it does not fall inside an
+    /// on-screen window owned by the granted app. The broker did not act.
+    TargetOutsideApp,
     /// A safety guard backed off instead of acting (a system
     /// security/authorization dialog owns the foreground). Recorded as denied,
     /// NOT retryable — the agent must surface it and stop, not re-fire input at
@@ -166,6 +173,30 @@ pub struct ElementTarget {
     pub y: Option<f64>,
 }
 
+/// A deterministic condition the native helper evaluates against live app /
+/// window / accessibility state. The broker never interprets screen content
+/// itself; the helper's read-only tree scan is the sole source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitCondition {
+    /// A process with this bundle id is a running application.
+    AppRunning,
+    /// The app owns at least one on-screen window.
+    WindowVisible,
+    /// The app's bounded accessibility tree contains this exact text in an
+    /// element title/description/value.
+    TextPresent { text: String },
+    /// The app's bounded accessibility tree no longer contains this exact
+    /// text.
+    TextAbsent { text: String },
+}
+
+/// Outcome of one native condition check after the requested bounded poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitObservation {
+    pub met: bool,
+    pub timed_out: bool,
+}
+
 /// Outcome of a control op (click/type/key/scroll/focus). `used_fallback` is
 /// true when AX targeting was not available and a coordinate/keystroke
 /// synthesis was used instead.
@@ -217,8 +248,10 @@ pub trait ComputerUseBackend: Send + Sync {
         target: &CaptureTarget,
         out_path: &Path,
         marks: &[Mark],
+        max_dimension: Option<u32>,
     ) -> Result<CaptureMeta, BackendError> {
         let _ = marks;
+        let _ = max_dimension;
         self.capture(target, out_path)
     }
     /// Read an app's accessibility tree, bounded by the (clamped) depth / node
@@ -269,6 +302,41 @@ pub trait ComputerUseBackend: Send + Sync {
         bundle_id: &str,
         window_id: Option<u32>,
     ) -> Result<ControlMeta, BackendError>;
+    /// Launch the registered application for `bundle_id` via `NSWorkspace`.
+    /// No path, executable, or argument ever reaches this method.
+    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError>;
+    /// Move the pointer over an element or confined coordinate point without
+    /// pressing any button.
+    fn hover(
+        &self,
+        bundle_id: &str,
+        target: &ElementTarget,
+    ) -> Result<ControlMeta, BackendError>;
+    /// Press at `from`, drag through bounded steps, and release at `to`.
+    /// Both endpoints are resolved/confined before the first mouse-down.
+    fn drag(
+        &self,
+        bundle_id: &str,
+        from: &ElementTarget,
+        to: &ElementTarget,
+        duration_ms: Option<u64>,
+    ) -> Result<ControlMeta, BackendError>;
+    /// Resize one window of the app to `width` × `height` logical points.
+    fn resize_window(
+        &self,
+        bundle_id: &str,
+        window_id: Option<u32>,
+        width: f64,
+        height: f64,
+    ) -> Result<ControlMeta, BackendError>;
+    /// Poll `condition` for up to `timeout_seconds` (mirrors
+    /// [`WaitObservation`]). Pure observation: never synthesizes input.
+    fn wait_condition(
+        &self,
+        bundle_id: &str,
+        condition: &WaitCondition,
+        timeout_seconds: f64,
+    ) -> Result<WaitObservation, BackendError>;
     /// Read the target element's normalized `{role, label}` without acting —
     /// the trust-independent signal the broker's forced-confirmation tripwire
     /// classifies before a control op runs. Resolves the same element the op
@@ -349,6 +417,38 @@ impl ComputerUseBackend for UnsupportedBackend {
         Self::refuse()
     }
     fn focus_window(&self, _: &str, _: Option<u32>) -> Result<ControlMeta, BackendError> {
+        Self::refuse()
+    }
+    fn launch_app(&self, _: &str) -> Result<ControlMeta, BackendError> {
+        Self::refuse()
+    }
+    fn hover(&self, _: &str, _: &ElementTarget) -> Result<ControlMeta, BackendError> {
+        Self::refuse()
+    }
+    fn drag(
+        &self,
+        _: &str,
+        _: &ElementTarget,
+        _: &ElementTarget,
+        _: Option<u64>,
+    ) -> Result<ControlMeta, BackendError> {
+        Self::refuse()
+    }
+    fn resize_window(
+        &self,
+        _: &str,
+        _: Option<u32>,
+        _: f64,
+        _: f64,
+    ) -> Result<ControlMeta, BackendError> {
+        Self::refuse()
+    }
+    fn wait_condition(
+        &self,
+        _: &str,
+        _: &WaitCondition,
+        _: f64,
+    ) -> Result<WaitObservation, BackendError> {
         Self::refuse()
     }
     fn describe_element(
@@ -576,7 +676,7 @@ impl ComputerUseBackend for HelperBackend {
         target: &CaptureTarget,
         out_path: &Path,
     ) -> Result<CaptureMeta, BackendError> {
-        self.capture_with_marks(target, out_path, &[])
+        self.capture_with_marks(target, out_path, &[], None)
     }
 
     fn capture_with_marks(
@@ -584,10 +684,19 @@ impl ComputerUseBackend for HelperBackend {
         target: &CaptureTarget,
         out_path: &Path,
         marks: &[Mark],
+        max_dimension: Option<u32>,
     ) -> Result<CaptureMeta, BackendError> {
         let mut request = match target {
-            CaptureTarget::App { bundle_id } => {
-                json!({ "op": "capture", "target": "app", "bundle_id": bundle_id })
+            CaptureTarget::App {
+                bundle_id,
+                window_id,
+            } => {
+                let mut value =
+                    json!({ "op": "capture", "target": "app", "bundle_id": bundle_id });
+                if let Some(window_id) = window_id {
+                    value["window_id"] = json!(window_id);
+                }
+                value
             }
             CaptureTarget::Display { display_id } => {
                 let mut value = json!({ "op": "capture", "target": "display" });
@@ -600,6 +709,9 @@ impl ComputerUseBackend for HelperBackend {
         request["out_path"] = json!(out_path.to_string_lossy());
         if !marks.is_empty() {
             request["marks"] = json!(marks);
+        }
+        if let Some(max_dimension) = max_dimension {
+            request["max_dimension"] = json!(max_dimension);
         }
 
         let result = self.run(request)?;
@@ -730,6 +842,91 @@ impl ComputerUseBackend for HelperBackend {
         self.run_control(request)
     }
 
+    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError> {
+        self.run_control(json!({ "op": "launch_app", "bundle_id": bundle_id }))
+    }
+
+    fn hover(
+        &self,
+        bundle_id: &str,
+        target: &ElementTarget,
+    ) -> Result<ControlMeta, BackendError> {
+        let mut request = json!({ "op": "hover", "bundle_id": bundle_id });
+        apply_target(&mut request, target);
+        self.run_control(request)
+    }
+
+    fn drag(
+        &self,
+        bundle_id: &str,
+        from: &ElementTarget,
+        to: &ElementTarget,
+        duration_ms: Option<u64>,
+    ) -> Result<ControlMeta, BackendError> {
+        let mut request = json!({ "op": "drag", "bundle_id": bundle_id });
+        // Helper translates `from_*` / `to_*` snake_case fields back onto the
+        // same explicit-point semantics as every other control op.
+        apply_target_to(&mut request, "from", from);
+        apply_target_to(&mut request, "to", to);
+        if let Some(duration_ms) = duration_ms {
+            request["duration_ms"] = json!(duration_ms);
+        }
+        self.run_control(request)
+    }
+
+    fn resize_window(
+        &self,
+        bundle_id: &str,
+        window_id: Option<u32>,
+        width: f64,
+        height: f64,
+    ) -> Result<ControlMeta, BackendError> {
+        let mut request = json!({
+            "op": "resize_window",
+            "bundle_id": bundle_id,
+            "width": width,
+            "height": height
+        });
+        if let Some(window_id) = window_id {
+            request["window_id"] = json!(window_id);
+        }
+        self.run_control(request)
+    }
+
+    fn wait_condition(
+        &self,
+        bundle_id: &str,
+        condition: &WaitCondition,
+        timeout_seconds: f64,
+    ) -> Result<WaitObservation, BackendError> {
+        let (kind, text) = match condition {
+            WaitCondition::AppRunning => ("app_running", None),
+            WaitCondition::WindowVisible => ("window_visible", None),
+            WaitCondition::TextPresent { text } => ("text_present", Some(text.as_str())),
+            WaitCondition::TextAbsent { text } => ("text_absent", Some(text.as_str())),
+        };
+        let mut request = json!({
+            "op": "wait_condition",
+            "bundle_id": bundle_id,
+            "condition": kind,
+            "timeout_seconds": timeout_seconds
+        });
+        if let Some(text) = text {
+            request["text"] = json!(text);
+        }
+        let result = self.run(request)?;
+        let parsed: WaitResultJson = serde_json::from_value(result).map_err(|e| {
+            BackendError::new(
+                BackendErrorKind::OperationFailed,
+                format!("malformed wait result: {e}"),
+            )
+        })?;
+        Ok(WaitObservation {
+            met: parsed.met,
+            timed_out: parsed.timed_out,
+        })
+    }
+
     fn describe_element(
         &self,
         bundle_id: &str,
@@ -774,6 +971,24 @@ fn apply_target(request: &mut Value, target: &ElementTarget) {
     }
 }
 
+/// Inject an [`ElementTarget`]'s present fields with a `prefix_` naming so a
+/// drag carries two independent addresses (`from_*`/`to_*`) whose semantics
+/// are unchanged from the single-target form.
+fn apply_target_to(request: &mut Value, prefix: &str, target: &ElementTarget) {
+    if let Some(id) = &target.element_id {
+        request[format!("{prefix}_element_id")] = json!(id);
+    }
+    if let Some(fingerprint) = &target.element_fingerprint {
+        request[format!("{prefix}_element_fingerprint")] = json!(fingerprint);
+    }
+    if let Some(x) = target.x {
+        request[format!("{prefix}_x")] = json!(x);
+    }
+    if let Some(y) = target.y {
+        request[format!("{prefix}_y")] = json!(y);
+    }
+}
+
 impl HelperBackend {
     /// Run a control op and parse its `{success, used_fallback, detail}`
     /// result.
@@ -815,6 +1030,7 @@ fn map_code(code: Option<&str>) -> BackendErrorKind {
         Some("invalid_request") => BackendErrorKind::InvalidRequest,
         Some("stale_element") => BackendErrorKind::StaleElement,
         Some("yielded") => BackendErrorKind::Yielded,
+        Some("target_outside_app") => BackendErrorKind::TargetOutsideApp,
         _ => BackendErrorKind::OperationFailed,
     }
 }
@@ -873,6 +1089,12 @@ struct DescribeResultJson {
     label: Option<String>,
     #[serde(default)]
     fingerprint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WaitResultJson {
+    met: bool,
+    timed_out: bool,
 }
 
 // Exercises the HelperBackend's spawn / concurrent-drain / bounded-wait

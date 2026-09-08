@@ -27,10 +27,23 @@ enum HelperOp: String, Decodable {
     case keyPress = "key_press"
     case scroll
     case focusWindow = "focus_window"
+    case launchApp = "launch_app"
+    case hover
+    case drag
+    case resizeWindow = "resize_window"
+    case waitCondition = "wait_condition"
     // Read-only: report a target element's role + label without acting, for the
     // broker's forced-confirmation tripwire (it classifies whether a control op
     // is consequential before acting).
     case describeElement = "describe_element"
+}
+
+/// `wait_condition` request kinds.
+enum WaitConditionKind: String, Decodable {
+    case appRunning = "app_running"
+    case windowVisible = "window_visible"
+    case textPresent = "text_present"
+    case textAbsent = "text_absent"
 }
 
 /// What a `capture` request targets.
@@ -86,6 +99,22 @@ struct HelperRequest: Decodable {
     /// double).
     let button: String?
     let clickCount: Int?
+    /// hover/drag/launch/resize/wait parameters.
+    let fromElementId: String?
+    let fromElementFingerprint: String?
+    let fromX: Double?
+    let fromY: Double?
+    let toElementId: String?
+    let toElementFingerprint: String?
+    let toX: Double?
+    let toY: Double?
+    let durationMs: Int?
+    let width: Double?
+    let height: Double?
+    let condition: WaitConditionKind?
+    let timeoutSeconds: Double?
+    /// wait_condition text (text_present / text_absent).
+    let text: String?
     /// scroll: pixel deltas (positive dy scrolls down, positive dx scrolls
     /// right).
     let dx: Double?
@@ -166,6 +195,16 @@ struct CUHelper {
                 emit(try Control.scroll(request))
             case .focusWindow:
                 emit(try Control.focusWindow(request))
+            case .launchApp:
+                emit(try Control.launchApp(request))
+            case .hover:
+                emit(try Control.hover(request))
+            case .drag:
+                emit(try Control.drag(request))
+            case .resizeWindow:
+                emit(try Control.resizeWindow(request))
+            case .waitCondition:
+                emit(try Control.waitCondition(request))
             case .describeElement:
                 emit(try Control.describeElement(request))
             }
