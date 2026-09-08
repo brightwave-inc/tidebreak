@@ -61,7 +61,10 @@ resolve_folder_access_request: carries the user's in-turn folder decision into t
 resolve_output_writeback_request: executes the approved write into a connected host folder, which only the desktop-side broker can reach.
 put_native_mcp_servers: shows the OS-native local-command warning and uses the host-only executor credential to save an approved configuration.
 
-# Computer-use control indicator and Stop
+# Computer-use control indicator, Stop, and native permission setup
+computer_use_permission_status: checks this desktop's native helper permissions and running bundle identity, which macOS uses to attribute screen recording and accessibility access.
+request_computer_use_permissions: asks macOS for screen recording and accessibility permission through the running desktop's native helper on an explicit user gesture.
+open_computer_use_permission_settings: opens a fixed local macOS System Settings pane for screen recording or accessibility permission.
 computer_use_state: reads the native control state (active app and halt latch) that lives only in this process.
 stop_computer_use_control: sets the native halt latch that short-circuits control ops before their next broker round-trip.
 resume_computer_use_control: clears that latch on an explicit user gesture.
