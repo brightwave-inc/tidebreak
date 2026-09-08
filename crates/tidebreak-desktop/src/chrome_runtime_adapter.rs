@@ -474,7 +474,8 @@ impl ChromeRuntimeAdapter {
                 ChromeConnectionMode::Managed => {
                     let mut managed = spawn_managed(&browser, &self.profile_root)?;
                     let (endpoint, cdp) =
-                        connect_profile(managed._profile.path(), Some(&mut managed.child)).await?;
+                        connect_profile(managed._profile.path(), Some(&mut managed.child), mode)
+                            .await?;
                     (endpoint, cdp, Some(managed), None)
                 }
                 ChromeConnectionMode::Existing => {
@@ -483,7 +484,7 @@ impl ChromeRuntimeAdapter {
                     // Chrome 144+ owns enablement and its connection approval.
                     // Opening this page never toggles the setting for the user.
                     open_remote_debugging_settings(&browser)?;
-                    let (endpoint, cdp) = connect_profile(&profile, None).await?;
+                    let (endpoint, cdp) = connect_profile(&profile, None, mode).await?;
                     (endpoint, cdp, None, Some(lease))
                 }
             };
@@ -532,7 +533,10 @@ impl ChromeRuntimeAdapter {
             biased;
             _ = scope.cancel.cancelled() => Err("Chrome connection cancelled.".to_owned()),
             _ = stop.cancelled() => Err("Chrome connection stopped.".to_owned()),
-            outcome = tokio::time::timeout(CONNECT_TIMEOUT, setup) => outcome.unwrap_or_else(|_| Err("Chrome connection timed out. Enable remote debugging at chrome://inspect/#remote-debugging, approve Chrome's prompt, then request a new connection.".to_owned())),
+            outcome = tokio::time::timeout(CONNECT_TIMEOUT, setup) => outcome.unwrap_or_else(|_| {
+                eprintln!("tidebreak-desktop: Chrome connection timed out (mode={mode:?})");
+                Err(connection_timeout_message(mode).to_owned())
+            }),
         };
         match outcome {
             Ok(()) => {
@@ -897,15 +901,55 @@ fn open_remote_debugging_settings(binary: &Path) -> Result<(), String> {
     )
 }
 
+fn connection_failure_message(mode: ChromeConnectionMode) -> &'static str {
+    match mode {
+        ChromeConnectionMode::Managed => "Tidebreak could not connect to the isolated Chrome profile's debugger. Request a new managed connection. If it fails again, check Tidebreak's local logs for Chrome debugger handshake failed.",
+        ChromeConnectionMode::Existing => "Chrome did not connect. Enable remote debugging at chrome://inspect/#remote-debugging and approve Chrome's prompt, then request a new connection.",
+    }
+}
+
+fn connection_timeout_message(mode: ChromeConnectionMode) -> &'static str {
+    match mode {
+        ChromeConnectionMode::Managed => "The isolated Chrome connection timed out. Request a new managed connection and complete Tidebreak's approval prompt. If it fails again, check Tidebreak's local logs for Chrome connection timed out.",
+        ChromeConnectionMode::Existing => "Chrome connection timed out. Enable remote debugging at chrome://inspect/#remote-debugging, approve Chrome's prompt, then request a new connection.",
+    }
+}
+
+/// Keep transport failure detail in local logs without debugger URLs or
+/// control characters. Never publish connection credentials to model output.
+fn connection_diagnostic(error: &str) -> String {
+    error
+        .split_whitespace()
+        .map(|part| {
+            if part.contains("://") || part.contains("/devtools/") {
+                "[endpoint redacted]".to_owned()
+            } else {
+                part.chars()
+                    .filter(|character| !character.is_control())
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(320)
+        .collect()
+}
+
 async fn connect_profile(
     profile: &Path,
     child: Option<&mut Child>,
+    mode: ChromeConnectionMode,
 ) -> Result<(String, CdpSession), String> {
     let endpoint = wait_for_endpoint(profile, child).await?;
     // A failed connection can mean the user declined Chrome's own prompt.
     // Never reconnect automatically or repeatedly ask for that permission.
-    let cdp = CdpSession::connect(&endpoint).await.map_err(|_| {
-        "Chrome did not connect. Enable remote debugging at chrome://inspect/#remote-debugging and approve Chrome's prompt, then request a new connection.".to_owned()
+    let cdp = CdpSession::connect(&endpoint).await.map_err(|error| {
+        eprintln!(
+            "tidebreak-desktop: Chrome debugger handshake failed (mode={mode:?}): {}",
+            connection_diagnostic(&error.to_string()),
+        );
+        connection_failure_message(mode).to_owned()
     })?;
     let version = cdp.command("Browser.getVersion", json!({})).await;
     let is_chrome = version
@@ -1260,6 +1304,40 @@ mod tests {
     }
 
     #[test]
+    fn managed_connection_failure_never_requests_existing_profile_permissions() {
+        let managed = connection_failure_message(ChromeConnectionMode::Managed);
+        assert!(managed.contains("isolated Chrome profile"));
+        assert!(managed.contains("Request a new managed connection"));
+        assert!(!managed.contains(EXISTING_SETUP_URL));
+        let timeout = connection_timeout_message(ChromeConnectionMode::Managed);
+        assert!(timeout.contains("isolated Chrome"));
+        assert!(!timeout.contains(EXISTING_SETUP_URL));
+        assert!(
+            connection_failure_message(ChromeConnectionMode::Existing).contains(EXISTING_SETUP_URL)
+        );
+        assert!(
+            connection_timeout_message(ChromeConnectionMode::Existing).contains(EXISTING_SETUP_URL)
+        );
+    }
+
+    #[test]
+    fn chrome_connection_diagnostics_preserve_bounded_sanitized_transport_errors() {
+        assert_eq!(
+            connection_diagnostic("chrome websocket: IO error: Connection refused (os error 61)"),
+            "chrome websocket: IO error: Connection refused (os error 61)"
+        );
+        assert_eq!(
+            connection_diagnostic("chrome websocket: HTTP error: 403 Forbidden"),
+            "chrome websocket: HTTP error: 403 Forbidden"
+        );
+        let sanitized = connection_diagnostic("failed\nws://127.0.0.1:9222/devtools/browser/private-id \t/devtools/browser/other-id\u{001b}");
+        assert!(!sanitized.contains("private-id"));
+        assert!(!sanitized.contains("other-id"));
+        assert!(!sanitized.chars().any(char::is_control));
+        assert_eq!(connection_diagnostic(&"x".repeat(1000)).len(), 320);
+    }
+
+    #[test]
     fn managed_arguments_preserve_background_startup_and_security() {
         let args = managed_arguments(Path::new("/private/profile with spaces"));
         assert!(args.contains(&"--user-data-dir=/private/profile with spaces".into()));
@@ -1354,7 +1432,11 @@ mod tests {
         let profile = managed._profile.path().to_owned();
         let (endpoint, cdp) = tokio::time::timeout(
             Duration::from_secs(20),
-            connect_profile(&profile, Some(&mut managed.child)),
+            connect_profile(
+                &profile,
+                Some(&mut managed.child),
+                ChromeConnectionMode::Managed,
+            ),
         )
         .await
         .unwrap()
