@@ -427,8 +427,63 @@ fn bound_preview_text(text: &str) -> (String, bool) {
     }
 }
 
+/// Whether a field the preview builder already clamped may have been cut.
+///
+/// `ToolActionPreview::build` clamps every field to `MAX_ACTION_FIELD_CHARS`
+/// and keeps no record of it, so by the time a card is projected the only
+/// trace of a cut is a field sitting exactly at the cap. Treating that as
+/// truncated is conservative: a field that happens to be exactly the cap's
+/// length reads as possibly cut, and the adapter falls back to the web link,
+/// which is the safe direction for a consent surface.
+fn at_field_cap(text: &str) -> bool {
+    text.chars().count() >= MAX_ACTION_FIELD_CHARS
+}
+
+fn any_at_field_cap<'a>(fields: impl IntoIterator<Item = &'a str>) -> bool {
+    fields.into_iter().any(at_field_cap)
+}
+
 fn bound_action_preview(preview: ToolActionPreview) -> (ToolActionPreview, bool) {
-    match preview {
+    let already_cut = match &preview {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+            summary,
+        } => any_at_field_cap(
+            [command.as_str(), cwd.as_str()]
+                .into_iter()
+                .chain(args.iter().map(String::as_str))
+                .chain(files.iter().map(String::as_str))
+                .chain(summary.as_deref()),
+        ),
+        ToolActionPreview::Search { query, summary } => {
+            any_at_field_cap([query.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::WebSearch {
+            query,
+            domains,
+            start_published_at,
+            end_published_at,
+            summary,
+        } => any_at_field_cap(
+            [query.as_str()]
+                .into_iter()
+                .chain(domains.iter().map(String::as_str))
+                .chain(start_published_at.as_deref())
+                .chain(end_published_at.as_deref())
+                .chain(summary.as_deref()),
+        ),
+        ToolActionPreview::WebExtract { url, summary } => {
+            any_at_field_cap([url.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::WriteFile { path, summary } => {
+            any_at_field_cap([path.as_str()].into_iter().chain(summary.as_deref()))
+        }
+        ToolActionPreview::DelegateAgent { .. } => false,
+    };
+    let (preview, truncated) = match preview {
         ToolActionPreview::Exec {
             command,
             args,
@@ -480,7 +535,8 @@ fn bound_action_preview(preview: ToolActionPreview) -> (ToolActionPreview, bool)
             (ToolActionPreview::WriteFile { path, summary }, truncated)
         }
         other => (other, false),
-    }
+    };
+    (preview, truncated || already_cut)
 }
 
 fn tool_name_for_preview(preview: &ToolActionPreview) -> String {
@@ -782,6 +838,55 @@ mod tests {
     use crate::attention::FenceReason;
     use crate::code::HarnessKind;
     use uuid::Uuid;
+
+    #[test]
+    fn a_command_the_builder_clamped_projects_as_a_truncated_card() {
+        let turn_id = TurnId::new();
+        let long = crate::ToolActionPreview::build(
+            "exec",
+            &serde_json::json!({ "command": "x".repeat(600) }),
+        )
+        .expect("a command builds a preview");
+        let card = InternalApprovalRequest::from_kind(
+            &ApprovalKind::ToolUse {
+                preview: long,
+                offered_grants: Vec::new(),
+            },
+            turn_id,
+            false,
+        );
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a tool use projects a tool-use card");
+        };
+        assert!(
+            preview_truncated,
+            "a command the builder cut to the cap is not the command being approved"
+        );
+
+        let short = crate::ToolActionPreview::build(
+            "exec",
+            &serde_json::json!({ "command": "cargo test" }),
+        )
+        .expect("a command builds a preview");
+        let card = InternalApprovalRequest::from_kind(
+            &ApprovalKind::ToolUse {
+                preview: short,
+                offered_grants: Vec::new(),
+            },
+            turn_id,
+            false,
+        );
+        let InternalApprovalRequest::ToolUse {
+            preview_truncated, ..
+        } = card
+        else {
+            panic!("a tool use projects a tool-use card");
+        };
+        assert!(!preview_truncated, "a short command is shown whole");
+    }
 
     #[test]
     fn a_multi_path_file_write_names_every_path_or_says_it_was_cut() {
