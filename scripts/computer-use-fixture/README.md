@@ -56,7 +56,10 @@ open /tmp/tidebreak-cu-fixture/ComputerUseFixture.app --args --fixture-dir /tmp/
 The fixture directory may also be provided as
 `TIDEBREAK_CU_FIXTURE_DIR`. Each launch creates a fresh run id
 (`YYYYMMDD-HHMMSS-uuid-8`), and every event for that run is written under
-`events/<run-id>/<zero-padded-sequence>.json`. Each event JSON has this shape:
+`events/<run-id>/<zero-padded-sequence>.json`. Reset keeps writing to the
+current run until the reset completes, then writes a final `state_snapshot`
+with the new run id into that same current run as a transition record; the new
+run's events live under `events/<new-run-id>/`. Each event JSON has this shape:
 
 ```json
 {
@@ -71,9 +74,9 @@ Events: `launch_ready`, `submission`, `text_entry`, `dropdown_selection`,
 `checkbox_toggle`, `hover_status`, `drag_started`, `drag_dropped`, `scroll`,
 `delayed_status`, `window_resized`,
 `second_window_opened`, `second_window_closed`, `reset_requested`,
-`state_snapshot`. Reusing a sequence number or writing an event that did not
-happen are acceptance failures, so re-running the smoke on the same fixture
-directory is not a shortcut.
+`reset_completed`, `state_snapshot`. Reusing a sequence number or writing an
+event that did not happen are acceptance failures, so re-running the smoke on
+the same fixture directory is not a shortcut.
 
 ## Evidence distinction
 
