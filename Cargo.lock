@@ -7522,6 +7522,7 @@ dependencies = [
  "dom_smoothie",
  "flate2",
  "futures",
+ "futures-util",
  "image",
  "infer 0.22.0",
  "jsonschema",
