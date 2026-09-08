@@ -483,6 +483,7 @@ jobs:
       - name: Desktop credential integration tests
         run: |
           cargo test -p tidebreak-cli --locked setup::tests
+          cargo test -p tidebreak-cli --locked --test serve
           cargo test -p tidebreak-server --features keychain --locked tests::listener
           cargo test -p tidebreak-core --features keychain --locked keychain
 
