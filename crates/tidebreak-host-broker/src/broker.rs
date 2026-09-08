@@ -99,8 +99,8 @@ const MAX_CU_CONDITION_TIMEOUT_SECONDS: f64 = 30.0;
 const MAX_CU_CONDITION_TEXT_BYTES: usize = 2 * 1024;
 const MAX_CU_DRAG_DURATION_MS: u64 = 10_000;
 const MAX_CU_WINDOW_DIMENSION: f64 = 10_000.0;
-/// Cap on Set-of-Marks badges extracted for one annotated capture.
-const MAX_CAPTURE_MARKS: usize = 100;
+/// Cap on annotated capture badges, matching the core contract's MAX_MARK.
+const MAX_CAPTURE_MARKS: usize = 80;
 /// Pending consequential-action confirmations retained at once, oldest
 /// evicted first. Each is single-use and small; the cap only bounds a client
 /// that never confirms.
@@ -2676,13 +2676,19 @@ impl Operator {
             }
             .ok_or(BrokerError::Denied)?
         };
-        let windows = self.spend_once_on_failure(
+        let mut windows = self.spend_once_on_failure(
             grant_id,
             self.shared
                 .computer_use
                 .list_windows(bundle_id.as_deref())
                 .map_err(BrokerError::ComputerUse),
         )?;
+        windows.retain(|window| {
+            !window
+                .bundle_id
+                .as_deref()
+                .is_some_and(is_blocked_control_bundle)
+        });
         Ok((OperationResult::CuListWindows { windows }, Some(grant_id)))
     }
 

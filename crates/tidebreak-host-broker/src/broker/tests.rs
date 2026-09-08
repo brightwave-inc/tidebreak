@@ -4487,6 +4487,9 @@ struct StubCuBackend {
     resized: Mutex<Vec<(String, f64, f64)>>,
     wait_conditions: Mutex<Vec<(String, WaitCondition)>>,
     capture_png: Vec<u8>,
+    tree_override: Mutex<Option<AxTree>>,
+    windows_override: Mutex<Option<Vec<WindowInfo>>>,
+    annotated_marks: Mutex<Vec<crate::set_of_marks::Mark>>,
     fail_click: Mutex<Option<BackendErrorKind>>,
     /// (op, mode) for every control dispatch, so tests can assert the broker
     /// hands the backend the mode the wire carried (background by default).
@@ -4564,6 +4567,9 @@ impl StubCuBackend {
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
     /// finds exactly one mark.
     fn ax_tree(&self) -> AxTree {
+        if let Some(tree) = self.tree_override.lock().unwrap().as_ref() {
+            return tree.clone();
+        }
         AxTree {
             app_name: Some("Example".to_owned()),
             tree: serde_json::json!({
@@ -4619,10 +4625,10 @@ impl ComputerUseBackend for StubCuBackend {
         &self,
         target: &CaptureTarget,
         out_path: &Path,
-        _marks: &[crate::set_of_marks::Mark],
+        marks: &[crate::set_of_marks::Mark],
         _max_dimension: Option<u32>,
     ) -> Result<CaptureMeta, BackendError> {
-        let _ = target;
+        *self.annotated_marks.lock().unwrap() = marks.to_vec();
         self.capture(target, out_path)
     }
 
@@ -4636,6 +4642,9 @@ impl ComputerUseBackend for StubCuBackend {
     }
 
     fn list_windows(&self, _bundle_id: Option<&str>) -> Result<Vec<WindowInfo>, BackendError> {
+        if let Some(windows) = self.windows_override.lock().unwrap().as_ref() {
+            return Ok(windows.clone());
+        }
         Ok(vec![WindowInfo {
             window_id: 7,
             title: Some("Inbox".to_owned()),
@@ -5632,6 +5641,83 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::AuditUnavailable);
     assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn unfiltered_window_lists_omit_blocked_app_owners() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ReadAppContent, Some("com.example.app"));
+    let window = fixture.backend.list_windows(None).unwrap().remove(0);
+    let bundles = [
+        "com.example.app",
+        "com.apple.keychainaccess",
+        "com.apple.SecurityAgent.helper",
+        "io.brightwave.tidebreak.dev",
+        "io.brightwave.tidebreak-fixture",
+    ];
+    *fixture.backend.windows_override.lock().unwrap() = Some(
+        bundles
+            .iter()
+            .enumerate()
+            .map(|(index, bundle)| WindowInfo {
+                window_id: u32::try_from(index).unwrap(),
+                bundle_id: Some((*bundle).to_owned()),
+                title: Some(format!("Window owned by {bundle}")),
+                ..window.clone()
+            })
+            .collect(),
+    );
+
+    let result = fixture
+        .operate(OperationRequest::CuListWindows { bundle_id: None })
+        .unwrap();
+    let OperationResult::CuListWindows { windows } = result else {
+        panic!("window list expected")
+    };
+    assert_eq!(
+        windows
+            .iter()
+            .filter_map(|window| window.bundle_id.as_deref())
+            .collect::<Vec<_>>(),
+        ["com.example.app", "io.brightwave.tidebreak-fixture"],
+    );
+}
+
+#[test]
+fn dense_captures_only_annotate_marks_the_model_can_reference() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::CaptureScreen, Some("com.example.app"));
+    *fixture.backend.tree_override.lock().unwrap() = Some(AxTree {
+        app_name: Some("Example".to_owned()),
+        tree: serde_json::json!({
+            "role": "AXWindow",
+            "children": (0..100).map(|index| serde_json::json!({
+                "role": "AXButton",
+                "id": format!("0.{index}"),
+                "fingerprint": format!("fp-{index}"),
+                "title": format!("Button {index}"),
+                "frame": { "x": 0.0, "y": index * 30, "width": 60.0, "height": 24.0 },
+            })).collect::<Vec<_>>(),
+        }),
+        truncated: false,
+    });
+
+    let result = fixture
+        .operate(OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+        })
+        .unwrap();
+    let OperationResult::CuCaptureScreen(capture) = result else {
+        panic!("capture expected")
+    };
+    assert_eq!(capture.marks.len(), 80);
+    assert_eq!(capture.marks.last().unwrap().mark, 80);
+    assert_eq!(
+        *fixture.backend.annotated_marks.lock().unwrap(),
+        capture.marks
+    );
 }
 
 #[test]

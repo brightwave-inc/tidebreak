@@ -41,7 +41,7 @@ use tidebreak_core::{
     COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
 use tidebreak_host_broker::{
-    extract_marks, is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod,
+    is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod,
     ControlRequest, ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest,
     CuResolveHandoffRequest, CuRevokeAppRequest, ElementTargetWire, ErrorCode, ExecutionMode,
     GrantSubject, Mark, OperationEnvelope, OperationRequest, OperationResult, SubjectKind,
@@ -74,8 +74,6 @@ const MAX_WINDOW_ROWS: usize = 64;
 /// captures across many apps resets the table rather than growing it; marks
 /// are a look-then-act affordance, so a dropped entry only costs a re-capture.
 const MAX_MARK_TABLES: usize = 64;
-/// Mark numbers are 1-based; mirrors the core contract's bound.
-const MAX_CACHED_MARKS: usize = tidebreak_core::MAX_MARK as usize;
 /// Renderer event carrying the full control/consent snapshot on every change.
 const STATE_EVENT: &str = "computer-use-state-changed";
 /// A control op touches the indicator as recently active for this long after
@@ -183,8 +181,8 @@ fn now_millis() -> i64 {
 /// next capture after a restart; a halt survives only until one (a stopped
 /// agent was already told not to retry, and consent is re-asked, not assumed).
 pub(crate) struct ComputerUseState {
-    /// (conversation, app scope) → marks from that pair's latest capture or
-    /// tree read. The scope is the bundle id, or empty for a whole-display
+    /// (conversation, app scope) → marks from that pair's latest capture.
+    /// The scope is the bundle id, or empty for a whole-display
     /// capture (which carries no marks today, but the key shape stays uniform).
     marks: StdMutex<HashMap<(Uuid, String), Vec<Mark>>>,
     /// Bundle id → human app name, learned from window lists and tree reads so
@@ -253,7 +251,7 @@ fn lock<'a, T>(mutex: &'a StdMutex<T>) -> StdMutexGuard<'a, T> {
 }
 
 impl ComputerUseState {
-    /// Record the marks one capture or tree read reported for (chat, app).
+    /// Record the marks one capture reported for (chat, app).
     fn remember_marks(&self, chat_id: Uuid, scope: &str, marks: Vec<Mark>) {
         let mut table = lock(&self.marks);
         if table.len() >= MAX_MARK_TABLES && !table.contains_key(&(chat_id, scope.to_owned())) {
@@ -263,7 +261,7 @@ impl ComputerUseState {
     }
 
     /// Resolve a Set-of-Marks number to its element address, from the most
-    /// recent capture or tree read for this chat and app.
+    /// recent capture for this chat and app.
     fn resolve_mark(&self, chat_id: Uuid, scope: &str, mark: u32) -> Option<(String, String)> {
         lock(&self.marks)
             .get(&(chat_id, scope.to_owned()))
@@ -1823,6 +1821,30 @@ async fn dispatch_confirmation(
     }
 }
 
+/// Preserve screenshot badge numbers when a tree read returns a smaller or
+/// changed set of elements. Tree targets use their explicit element identities.
+fn finish_tree_read(
+    cu: &ComputerUseState,
+    call: &ToolCallRecord,
+    tree: tidebreak_host_broker::computer_use::AxTree,
+) -> StoredResolution {
+    if let Some(bundle_id) = call
+        .arguments
+        .get("app_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        cu.learn_app_name(bundle_id, tree.app_name.as_deref());
+    }
+    let tree_text = serde_json::to_string(&tree.tree).unwrap_or_else(|_| "{}".to_owned());
+    let (tree_text, over_limit) = tidebreak_core::truncate_utf8(&tree_text, MAX_TREE_RESULT_BYTES);
+    completed(serde_json::json!({
+        "status": "ok",
+        "app_name": tree.app_name,
+        "truncated": tree.truncated || over_limit,
+        "tree": tree_text,
+    }))
+}
+
 /// The published screenshot of one capture, kept typed so the resolution wire
 /// can carry it as structured image references once the server accepts them.
 /// Today the same identity reaches the model through the result text.
@@ -1879,28 +1901,7 @@ async fn map_result(
         OperationResult::CuCaptureScreen(capture) => {
             finish_capture(app, state, context, call, capture, delivery).await
         }
-        OperationResult::CuReadAppContent(tree) => {
-            if let Some(bundle_id) = call
-                .arguments
-                .get("app_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                cu.learn_app_name(bundle_id, tree.app_name.as_deref());
-                // Marks from a tree read are valid targets exactly like a
-                // capture's — the same elements, numbered the same way.
-                let marks = extract_marks(&tree.tree, MAX_CACHED_MARKS);
-                cu.remember_marks(call.chat_id.0, bundle_id, marks);
-            }
-            let tree_text = serde_json::to_string(&tree.tree).unwrap_or_else(|_| "{}".to_owned());
-            let (tree_text, over_limit) =
-                tidebreak_core::truncate_utf8(&tree_text, MAX_TREE_RESULT_BYTES);
-            completed(serde_json::json!({
-                "status": "ok",
-                "app_name": tree.app_name,
-                "truncated": tree.truncated || over_limit,
-                "tree": tree_text,
-            }))
-        }
+        OperationResult::CuReadAppContent(tree) => finish_tree_read(cu, call, tree),
         OperationResult::CuClick(meta)
         | OperationResult::CuTypeText(meta)
         | OperationResult::CuKeyPress(meta)
@@ -2354,6 +2355,64 @@ mod tests {
         assert_eq!(wire.element_id.as_deref(), Some("0.4.2"));
         assert_eq!(wire.element_fingerprint.as_deref(), Some("fp-0.4.2"));
         assert_eq!(wire.x, None);
+    }
+
+    #[test]
+    fn a_narrow_tree_read_preserves_the_last_screenshot_mark_mapping() {
+        let cu = ComputerUseState::default();
+        let chat = SessionId::new();
+        cu.remember_marks(
+            chat.0,
+            "com.example.app",
+            vec![mark(1, "0.1"), mark(2, "0.4.2")],
+        );
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat,
+            turn_id: tidebreak_core::TurnId::new(),
+            provider_id: "tree-read".into(),
+            name: COMPUTER_READ_APP_CONTENT_TOOL.into(),
+            arguments: serde_json::json!({ "app_id": "com.example.app", "max_nodes": 1 }),
+            raw_arguments: None,
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        let tree = tidebreak_host_broker::computer_use::AxTree {
+            app_name: Some("Example".into()),
+            tree: serde_json::json!({
+                "role": "AXButton",
+                "id": "0.4.2",
+                "fingerprint": "fp-0.4.2",
+                "title": "Second button",
+                "frame": { "x": 0, "y": 0, "width": 10, "height": 10 },
+            }),
+            truncated: true,
+        };
+        let narrow_marks = tidebreak_host_broker::extract_marks(&tree.tree, 80);
+        assert_eq!(narrow_marks[0].element_id, "0.4.2");
+        assert_eq!(
+            narrow_marks[0].mark, 1,
+            "the narrower tree would renumber this element"
+        );
+
+        let resolution = finish_tree_read(&cu, &call, tree);
+        assert!(matches!(resolution, StoredResolution::Completed { .. }));
+        assert_eq!(cu.app_name("com.example.app").as_deref(), Some("Example"));
+        for (number, element_id) in [(1, "0.1"), (2, "0.4.2")] {
+            let target = resolve_target(&cu, chat, "com.example.app", &target_with_mark(number))
+                .expect("the last screenshot still owns its badge numbers");
+            assert_eq!(target.element_id.as_deref(), Some(element_id));
+            assert_eq!(target.element_fingerprint, Some(format!("fp-{element_id}")));
+        }
     }
 
     #[test]
