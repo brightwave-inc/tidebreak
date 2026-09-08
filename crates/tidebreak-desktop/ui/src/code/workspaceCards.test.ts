@@ -4,6 +4,7 @@ import type {
   Attention,
   CodeRepoSnapshot,
   CodeSessionDigest,
+  CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
 } from "../api/types";
 import {
@@ -296,7 +297,58 @@ describe("arrangeWorkspaces", () => {
       ),
     ).toEqual(["needs_you", "idle"]);
   });
+
+  it("groups Slack DM and channel sessions apart from local ones", () => {
+    const rows = [
+      workspace("ws-local", "app", "active", "2026-08-14T00:00:00.000Z"),
+      workspace("ws-dm", "app", "active", "2026-08-16T00:00:00.000Z"),
+      workspace("ws-channel", "app", "active", "2026-08-17T00:00:00.000Z"),
+    ];
+    const sessions: Record<string, CodeSessionSnapshot> = {
+      "ws-dm": sessionOn("ws-dm", {
+        channel_kind: "slack",
+        external_key: "T0400000:D0898765:dm2",
+      }),
+      "ws-channel": sessionOn("ws-channel", {
+        channel_kind: "slack",
+        external_key: "T0400000:C0812345:1724900000.123456",
+      }),
+    };
+    const groups = arrangeWorkspaces("by-created", repos, rows, {}, sessions);
+    expect(
+      groups.map((group) => [
+        group.key,
+        group.label,
+        group.workspaces.map((item) => item.id),
+      ]),
+    ).toEqual([
+      ["local", "Local", ["ws-local"]],
+      ["slack:channel", "Slack channel", ["ws-channel"]],
+      ["slack:dm", "Slack DM", ["ws-dm"]],
+    ]);
+  });
 });
+
+function sessionOn(
+  workspaceId: string,
+  external_origin: CodeSessionSnapshot["external_origin"],
+): CodeSessionSnapshot {
+  return {
+    visibility: "private",
+    id: `sess-${workspaceId}`,
+    workspace_id: workspaceId,
+    kind: "interactive",
+    harness_kind: "claude_code",
+    execution_location: "machine",
+    permission_mode: "ask",
+    fast_mode: false,
+    lifecycle: "idle",
+    attention: working,
+    unrecognized_event_count: 0,
+    created_at: "2026-08-15T00:00:00.000Z",
+    ...(external_origin ? { external_origin } : {}),
+  };
+}
 
 describe("workspaceStatusRank", () => {
   it("ranks archived last even when a digest is noisy", () => {

@@ -126,6 +126,7 @@ export function CommandPaletteDialog() {
       repos,
       workspaces,
       digests,
+      sessions,
     );
     const workspace = workspaces.find((entry) => entry.id === workspaceId);
     const repo = repos.find((entry) => entry.id === workspace?.repo_id);

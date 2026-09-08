@@ -2,10 +2,15 @@ import type {
   Attention,
   CodeRepoSnapshot,
   CodeSessionDigest,
+  CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
   CodeWorkspaceStatus,
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
+import {
+  sessionOriginGroupLabel,
+  slackConversationKind,
+} from "./SessionOriginBanner";
 import {
   prCompactStatusLabel,
   pullRequestLifecycle,
@@ -311,8 +316,62 @@ export function arrangeWorkspaces(
   repos: readonly CodeRepoSnapshot[],
   workspaces: readonly CodeWorkspaceSnapshot[],
   digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
+  sessions: Readonly<Record<string, CodeSessionSnapshot | undefined>> = {},
 ): ArrangedWorkspaceGroup[] {
-  return arrangeLiveWorkspaces(mode, repos, workspaces, digests);
+  const live = workspaces.filter((workspace) => !isPutAway(workspace));
+  const originKeys = new Set(
+    live.map((workspace) => originGroupKey(sessions[workspace.id])),
+  );
+  const usesOriginGroups =
+    originKeys.size > 1 || (originKeys.size === 1 && !originKeys.has("local"));
+  if (!usesOriginGroups) {
+    return arrangeLiveWorkspaces(mode, repos, workspaces, digests);
+  }
+  const buckets = new Map<string, CodeWorkspaceSnapshot[]>();
+  for (const workspace of live) {
+    const key = originGroupKey(sessions[workspace.id]);
+    const listed = buckets.get(key);
+    if (listed) listed.push(workspace);
+    else buckets.set(key, [workspace]);
+  }
+  const groups: ArrangedWorkspaceGroup[] = [];
+  for (const key of orderedOriginKeys(buckets.keys())) {
+    const listed = buckets.get(key);
+    if (!listed || listed.length === 0) continue;
+    groups.push({
+      key,
+      label: originGroupHeader(key, sessions[listed[0]!.id]),
+      workspaces: arrangeLiveWorkspaces(mode, repos, listed, digests).flatMap(
+        (group) => group.workspaces,
+      ),
+    });
+  }
+  return groups;
+}
+
+function originGroupKey(session: CodeSessionSnapshot | undefined): string {
+  const origin = session?.external_origin;
+  if (!origin) return "local";
+  return `${origin.channel_kind}:${slackConversationKind(origin.external_key)}`;
+}
+
+function originGroupHeader(
+  key: string,
+  session: CodeSessionSnapshot | undefined,
+): string {
+  if (key === "local") return "Local";
+  if (session?.external_origin) {
+    return sessionOriginGroupLabel(session.external_origin);
+  }
+  return key;
+}
+
+function orderedOriginKeys(keys: Iterable<string>): string[] {
+  return [...keys].sort((left, right) => {
+    if (left === "local") return -1;
+    if (right === "local") return 1;
+    return left.localeCompare(right);
+  });
 }
 
 function arrangeLiveWorkspaces(

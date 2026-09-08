@@ -8,8 +8,32 @@ import type {
   SessionExternalOrigin as CodeSessionExternalOrigin,
 } from "../generated/wire";
 
-function channelLabel(kind: string): string {
+export function channelLabel(kind: string): string {
   return kind === "slack" ? "Slack" : kind;
+}
+
+/** Slack conversation id from a colon- or slash-delimited external key. */
+export function slackChannelId(externalKey: string): string {
+  const parts = externalKey.split(externalKey.includes(":") ? ":" : "/");
+  return parts[1] ?? "";
+}
+
+/**
+ * Slack DM ids start with `D`. Everything else is a channel (including
+ * private groups).
+ */
+export function slackConversationKind(externalKey: string): "dm" | "channel" {
+  return /^D/i.test(slackChannelId(externalKey)) ? "dm" : "channel";
+}
+
+/** Rail group name: channel family plus DM or channel. */
+export function sessionOriginGroupLabel(
+  origin: CodeSessionExternalOrigin,
+): string {
+  const name = channelLabel(origin.channel_kind);
+  return slackConversationKind(origin.external_key) === "dm"
+    ? `${name} DM`
+    : `${name} channel`;
 }
 
 /**

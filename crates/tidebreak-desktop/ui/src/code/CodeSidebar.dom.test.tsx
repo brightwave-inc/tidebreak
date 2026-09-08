@@ -576,6 +576,96 @@ describe("CodeSidebar", () => {
     );
   });
 
+  it("groups local, Slack DM, and Slack channel sessions as three named origins", async () => {
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "ws-local",
+        repo_id: "repo-1",
+        title: "Local thread",
+        worktree_path: "/tmp/app/.worktrees/local",
+        branch_name: "tidebreak/local",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-dm",
+        repo_id: "repo-1",
+        title: "Slack DM thread",
+        worktree_path: "/tmp/app/.worktrees/dm",
+        branch_name: "tidebreak/dm",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+      {
+        id: "ws-channel",
+        repo_id: "repo-1",
+        title: "Slack channel thread",
+        worktree_path: "/tmp/app/.worktrees/channel",
+        branch_name: "tidebreak/channel",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-17T00:00:00.000Z",
+      },
+    ]);
+    const idle = {
+      visibility: "private" as const,
+      kind: "interactive" as const,
+      harness_kind: "claude_code" as const,
+      execution_location: "machine" as const,
+      permission_mode: "ask" as const,
+      fast_mode: false,
+      lifecycle: "idle" as const,
+      attention: {
+        state: { type: "working" as const },
+        source: "lifecycle" as const,
+      },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+    };
+    useCodeCatalogStore.getState().rememberSession({
+      ...idle,
+      id: "sess-local",
+      workspace_id: "ws-local",
+    });
+    useCodeCatalogStore.getState().rememberSession({
+      ...idle,
+      id: "sess-dm",
+      workspace_id: "ws-dm",
+      external_origin: {
+        channel_kind: "slack",
+        external_key: "T0400000:D0898765:dm2",
+      },
+    });
+    useCodeCatalogStore.getState().rememberSession({
+      ...idle,
+      id: "sess-channel",
+      workspace_id: "ws-channel",
+      external_origin: {
+        channel_kind: "slack",
+        external_key: "T0400000:C0812345:1724900000.123456",
+      },
+    });
+
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const groups = await screen.findAllByTestId("rail-origin-group");
+    expect(groups.map((group) => group.getAttribute("data-origin"))).toEqual([
+      "local",
+      "slack:channel",
+      "slack:dm",
+    ]);
+    expect(screen.getByText("Local")).toBeInTheDocument();
+    expect(screen.getByText("Slack DM")).toBeInTheDocument();
+    expect(screen.getByText("Slack channel")).toBeInTheDocument();
+  });
+
   it("opens and clears selection on an unmodified click", async () => {
     const { router } = await renderWithRouter(
       <AppContextProvider value={app}>
