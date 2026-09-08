@@ -133,11 +133,30 @@ pub fn is_computer_use_control_tool(name: &str) -> bool {
 
 /// Shared guidance folded into the acting tools' descriptions: computer use is
 /// primarily an observation surface, while GUI driving is a disruptive fallback.
-const ACTING_NOTE: &str = "\n\nUse GUI control sparingly. Clicking, typing, scrolling, and moving focus use the user's real interface and are slower, more brittle, and more disruptive than reading app content or using a dedicated tool. Read first, prefer a non-GUI path when one exists, and act only when it is necessary to complete the user's request. The user can stop control at any time.";
+const ACTING_NOTE: &str = "\n\nUse GUI control sparingly. Clicking, typing, scrolling, and moving focus use the user's real interface and are slower, more brittle, and more disruptive than reading app content or using a dedicated tool. Read first, prefer a non-GUI path when one exists, and act only when it is necessary to complete the user's request. The user can stop control at any time.\n\nActions run in the default `background` execution mode: the host drives the app directly while preserving the user's focus, pointer, and active window. Set `execution_mode` to \"foreground\" only when an action genuinely needs the real pointer or focus; foreground control asks the user for a separate takeover permission first. An action that cannot be performed without taking over refuses with `requires_foreground` — it is never retried or escalated automatically.";
 
 /// Shared targeting guidance: prefer a Set-of-Marks number or an element
 /// identity over raw coordinates.
 const TARGETING_NOTE: &str = "Target by `mark` (a number from the last annotated screenshot) or by `element_id` + `element_fingerprint` from `computer_read_app_content`. Use `x`/`y` coordinates only when the app exposes no usable accessibility element.";
+
+/// How a control action interacts with the user's live session. Background is
+/// the default everywhere: the host acts on the app directly and must leave
+/// the user's focus, pointer, and active window untouched. Foreground is an
+/// explicit takeover the desktop only honors after a separate trusted native
+/// approval per app and chat — an app-control grant alone never implies it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(description = "", transform = crate::client_tools::preserve_enum_wire_shape)]
+pub enum ExecutionMode {
+    /// Act without disturbing the user's focus or pointer (the default). An
+    /// action that cannot honor this refuses with `requires_foreground`.
+    #[default]
+    #[schemars(description = "")]
+    Background,
+    /// Take over the real pointer/focus. Requires a separate user approval.
+    #[schemars(description = "")]
+    Foreground,
+}
 
 /// Which mouse button a click uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -289,6 +308,14 @@ pub struct ComputerClickArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Double-click when true (default single).")]
     pub double: Option<bool>,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_TYPE_TEXT_TOOL`].
@@ -307,6 +334,14 @@ pub struct ComputerTypeTextArgs {
     /// Where to type. Omit to type into the focused field.
     #[serde(flatten)]
     pub target: ElementTargetArgs,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_KEY_PRESS_TOOL`].
@@ -326,6 +361,14 @@ pub struct ComputerKeyPressArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Chord modifiers to hold (cmd/shift/ctrl/alt/fn).")]
     pub modifiers: Option<Vec<KeyModifier>>,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_SCROLL_TOOL`].
@@ -346,6 +389,14 @@ pub struct ComputerScrollArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Vertical pixel delta (positive = down).")]
     pub dy: Option<f64>,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_FOCUS_WINDOW_TOOL`].
@@ -359,12 +410,31 @@ pub struct ComputerFocusWindowArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Optional window id to raise.")]
     pub window_id: Option<u32>,
+    /// Focusing always changes which app the user is looking at, so this tool
+    /// only acts in foreground mode with the user's separate approval. The
+    /// background default refuses with `requires_foreground`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode. Focusing takes over the user's screen, so this tool requires \"foreground\" (with separate user approval); the \"background\" default refuses."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_RETURN_TO_TIDEBREAK_TOOL`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ComputerReturnToTidebreakArgs {}
+pub struct ComputerReturnToTidebreakArgs {
+    /// Raising the Tidebreak window steals whatever the user is focused on,
+    /// so this tool only acts in foreground mode with the user's separate
+    /// approval. The background default refuses with `requires_foreground`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode. Raising the Tidebreak window takes over the user's focus, so this tool requires \"foreground\" (with separate user approval); the \"background\" default refuses."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
+}
 
 /// Canonical arguments for [`COMPUTER_WAIT_TOOL`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -420,6 +490,14 @@ pub struct ComputerLaunchAppArgs {
         description = "App bundle id to launch (e.g. \"com.apple.Notes\")."
     )]
     pub app_id: String,
+    /// Background (default) launches without activating the app over the
+    /// user's current focus; foreground activation needs separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) launches without stealing the user's focus; \"foreground\" activates the app and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_HOVER_TOOL`].
@@ -434,6 +512,14 @@ pub struct ComputerHoverArgs {
     /// the pointer moves.
     #[serde(flatten)]
     pub target: ElementTargetArgs,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_DRAG_TOOL`].
@@ -457,6 +543,14 @@ pub struct ComputerDragArgs {
         description = "Drag duration in ms (default 200, max 10000)."
     )]
     pub duration_ms: Option<u64>,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_RESIZE_WINDOW_TOOL`].
@@ -477,6 +571,14 @@ pub struct ComputerResizeWindowArgs {
     /// New height in logical points (max 10000).
     #[schemars(range(min = 1.0, max = MAX_WINDOW_DIMENSION))]
     pub height: f64,
+    /// Background (default) preserves the user's focus and pointer;
+    /// foreground takes over and needs the user's separate approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (default) preserves the user's focus and pointer; \"foreground\" takes over and requires separate user approval."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 // MARK: - Validation
@@ -783,7 +885,7 @@ pub fn computer_scroll_tool_spec() -> ToolSpec {
 pub fn computer_focus_window_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerFocusWindowArgs>(
         COMPUTER_FOCUS_WINDOW_TOOL,
-        &format!("Bring an app (or one of its windows) to the front. Use this only when focus must move to continue the task, such as before a key press or after another app took focus.{ACTING_NOTE}"),
+        &format!("Bring an app (or one of its windows) to the front. Focusing always takes over what the user is looking at, so this tool acts only with `execution_mode` set to \"foreground\" and the user's separate foreground approval; the background default refuses with `requires_foreground`. Background control does not need focus — act on the app directly instead.{ACTING_NOTE}"),
     )
 }
 
@@ -792,7 +894,7 @@ pub fn computer_focus_window_tool_spec() -> ToolSpec {
 pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerReturnToTidebreakArgs>(
         COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
-        "Return focus to the Tidebreak window. Use after finishing work in another app so the user can see that the task is done and continue the conversation.",
+        "Return focus to the Tidebreak window. Raising Tidebreak takes over whatever the user is focused on, so this tool acts only with `execution_mode` set to \"foreground\" and the user's separate foreground approval; the background default refuses with `requires_foreground`. It is rarely needed — the user can switch back themselves.",
     )
 }
 
@@ -1043,6 +1145,93 @@ mod tests {
         assert_eq!(
             computer_read_app_content_tool_spec().name,
             COMPUTER_READ_APP_CONTENT_TOOL
+        );
+    }
+
+    #[test]
+    fn execution_mode_defaults_to_background_and_stays_typed() {
+        // Absent on the wire means background — the canonical default.
+        let args: ComputerClickArgs =
+            serde_json::from_value(json!({ "app_id": "com.apple.Notes", "mark": 3 })).unwrap();
+        assert_eq!(args.execution_mode, None);
+        assert_eq!(
+            args.execution_mode.unwrap_or_default(),
+            ExecutionMode::Background
+        );
+        // Foreground round-trips through the snake_case wire value.
+        let args: ComputerClickArgs = serde_json::from_value(json!({
+            "app_id": "com.apple.Notes",
+            "mark": 3,
+            "execution_mode": "foreground"
+        }))
+        .unwrap();
+        assert_eq!(args.execution_mode, Some(ExecutionMode::Foreground));
+        assert_eq!(
+            serde_json::to_value(ExecutionMode::Background).unwrap(),
+            json!("background")
+        );
+
+        // Every control tool (plus return_to_tidebreak, which moves focus)
+        // accepts the typed mode…
+        for (name, args) in [
+            (COMPUTER_CLICK_TOOL, json!({ "app_id": "a", "mark": 1 })),
+            (
+                COMPUTER_TYPE_TEXT_TOOL,
+                json!({ "app_id": "a", "text": "x" }),
+            ),
+            (
+                COMPUTER_KEY_PRESS_TOOL,
+                json!({ "app_id": "a", "key": "tab" }),
+            ),
+            (COMPUTER_SCROLL_TOOL, json!({ "app_id": "a", "dy": 10.0 })),
+            (COMPUTER_FOCUS_WINDOW_TOOL, json!({ "app_id": "a" })),
+            (COMPUTER_LAUNCH_APP_TOOL, json!({ "app_id": "a" })),
+            (COMPUTER_HOVER_TOOL, json!({ "app_id": "a", "mark": 1 })),
+            (
+                COMPUTER_DRAG_TOOL,
+                json!({ "app_id": "a", "from": { "mark": 1 }, "to": { "mark": 2 } }),
+            ),
+            (
+                COMPUTER_RESIZE_WINDOW_TOOL,
+                json!({ "app_id": "a", "width": 800.0, "height": 600.0 }),
+            ),
+            (COMPUTER_RETURN_TO_TIDEBREAK_TOOL, json!({})),
+        ] {
+            let mut with_mode = args.clone();
+            with_mode["execution_mode"] = json!("background");
+            assert!(
+                validate_computer_use_arguments(name, &with_mode),
+                "{name} accepts background"
+            );
+            with_mode["execution_mode"] = json!("foreground");
+            assert!(
+                validate_computer_use_arguments(name, &with_mode),
+                "{name} accepts foreground"
+            );
+            // …and an unknown mode never crosses the trusted-client boundary.
+            with_mode["execution_mode"] = json!("takeover");
+            assert!(
+                !validate_computer_use_arguments(name, &with_mode),
+                "{name} rejects an unknown mode"
+            );
+        }
+
+        // Reads and captures carry no mode: observation never touches focus.
+        assert!(!validate_computer_read_app_content_arguments(
+            &json!({ "app_id": "a", "execution_mode": "background" })
+        ));
+        assert!(!validate_computer_capture_screen_arguments(
+            &json!({ "execution_mode": "background" })
+        ));
+
+        // The schema advertises the field on control tools only.
+        assert!(
+            computer_click_tool_spec().input_schema["properties"]["execution_mode"].is_object()
+        );
+        assert!(
+            computer_read_app_content_tool_spec().input_schema["properties"]
+                .get("execution_mode")
+                .is_none()
         );
     }
 

@@ -20,7 +20,7 @@
 //! snapshot event/query; the Stop latch short-circuits any subsequent control
 //! op before its broker round-trip.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -43,8 +43,9 @@ use tidebreak_core::{
 use tidebreak_host_broker::{
     extract_marks, is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod,
     ControlRequest, ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest,
-    CuResolveHandoffRequest, CuRevokeAppRequest, ElementTargetWire, ErrorCode, GrantSubject, Mark,
-    OperationEnvelope, OperationRequest, OperationResult, SubjectKind, PROTOCOL_VERSION,
+    CuResolveHandoffRequest, CuRevokeAppRequest, ElementTargetWire, ErrorCode, ExecutionMode,
+    GrantSubject, Mark, OperationEnvelope, OperationRequest, OperationResult, SubjectKind,
+    PROTOCOL_VERSION,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -80,6 +81,10 @@ const STATE_EVENT: &str = "computer-use-state-changed";
 /// A control op touches the indicator as recently active for this long after
 /// its last broker round-trip; the renderer re-arms the banner on this window.
 const INDICATOR_IDLE_REARM: std::time::Duration = std::time::Duration::from_secs(30);
+/// Foreground-approval scope key for `computer_return_to_tidebreak`. It is
+/// Tidebreak's own (control-blocked) bundle id, so it can never collide with
+/// an app the broker could actually grant.
+const TIDEBREAK_FOCUS_SCOPE: &str = "io.brightwave.tidebreak";
 
 /// Capability a grant miss was asking for, in the card's vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -193,6 +198,13 @@ pub(crate) struct ComputerUseState {
     /// before dispatch (and prevents it) or after that dispatch has already
     /// completed. Read-only operations do not take this gate.
     acting_dispatch: tokio::sync::Mutex<()>,
+    /// (conversation, app) pairs the user has separately approved for
+    /// foreground takeover through the trusted native dialog. Host-side and
+    /// session-only, exactly like the halt latch: nothing the renderer or the
+    /// model produces can insert into this set, so an app-control grant can
+    /// never silently become a takeover. Cleared by Stop — after a halt, a
+    /// takeover must be re-approved.
+    foreground_takeovers: StdMutex<HashSet<(Uuid, String)>>,
 }
 
 impl Default for ComputerUseState {
@@ -203,6 +215,7 @@ impl Default for ComputerUseState {
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
             acting_dispatch: tokio::sync::Mutex::new(()),
+            foreground_takeovers: StdMutex::new(HashSet::new()),
         }
     }
 }
@@ -259,6 +272,17 @@ impl ComputerUseState {
         *self.halt.borrow()
     }
 
+    /// Whether this chat already holds the user's separate takeover approval
+    /// for this scope (an app bundle id, or [`TIDEBREAK_FOCUS_SCOPE`]).
+    fn has_foreground_approval(&self, chat_id: Uuid, scope: &str) -> bool {
+        lock(&self.foreground_takeovers).contains(&(chat_id, scope.to_owned()))
+    }
+
+    /// Record a trusted-dialog takeover approval for (chat, scope).
+    fn remember_foreground_approval(&self, chat_id: Uuid, scope: &str) {
+        lock(&self.foreground_takeovers).insert((chat_id, scope.to_owned()));
+    }
+
     /// Await the next halt, returning immediately if already halted. A halt
     /// that fired between the pre-dispatch check and here is still observed:
     /// the watch receiver starts from the current value, not the next change.
@@ -275,6 +299,9 @@ impl ComputerUseState {
         // send_replace, not send: the latch must hold even when no prompt is
         // currently parked on it (send drops the value with zero receivers).
         self.halt.send_replace(true);
+        // A Stop withdraws every standing takeover approval: resuming control
+        // later must re-ask before the screen can be taken over again.
+        lock(&self.foreground_takeovers).clear();
         // Make Stop visible immediately, then wait for any action that was
         // already in flight to drain before reporting the stop complete.
         let _dispatch = self.acting_dispatch.lock().await;
@@ -817,11 +844,33 @@ enum CuAction {
     Broker(OperationRequest),
     /// Return focus to Tidebreak itself. Deliberately not a broker op: Tidebreak
     /// is on the control blocklist, and focusing our own window is a local
-    /// window-manager call, not synthesized input into another app.
+    /// window-manager call, not synthesized input into another app. Reached
+    /// only in foreground mode — build_action refuses the background default —
+    /// and still gated on the user's separate takeover approval at execution.
     ReturnToTidebreak,
     /// A bounded local pause. The broker exposes the same op clamped; keeping
     /// it local saves a round-trip and never reaches the helper either way.
     Wait(f64),
+}
+
+/// The broker-wire mode for the model's requested mode. Absent means the
+/// canonical background default — never an implicit takeover.
+fn broker_mode(mode: Option<tidebreak_core::ExecutionMode>) -> ExecutionMode {
+    match mode.unwrap_or_default() {
+        tidebreak_core::ExecutionMode::Background => ExecutionMode::Background,
+        tidebreak_core::ExecutionMode::Foreground => ExecutionMode::Foreground,
+    }
+}
+
+/// The refusal every focus-taking call gets in background mode, and every
+/// broker `requires_foreground` maps to. Nothing acted; the agent must not
+/// blindly retry — a foreground re-issue is a deliberate escalation that asks
+/// the user first.
+fn requires_foreground_resolution() -> StoredResolution {
+    unavailable(
+        "requires_foreground",
+        "This action needs the user's real focus or pointer, so it cannot run in the default background mode and was not performed. Do not retry it automatically. If taking over the screen is truly necessary, re-issue the action with execution_mode set to \"foreground\", which asks the user for permission first.",
+    )
 }
 
 async fn execute_operation(
@@ -838,8 +887,19 @@ async fn execute_operation(
     };
     match action {
         CuAction::ReturnToTidebreak => {
+            // Foreground mode was already required by build_action; the
+            // takeover approval is still asked separately per chat.
+            if let Err(resolution) =
+                ensure_foreground_takeover(app, state, call, TIDEBREAK_FOCUS_SCOPE).await
+            {
+                return resolution;
+            }
             crate::deep_link::focus_main_window(app);
-            completed(serde_json::json!({ "status": "ok", "focused": "tidebreak" }))
+            completed(serde_json::json!({
+                "status": "ok",
+                "focused": "tidebreak",
+                "execution_mode": "foreground",
+            }))
         }
         CuAction::Wait(seconds) => {
             let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
@@ -925,6 +985,7 @@ fn build_action(
                 } else {
                     None
                 },
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_TYPE_TEXT_TOOL => {
@@ -935,6 +996,7 @@ fn build_action(
                 bundle_id: args.app_id,
                 text: args.text,
                 target,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_KEY_PRESS_TOOL => {
@@ -957,6 +1019,7 @@ fn build_action(
                 bundle_id: args.app_id,
                 key: args.key,
                 modifiers,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_SCROLL_TOOL => {
@@ -968,14 +1031,23 @@ fn build_action(
                 target,
                 dx: args.dx,
                 dy: args.dy,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_FOCUS_WINDOW_TOOL => {
             let args: ComputerFocusWindowArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            // Focusing always changes what the user is looking at, so the
+            // background default refuses here — before any broker round-trip —
+            // rather than leaving a path that steals focus without the
+            // explicit foreground escalation.
+            if broker_mode(args.execution_mode) != ExecutionMode::Foreground {
+                return Err(requires_foreground_resolution());
+            }
             Ok(CuAction::Broker(OperationRequest::CuFocusWindow {
                 bundle_id: args.app_id,
                 window_id: args.window_id,
+                execution_mode: ExecutionMode::Foreground,
             }))
         }
         COMPUTER_LAUNCH_APP_TOOL => {
@@ -983,6 +1055,7 @@ fn build_action(
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
             Ok(CuAction::Broker(OperationRequest::CuLaunchApp {
                 bundle_id: args.app_id,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_HOVER_TOOL => {
@@ -992,6 +1065,7 @@ fn build_action(
             Ok(CuAction::Broker(OperationRequest::CuHover {
                 bundle_id: args.app_id,
                 target,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_DRAG_TOOL => {
@@ -1004,6 +1078,7 @@ fn build_action(
                 from,
                 to,
                 duration_ms: args.duration_ms,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
         COMPUTER_RESIZE_WINDOW_TOOL => {
@@ -1014,9 +1089,20 @@ fn build_action(
                 window_id: args.window_id,
                 width: args.width,
                 height: args.height,
+                execution_mode: broker_mode(args.execution_mode),
             }))
         }
-        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => Ok(CuAction::ReturnToTidebreak),
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
+            let args: ComputerReturnToTidebreakArgs =
+                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
+            // Raising Tidebreak steals the user's focus like any other focus
+            // move; the background default refuses instead of bypassing the
+            // foreground escalation just because the target is our own window.
+            if broker_mode(args.execution_mode) != ExecutionMode::Foreground {
+                return Err(requires_foreground_resolution());
+            }
+            Ok(CuAction::ReturnToTidebreak)
+        }
         COMPUTER_WAIT_TOOL => {
             let args: ComputerWaitArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
@@ -1102,6 +1188,67 @@ fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
     }
 }
 
+/// The mode a broker control operation will act in, when it carries one.
+/// Read requests have no mode: observation never touches focus.
+fn request_execution_mode(request: &OperationRequest) -> Option<ExecutionMode> {
+    match request {
+        OperationRequest::CuClick { execution_mode, .. }
+        | OperationRequest::CuTypeText { execution_mode, .. }
+        | OperationRequest::CuKeyPress { execution_mode, .. }
+        | OperationRequest::CuScroll { execution_mode, .. }
+        | OperationRequest::CuFocusWindow { execution_mode, .. }
+        | OperationRequest::CuLaunchApp { execution_mode, .. }
+        | OperationRequest::CuHover { execution_mode, .. }
+        | OperationRequest::CuDrag { execution_mode, .. }
+        | OperationRequest::CuResizeWindow { execution_mode, .. } => Some(*execution_mode),
+        _ => None,
+    }
+}
+
+/// The separate per-app, per-chat takeover approval every foreground action
+/// requires. The existing app-control grant never implies it: the decision is
+/// made through the trusted native dialog and remembered host-side in
+/// [`ComputerUseState`], where neither renderer events nor model output can
+/// forge it. Raced against the Stop latch like every other prompt.
+async fn ensure_foreground_takeover(
+    app: &AppHandle,
+    state: &HostAccess,
+    call: &ToolCallRecord,
+    scope: &str,
+) -> Result<(), StoredResolution> {
+    let cu = &state.computer_use;
+    if cu.is_halted() {
+        return Err(stopped_resolution());
+    }
+    if cu.has_foreground_approval(call.chat_id.0, scope) {
+        return Ok(());
+    }
+    let target_label = if scope == TIDEBREAK_FOCUS_SCOPE {
+        "the Tidebreak window".to_owned()
+    } else {
+        crate::native_security_label(cu.app_name(scope).as_deref().unwrap_or(scope))
+    };
+    let message = format!(
+        "Allow Tidebreak to take over your screen for {target_label}? Foreground control moves your pointer, keyboard focus, and active window while it acts, instead of working in the background. You can stop control at any time."
+    );
+    let approved = tokio::select! {
+        approved = native_binary_choice(app, "Allow foreground control?", &message, "Take over") =>
+            approved.unwrap_or(false),
+        () = cu.wait_for_halt() => false,
+    };
+    if cu.is_halted() {
+        return Err(stopped_resolution());
+    }
+    if !approved {
+        return Err(unavailable(
+            "foreground_declined",
+            "The user declined to let Tidebreak take over the screen for this action. Do not retry in foreground mode; continue in the background or ask how they want to proceed.",
+        ));
+    }
+    cu.remember_foreground_approval(call.chat_id.0, scope);
+    Ok(())
+}
+
 /// The capability a grant miss on this call is asking for, matching the
 /// broker's own authorization: the three control tools need `ControlApp`;
 /// scroll, focus, and tree reads need `ReadAppContent`; capture and window
@@ -1151,6 +1298,17 @@ async fn dispatch_broker(
                 "app_blocked",
                 "That application cannot be captured, read, or controlled by Tidebreak.",
             );
+        }
+    }
+    // Foreground is an escalation on top of the app-control grant: it needs
+    // its own per-app, per-chat trusted approval before any broker dispatch.
+    // The approval outlives this call for the session (until Stop), so the
+    // post-consent re-issue and follow-up actions in the same chat/app do not
+    // re-prompt.
+    if request_execution_mode(&request) == Some(ExecutionMode::Foreground) {
+        let scope = bundle_id.clone().unwrap_or_default();
+        if let Err(resolution) = ensure_foreground_takeover(app, state, call, &scope).await {
+            return resolution;
         }
     }
     if let Some(bundle_id) = bundle_id.as_deref() {
@@ -1223,6 +1381,10 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
             "os_permission_required",
             "macOS has not granted Tidebreak Screen Recording and Accessibility. Ask the user to enable them in Settings, then retry.",
         )),
+        // The helper could not act without taking over the user's focus or
+        // pointer, and did nothing. Surfaced verbatim as requires_foreground —
+        // never a consent card, never an automatic foreground retry.
+        ErrorCode::RequiresForeground => BrokerFailure::Resolution(requires_foreground_resolution()),
         ErrorCode::StaleElement => BrokerFailure::Resolution(unavailable(
             "stale_element",
             "The target element moved or changed since it was last seen. Read the app content or capture the screen again, then retry against the fresh element.",
@@ -1727,6 +1889,9 @@ fn control_meta_json(meta: &tidebreak_host_broker::ControlMeta) -> serde_json::V
         "success": meta.success,
         "used_fallback": meta.used_fallback,
         "detail": meta.detail,
+        // The mode the helper actually acted in — truthful result metadata,
+        // absent when the helper predates the mode contract.
+        "execution_mode": meta.execution_mode,
     })
 }
 
@@ -2432,13 +2597,186 @@ mod tests {
             panic!("wait stays local");
         };
         assert_eq!(seconds, 2.5);
+        // Returning focus to Tidebreak is a focus steal like any other: the
+        // background default refuses, and only an explicit foreground request
+        // maps to the local action (still gated on takeover approval later).
         assert!(matches!(
             build_action(
                 &cu,
                 &call(COMPUTER_RETURN_TO_TIDEBREAK_TOOL, serde_json::json!({}))
             ),
+            Err(StoredResolution::Failed { .. })
+        ));
+        assert!(matches!(
+            build_action(
+                &cu,
+                &call(
+                    COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+                    serde_json::json!({ "execution_mode": "foreground" })
+                )
+            ),
             Ok(CuAction::ReturnToTidebreak)
         ));
+    }
+
+    #[test]
+    fn control_actions_default_to_background_and_carry_an_explicit_mode() {
+        let cu = ComputerUseState::default();
+        let call = |name: &str, arguments: serde_json::Value| ToolCallRecord {
+            id: CallId::new(),
+            chat_id: SessionId::new(),
+            turn_id: tidebreak_core::TurnId::new(),
+            provider_id: "tool-1".into(),
+            name: name.into(),
+            arguments,
+            raw_arguments: None,
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        // Absent on the tool call means background on the broker wire.
+        let Ok(CuAction::Broker(request)) = build_action(
+            &cu,
+            &call(
+                COMPUTER_LAUNCH_APP_TOOL,
+                serde_json::json!({ "app_id": "dev.tidebreak.fixture" }),
+            ),
+        ) else {
+            panic!("launch maps");
+        };
+        assert_eq!(
+            request_execution_mode(&request),
+            Some(ExecutionMode::Background)
+        );
+
+        // An explicit foreground request survives the mapping.
+        let Ok(CuAction::Broker(request)) = build_action(
+            &cu,
+            &call(
+                COMPUTER_CLICK_TOOL,
+                serde_json::json!({
+                    "app_id": "dev.tidebreak.fixture",
+                    "x": 10.0,
+                    "y": 20.0,
+                    "execution_mode": "foreground",
+                }),
+            ),
+        ) else {
+            panic!("click maps");
+        };
+        assert_eq!(
+            request_execution_mode(&request),
+            Some(ExecutionMode::Foreground)
+        );
+
+        // Reads never carry a mode to gate on.
+        let Ok(CuAction::Broker(request)) = build_action(
+            &cu,
+            &call(COMPUTER_LIST_WINDOWS_TOOL, serde_json::json!({})),
+        ) else {
+            panic!("list maps");
+        };
+        assert_eq!(request_execution_mode(&request), None);
+    }
+
+    #[test]
+    fn focus_window_refuses_the_background_default_without_a_broker_round_trip() {
+        let cu = ComputerUseState::default();
+        let call = |arguments: serde_json::Value| ToolCallRecord {
+            id: CallId::new(),
+            chat_id: SessionId::new(),
+            turn_id: tidebreak_core::TurnId::new(),
+            provider_id: "tool-1".into(),
+            name: COMPUTER_FOCUS_WINDOW_TOOL.into(),
+            arguments,
+            raw_arguments: None,
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        let refused = build_action(
+            &cu,
+            &call(serde_json::json!({ "app_id": "com.example.app" })),
+        )
+        .expect_err("background focus must refuse");
+        let StoredResolution::Failed {
+            error_code, result, ..
+        } = &refused
+        else {
+            panic!("background focus fails the call");
+        };
+        assert_eq!(error_code, "requires_foreground");
+        assert!(result.contains("Do not retry it automatically"));
+
+        let action = build_action(
+            &cu,
+            &call(serde_json::json!({
+                "app_id": "com.example.app",
+                "execution_mode": "foreground",
+            })),
+        )
+        .expect("foreground focus maps to the broker op");
+        let CuAction::Broker(request) = action else {
+            panic!("focus is a broker op");
+        };
+        assert_eq!(
+            request_execution_mode(&request),
+            Some(ExecutionMode::Foreground)
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_takeover_approvals_are_scoped_and_withdrawn_by_stop() {
+        let cu = ComputerUseState::default();
+        let chat = Uuid::new_v4();
+        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
+        cu.remember_foreground_approval(chat, "com.example.app");
+        assert!(cu.has_foreground_approval(chat, "com.example.app"));
+        // Scoped to the exact (chat, app) pair — no bleed across apps or chats.
+        assert!(!cu.has_foreground_approval(chat, "com.other.app"));
+        assert!(!cu.has_foreground_approval(Uuid::new_v4(), "com.example.app"));
+        // Stop withdraws every takeover approval; resume does not restore it.
+        cu.halt().await;
+        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
+        cu.resume();
+        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
+    }
+
+    #[test]
+    fn requires_foreground_maps_to_a_hard_refusal_not_a_consent_prompt() {
+        let error = BrokerClientError::Broker {
+            code: ErrorCode::RequiresForeground,
+            message: "wording is not the contract".to_owned(),
+            retryable: false,
+        };
+        match map_broker_error(&error) {
+            BrokerFailure::Resolution(StoredResolution::Failed {
+                error_code, result, ..
+            }) => {
+                assert_eq!(error_code, "requires_foreground");
+                assert!(result.contains("execution_mode"));
+                assert!(result.contains("Do not retry it automatically"));
+            }
+            _ => panic!("requires_foreground must never become a consent card"),
+        }
     }
 
     #[test]
