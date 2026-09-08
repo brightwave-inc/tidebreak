@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome};
+use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
 use tidebreak_core::{
-    CancelToken, ChromeConnectionGrant, OwnerId, SessionId, WorkspaceId, CHROME_NEW_TAB_TOOL,
+    CancelToken, ChromeConnectionGrant, OwnerId, SessionId, WorkspaceId, CHROME_ACT_TOOL,
+    CHROME_NEW_TAB_TOOL, CHROME_SCREENSHOT_TOOL, CHROME_SNAPSHOT_TOOL,
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -196,8 +197,10 @@ async fn cdp_clones_share_command_ids_and_honor_dispatch_guards() {
     let (result_a, result_b) = tokio::join!(a.command("A", json!({})), b.command("B", json!({})));
     assert!(result_a.is_ok() && result_b.is_ok());
     responder.await.unwrap();
-    let ids = ids.lock().unwrap();
-    assert_ne!(ids[0], ids[1]);
+    {
+        let ids = ids.lock().unwrap();
+        assert_ne!(ids[0], ids[1]);
+    }
     let result = cdp
         .command_guarded(None, "C", json!({}), Arc::new(|| false))
         .await;
@@ -219,4 +222,414 @@ async fn revoked_guard_discards_command_before_transport_send() {
         .await;
     assert!(result.is_err());
     assert!(requests.try_recv().is_err());
+}
+
+// MARK: - Scripted fake CDP server
+//
+// The fake Chrome below is the same channel transport the tests above use,
+// driven by a per-test script so one command can fail, hang, or return a
+// crafted payload while everything else answers like a healthy page.
+
+enum Scripted {
+    Result(Value),
+    Error(&'static str),
+    Hold,
+}
+
+fn respond(
+    mut requests: mpsc::UnboundedReceiver<Value>,
+    replies: mpsc::UnboundedSender<CdpFrame>,
+    log: Arc<Mutex<Vec<Value>>>,
+    script: impl Fn(&Value) -> Scripted + Send + 'static,
+) {
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            log.lock().unwrap().push(request.clone());
+            let reply = match script(&request) {
+                Scripted::Result(result) => json!({"id":request["id"],"result":result}),
+                Scripted::Error(message) => {
+                    json!({"id":request["id"],"error":{"message":message,"code":1}})
+                }
+                Scripted::Hold => continue,
+            };
+            if replies.send(CdpFrame::Text(reply.to_string())).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+const PAGE_URL: &str = "http://127.0.0.1:3000/";
+
+fn page_reply(request: &Value) -> Scripted {
+    Scripted::Result(match request["method"].as_str().unwrap_or("") {
+        "Target.getTargetInfo" => {
+            json!({"targetInfo":{"type":"page","url":PAGE_URL,"title":"Fixture"}})
+        }
+        "Target.attachToTarget" => json!({"sessionId":"S1"}),
+        "Page.getFrameTree" => {
+            json!({"frameTree":{"frame":{"id":"F1","loaderId":"L1","url":PAGE_URL}}})
+        }
+        "Page.createIsolatedWorld" => json!({"executionContextId":7}),
+        "DOM.getFrameOwner" => json!({"backendNodeId":11}),
+        "DOM.getBoxModel" => json!({"model":{"content":[100.0,50.0]}}),
+        "Page.getLayoutMetrics" => {
+            json!({"cssVisualViewport":{"clientWidth":800.0,"clientHeight":600.0,"pageX":0.0,"pageY":0.0}})
+        }
+        "Runtime.evaluate" => {
+            let expression = request["params"]["expression"].as_str().unwrap_or("");
+            let value = if expression.contains("title:document.title") {
+                json!({"title":"Fixture","width":800.0,"height":600.0,"scrollX":0.0,"scrollY":0.0})
+            } else if expression.contains("\"prefix\"") {
+                json!({"truncated":false,"nodes":[fixture_node("n-0-0", "F1")]})
+            } else {
+                json!({"ok":true,"x":10.0,"y":20.0})
+            };
+            json!({"result":{"value":value}})
+        }
+        _ => json!({}),
+    })
+}
+
+fn fixture_node(reference: &str, frame: &str) -> Value {
+    json!({"kind":"interactive","ref":reference,"tag":"button","role":"button","name":"Go",
+        "frame":frame,"disabled":false,"sensitive":false,"actions":["click"],
+        "bounds":{"x":1.0,"y":2.0,"width":10.0,"height":10.0}})
+}
+
+fn scripted_connection(
+    script: impl Fn(&Value) -> Scripted + Send + 'static,
+) -> (
+    ChromeComputerUseService,
+    ChromeScope,
+    Arc<Mutex<Vec<Value>>>,
+) {
+    let (service, scope, requests, replies) = connection();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    respond(requests, replies, log.clone(), script);
+    (service, scope, log)
+}
+
+fn call(name: &str, arguments: Value) -> ComputerUseCall {
+    ComputerUseCall {
+        request_id: Uuid::new_v4(),
+        name: name.into(),
+        arguments,
+    }
+}
+
+async fn controlled_tab(
+    service: &ChromeComputerUseService,
+    scope: &ChromeScope,
+) -> (String, String) {
+    let summary = service
+        .attach_existing_tab(scope, "test", "T1")
+        .await
+        .unwrap();
+    let snapshot = service
+        .dispatch(
+            scope,
+            &call(
+                CHROME_SNAPSHOT_TOOL,
+                json!({"targetRef":summary.target_ref}),
+            ),
+        )
+        .await
+        .result;
+    assert_eq!(
+        snapshot.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        snapshot.text
+    );
+    (
+        summary.target_ref,
+        snapshot.data["snapshotId"].as_str().unwrap().into(),
+    )
+}
+
+fn act(target: &str, snapshot: &str, node: &str, action: Value) -> ComputerUseCall {
+    call(
+        CHROME_ACT_TOOL,
+        json!({"targetRef":target,"snapshotId":snapshot,"documentEpoch":1,"ref":node,"action":action}),
+    )
+}
+
+async fn dispatched(
+    service: &ChromeComputerUseService,
+    scope: &ChromeScope,
+    request: ComputerUseCall,
+) -> tokio::task::JoinHandle<ComputerUseResult> {
+    let service = service.clone();
+    let scope = scope.clone();
+    tokio::spawn(async move { service.dispatch(&scope, &request).await.result })
+}
+
+async fn logged(log: &Arc<Mutex<Vec<Value>>>, matches: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..200 {
+        if let Some(hit) = log.lock().unwrap().iter().find(|request| matches(request)) {
+            return hit.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "expected protocol request was never sent; saw {:?}",
+        log.lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["method"].clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+fn key_event(request: &Value, kind: &str) -> bool {
+    request["method"] == "Input.dispatchKeyEvent" && request["params"]["type"] == kind
+}
+
+fn mouse_event(request: &Value, kind: &str) -> bool {
+    request["method"] == "Input.dispatchMouseEvent" && request["params"]["type"] == kind
+}
+
+#[tokio::test]
+async fn failed_key_down_still_releases_the_key_and_consumes_the_snapshot() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if key_event(request, "keyDown") {
+            Scripted::Error("input rejected")
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let press = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"press","key":"Enter"}),
+    );
+    let result = service.dispatch(&scope, &press).await.result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Unknown,
+        "{}",
+        result.text
+    );
+    let release = logged(&log, |request| key_event(request, "keyUp")).await;
+    assert_eq!(release["params"]["key"], "Enter");
+    let retry = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"press","key":"Enter"}),
+    );
+    let retry = service.dispatch(&scope, &retry).await.result;
+    assert!(retry.text.contains("stale"), "{}", retry.text);
+}
+
+#[tokio::test]
+async fn cancelled_key_down_response_still_releases_the_key() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if key_event(request, "keyDown") {
+            Scripted::Hold
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let press = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"press","key":"Enter"}),
+    );
+    let task = dispatched(&service, &scope, press).await;
+    logged(&log, |request| key_event(request, "keyDown")).await;
+    service.ownership().trip();
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    logged(&log, |request| key_event(request, "keyUp")).await;
+    service.ownership().resume();
+    let retry = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"press","key":"Enter"}),
+    );
+    let retry = service.dispatch(&scope, &retry).await.result;
+    assert!(retry.text.contains("stale"), "{}", retry.text);
+}
+
+#[tokio::test]
+async fn dropped_act_future_releases_the_button_and_consumes_the_snapshot() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if mouse_event(request, "mousePressed") {
+            Scripted::Hold
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let click = act(&target, &snapshot, "n-0-0", json!({"type":"click"}));
+    let task = dispatched(&service, &scope, click).await;
+    logged(&log, |request| mouse_event(request, "mousePressed")).await;
+    task.abort();
+    let _ = task.await;
+    let release = logged(&log, |request| mouse_event(request, "mouseReleased")).await;
+    assert_eq!(release["params"]["buttons"], 0);
+    let retry = act(&target, &snapshot, "n-0-0", json!({"type":"click"}));
+    let retry = service.dispatch(&scope, &retry).await.result;
+    assert!(retry.text.contains("stale"), "{}", retry.text);
+}
+
+#[tokio::test]
+async fn failed_drag_cancels_dragging_then_releases_at_the_origin() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if mouse_event(request, "mouseMoved") && request["params"]["buttons"] == 1 {
+            Scripted::Error("target closed")
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let drag = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"drag","to_ref":"n-0-0"}),
+    );
+    let result = service.dispatch(&scope, &drag).await.result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    logged(&log, |request| request["method"] == "Input.cancelDragging").await;
+    let release = logged(&log, |request| mouse_event(request, "mouseReleased")).await;
+    assert_eq!(release["params"]["x"], 10.0);
+    assert_eq!(release["params"]["y"], 20.0);
+    let entries = log.lock().unwrap();
+    let cancel_at = entries
+        .iter()
+        .position(|request| request["method"] == "Input.cancelDragging")
+        .unwrap();
+    let release_at = entries
+        .iter()
+        .position(|request| mouse_event(request, "mouseReleased"))
+        .unwrap();
+    assert!(cancel_at < release_at);
+}
+
+#[tokio::test]
+async fn completed_press_releases_the_key_exactly_once() {
+    let (service, scope, log) = scripted_connection(page_reply);
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let press = act(
+        &target,
+        &snapshot,
+        "n-0-0",
+        json!({"type":"press","key":"Enter"}),
+    );
+    let result = service.dispatch(&scope, &press).await.result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let key_events = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .count();
+    assert_eq!(key_events, 2);
+}
+
+#[tokio::test]
+async fn screenshot_refits_capture_scale_to_the_transport_budget() {
+    use base64::Engine;
+    let captures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = captures.clone();
+    let (service, scope, log) = scripted_connection(move |request| {
+        if request["method"] == "Page.captureScreenshot" {
+            let attempt = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.resize(if attempt == 0 { 2_000_000 } else { 200_000 }, 0);
+            Scripted::Result(
+                json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+            )
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let shot = call(
+        CHROME_SCREENSHOT_TOOL,
+        json!({"targetRef":target,"snapshotId":snapshot,"documentEpoch":1}),
+    );
+    let result = service.dispatch(&scope, &shot).await.result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    assert_eq!(result.images.len(), 1);
+    let scales = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "Page.captureScreenshot")
+        .map(|request| request["params"]["clip"]["scale"].as_f64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(scales.len(), 2);
+    assert!(scales[1] < scales[0], "{scales:?}");
+    let width = result.data["width"].as_f64().unwrap();
+    let height = result.data["height"].as_f64().unwrap();
+    assert!(width < 800.0 && width > 0.0, "{width}");
+    assert!((width / height - 800.0 / 600.0).abs() < 0.01);
+}
+
+#[tokio::test]
+async fn nested_frame_click_sums_every_ancestor_offset() {
+    let (service, scope, log) =
+        scripted_connection(|request| match request["method"].as_str().unwrap_or("") {
+            "Page.getFrameTree" => Scripted::Result(json!({"frameTree":{
+                "frame":{"id":"F1","loaderId":"L1","url":PAGE_URL},
+                "childFrames":[{"frame":{"id":"F2","loaderId":"L2","url":PAGE_URL},
+                    "childFrames":[{"frame":{"id":"F3","loaderId":"L3","url":PAGE_URL}}]}]}})),
+            "Runtime.evaluate" => {
+                let expression = request["params"]["expression"].as_str().unwrap_or("");
+                if expression.contains("\"prefix\"") {
+                    let nodes = if expression.contains("\"frame\":\"F3\"") {
+                        json!([fixture_node("n-2-0", "F3")])
+                    } else {
+                        json!([])
+                    };
+                    Scripted::Result(json!({"result":{"value":{"truncated":false,"nodes":nodes}}}))
+                } else {
+                    page_reply(request)
+                }
+            }
+            _ => page_reply(request),
+        });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let click = act(&target, &snapshot, "n-2-0", json!({"type":"click"}));
+    let result = service.dispatch(&scope, &click).await.result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    let moved = logged(&log, |request| mouse_event(request, "mouseMoved")).await;
+    assert_eq!(moved["params"]["x"], 210.0);
+    assert_eq!(moved["params"]["y"], 120.0);
+    let owners = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["method"] == "DOM.getFrameOwner")
+        .map(|request| request["params"]["frameId"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(owners.contains(&"F3".to_owned()) && owners.contains(&"F2".to_owned()));
 }

@@ -110,6 +110,9 @@ struct Frame {
     loader: String,
     url: String,
     name: String,
+    /// Embedding frame id when the snapshot walk established it; `None` for
+    /// the top frame and for child-session roots with unknown parentage.
+    parent: Option<String>,
 }
 #[derive(Clone)]
 struct Snapshot {
@@ -160,6 +163,69 @@ struct Access {
     grant: ChromeConnectionGrant,
     connection: String,
     fence: Fence,
+}
+/// Ceiling for one compensating release command after an error, cancel, or
+/// dropped call, so cleanup stays bounded even when Chrome never answers.
+const INPUT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default largest delivered screenshot dimension in CSS pixels. Explicit
+/// bounds may still request up to the contract maximum; the byte budget
+/// below governs either way.
+const DEFAULT_CHROME_SCREENSHOT_DIMENSION: f64 = 1440.0;
+/// Bounded number of capture attempts while fitting the shared transport's
+/// per-image byte budget.
+const SCREENSHOT_FIT_ATTEMPTS: usize = 4;
+/// Best-effort neutralizer for a pressed key or mouse button.
+///
+/// Armed before the down event is issued: once that command is queued, its
+/// response can be cancelled — or the whole call future dropped by a caller's
+/// `select!` — while Chrome has already applied the press. Dropping an armed
+/// hold sends the bounded release commands straight on the transport.
+/// Releasing held input restores the page to neutral rather than exercising
+/// authority, so like the pre-existing drag cancel path it runs even after
+/// the fence has ended. The transport's command queue keeps ordering sound: a
+/// down that was discarded before dispatch never reaches Chrome after its
+/// release, and a redundant release is harmless to Chrome.
+struct InputHold {
+    cdp: CdpSession,
+    session: String,
+    releases: Vec<(&'static str, Value)>,
+}
+impl InputHold {
+    fn new(access: &Access, tab: &Tab) -> Self {
+        Self {
+            cdp: access.cdp.clone(),
+            session: tab.cdp_session.clone(),
+            releases: Vec::new(),
+        }
+    }
+    fn arm(&mut self, method: &'static str, params: Value) {
+        self.releases.push((method, params));
+    }
+    fn disarm(&mut self) {
+        self.releases.clear();
+    }
+}
+impl Drop for InputHold {
+    fn drop(&mut self) {
+        if self.releases.is_empty() {
+            return;
+        }
+        let cdp = self.cdp.clone();
+        let session = std::mem::take(&mut self.session);
+        let releases = std::mem::take(&mut self.releases);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            for (method, params) in releases {
+                let _ = tokio::time::timeout(
+                    INPUT_RELEASE_TIMEOUT,
+                    cdp.command_in_session(&session, method, params),
+                )
+                .await;
+            }
+        });
+    }
 }
 impl Access {
     async fn command(
@@ -214,6 +280,7 @@ impl Access {
             value: &Value,
             out: &mut Vec<Frame>,
             parent_url: &str,
+            parent_id: Option<&str>,
             cdp_session: &str,
         ) -> Result<(), String> {
             if out.len() >= 128 {
@@ -226,16 +293,18 @@ impl Access {
             } else {
                 url
             };
+            let id = frame["id"].as_str().unwrap_or("").to_owned();
             out.push(Frame {
                 cdp_session: cdp_session.into(),
-                id: frame["id"].as_str().unwrap_or("").into(),
+                id: id.clone(),
                 loader: frame["loaderId"].as_str().unwrap_or("").into(),
                 url: url.into(),
                 name: frame["name"].as_str().unwrap_or("").into(),
+                parent: parent_id.map(str::to_owned),
             });
             if let Some(children) = value["childFrames"].as_array() {
                 for child in children {
-                    walk(child, out, url, cdp_session)?;
+                    walk(child, out, url, Some(&id), cdp_session)?;
                 }
             }
             Ok(())
@@ -244,7 +313,7 @@ impl Access {
             .command(Some(session), "Page.getFrameTree", json!({}))
             .await?;
         let mut frames = Vec::new();
-        walk(&value["frameTree"], &mut frames, "", session)?;
+        walk(&value["frameTree"], &mut frames, "", None, session)?;
         if frames.first().is_none_or(|frame| !self.permits(&frame.url)) {
             return Err("Chrome page origin is outside the approved scope".into());
         }
@@ -280,9 +349,20 @@ impl Access {
                     .command(Some(&child.session_id), "Page.getFrameTree", json!({}))
                     .await?;
                 let mut child_frames = Vec::new();
-                walk(&tree["frameTree"], &mut child_frames, "", &child.session_id)?;
-                for frame in child_frames {
+                walk(
+                    &tree["frameTree"],
+                    &mut child_frames,
+                    "",
+                    None,
+                    &child.session_id,
+                )?;
+                for mut frame in child_frames {
                     if let Some(old) = frames.iter_mut().find(|old| old.id == frame.id) {
+                        // The embedding tree already recorded who owns this
+                        // frame; the child-session walk cannot know that.
+                        if frame.parent.is_none() {
+                            frame.parent = old.parent.clone();
+                        }
                         *old = frame;
                     } else {
                         frames.push(frame);
@@ -737,7 +817,11 @@ impl ChromeComputerUseService {
                     return Err("Chrome URL is outside the approved scope".into());
                 }
                 let result = access
-                    .command(None, "Target.createTarget", json!({"url":args.url,"background":true}))
+                    .command(
+                        None,
+                        "Target.createTarget",
+                        json!({"url":args.url,"background":true}),
+                    )
                     .await?;
                 let target = result["targetId"]
                     .as_str()
@@ -1009,35 +1093,60 @@ impl ChromeComputerUseService {
         if width <= 0.0 || height <= 0.0 {
             return Err("Chrome viewport is unavailable".into());
         }
-        let scale = (args.max_width.unwrap_or(MAX_CHROME_SCREENSHOT_DIMENSION) as f64 / width)
+        let mut scale = (args
+            .max_width
+            .map(|value| value as f64)
+            .unwrap_or(DEFAULT_CHROME_SCREENSHOT_DIMENSION)
+            / width)
             .min(
                 args.max_height
                     .filter(|value| *value > 0)
-                    .unwrap_or(MAX_CHROME_SCREENSHOT_DIMENSION) as f64
+                    .map(|value| value as f64)
+                    .unwrap_or(DEFAULT_CHROME_SCREENSHOT_DIMENSION)
                     / height,
             )
             .min(1.0);
-        let image=access.command(Some(&tab.cdp_session),"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false,"clip":{"x":viewport["pageX"].as_f64().unwrap_or(0.0),"y":viewport["pageY"].as_f64().unwrap_or(0.0),"width":width,"height":height,"scale":scale}})).await?;
-        self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
-            .await?;
-        let encoded = image["data"]
-            .as_str()
-            .ok_or("Chrome screenshot has no image")?;
+        // The shared transport carries at most one 1 MiB image inside one
+        // 2 MiB frame. Fit here in the producer with a bounded number of
+        // re-captures at a smaller clip scale; the native wrapper still
+        // enforces the same ceiling as defense in depth.
         use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|_| "Chrome screenshot has invalid encoding")?;
-        if bytes.len() > MAX_CHROME_SCREENSHOT_PNG_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-        {
-            return Err("Chrome screenshot is invalid or exceeds its size limit".into());
+        for _ in 0..SCREENSHOT_FIT_ATTEMPTS {
+            let image=access.command(Some(&tab.cdp_session),"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false,"clip":{"x":viewport["pageX"].as_f64().unwrap_or(0.0),"y":viewport["pageY"].as_f64().unwrap_or(0.0),"width":width,"height":height,"scale":scale}})).await?;
+            self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
+                .await?;
+            let encoded = image["data"]
+                .as_str()
+                .ok_or("Chrome screenshot has no image")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "Chrome screenshot has invalid encoding")?;
+            if bytes.len() > MAX_CHROME_SCREENSHOT_PNG_BYTES
+                || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            {
+                return Err("Chrome screenshot is invalid or exceeds its size limit".into());
+            }
+            if bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES
+                && encoded.len() <= MAX_BROWSER_SCREENSHOT_FRAME_BYTES
+            {
+                return Ok((
+                    json!({"targetRef":args.target_ref,"snapshotId":args.snapshot_id,"documentEpoch":args.document_epoch,"mimeType":"image/png","width":(width*scale).round(),"height":(height*scale).round()}),
+                    vec![ComputerUseImage {
+                        mime_type: "image/png".into(),
+                        base64: encoded.into(),
+                    }],
+                ));
+            }
+            // PNG size tracks pixel area, so shrink toward the byte budget
+            // with a margin; the floor keeps one attempt from collapsing.
+            let ratio =
+                (MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES as f64 / bytes.len() as f64).sqrt();
+            scale = (scale * ratio * 0.9).max(scale * 0.25);
+            if width * scale < 16.0 || height * scale < 16.0 {
+                break;
+            }
         }
-        Ok((
-            json!({"targetRef":args.target_ref,"snapshotId":args.snapshot_id,"documentEpoch":args.document_epoch,"mimeType":"image/png"}),
-            vec![ComputerUseImage {
-                mime_type: "image/png".into(),
-                base64: encoded.into(),
-            }],
-        ))
+        Err("Chrome screenshot could not be reduced to the transport image budget".into())
     }
     async fn probe(
         &self,
@@ -1074,17 +1183,32 @@ impl ChromeComputerUseService {
         let mut y = result["y"]
             .as_f64()
             .ok_or("Chrome target has no y coordinate")?;
-        if frame != &snapshot.frames[0].id {
+        // Input coordinates dispatch in top-frame space, so a framed target
+        // needs every ancestor frame owner's offset, not just the immediate
+        // one. Refuse when the chain to the top frame is unknown rather than
+        // risking a misplaced click in a different element.
+        let mut current = frame.clone();
+        for _ in 0..snapshot.frames.len() {
+            if current == snapshot.frames[0].id {
+                break;
+            }
+            let parent = snapshot
+                .frames
+                .iter()
+                .find(|f| f.id == current)
+                .and_then(|f| f.parent.as_ref())
+                .and_then(|parent| snapshot.frames.iter().find(|f| &f.id == parent))
+                .ok_or("Chrome target is inside a nested frame whose position cannot be resolved; take a fresh snapshot")?;
             let owner = access
                 .command(
-                    Some(&tab.cdp_session),
+                    Some(&parent.cdp_session),
                     "DOM.getFrameOwner",
-                    json!({"frameId":frame}),
+                    json!({"frameId":current}),
                 )
                 .await?;
             let bounds = access
                 .command(
-                    Some(&tab.cdp_session),
+                    Some(&parent.cdp_session),
                     "DOM.getBoxModel",
                     json!({"backendNodeId":owner["backendNodeId"]}),
                 )
@@ -1095,6 +1219,13 @@ impl ChromeComputerUseService {
             y += bounds["model"]["content"][1]
                 .as_f64()
                 .ok_or("Chrome frame offset is unavailable")?;
+            current = parent.id.clone();
+        }
+        if current != snapshot.frames[0].id {
+            return Err(
+                "Chrome target is inside a nested frame whose position cannot be resolved; take a fresh snapshot"
+                    .into(),
+            );
         }
         Ok((x, y))
     }
@@ -1121,6 +1252,13 @@ impl ChromeComputerUseService {
         let snapshot = self
             .checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
             .await?;
+        // A previous snapshot cannot authorize a second action after any
+        // attempt. Consume it before the first side effect so cancellation or
+        // a dropped call future cannot leave the authority behind.
+        if let Some(stored) = self.inner.lock().unwrap().tabs.get_mut(&args.target_ref) {
+            stored.snapshot = None;
+        }
+        let mut hold = InputHold::new(&access, &tab);
         let operation=async {
    match &args.action {
     ChromeAction::Fill{value}|ChromeAction::Select{value}=>{self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true,"focus":true,"operation":args.action.kind(),"value":value})).await?;}
@@ -1130,21 +1268,23 @@ impl ChromeComputerUseService {
      self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true,"focus":true})).await?;
      let(key,modifiers,code)=key_chord(key)?;
      self.checked_snapshot(&access,&tab,&args.snapshot_id,args.document_epoch).await?;
+     hold.arm("Input.dispatchKeyEvent",json!({"type":"keyUp","key":key,"modifiers":modifiers,"windowsVirtualKeyCode":code}));
      access.command(Some(&tab.cdp_session),"Input.dispatchKeyEvent",json!({"type":"keyDown","key":key,"modifiers":modifiers,"windowsVirtualKeyCode":code})).await?;
      access.command(Some(&tab.cdp_session),"Input.dispatchKeyEvent",json!({"type":"keyUp","key":key,"modifiers":modifiers,"windowsVirtualKeyCode":code})).await?;
+     hold.disarm();
     }
     ChromeAction::Drag{to_ref}=>{
      self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true})).await?;
      let(dx,dy)=self.probe(&access,&tab,&snapshot,to_ref,json!({"scroll":false})).await?;
      let(x,y)=self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":false})).await?;
      self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x,"y":y})).await?;
+     // Cleanup releases back at the origin so it can never complete the drop.
+     hold.arm("Input.cancelDragging",json!({}));
+     hold.arm("Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}));
      self.mouse(&access,&tab,&snapshot,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1})).await?;
-     let drag=async {for step in 1..=12 {let t=f64::from(step)/12.0;self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x+(dx-x)*t,"y":y+(dy-y)*t,"button":"left","buttons":1})).await?;tokio::time::sleep(Duration::from_millis(16)).await;}Ok::<(),String>(())}.await;
-     if let Err(error)=drag {
-       let _=tokio::time::timeout(Duration::from_secs(2),access.cdp.command_in_session(&tab.cdp_session,"Input.cancelDragging",json!({}))).await;
-       return Err(error);
-     }
+     for step in 1..=12 {let t=f64::from(step)/12.0;self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x+(dx-x)*t,"y":y+(dy-y)*t,"button":"left","buttons":1})).await?;tokio::time::sleep(Duration::from_millis(16)).await;}
      self.mouse(&access,&tab,&snapshot,json!({"type":"mouseReleased","x":dx,"y":dy,"button":"left","buttons":0,"clickCount":1})).await?;
+     hold.disarm();
     }
     ChromeAction::Click|ChromeAction::DoubleClick|ChromeAction::Hover|ChromeAction::Scroll{..}=>{
      let(x,y)=self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true})).await?;
@@ -1154,18 +1294,16 @@ impl ChromeComputerUseService {
       ChromeAction::Scroll{x:dx,y:dy}=>{self.mouse(&access,&tab,&snapshot,json!({"type":"mouseWheel","x":x,"y":y,"deltaX":dx.unwrap_or(0.0),"deltaY":dy.unwrap_or(0.0)})).await?;},
       _=>{let count=if args.action==ChromeAction::DoubleClick{2}else{1};for click in 1..=count{
        self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":false})).await?;
+       hold.arm("Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":click}));
        self.mouse(&access,&tab,&snapshot,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":click})).await?;
        access.command(Some(&tab.cdp_session),"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":click})).await?;
+       hold.disarm();
       }}
      }
     }
    }
    Ok::<(),String>(())
   }.await;
-        // A previous snapshot cannot authorize a second action after any attempt.
-        if let Some(stored) = self.inner.lock().unwrap().tabs.get_mut(&args.target_ref) {
-            stored.snapshot = None;
-        }
         operation?;
         Ok(ChromeActResult {
             target_ref: args.target_ref.clone(),
