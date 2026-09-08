@@ -205,7 +205,10 @@ impl CodexStreamParser {
             level: HarnessNoticeLevel::Warning,
             message: "Tidebreak does not support this MCP form, URL, or unverified tool confirmation. The request cannot proceed.".into(),
         }];
-        if let Some(id) = value.get("id") {
+        if let Some(id) = value
+            .get("id")
+            .filter(|id| id.is_string() || id.is_i64() || id.is_u64())
+        {
             // A duplicate request id is protocol drift. The decline also
             // settles its earlier card; do not let a delayed decision send
             // accept while the server's resolved notification is in flight.

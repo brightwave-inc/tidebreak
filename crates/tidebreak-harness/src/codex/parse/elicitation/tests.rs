@@ -97,7 +97,6 @@ fn arbitrary_or_mismatched_elicitation_never_becomes_tool_consent() {
             "/params/message",
             json!("Allow the tb-browser MCP server to run tool \"browser_click\"?"),
         ),
-        ("/id", Value::Null),
     ];
     for (pointer, value) in changes {
         let (mut parser, mut request) = start_and_request();
@@ -254,4 +253,26 @@ fn decided_mcp_confirmation_cannot_reopen_before_tool_completion() {
         [HarnessEvent::HarnessNotice { .. }]
     ));
     assert!(parser.pending_approval("call_fixture").is_none());
+}
+
+#[test]
+fn malformed_elicitation_ids_never_create_replies_or_settle_valid_approvals() {
+    for invalid_id in [Value::Null, json!(true), json!(1.5), json!([]), json!({})] {
+        let (mut parser, request) = start_and_request();
+        parser.push_line(&request.to_string());
+        let mut malformed = request.clone();
+        malformed["id"] = invalid_id;
+        let events = parser.push_line(&malformed.to_string());
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::HarnessNotice { .. }]
+        ));
+        assert!(parser.take_rejected_elicitations().is_empty());
+        assert!(parser.pending_approval("call_fixture").is_some());
+    }
+    let (mut parser, mut request) = start_and_request();
+    request.as_object_mut().unwrap().remove("id");
+    parser.push_line(&request.to_string());
+    assert!(parser.take_rejected_elicitations().is_empty());
+    assert!(parser.pending_approvals.is_empty());
 }
