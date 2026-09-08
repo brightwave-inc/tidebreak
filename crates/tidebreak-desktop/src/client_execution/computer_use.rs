@@ -887,34 +887,59 @@ async fn execute_operation(
         Ok(action) => action,
         Err(resolution) => return resolution,
     };
-    match action {
-        CuAction::ReturnToTidebreak => {
-            // Foreground mode was already required by build_action; the
-            // takeover approval is still asked separately per chat.
-            if let Err(resolution) =
-                ensure_foreground_takeover(app, state, call, TIDEBREAK_FOCUS_SCOPE).await
-            {
-                return resolution;
+    let event_call = tidebreak_core::computer_session::ComputerUseCall {
+        request_id: call.id.0,
+        name: call.name.clone(),
+        arguments: call.arguments.clone(),
+    };
+    let activity = crate::computer_use_action::activity_for_call(
+        call.chat_id,
+        &event_call,
+        crate::computer_use_action::ComputerUseActionSource::Native,
+    );
+    if let Some(activity) = &activity {
+        crate::computer_use_action::emit_computer_use_action(app, activity);
+    }
+    let resolution = async {
+        match action {
+            CuAction::ReturnToTidebreak => {
+                // Foreground mode was already required by build_action; the
+                // takeover approval is still asked separately per chat.
+                if let Err(resolution) =
+                    ensure_foreground_takeover(app, state, call, TIDEBREAK_FOCUS_SCOPE).await
+                {
+                    return resolution;
+                }
+                crate::deep_link::focus_main_window(app);
+                completed(serde_json::json!({
+                    "status": "ok",
+                    "focused": "tidebreak",
+                    "execution_mode": "foreground",
+                }))
             }
-            crate::deep_link::focus_main_window(app);
-            completed(serde_json::json!({
-                "status": "ok",
-                "focused": "tidebreak",
-                "execution_mode": "foreground",
-            }))
-        }
-        CuAction::Wait(seconds) => {
-            let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
-            tokio::select! {
-                () = cu.wait_for_halt() => stopped_resolution(),
-                () = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)) =>
-                    completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
+            CuAction::Wait(seconds) => {
+                let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
+                tokio::select! {
+                    () = cu.wait_for_halt() => stopped_resolution(),
+                    () = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)) =>
+                        completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
+                }
             }
-        }
-        CuAction::Broker(request) => {
-            dispatch_broker(app, state, context, call, request, delivery).await
+            CuAction::Broker(request) => {
+                dispatch_broker(app, state, context, call, request, delivery).await
+            }
         }
     }
+    .await;
+    if let Some(activity) = activity {
+        let (success, error_code) = match &resolution {
+            StoredResolution::Completed { .. } => (true, None),
+            StoredResolution::Failed { error_code, .. } => (false, Some(error_code.as_str())),
+            StoredResolution::Cancelled { .. } => (false, Some("cancelled")),
+        };
+        crate::computer_use_action::finish_call_activity(app, activity, success, error_code);
+    }
+    resolution
 }
 
 /// Parse the canonical arguments and map the tool to its broker operation.
