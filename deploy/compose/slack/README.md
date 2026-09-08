@@ -38,9 +38,9 @@ cp tokens.example tokens
 
 1. **`.env`** — database passwords, blob store, provider key, public machine
    URL, image tags, the adapter bootstrap bearer, and the token-sealing key.
-2. **`slack.env`** — `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET`. Add the
-   app-level token only if you run Slack socket mode (confirm the environment
-   name against the image you pin).
+2. **`slack.env`** — `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET`. The
+   adapter receives events and slash commands over HTTPS request URLs; it
+   does not use socket mode.
 3. **`tokens`** — one person `admin` line and one `service` line. Channel
    sessions run as the service principal
    ([decision 0089](../../../docs/decisions/0089-service-principals.md)).
@@ -54,9 +54,9 @@ Generate tokens and the bootstrap bearer with `openssl rand -hex 32`.
 ## The machine directory: file or environment
 
 This Compose file mounts `./machines.json` read-only and points
-`SLACK_ADAPTER_MACHINES_FILE` at that path. Treat
-`SLACK_ADAPTER_MACHINES_FILE` as a placeholder if the image you pin uses a
-different name for a file path.
+`SLACK_ADAPTER_MACHINES_FILE` at that path. Adapter images from gateway
+release v0.1.0-alpha.195 read that file; set `SLACK_ADAPTER_MACHINES` to the
+same JSON instead if you pin an older image.
 
 To pass the same document as environment instead, drop the volume and set:
 

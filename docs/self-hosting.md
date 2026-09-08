@@ -399,9 +399,8 @@ settings:
   socket_mode_enabled: false
 ```
 
-Treat any scope or event name you cannot confirm against the image you pin
-as a placeholder. If you use socket mode, set the app-level token in the
-adapter environment; HTTP request URLs then stay unused.
+The adapter receives events and slash commands over the HTTPS request URLs
+above; it does not use socket mode, so no app-level token is needed.
 
 Put `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` in `slack.env` beside the
 Compose file. Keep that file off the machine's `.env` so a restart of one
@@ -459,10 +458,10 @@ workspace grant.
 
 Pass that document in either of two ways:
 
-- **File.** Mount it into the adapter container. The Compose example uses
-  `./machines.json` and `SLACK_ADAPTER_MACHINES_FILE`. Confirm the file-path
-  variable name against the image you pin; this repository does not define
-  it.
+- **File.** Mount it into the adapter container and point
+  `SLACK_ADAPTER_MACHINES_FILE` at it, as the Compose example does with
+  `./machines.json`. Adapter images from gateway release v0.1.0-alpha.195
+  read the file.
 - **Environment.** Set `SLACK_ADAPTER_MACHINES` to the same JSON string.
 
 `GET /health/setup` on the adapter reports `ready` and `missing`. Use it

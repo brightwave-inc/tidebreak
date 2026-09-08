@@ -91,9 +91,7 @@ services:
       - slack.env
     environment:
       DATABASE_URL: postgres://slack_adapter:${ADAPTER_POSTGRES_PASSWORD:?set ADAPTER_POSTGRES_PASSWORD in .env}@adapter-postgres:5432/slack_adapter
-      # Placeholder: replace TOKEN_SEALING_KEY with the environment name the
-      # adapter image documents for its token-sealing key.
-      TOKEN_SEALING_KEY: ${TOKEN_SEALING_KEY:?set TOKEN_SEALING_KEY in .env}
+      SLACK_ADAPTER_TOKEN_KEY: ${SLACK_ADAPTER_TOKEN_KEY:?set SLACK_ADAPTER_TOKEN_KEY in .env}
       # Directory as a mounted file. To pass the same document as environment
       # instead, set SLACK_ADAPTER_MACHINES to the JSON and drop this volume.
       SLACK_ADAPTER_MACHINES_FILE: /run/slack-adapter/machines.json
