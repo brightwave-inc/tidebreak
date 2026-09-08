@@ -813,7 +813,7 @@ cost, recorded so the gate is honest:
 - Approving engine actions from a Slack button on a sandbox session. The
   repository confirmation and the reap button stay session-lifecycle
   consent. A machine session's approval, question, and plan cards are in
-  scope (decision 90).
+  scope (decision 91).
 - Transcript-level resume for scratch sessions.
 
 ## Open questions
