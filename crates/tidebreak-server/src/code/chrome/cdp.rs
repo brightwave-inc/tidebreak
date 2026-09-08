@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use tidebreak_core::CancelToken;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -481,7 +482,6 @@ enum CdpCommandMsg {
         reply: oneshot::Sender<Result<Value, CdpError>>,
         authorized: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     },
-    Shutdown,
 }
 
 /// A session-correlated command futures holder.
@@ -502,6 +502,7 @@ pub struct AttachedSession {
 #[derive(Clone)]
 pub struct CdpSession {
     commands: mpsc::UnboundedSender<CdpCommandMsg>,
+    closed: CancelToken,
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     events: std::sync::Arc<Mutex<Vec<CdpEvent>>>,
     attachments: std::sync::Arc<Mutex<HashMap<String, AttachedSession>>>,
@@ -520,13 +521,25 @@ impl CdpSession {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
         let attachments = std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let closed = CancelToken::new();
         let session = Self {
+            closed: closed.clone(),
             attachments: attachments.clone(),
             commands: command_tx,
             next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             events: events.clone(),
         };
-        tokio::spawn(reader_loop(transport, command_rx, events, attachments));
+        tokio::spawn(async move {
+            // A queued shutdown cannot interrupt a stalled socket write. Drop
+            // the whole reader, including its transport and pending replies,
+            // as soon as close wins against the in-flight operation.
+            tokio::select! {
+                biased;
+                _ = closed.cancelled() => {},
+                _ = reader_loop(transport, command_rx, events, attachments) => {},
+            }
+            closed.cancel();
+        });
         session
     }
 
@@ -559,6 +572,9 @@ impl CdpSession {
         params: Value,
         authorized: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<Value, CdpError> {
+        if self.closed.is_cancelled() {
+            return Err(CdpError("chrome protocol session closed".into()));
+        }
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -585,16 +601,17 @@ impl CdpSession {
     }
 
     pub fn is_connected(&self) -> bool {
-        !self.commands.is_closed()
+        !self.closed.is_cancelled() && !self.commands.is_closed()
     }
 
     pub fn attached_sessions(&self) -> Vec<AttachedSession> {
         self.attachments.lock().unwrap().values().cloned().collect()
     }
 
-    /// Close the protocol task and transport.
+    /// Refuse new commands immediately and cancel the protocol task, even
+    /// when the transport is waiting to finish a write.
     pub fn close(&self) {
-        let _ = self.commands.send(CdpCommandMsg::Shutdown);
+        self.closed.cancel();
     }
 }
 
@@ -609,7 +626,7 @@ async fn reader_loop(
         tokio::select! {
             command = commands.recv() => {
                 match command {
-                    Some(CdpCommandMsg::Shutdown) | None => {
+                    None => {
                         for (_, pending_command) in pending.drain() {
                             let _ = pending_command.reply.send(Err(CdpError("chrome protocol session closed".to_owned())));
                         }
@@ -702,5 +719,128 @@ async fn reader_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct GatedSendTransport {
+        entered: Option<oneshot::Sender<()>>,
+        resume: Option<oneshot::Receiver<()>>,
+        delivered: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CdpTransport for GatedSendTransport {
+        async fn send_text(&mut self, text: &str) -> Result<(), CdpError> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            if let Some(resume) = self.resume.take() {
+                let _ = resume.await;
+            }
+            self.delivered
+                .send(text.into())
+                .map_err(|_| CdpError("test receiver closed".into()))
+        }
+
+        async fn next(&mut self) -> Result<Option<CdpFrame>, CdpError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn close_cancels_stalled_send_without_dispatching_input() {
+        let (entered, started) = oneshot::channel();
+        let (resume, gate) = oneshot::channel();
+        let (delivered, mut received) = mpsc::unbounded_channel();
+        let session = CdpSession::with_transport(GatedSendTransport {
+            entered: Some(entered),
+            resume: Some(gate),
+            delivered,
+        });
+        let command = tokio::spawn({
+            let session = session.clone();
+            async move {
+                session
+                    .command_in_session(
+                        "page",
+                        "Input.dispatchKeyEvent",
+                        json!({"type":"keyDown","key":"Enter"}),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .expect("send did not reach its gate")
+            .unwrap();
+        session.close();
+        assert!(!session.is_connected());
+        assert!(session
+            .command("Target.getTargets", json!({}))
+            .await
+            .is_err());
+        // Make both close and the old write ready before the reader runs.
+        let _ = resume.send(());
+        assert!(tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("close did not end the command")
+            .unwrap()
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("close did not drop the transport")
+                .is_none(),
+            "the old input reached Chrome after close"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_ends_blocked_and_queued_commands_without_releasing_the_writer() {
+        let (entered, started) = oneshot::channel();
+        let (_resume, gate) = oneshot::channel();
+        let (delivered, mut received) = mpsc::unbounded_channel();
+        let session = CdpSession::with_transport(GatedSendTransport {
+            entered: Some(entered),
+            resume: Some(gate),
+            delivered,
+        });
+        let first = tokio::spawn({
+            let session = session.clone();
+            async move {
+                session
+                    .command("Input.insertText", json!({"text":"a"}))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .expect("send did not reach its gate")
+            .unwrap();
+        let second = session.command("Input.insertText", json!({"text":"b"}));
+        tokio::pin!(second);
+        assert!(futures_util::poll!(&mut second).is_pending());
+        session.close();
+        assert!(!session.is_connected());
+        assert!(tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("close did not end the blocked command")
+            .unwrap()
+            .is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("close did not end the queued command")
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("close did not drop the stalled transport")
+                .is_none()
+        );
     }
 }
