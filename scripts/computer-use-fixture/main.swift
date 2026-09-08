@@ -42,7 +42,6 @@ struct AppArguments {
 // JSON events are written one object per file so a crash never leaves a
 // half-written record and a replay cannot silently reuse a sequence number.
 final class EventStore {
-    let fixtureDirectory: URL
     let eventsDirectory: URL
     private let runID: String
     private(set) var sequence = 0
@@ -50,7 +49,6 @@ final class EventStore {
     private let dateFormatter = ISO8601DateFormatter()
 
     init(fixtureDirectory: URL, runID: String) throws {
-        self.fixtureDirectory = fixtureDirectory
         let eventsDir = fixtureDirectory
             .appendingPathComponent("events", isDirectory: true)
             .appendingPathComponent(runID, isDirectory: true)
@@ -277,6 +275,12 @@ final class DragItemView: NSView {
             onDrop?("none")
             return
         }
+        if let target = root.subviews.first(where: {
+            $0.accessibilityIdentifier() == "fixture-drop-target" && $0.frame.intersects(frame)
+        }) {
+            onDrop?(target.accessibilityIdentifier() ?? "fixture-drop-target")
+            return
+        }
         let point = root.convert(event.locationInWindow, from: nil)
         guard let hit = root.hitTest(point), hit !== self else {
             onDrop?("none")
@@ -437,6 +441,7 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         scrollView.documentView = scrollContent
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.setAccessibilityIdentifier("fixture-scroll-area")
         scrollView.setAccessibilityLabel("Scroll area")
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -654,13 +659,22 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         second.delegate = self
         let controller = NSWindowController(window: second)
         self.secondWindowController = controller
+        let secondRoot = FlippedView()
+        secondRoot.translatesAutoresizingMaskIntoConstraints = false
+        second.contentView = secondRoot
         let note = NSTextField(labelWithString: "Second fixture window. Close it to continue.")
+        note.translatesAutoresizingMaskIntoConstraints = false
         note.setAccessibilityIdentifier("fixture-second-note")
         note.setAccessibilityLabel("Second window note")
-        note.translatesAutoresizingMaskIntoConstraints = false
-        second.contentView = note
-        note.centerXAnchor.constraint(equalTo: second.contentView!.centerXAnchor).isActive = true
-        note.centerYAnchor.constraint(equalTo: second.contentView!.centerYAnchor).isActive = true
+        secondRoot.addSubview(note)
+        NSLayoutConstraint.activate([
+            secondRoot.topAnchor.constraint(equalTo: second.contentLayoutGuide.topAnchor),
+            secondRoot.leadingAnchor.constraint(equalTo: second.contentLayoutGuide.leadingAnchor),
+            secondRoot.trailingAnchor.constraint(equalTo: second.contentLayoutGuide.trailingAnchor),
+            secondRoot.bottomAnchor.constraint(equalTo: second.contentLayoutGuide.bottomAnchor),
+            note.centerXAnchor.constraint(equalTo: secondRoot.centerXAnchor),
+            note.centerYAnchor.constraint(equalTo: secondRoot.centerYAnchor),
+        ])
         second.center()
         second.makeKeyAndOrderFront(nil)
         secondWindowButton.title = "Close second window"
@@ -804,6 +818,8 @@ do {
     app.delegate = delegate
     app.setActivationPolicy(.regular)
     app.run()
+} catch let error as FixtureError {
+    error.logAndExit()
 } catch {
     FixtureError.missingFixtureDirectory.logAndExit()
 }
