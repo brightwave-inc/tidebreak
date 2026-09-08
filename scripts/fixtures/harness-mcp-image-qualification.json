@@ -1,0 +1,156 @@
+{
+  "qualified_on": "2026-09-08",
+  "command": "python3 scripts/harness-mcp-image-probe.py --harness all",
+  "method": "Installed binaries call a local stdio MCP fixture through scripted loopback model endpoints. A macOS sandbox blocks outbound connections. Each successful report requires MCP discovery, invocation, image return, and matching PNG bytes in a later model request.",
+  "qualification_limit": "This proves installed-harness image transport. It does not prove Tidebreak bridge launch wiring, native or browser capture, or model reasoning.",
+  "results": [
+    {
+      "harness": "codex",
+      "version": "codex-cli 0.153.2",
+      "status": "passed",
+      "scope": "installed_harness_mcp_image_transport",
+      "outbound_network": "loopback_only_verified",
+      "paid_inference": false,
+      "child_exit": 0,
+      "timed_out": false,
+      "mcp_discovered": true,
+      "mcp_invoked": true,
+      "mcp_returned_image": true,
+      "fixture_png_bytes": 123,
+      "fixture_png_sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+      "provider_requests": [
+        {
+          "path": "/v1/responses",
+          "tool": null,
+          "images": []
+        },
+        {
+          "path": "/v1/responses",
+          "tool": "mcp__tidebreak_probe.capture_fixture",
+          "images": []
+        },
+        {
+          "path": "/v1/responses",
+          "tool": "mcp__tidebreak_probe.capture_fixture",
+          "images": [
+            {
+              "path": "request.input[6].output[2]",
+              "bytes": 123,
+              "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8"
+            }
+          ]
+        }
+      ],
+      "matching_images": [
+        {
+          "path": "request.input[6].output[2]",
+          "bytes": 123,
+          "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+          "request_index": 3
+        }
+      ],
+      "remaining_gates": [
+        "actual_tidebreak_bridge",
+        "native_or_browser_capture",
+        "model_reasoning"
+      ]
+    },
+    {
+      "harness": "claude",
+      "version": "2.1.263 (Claude Code)",
+      "status": "passed",
+      "scope": "installed_harness_mcp_image_transport",
+      "outbound_network": "loopback_only_verified",
+      "paid_inference": false,
+      "child_exit": 0,
+      "timed_out": false,
+      "mcp_discovered": true,
+      "mcp_invoked": true,
+      "mcp_returned_image": true,
+      "fixture_png_bytes": 123,
+      "fixture_png_sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+      "provider_requests": [
+        {
+          "path": "/v1/messages?beta=true",
+          "tool": "mcp__tidebreak_probe__capture_fixture",
+          "images": []
+        },
+        {
+          "path": "/v1/messages?beta=true",
+          "tool": "mcp__tidebreak_probe__capture_fixture",
+          "images": [
+            {
+              "path": "request.messages[2].content[0].content[1]",
+              "bytes": 123,
+              "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8"
+            }
+          ]
+        }
+      ],
+      "matching_images": [
+        {
+          "path": "request.messages[2].content[0].content[1]",
+          "bytes": 123,
+          "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+          "request_index": 2
+        }
+      ],
+      "remaining_gates": [
+        "actual_tidebreak_bridge",
+        "native_or_browser_capture",
+        "model_reasoning"
+      ]
+    },
+    {
+      "harness": "opencode",
+      "version": "1.18.23",
+      "status": "passed",
+      "scope": "installed_harness_mcp_image_transport",
+      "outbound_network": "loopback_only_verified",
+      "paid_inference": false,
+      "child_exit": 0,
+      "timed_out": false,
+      "mcp_discovered": true,
+      "mcp_invoked": true,
+      "mcp_returned_image": true,
+      "fixture_png_bytes": 123,
+      "fixture_png_sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+      "provider_requests": [
+        {
+          "path": "/v1/responses",
+          "tool": null,
+          "images": []
+        },
+        {
+          "path": "/v1/responses",
+          "tool": "tidebreak_probe_capture_fixture",
+          "images": []
+        },
+        {
+          "path": "/v1/responses",
+          "tool": "tidebreak_probe_capture_fixture",
+          "images": [
+            {
+              "path": "request.input[3].output[1]",
+              "bytes": 123,
+              "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8"
+            }
+          ]
+        }
+      ],
+      "matching_images": [
+        {
+          "path": "request.input[3].output[1]",
+          "bytes": 123,
+          "sha256": "2d10c8695a7e4b6c1a156aa46ea3973917d221bc15541e36a6e05502676379e8",
+          "request_index": 3
+        }
+      ],
+      "remaining_gates": [
+        "actual_tidebreak_bridge",
+        "native_or_browser_capture",
+        "model_reasoning"
+      ]
+    }
+  ]
+}
