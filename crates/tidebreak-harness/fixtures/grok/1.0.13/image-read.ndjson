@@ -1,0 +1,7 @@
+{"type":"usage"}
+{"type":"tool_call","toolCallId":"fixture_read_image","title":"read_file","kind":"read","status":"pending","toolName":"read_file","rawInput":{"target_file":"/workspace/capture.png"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"fixture_read_image","status":null,"content":[],"rawOutput":null,"locations":[{"path":"/workspace/capture.png"}]}
+{"type":"tool_call_update","toolCallId":"fixture_read_image","status":"completed","content":[{"type":"content","content":{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC","mimeType":"image/png"}}],"rawOutput":{"type":"ReadFile","ImageContent":{"data":"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC","mime_type":"image/png"}},"locations":[]}
+{"type":"text","data":"Fixture complete."}
+{"type":"usage"}
+{"type":"end","stopReason":"end_turn","sessionId":"fixture-session","requestId":"fixture-request"}

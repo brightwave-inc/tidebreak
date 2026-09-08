@@ -4777,11 +4777,14 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
     // hand (the control surface refuses it, tested below) and the op still
     // refuses.
     for blocked in [
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
+        "com.apple.loginwindow",
+        "com.apple.CoreAuthUI",
+        "com.apple.coreauthd",
+        "com.apple.keychainaccess",
+        "com.apple.systempreferences",
         "com.apple.SecurityAgent",
         "io.brightwave.tidebreak",
-        "io.brightwave.anything",
+        "io.brightwave.tidebreak.staging",
     ] {
         fixture.broker.shared.state.lock().unwrap().grants.push(
             Grant::from_consent(
@@ -4813,8 +4816,62 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
     }
     assert!(fixture.backend.clicks().is_empty());
     // A lookalike suffix is not the blocked bundle.
-    fixture.grant(Capability::ControlApp, Some("com.apple.Terminalized"));
-    fixture.click("com.apple.Terminalized").unwrap();
+    fixture.grant(Capability::ControlApp, Some("com.apple.SecurityAgentish"));
+    fixture.click("com.apple.SecurityAgentish").unwrap();
+}
+
+#[test]
+fn development_app_reads_and_control_require_explicit_app_grants() {
+    for bundle_id in [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.microsoft.VSCode",
+        "com.jetbrains.CLion",
+        "com.apple.dt.Xcode",
+        "com.raycast.macos",
+        "io.brightwave.another-product",
+        "dev.tidebreak.desktop-test",
+    ] {
+        let fixture = cu_setup();
+        let read_request = OperationRequest::CuReadAppContent {
+            bundle_id: bundle_id.to_owned(),
+            max_depth: None,
+            max_nodes: None,
+        };
+        let capture_request = OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: bundle_id.to_owned(),
+            },
+        };
+        assert_eq!(
+            fixture.click(bundle_id).unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fixture.operate(read_request.clone()).unwrap_err().code,
+            ErrorCode::Denied,
+        );
+        assert_eq!(
+            fixture.operate(capture_request.clone()).unwrap_err().code,
+            ErrorCode::Denied,
+        );
+        fixture.grant(Capability::ReadAppContent, Some(bundle_id));
+        assert!(matches!(
+            fixture.operate(read_request).unwrap(),
+            OperationResult::CuReadAppContent(_)
+        ));
+        assert_eq!(
+            fixture.click(bundle_id).unwrap_err().code,
+            ErrorCode::Denied
+        );
+        fixture.grant(Capability::ControlApp, Some(bundle_id));
+        fixture.click(bundle_id).unwrap();
+        assert_eq!(fixture.backend.clicks().len(), 1, "{bundle_id}");
+        assert!(matches!(
+            fixture.operate(capture_request).unwrap(),
+            OperationResult::CuCaptureScreen(_)
+        ));
+    }
 }
 
 #[test]

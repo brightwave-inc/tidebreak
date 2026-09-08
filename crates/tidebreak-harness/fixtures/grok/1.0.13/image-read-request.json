@@ -1,0 +1,21 @@
+{
+  "model": "grok-4.6",
+  "messages": [
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "text",
+          "text": "Read image file: /workspace/capture.png"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC"
+          }
+        }
+      ],
+      "tool_call_id": "fixture_read_image"
+    }
+  ]
+}

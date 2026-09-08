@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-08
 - Delivery: #3245
-- Supersedes the foreground-only and screenshot-redaction limits in decisions 13 and 54.
+- Supersedes the foreground-only, development-app blocklist, and screenshot-redaction limits in decisions 13 and 54.
 
 ## Decision
 
@@ -12,6 +12,10 @@ Code sessions receive computer use through a host-owned service. External harnes
 Screenshot access is part of an explicitly approved app or browser scope. Consent says that visible content reaches the selected model and provider. Automatic redaction is not a guarantee or a prerequisite for capture. Whole-display capture requires its own grant. Existing browser sharing must receive the disclosure before gaining screenshot access.
 
 Native app access does not silently replace denied browser access. Native control of browser windows requires a broader app grant that explains its scope. System authentication and approval interfaces remain under human control. Testing Tidebreak itself must use an isolated development target without access to the controlling instance's approval interface.
+
+Terminals, editors, IDEs, and command launchers use the same explicit app grants as other apps. Control consent for these apps states that the agent can run commands with the user's local account permissions, including outside a coding sandbox. Read and screenshot grants do not authorize control. A list of executable apps cannot enforce a sandbox boundary, so the known development-app list only selects the stronger disclosure.
+
+The hard blocklist retains the `io.brightwave.tidebreak` app family and OS authentication, keychain, and settings surfaces. It does not block other products under `io.brightwave.*`. To test Tidebreak, build a separate target with a bundle id under `dev.tidebreak.*` and an isolated profile without access to the controlling instance's approval interface. A renamed bundle alone does not establish that isolation. Reserved Tidebreak app ids remain blocked even when a grant exists.
 
 The host derives owner, workspace, and session identity. Each operation carries a request id. Completed results may be recovered; unknown outcomes require inspection before another action. An interrupt cancels pending input and releases ownership. Session termination revokes access. Restart invalidates transient targets and controllers.
 

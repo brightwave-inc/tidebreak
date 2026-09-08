@@ -369,10 +369,7 @@ async fn native_three_way_choice(
         .map_err(|_| "the native computer-use prompt closed unexpectedly".to_owned())
 }
 
-async fn native_consent_choice(
-    app: &AppHandle,
-    view: &ConsentPromptView,
-) -> Result<ConsentDecision, String> {
+fn computer_use_consent_message(view: &ConsentPromptView) -> String {
     let app_label = if view.bundle_id.is_empty() {
         "your entire screen".to_owned()
     } else {
@@ -383,12 +380,37 @@ async fn native_consent_choice(
         ConsentCapability::ReadAppContent => "read on-screen content from",
         ConsentCapability::ControlApp => "control",
     };
+    let mut message = format!(
+        "Allow Tidebreak to {action} {app_label}? Screenshots and on-screen content within this permission can be sent to your selected model and provider. You can stop control at any time."
+    );
+    if view.capability == ConsentCapability::ControlApp {
+        if tidebreak_host_broker::blocklist::is_development_control_bundle(&view.bundle_id) {
+            message.push_str(" This app can run commands on your Mac. Allowing control lets Tidebreak use those commands with your account's permissions, including access outside the coding sandbox.");
+        }
+        if matches!(
+            view.bundle_id.as_str(),
+            "com.google.Chrome"
+                | "com.google.Chrome.beta"
+                | "com.google.Chrome.dev"
+                | "com.google.Chrome.canary"
+                | "com.apple.Safari"
+                | "com.microsoft.edgemac"
+                | "org.mozilla.firefox"
+        ) {
+            message.push_str(" This permission covers the browser app and its visible tabs. It is broader than sharing one website.");
+        }
+    }
+    message
+}
+
+async fn native_consent_choice(
+    app: &AppHandle,
+    view: &ConsentPromptView,
+) -> Result<ConsentDecision, String> {
     let first = native_three_way_choice(
         app,
         "Allow computer use?",
-        &format!(
-            "Allow Tidebreak to {action} {app_label}? This permission is enforced by the native host, outside the conversation renderer."
-        ),
+        &computer_use_consent_message(view),
         "Allow once",
         "Remember permission…",
         "Don't allow",
@@ -1621,6 +1643,27 @@ fn unavailable(code: &str, message: &str) -> StoredResolution {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_app_consent_discloses_pixels_and_broader_control() {
+        let mut view = ConsentPromptView {
+            call_id: tidebreak_core::CallId::new(),
+            chat_id: tidebreak_core::SessionId::new(),
+            bundle_id: "com.microsoft.VSCode".into(),
+            app_name: Some("Visual Studio Code".into()),
+            capability: ConsentCapability::ControlApp,
+            grant_scope: ConsentGrantScope::Chat,
+        };
+        let message = computer_use_consent_message(&view);
+        assert!(message.contains("selected model and provider"));
+        assert!(message.contains("outside the coding sandbox"));
+        view.bundle_id = "com.google.Chrome".into();
+        assert!(computer_use_consent_message(&view).contains("broader than sharing one website"));
+        view.capability = ConsentCapability::ReadAppContent;
+        assert!(!computer_use_consent_message(&view).contains("can run commands"));
+        view.bundle_id.clear();
+        assert!(computer_use_consent_message(&view).contains("your entire screen"));
+    }
+
     use super::*;
 
     fn mark(number: u32, id: &str) -> Mark {

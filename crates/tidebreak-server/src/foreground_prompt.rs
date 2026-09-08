@@ -422,7 +422,7 @@ pub(crate) fn compose_for_surface(
                 "- Prefer the accessibility tree for reading; when an app's tree is incomplete or unclear, capture a screenshot to see what is actually on screen before deciding.",
             );
             lines.push(
-                "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
+                "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop control or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
             );
             lines.push(
                 "- When work in another app is finished, use `computer_return_to_tidebreak` so the user can see completion and continue the conversation.",

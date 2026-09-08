@@ -222,6 +222,49 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tidebreak_core::PermissionMode;
 
+    #[test]
+    fn image_read_fixture_keeps_pixels_out_of_the_journal_preview() {
+        let (events, unrecognized) = replay_version("1.0.13", "image-read");
+        assert_eq!(unrecognized, 0);
+        let preview = events.iter().find_map(|event| match event {
+            HarnessEvent::ToolCompleted { preview, .. } => Some(preview.as_str()),
+            _ => None,
+        });
+        assert_eq!(preview, Some("Image received (image/png)."));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(!rendered.contains("iVBOR"));
+    }
+
+    #[test]
+    fn image_read_fixture_reaches_the_next_model_request_as_pixels() {
+        let directory = fixture_dir("1.0.13");
+        let stream = std::fs::read_to_string(directory.join("image-read.ndjson")).unwrap();
+        let image_update = stream
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|value| value.pointer("/rawOutput/ImageContent/data").is_some())
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.join("image-read-request.json")).unwrap(),
+        )
+        .unwrap();
+        let pixels = image_update
+            .pointer("/rawOutput/ImageContent/data")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let image = request["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "image_url")
+            .unwrap();
+        assert_eq!(
+            image["image_url"]["url"],
+            format!("data:image/png;base64,{pixels}")
+        );
+        assert_eq!(request["messages"][0]["role"], "tool");
+    }
+
     fn fixture_dir(version: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/grok/{version}"))
     }

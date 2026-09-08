@@ -2429,6 +2429,63 @@ test("universal macOS release and staging packages contain both slices", () => {
   }
 });
 
+test("macOS computer-use helper survives packaging and is signed before bundling", () => {
+  const release = workflows["release.yml"];
+  const combine = workflowJob(release, "combine_macos");
+  const shell = (job) => job.replace(/[ \t]*\\\n[ \t]*/g, " ");
+  const targetHelper = "crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$RELEASE_TARGET";
+  const resource = "crates/tidebreak-desktop/resources/host-broker/tidebreak-cu-helper";
+
+  for (const [source, prepareName, buildName, bundleName] of [
+    [release, "prepare_macos", "build_macos", "Bundle and sign the prepared Tauri app"],
+    [workflows["staging-publish.yml"], "prepare_macos_staging", "build_macos_staging", "Bundle and sign the prepared staging app"],
+  ]) {
+    const prepare = workflowJob(source, prepareName);
+    const build = workflowJob(source, buildName);
+    assert.ok(prepare.includes(`cu_helper="${targetHelper}"`));
+    assert.match(prepare, /for file in [^\n]*"\$cu_helper"[^\n]*; do/);
+    assert.match(shell(prepare), /install -m 755 "\$cu_helper" "\$PREPARED_ROOT\/\$cu_helper"/);
+    assert.match(
+      shell(prepare),
+      /shasum -a 256 [^\n]*"\$cu_helper" > SHA256SUMS/,
+      `${prepareName} must checksum the computer-use helper`,
+    );
+    assert.ok(build.includes(`"./${targetHelper}"`));
+    assert.ok(build.includes(`cu_helper="${targetHelper}"`));
+    assert.ok(build.includes(`cu_resource="${resource}"`));
+    assert.match(build, /install -m 755 "\$PREPARED_ROOT\/\$cu_helper" "\$cu_resource"/);
+
+    const signing = build.match(/      - name: Sign the computer-use helper resource\n[\s\S]*?(?=\n      - name:)/)?.[0];
+    assert.ok(signing, `${buildName} must sign the helper before bundling`);
+    assert.match(signing, /codesign --force --options runtime --timestamp/);
+    assert.match(signing, /--identifier io\.brightwave\.tidebreak\.cu-helper/);
+    assert.match(signing, /--sign "\$APPLE_SIGNING_IDENTITY"/);
+    assert.match(signing, /--keychain "\$APPLE_SIGNING_KEYCHAIN"/);
+    assert.match(signing, /codesign --verify --strict --verbose=2 "\$cu_resource"/);
+    assert.ok(build.indexOf(signing) > build.indexOf("- name: Import Developer ID certificate"));
+    assert.ok(build.indexOf(signing) < build.indexOf(`- name: ${bundleName}`));
+
+    const verifyAt = build.search(/- name: Verify and collect (?:signed|staging) artifacts/);
+    assert.notEqual(verifyAt, -1, `${buildName} must verify its packaged helper`);
+    const verify = build.slice(verifyAt);
+    assert.match(verify, /cu_helper="\$app_path\/Contents\/Resources\/host-broker\/tidebreak-cu-helper"/);
+    assert.match(verify, /\[\[ -x "\$cu_helper" \]\]/);
+    assert.match(verify, /helper_arches="\$\(lipo -archs "\$cu_helper"\)"/);
+    assert.match(verify, /\[\[ "\$helper_arches" = \*arm64\* && "\$helper_arches" = \*x86_64\* \]\]/);
+    assert.match(verify, /codesign --verify --strict --verbose=2 "\$cu_helper"/);
+    assert.match(verify, /\[\[ "\$helper_identifier" = io\.brightwave\.tidebreak\.cu-helper \]\]/);
+    assert.match(verify, /\[\[ -n "\$app_team" && "\$app_team" != "not set" && "\$helper_team" = "\$app_team" \]\]/);
+  }
+
+  assert.ok(combine.includes('"./crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$target"'));
+  assert.match(
+    shell(combine),
+    /lipo -create "\$arm_root\/crates\/tidebreak-desktop\/binaries\/tidebreak-cu-helper-aarch64-apple-darwin" "\$x86_root\/crates\/tidebreak-desktop\/binaries\/tidebreak-cu-helper-x86_64-apple-darwin" -output "\$PREPARED_ROOT\/\$cu_helper"/,
+  );
+  assert.match(combine, /for file in [^\n]*"\$cu_helper"[^\n]*; do/);
+  assert.match(shell(combine), /shasum -a 256 [^\n]*"\$cu_helper" > SHA256SUMS/);
+});
+
 test("release and staging share one third-party notices implementation", () => {
   const noticesWorkflow = workflows["third-party-notices.yml"];
   const notices = workflowJob(noticesWorkflow, "check");

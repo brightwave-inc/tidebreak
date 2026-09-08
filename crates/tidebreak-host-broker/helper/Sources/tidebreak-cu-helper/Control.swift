@@ -43,50 +43,18 @@ enum Control {
     /// Bundle ids (exact, or as a dotted prefix) the helper will never act on.
     /// Mirrors the broker's blocklist — defense in depth, not the primary gate.
     static let blockedBundlePrefixes: [String] = [
-        // Never automate Tidebreak itself (covers the desktop and any
-        // channel-suffixed variant).
         "io.brightwave.tidebreak",
-        "io.brightwave.",
-        // Terminals, IDEs, editors, and command launchers: a ControlApp grant
-        // over any of these reaches unsandboxed local execution (focus the
-        // integrated shell, type a command, press Return) and would bypass the
-        // sandboxed exec path. A bundle-id list cannot enumerate every app that
-        // embeds a shell; this is the common class. See decision record 0013.
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
-        "dev.warp.",
-        "net.kovidgoyal.kitty",
-        "org.alacritty",
-        "io.alacritty",
-        "com.github.wez.wezterm",
-        "com.mitchellh.ghostty",
-        "com.microsoft.VSCode",
-        "com.microsoft.VSCodeInsiders",
-        "com.visualstudio.code.oss",
-        // Cursor's stable ToDesktop-issued bundle id (not a com.cursor.* id).
-        "com.todesktop.230313mzl4w4u92",
-        "com.exafunction.windsurf",
-        "com.apple.dt.Xcode",
-        "com.jetbrains.",
-        "com.sublimetext.",
-        "com.panic.Nova",
-        "com.google.android.studio",
-        "dev.zed.Zed",
-        "org.gnu.Emacs",
-        "org.vim.MacVim",
-        "com.runningwithcrayons.Alfred",
-        "com.raycast.macos",
-        // Auth / login / credential surfaces — driving these could defeat a
-        // human-in-the-loop check.
         "com.apple.loginwindow",
         "com.apple.SecurityAgent",
+        "com.apple.CoreAuthUI",
+        "com.apple.coreauthd",
         "com.apple.systempreferences",
         "com.apple.keychainaccess",
     ]
 
     /// Matches the broker's semantics exactly: an entry blocks its exact id and
-    /// anything nested under it at a dotted boundary, so `com.apple.Terminal`
-    /// blocks `com.apple.Terminal.helper` but not `com.apple.Terminalized`.
+    /// anything nested under it at a dotted boundary, so `com.apple.SecurityAgent`
+    /// blocks `com.apple.SecurityAgent.helper` but not a lookalike suffix.
     static func isBlocked(_ bundleId: String) -> Bool {
         blockedBundlePrefixes.contains { entry in
             let base = entry.hasSuffix(".") ? String(entry.dropLast()) : entry
@@ -97,7 +65,7 @@ enum Control {
 
     /// Throw `operation_failed` when a request targets a blocked bundle. Shared
     /// by every op that names an app — capture and read as well as control, so
-    /// a compromised broker cannot read Terminal or Tidebreak through the helper
+    /// a compromised broker cannot read protected security or Tidebreak surfaces
     /// directly.
     static func ensureNotBlocked(_ bundleId: String?) throws {
         if let bundleId, isBlocked(bundleId) {

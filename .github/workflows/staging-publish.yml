@@ -167,7 +167,8 @@ jobs:
           app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop"
           broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
           cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET"
-          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$RELEASE_CONFIG"; do
+          cu_helper="crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$RELEASE_TARGET"
+          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$cu_helper" "$RELEASE_CONFIG"; do
             [[ -s "$file" ]] || {
               echo "Prepared staging macOS input is missing or empty: $file" >&2
               exit 1
@@ -181,6 +182,7 @@ jobs:
           install -m 755 "$app_binary" "$PREPARED_ROOT/$app_binary"
           install -m 755 "$broker_sidecar" "$PREPARED_ROOT/$broker_sidecar"
           install -m 755 "$cli_sidecar" "$PREPARED_ROOT/$cli_sidecar"
+          install -m 755 "$cu_helper" "$PREPARED_ROOT/$cu_helper"
           install -m 644 "$RELEASE_CONFIG" "$PREPARED_ROOT/staging-config.json"
 
           (
@@ -190,6 +192,7 @@ jobs:
               "$app_binary" \
               "$broker_sidecar" \
               "$cli_sidecar" \
+              "$cu_helper" \
               > SHA256SUMS
             tar -cf "$GITHUB_WORKSPACE/prepared-staging-macos.tar" \
               SHA256SUMS \
@@ -260,6 +263,7 @@ jobs:
               "./SHA256SUMS" \
               "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET" \
               "./crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$RELEASE_TARGET" \
               "./staging-config.json" \
               "./target/$RELEASE_TARGET/release/tidebreak-desktop" \
               | LC_ALL=C sort)"
@@ -274,10 +278,14 @@ jobs:
           app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop"
           broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
           cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET"
-          install -d "$(dirname "$app_binary")" "$(dirname "$broker_sidecar")"
+          cu_helper="crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$RELEASE_TARGET"
+          cu_resource="crates/tidebreak-desktop/resources/host-broker/tidebreak-cu-helper"
+          install -d "$(dirname "$app_binary")" "$(dirname "$broker_sidecar")" "$(dirname "$cu_resource")"
           install -m 755 "$PREPARED_ROOT/$app_binary" "$app_binary"
           install -m 755 "$PREPARED_ROOT/$broker_sidecar" "$broker_sidecar"
           install -m 755 "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
+          install -m 755 "$PREPARED_ROOT/$cu_helper" "$cu_helper"
+          install -m 755 "$PREPARED_ROOT/$cu_helper" "$cu_resource"
           install -m 644 "$PREPARED_ROOT/staging-config.json" "$RELEASE_CONFIG"
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -357,6 +365,20 @@ jobs:
             echo "APPLE_CERTIFICATE_PATH=$certificate_path"
             echo "APPLE_SIGNING_KEYCHAIN=$keychain_path"
           } >> "$GITHUB_ENV"
+
+      - name: Sign the computer-use helper resource
+        run: |
+          cu_resource="crates/tidebreak-desktop/resources/host-broker/tidebreak-cu-helper"
+          [[ -x "$cu_resource" ]] || {
+            echo "Prepared computer-use helper is missing or not executable: $cu_resource" >&2
+            exit 1
+          }
+          codesign --force --options runtime --timestamp \
+            --identifier io.brightwave.tidebreak.cu-helper \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --keychain "$APPLE_SIGNING_KEYCHAIN" \
+            "$cu_resource"
+          codesign --verify --strict --verbose=2 "$cu_resource"
 
       - name: Add the macOS signing identity to the prepared configuration
         env:
@@ -542,6 +564,30 @@ jobs:
           cli_arches="$(lipo -archs "$cli_sidecar")"
           [[ "$cli_arches" = *arm64* && "$cli_arches" = *x86_64* ]] || {
             echo "Expected universal staging CLI, found Mach-O architectures: $cli_arches" >&2
+            exit 1
+          }
+
+          cu_helper="$app_path/Contents/Resources/host-broker/tidebreak-cu-helper"
+          [[ -x "$cu_helper" ]] || {
+            echo "Universal app is missing its executable computer-use helper: $cu_helper" >&2
+            exit 1
+          }
+          helper_arches="$(lipo -archs "$cu_helper")"
+          [[ "$helper_arches" = *arm64* && "$helper_arches" = *x86_64* ]] || {
+            echo "Expected universal computer-use helper, found Mach-O architectures: $helper_arches" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 "$cu_helper"
+          helper_signature="$(codesign --display --verbose=4 "$cu_helper" 2>&1)"
+          helper_identifier="$(printf '%s\n' "$helper_signature" | sed -n 's/^Identifier=//p')"
+          helper_team="$(printf '%s\n' "$helper_signature" | sed -n 's/^TeamIdentifier=//p')"
+          app_team="$(codesign --display --verbose=4 "$app_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          [[ "$helper_identifier" = io.brightwave.tidebreak.cu-helper ]] || {
+            echo "Computer-use helper has an unexpected signing identifier: $helper_identifier" >&2
+            exit 1
+          }
+          [[ -n "$app_team" && "$app_team" != "not set" && "$helper_team" = "$app_team" ]] || {
+            echo "Computer-use helper signing team does not match the app: $helper_team / $app_team" >&2
             exit 1
           }
 
