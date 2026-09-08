@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
       visibleUntilMillis: number;
     },
     halted: false,
+    stoppedSessions: 0,
   },
   stop: vi.fn(() => Promise.resolve()),
   resume: vi.fn(() => Promise.resolve()),
@@ -40,6 +41,7 @@ describe("ComputerUseIndicator", () => {
     mocks.snapshot = {
       active: null,
       halted: false,
+      stoppedSessions: 0,
     };
     vi.clearAllMocks();
   });
@@ -102,4 +104,87 @@ describe("ComputerUseIndicator", () => {
     await userEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(mocks.stop).toHaveBeenCalledOnce();
   });
+});
+
+describe("individually stopped sessions", () => {
+  it("offers Resume for an individually stopped session without claiming a global stop", async () => {
+    const resume = vi.fn(async () => {});
+    render(
+      <ComputerUseIndicatorView
+        snapshot={{ active: null, halted: false, stoppedSessions: 1 }}
+        onStop={mocks.stop}
+        onResume={resume}
+      />,
+    );
+    expect(
+      screen.getByText("Computer control is stopped for 1 session"),
+    ).toBeTruthy();
+    expect(screen.queryByText("Computer control is stopped")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Stop available for another active session and offers a separate Resume", async () => {
+    const resume = vi.fn(async () => {});
+    const stop = vi.fn(async () => {});
+    render(
+      <ComputerUseIndicatorView
+        snapshot={{
+          active: {
+            bundleId: "test.editor",
+            appName: "Editor",
+            lastActivityMillis: Date.now(),
+            visibleUntilMillis: Date.now() + 30_000,
+          },
+          halted: false,
+          stoppedSessions: 2,
+        }}
+        onStop={stop}
+        onResume={resume}
+      />,
+    );
+    expect(screen.getByText("Tidebreak is controlling Editor")).toBeTruthy();
+    expect(
+      screen.getByText("2 sessions have stopped computer control."),
+    ).toBeTruthy();
+    expect(screen.queryByText("Computer control is stopped")).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Resume stopped sessions" }),
+    );
+    expect(resume).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(stop).toHaveBeenCalledOnce();
+  });
+});
+
+it("keeps emergency Stop available while Resume waits for native approval", async () => {
+  const resume = vi.fn(() => new Promise<void>(() => {}));
+  const stop = vi.fn(async () => {});
+  render(
+    <ComputerUseIndicatorView
+      snapshot={{
+        active: {
+          bundleId: "test.editor",
+          appName: "Editor",
+          lastActivityMillis: Date.now(),
+          visibleUntilMillis: Date.now() + 30_000,
+        },
+        halted: false,
+        stoppedSessions: 1,
+      }}
+      onStop={stop}
+      onResume={resume}
+    />,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Resume stopped sessions" }),
+  );
+  expect(resume).toHaveBeenCalledOnce();
+  const stopButton = screen.getByRole("button", {
+    name: "Stop",
+  }) as HTMLButtonElement;
+  expect(stopButton.disabled).toBe(false);
+  await userEvent.click(stopButton);
+  expect(stop).toHaveBeenCalledOnce();
 });
