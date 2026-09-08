@@ -55,9 +55,10 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // the engine-neutral semantic command contract.
             semantic_snapshot: cfg!(target_os = "macos"),
             semantic_actions: cfg!(target_os = "macos"),
-            // WKWebView can consume parser-created closed shadow roots before
-            // Tidebreak can prove that their rendered content is safe.
-            screenshot: false,
+            // Decision 93: capture is gated on the disclosed capture grant,
+            // not on proving closed-shadow privacy first.
+            screenshot: cfg!(target_os = "macos"),
+            developer_diagnostics: cfg!(target_os = "macos"),
             cross_origin_frames: false,
             profile_reset: cfg!(target_os = "macos"),
         },
@@ -88,6 +89,8 @@ pub(crate) struct BrowserAgentAccess {
     pub(crate) scope: Option<BrowserAgentAccessScope>,
     pub(crate) can_observe: bool,
     pub(crate) can_control: bool,
+    pub(crate) can_capture_screens: bool,
+    pub(crate) can_diagnose: bool,
     pub(crate) can_transfer_files: bool,
 }
 
@@ -297,6 +300,9 @@ struct BrowserRecord {
     engine: BrowserEngineDescriptor,
     controller: BrowserController,
     controller_capability_id: Option<Uuid>,
+    /// The live agent capability that opened this tab via `browser_open`.
+    /// Only that agent may close the tab; human takeover clears it.
+    opened_by_capability: Option<Uuid>,
     paused_origin: Option<BrowserOrigin>,
     pending_navigation_url: Option<String>,
     dispatch: BrowserDispatchState,
@@ -652,6 +658,7 @@ impl BrowserRegistry {
                 engine: platform_default_engine(),
                 controller: BrowserController::default(),
                 controller_capability_id: None,
+                opened_by_capability: None,
                 paused_origin: None,
                 pending_navigation_url: None,
                 dispatch: BrowserDispatchState::default(),
@@ -955,6 +962,9 @@ impl BrowserRegistry {
                     record.controller.label = Some(controller_label.clone());
                 }
             }
+            if record.opened_by_capability == Some(capability_id) {
+                record.opened_by_capability = Some(replacement);
+            }
         }
         state
             .confirmations
@@ -1055,6 +1065,142 @@ impl BrowserRegistry {
             .get(browser_id)
             .expect("browser was checked above");
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Extend every grant that already covers this browser's share target
+    /// with additional capabilities the user just approved through a fresh
+    /// native disclosure. Never creates a grant: a target with no covering
+    /// consent still needs the full sharing dialog.
+    pub(crate) fn extend_browser_access(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        capabilities: &[BrowserGrantCapability],
+    ) -> Result<BrowserSnapshot, String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        let target = share_target_for_record(record)
+            .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())?;
+        let owner_id = record.owner_id.clone();
+        let mut next = state.grants.clone();
+        let mut extended = false;
+        for grant in next.iter_mut() {
+            if grant.owner_id == owner_id
+                && grant.workspace_id == workspace_id
+                && grant.scope.covers(&target)
+            {
+                grant.capabilities.extend(capabilities.iter().copied());
+                extended = true;
+            }
+        }
+        if !extended {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        persist_browser_grants(&state, &next)?;
+        state.grants = next;
+        let record = state
+            .records
+            .get(browser_id)
+            .expect("browser was checked above");
+        Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Authorize a `browser_open` proposal before anything is created: the
+    /// capability must be live and the destination origin must already be
+    /// covered by a control grant for this owner and workspace. Opening a tab
+    /// never creates consent.
+    pub(crate) fn authorize_agent_open(
+        &self,
+        capability_id: Uuid,
+        owner_id: &OwnerId,
+        destination: &BrowserOrigin,
+    ) -> Result<String, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        if !grants_cover(
+            &state,
+            owner_id,
+            &capability.workspace_id,
+            destination,
+            BrowserGrantCapability::BrowserControlOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        Ok(capability.workspace_id.clone())
+    }
+
+    /// Bind a freshly created tab to the agent capability that opened it.
+    pub(crate) fn mark_agent_opened(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let workspace_id = active_capability(&state, capability_id)?
+            .workspace_id
+            .clone();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &workspace_id, record)?;
+        record.opened_by_capability = Some(capability_id);
+        Ok(())
+    }
+
+    /// Authorize a `browser_close` proposal: only the agent capability that
+    /// opened the tab may close it, and only while that capability is live.
+    /// Returns the workspace id so the caller can perform the native close.
+    pub(crate) fn authorize_agent_close(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<String, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if record.opened_by_capability != Some(capability_id) {
+            return Err("browser tab was not opened by this agent".to_owned());
+        }
+        Ok(capability.workspace_id.clone())
+    }
+
+    /// Authorize a `browser_activate` proposal: the capability must be live,
+    /// the tab must be in its workspace, and the tab's current origin must be
+    /// shared for observation. Returns the workspace id and whether the tab
+    /// is already visible.
+    pub(crate) fn authorize_agent_activation(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<(String, bool), String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        Ok((capability.workspace_id.clone(), record.visible))
     }
 
     pub(crate) fn revoke_browser_access(
@@ -1450,6 +1596,9 @@ impl BrowserRegistry {
                 record.controller = BrowserController::default();
                 record.controller_capability_id = None;
             }
+            // Decision 93: human takeover ends the opening agent's lifecycle
+            // ownership. The tab stays under human control from here on.
+            record.opened_by_capability = None;
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
@@ -2208,6 +2357,17 @@ impl BrowserRegistry {
             ) {
                 return Err("browser origin is not shared for this operation".to_owned());
             }
+            // Capture consent is separate from observation: only a grant taken
+            // under the screenshot disclosure may record captured pixels.
+            if !grants_cover(
+                &state,
+                &record.owner_id,
+                &workspace_id,
+                &origin,
+                BrowserGrantCapability::BrowserCaptureVisibleTab,
+            ) {
+                return Err("browser origin is not shared for screenshots".to_owned());
+            }
             let Some(snapshot) = &record.semantic_snapshot else {
                 return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
             };
@@ -2524,6 +2684,8 @@ fn agent_access_for_record(
             scope: None,
             can_observe: false,
             can_control: false,
+            can_capture_screens: false,
+            can_diagnose: false,
             can_transfer_files: false,
         };
     };
@@ -2547,6 +2709,8 @@ fn agent_access_for_record(
     };
     let can_observe = covers(BrowserGrantCapability::BrowserObserveOrigin);
     let can_control = covers(BrowserGrantCapability::BrowserControlOrigin);
+    let can_capture_screens = covers(BrowserGrantCapability::BrowserCaptureVisibleTab);
+    let can_diagnose = covers(BrowserGrantCapability::BrowserDiagnoseOrigin);
     let can_transfer_files = covers(BrowserGrantCapability::BrowserTransferFiles);
     let scope = matching
         .iter()
@@ -2564,6 +2728,8 @@ fn agent_access_for_record(
         scope,
         can_observe,
         can_control,
+        can_capture_screens,
+        can_diagnose,
         can_transfer_files,
     }
 }
