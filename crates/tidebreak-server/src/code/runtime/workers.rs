@@ -278,6 +278,31 @@ impl CodeRuntime {
             _ => None,
         };
 
+        // Mint a native computer-use channel only when the desktop native
+        // runtime is present. The session-private capfile path is injected
+        // through TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app
+        // token enters argv or the model. Absent runtime = no channel and no
+        // native tools on any harness.
+        let native_capfile = match (self.native_runtime.as_ref(), session.workspace_id) {
+            (Some(_), Some(workspace)) => Some(
+                self.native_tokens
+                    .issue(NativeSubject {
+                        owner: session.owner.clone(),
+                        workspace,
+                        session: session.id,
+                    })
+                    .map_err(ServerError::internal)?,
+            ),
+            _ => None,
+        };
+        let native = match (native_capfile, self.browser_bridge_command.as_ref()) {
+            (Some(capfile), Some(bridge)) => Some(tidebreak_harness::NativeChannelSpec::new(
+                capfile,
+                bridge.clone(),
+            )),
+            _ => None,
+        };
+
         let private_root = match &workspace {
             Some(workspace) => crate::code::scratch::workspace_root(&self.data_dir, workspace.id),
             None => crate::code::scratch::session_root(&self.data_dir, session.id),
@@ -375,6 +400,7 @@ impl CodeRuntime {
             binary: binary.clone(),
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
+            native,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {

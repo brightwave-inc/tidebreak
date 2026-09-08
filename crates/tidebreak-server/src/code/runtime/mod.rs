@@ -58,6 +58,8 @@ use tidebreak_harness::{
 
 use super::approval_bridge::ApprovalBridge;
 use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
+use super::native_channel::{NativeSubject, NativeTokenRegistry};
+use super::native_runtime::{NativeRuntime, NativeRuntimeScope};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
@@ -179,6 +181,8 @@ pub struct CodeRuntime {
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     pub browser_tokens: BrowserTokenRegistry,
+    /// The session-native capability registry used by harness bridges.
+    pub native_tokens: NativeTokenRegistry,
     /// The desktop browser adapter, installed before recovery starts. Absent
     /// in headless deployments and tests that do not register one.
     browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
@@ -189,6 +193,14 @@ pub struct CodeRuntime {
     /// either is `None`, `browser` stays `None` and no browser tools are
     /// advertised or injected.
     browser_bridge_command: Option<PathBuf>,
+    /// The desktop native computer-use adapter, installed before recovery
+    /// starts. Absent in headless deployments and tests that do not register
+    /// one. When present, session creation mints a session-private capfile
+    /// and injects `TIDEBREAK_NATIVE_CAPFILE`; when absent, native tools are
+    /// not advertised on external harness bridges or the internal engine.
+    native_runtime: Option<Arc<dyn NativeRuntime>>,
+    /// The session-private native capability registry.
+    native_tokens: NativeTokenRegistry,
     pub(in crate::code) host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     /// Per-caller git-forge lending on a gateway-authenticated hosted
@@ -459,6 +471,10 @@ impl CodeRuntime {
             .expect("browser capfile directory must be resolvable to an absolute path");
         #[cfg(test)]
         browser_tokens.set_loopback_base("http://127.0.0.1:0");
+        let native_tokens = NativeTokenRegistry::new(&data_dir)
+            .expect("native capfile directory must be resolvable to an absolute path");
+        #[cfg(test)]
+        native_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -471,6 +487,8 @@ impl CodeRuntime {
             browser_tokens,
             browser_runtime,
             browser_bridge_command,
+            native_runtime: None,
+            native_tokens,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -529,6 +547,7 @@ impl CodeRuntime {
     /// Bound after listen so Claude can be pointed at the loopback MCP route.
     fn set_loopback_base(&self, base: String) {
         self.browser_tokens.set_loopback_base(&base);
+        self.native_tokens.set_loopback_base(&base);
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
     }
@@ -579,9 +598,11 @@ impl CodeRuntime {
         // Synchronously delete stale capfiles before the returned future is
         // pollable so issue() cannot race an unpolled startup cleanup.
         let cleanup = self.browser_tokens.delete_all_stale_capfiles();
+        let native_cleanup = self.native_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
         Box::pin(async move {
             cleanup.map_err(ServerError::internal)?;
+            native_cleanup.map_err(ServerError::internal)?;
             if let Some(external) = runtime
                 .harness_llm
                 .as_ref()
@@ -623,6 +644,10 @@ impl CodeRuntime {
             .expect("browser capfile directory must be resolvable to an absolute path");
         #[cfg(any(test, feature = "test-support"))]
         browser_tokens.set_loopback_base("http://127.0.0.1:0");
+        let native_tokens = NativeTokenRegistry::new(&data_dir)
+            .expect("native capfile directory must be resolvable to an absolute path");
+        #[cfg(any(test, feature = "test-support"))]
+        native_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -635,6 +660,8 @@ impl CodeRuntime {
             browser_tokens,
             browser_runtime,
             browser_bridge_command,
+            native_runtime: None,
+            native_tokens,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             git_credentials: None,
@@ -795,6 +822,36 @@ impl CodeRuntime {
     /// Return the installed browser adapter, if any.
     pub fn browser_runtime(&self) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
         self.browser_runtime.clone()
+    }
+
+    /// Return the installed native adapter, if any.
+    pub fn native_runtime(&self) -> Option<Arc<dyn NativeRuntime>> {
+        self.native_runtime.clone()
+    }
+
+    /// Install the desktop native computer-use adapter before recovery.
+    pub fn with_native_runtime(mut self, runtime: Arc<dyn NativeRuntime>) -> Self {
+        self.native_runtime = Some(runtime);
+        self
+    }
+
+    /// Test constructor that also installs a native runtime.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_registry_and_native_runtime(
+        db: Arc<DbStore>,
+        data_dir: PathBuf,
+        adapters: AdapterRegistry,
+        native_runtime: Option<Arc<dyn NativeRuntime>>,
+    ) -> Self {
+        let mut runtime = Self::with_registry_and_browser_runtime(
+            db,
+            data_dir,
+            adapters,
+            None,
+            None,
+        );
+        runtime.native_runtime = native_runtime;
+        runtime
     }
 
     /// Install the hook that recaps each completed turn (`super::recap`).

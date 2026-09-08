@@ -525,6 +525,7 @@ impl OpencodeSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdout = child
@@ -1047,6 +1048,7 @@ mod tests {
             binary: Some(std::path::PathBuf::from("opencode")),
             sink: std::sync::Arc::new(Discard),
             browser: None,
+            native: None,
         })
     }
 
