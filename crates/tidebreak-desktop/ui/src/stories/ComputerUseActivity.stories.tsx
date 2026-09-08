@@ -104,12 +104,14 @@ function NativeActivity({
   longName = false,
   idle = false,
   chrome = false,
+  stoppedSessions = 0,
 }: {
   phase?: ComputerUseAction["phase"];
   stopped?: boolean;
   longName?: boolean;
   idle?: boolean;
   chrome?: boolean;
+  stoppedSessions?: number;
 }) {
   const now = Date.now();
   const native: ComputerUseAction = {
@@ -135,6 +137,7 @@ function NativeActivity({
       <ComputerUseIndicatorView
         snapshot={{
           halted: stopped,
+          stoppedSessions,
           active: idle
             ? null
             : {
@@ -177,4 +180,14 @@ export const Idle: Story = { render: () => <NativeActivity idle /> };
 
 export const BackgroundChrome: Story = {
   render: () => <NativeActivity chrome />,
+};
+
+export const StoppedSession: Story = {
+  render: () => <NativeActivity idle stoppedSessions={1} />,
+};
+export const SeveralStoppedSessions: Story = {
+  render: () => <NativeActivity idle stoppedSessions={3} />,
+};
+export const ActiveWithStoppedSession: Story = {
+  render: () => <NativeActivity stoppedSessions={1} />,
 };

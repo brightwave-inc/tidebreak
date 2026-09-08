@@ -14,6 +14,8 @@ export type ComputerUseActiveControl = {
 export type ComputerUseSnapshot = {
   active: ComputerUseActiveControl | null;
   halted: boolean;
+  /** Individual sessions stopped while other sessions may still be running. */
+  stoppedSessions?: number;
 };
 
 const STATE_EVENT = "computer-use-state-changed";
