@@ -33,9 +33,9 @@ function unwrapResult(result, name) {
   }
   const outcome = result.outcome ?? result.status ?? "completed";
   if (outcome !== "completed" && outcome !== "ok") {
-    const errorCode = result.error_code ?? result.errorCode ?? "unknown";
+    const errorCode = result.error_code ?? result.errorCode ?? result.data?.status ?? "unknown";
     const detail =
-      result.message ?? result.detail ?? result.error ?? "no failure detail";
+      result.message ?? result.detail ?? result.error ?? result.data?.message ?? "no failure detail";
     throw new Error(
       "computer " + name + " failed: " + errorCode + " — " + detail,
     );
@@ -82,6 +82,23 @@ export function findTarget(tree, identifier, expectedRole) {
     );
   }
   return { id, fingerprint, identifier, label: node.label ?? node.name ?? null };
+}
+
+export function findFixtureWindow(windows) {
+  const owner = (window) => window.bundle_id ?? window.bundleId ?? window.app_id;
+  const title = (window) => window.title ?? window.name;
+  const visible = windows.filter((window) =>
+    window.visible !== false && owner(window) === APP_ID,
+  );
+  const titled = visible.filter((window) => title(window) === WINDOW_TITLE);
+  assert.ok(titled.length <= 1, "fixture window title is ambiguous");
+  if (titled.length === 1) return titled[0];
+
+  // macOS can omit window titles before Screen Recording is granted.
+  // Accept one explicitly owned window; never guess among several windows.
+  const owned = visible.filter((window) => owner(window) === APP_ID);
+  if (owned.length === 1 && !title(owned[0])) return owned[0];
+  return undefined;
 }
 
 export async function readFixtureEvents(fixtureDir, runID) {
@@ -262,22 +279,17 @@ export async function runNativeSmoke({
   );
   assert.ok(launch.outcome === undefined || launch.outcome === "completed", "launch must complete");
 
-  let windows = [];
+  let mainWindow;
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const result = unwrapResult(
       await call("computer_list_windows", { app_id: APP_ID }),
       "computer_list_windows",
     );
-    windows = result.windows ?? result.data?.windows ?? [];
-    const fixture = windows.find((window) => (window.title ?? window.name) === WINDOW_TITLE);
-    if (fixture && (fixture.visible ?? true)) break;
+    mainWindow = findFixtureWindow(result.windows ?? result.data?.windows ?? []);
+    if (mainWindow) break;
     await pause(250);
   }
-  assert.ok(
-    windows.some((window) => (window.title ?? window.name) === WINDOW_TITLE),
-    "fixture window did not appear after launch",
-  );
-  const mainWindow = windows.find((window) => (window.title ?? window.name) === WINDOW_TITLE);
+  assert.ok(mainWindow, "fixture window did not appear unambiguously after launch");
   const mainWindowId = mainWindow?.window_id ?? mainWindow?.id;
   assert.ok(mainWindowId !== undefined, "fixture window must expose a window id");
 

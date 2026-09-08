@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { deflateSync, crc32 } from "node:zlib";
 import {
   cliCall,
+  findFixtureWindow,
   readFixtureEvents,
   runNativeSmoke,
   REQUIRED_IDENTIFIERS,
@@ -123,7 +124,7 @@ function nativeFixture(options = {}) {
         if (options.failLaunch) throw new Error("launch rejected");
         return { outcome: "completed" };
       case "computer_list_windows":
-        return { outcome: "completed", data: { windows: [{ window_id: 1, title: "Computer Use Fixture", visible: true }] } };
+        return { outcome: "completed", data: { windows: [{ window_id: 1, bundle_id: APP_ID, title: options.omitWindowTitle ? null : "Computer Use Fixture", visible: true }] } };
       case "computer_focus_window":
         return { outcome: "completed" };
       case "computer_read_app_content": {
@@ -243,6 +244,36 @@ function smokeOptions(fixture, extra = {}) {
     ...extra,
   };
 }
+
+test("one owned untitled native window can complete acceptance", async () => {
+  const fixture = nativeFixture({ omitWindowTitle: true });
+  const report = await runNativeSmoke(smokeOptions(fixture));
+  assert.equal(report.status, "passed");
+  const resize = fixture.calls.find(([name]) => name === "computer_resize_window");
+  assert.equal(resize[1].window_id, 1);
+});
+
+test("window discovery rejects hidden, foreign, or ambiguous untitled windows", () => {
+  const window = { window_id: 1, bundle_id: APP_ID, title: null };
+  assert.equal(findFixtureWindow([window]), window);
+  assert.equal(findFixtureWindow([{ ...window, visible: false }]), undefined);
+  assert.equal(findFixtureWindow([{ ...window, bundle_id: "other.app", title: "Computer Use Fixture" }]), undefined);
+  assert.equal(findFixtureWindow([{ window_id: 1, title: null }]), undefined);
+  assert.equal(findFixtureWindow([{ window_id: 1, title: "Computer Use Fixture" }]), undefined);
+  assert.equal(findFixtureWindow([window, { ...window, window_id: 2 }]), undefined);
+  const main = { ...window, title: "Computer Use Fixture" };
+  assert.equal(findFixtureWindow([window, main]), main);
+  assert.throws(() => findFixtureWindow([main, { ...main, window_id: 2 }]), /ambiguous/);
+});
+
+test("native permission failure retains the helper message before interaction", async () => {
+  const fixture = nativeFixture({ omitWindowTitle: true });
+  const call = async (name, args) => name === "computer_read_app_content"
+    ? { outcome: "rejected", data: { status: "unavailable", message: "macOS has not granted Tidebreak Screen Recording and Accessibility." } }
+    : fixture.call(name, args);
+  await assert.rejects(runNativeSmoke(smokeOptions(fixture, { call })), /unavailable.*macOS has not granted/);
+  assert.ok(!fixture.calls.some(([name]) => name === "computer_click"));
+});
 
 test("a failed launch fails loudly before any interaction", async () => {
   const fixture = nativeFixture({ failLaunch: true });
