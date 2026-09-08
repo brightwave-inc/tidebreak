@@ -976,18 +976,7 @@ mod tests {
 
     #[test]
     fn computer_use_section_tracks_the_exact_surface() {
-        let full = compose(&[
-            spec(tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL),
-            spec(tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL),
-            spec(tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL),
-            spec(tidebreak_core::COMPUTER_CLICK_TOOL),
-            spec(tidebreak_core::COMPUTER_TYPE_TEXT_TOOL),
-            spec(tidebreak_core::COMPUTER_KEY_PRESS_TOOL),
-            spec(tidebreak_core::COMPUTER_SCROLL_TOOL),
-            spec(tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL),
-            spec(tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL),
-            spec(tidebreak_core::COMPUTER_WAIT_TOOL),
-        ]);
+        let full = compose(&tidebreak_core::computer_use_tool_specs());
         assert!(full.contains(COMPUTER_USE_HEADING));
         assert!(full.contains("`computer_click`"));
         assert!(

@@ -58,8 +58,6 @@ use tidebreak_harness::{
 
 use super::approval_bridge::ApprovalBridge;
 use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
-use super::native_channel::{NativeSubject, NativeTokenRegistry};
-use super::native_runtime::{NativeRuntime, NativeRuntimeScope};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
@@ -72,6 +70,8 @@ use super::fork;
 use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, WorkspaceGitStatus};
 use super::harness_install::HarnessInstallJobs;
 use super::naming_settings;
+use super::native_channel::{NativeSubject, NativeTokenRegistry};
+use super::native_runtime::{NativeRuntime, NativeRuntimeScope};
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, spawn_session_worker, wake_queue, AttachmentStore, ExecutionSettingsSettlement,
@@ -872,13 +872,8 @@ impl CodeRuntime {
         adapters: AdapterRegistry,
         native_runtime: Option<Arc<dyn NativeRuntime>>,
     ) -> Self {
-        let mut runtime = Self::with_registry_and_browser_runtime(
-            db,
-            data_dir,
-            adapters,
-            None,
-            None,
-        );
+        let mut runtime =
+            Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None);
         runtime.native_bridge_command = native_runtime
             .as_ref()
             .map(|_| PathBuf::from("/test/tidebreak-native-bridge"));
