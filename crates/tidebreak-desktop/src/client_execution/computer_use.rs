@@ -1563,7 +1563,7 @@ enum BrokerFailure {
 }
 
 fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
-    let BrokerClientError::Broker { code, .. } = error else {
+    let BrokerClientError::Broker { code, message, .. } = error else {
         // Transport-layer failures say nothing about authorization and must
         // not surface broker internals to the model.
         return BrokerFailure::Resolution(unavailable(
@@ -1582,7 +1582,17 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
         ErrorCode::Denied => BrokerFailure::ConsentRequired,
         ErrorCode::OsPermissionDenied => BrokerFailure::Resolution(unavailable(
             "os_permission_required",
-            "macOS has not granted Tidebreak Screen Recording and Accessibility. Ask the user to enable them in Settings, then retry.",
+            // Older brokers report one generic message. Only the canonical
+            // messages identify which permission the helper refused.
+            match message.as_str() {
+                "Accessibility permission is not granted" => {
+                    "macOS has not granted Tidebreak Accessibility. Ask the user to enable Accessibility in System Settings, then retry."
+                }
+                "Screen Recording permission is not granted" => {
+                    "macOS has not granted Tidebreak Screen Recording. Ask the user to enable Screen Recording in System Settings, then retry."
+                }
+                _ => "A macOS permission required for this operation is missing. Ask the user to check Tidebreak's permissions in System Settings, then retry.",
+            },
         )),
         // The helper could not act without taking over the user's focus or
         // pointer, and did nothing. Surfaced verbatim as requires_foreground —
@@ -3208,6 +3218,82 @@ mod tests {
         assert!(!cu.has_foreground_approval(chat, "com.example.app"));
         cu.resume();
         assert!(!cu.has_foreground_approval(chat, "com.example.app"));
+    }
+
+    #[test]
+    fn known_os_permission_failures_name_only_the_missing_permission() {
+        for (message, permission, other_permission) in [
+            (
+                "Accessibility permission is not granted",
+                "Accessibility",
+                "Screen Recording",
+            ),
+            (
+                "Screen Recording permission is not granted",
+                "Screen Recording",
+                "Accessibility",
+            ),
+        ] {
+            let error = BrokerClientError::Broker {
+                code: ErrorCode::OsPermissionDenied,
+                message: message.to_owned(),
+                retryable: true,
+            };
+            let BrokerFailure::Resolution(StoredResolution::Failed {
+                error_code, result, ..
+            }) = map_broker_error(&error)
+            else {
+                panic!("OS permission failures must not become consent cards");
+            };
+            assert_eq!(error_code, "os_permission_required");
+            let payload: serde_json::Value = serde_json::from_str(&result).unwrap();
+            let guidance = payload["message"].as_str().unwrap();
+            assert!(guidance.contains(permission));
+            assert!(!guidance.contains(other_permission));
+            assert!(guidance.contains("System Settings"));
+        }
+    }
+
+    #[test]
+    fn unknown_and_legacy_os_permission_failures_use_sanitized_guidance() {
+        for message in [
+            "an OS permission required for this operation is not granted",
+            "the OS screen-recording or accessibility permission is not granted",
+            "/private/helper-state: permission denied",
+            "Accessibility permission is not granted; private helper details",
+            "Screen Recording permission is not granted\nprivate helper details",
+        ] {
+            let error = BrokerClientError::Broker {
+                code: ErrorCode::OsPermissionDenied,
+                message: message.to_owned(),
+                retryable: true,
+            };
+            let BrokerFailure::Resolution(StoredResolution::Failed {
+                error_code, result, ..
+            }) = map_broker_error(&error)
+            else {
+                panic!("OS permission failures must not become consent cards");
+            };
+            assert_eq!(error_code, "os_permission_required");
+            let payload: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(
+                payload["message"],
+                "A macOS permission required for this operation is missing. Ask the user to check Tidebreak's permissions in System Settings, then retry."
+            );
+        }
+    }
+
+    #[test]
+    fn a_permission_message_does_not_override_the_error_code() {
+        let error = BrokerClientError::Broker {
+            code: ErrorCode::Denied,
+            message: "Accessibility permission is not granted".to_owned(),
+            retryable: false,
+        };
+        assert!(matches!(
+            map_broker_error(&error),
+            BrokerFailure::ConsentRequired
+        ));
     }
 
     #[test]

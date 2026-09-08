@@ -4945,6 +4945,42 @@ impl CuFixture {
 }
 
 #[test]
+fn known_os_permission_failures_preserve_the_specific_permission() {
+    for message in [
+        "Accessibility permission is not granted",
+        "Screen Recording permission is not granted",
+    ] {
+        let response = error_response(BrokerError::ComputerUse(BackendError {
+            kind: BackendErrorKind::PermissionDenied,
+            message: message.to_owned(),
+        }));
+        assert_eq!(response.code, ErrorCode::OsPermissionDenied);
+        assert_eq!(response.message, message);
+        assert!(response.retryable);
+    }
+}
+
+#[test]
+fn unknown_os_permission_failures_do_not_expose_backend_messages() {
+    for message in [
+        "/private/helper-state: permission denied",
+        "Accessibility permission is not granted; private helper details",
+        "Screen Recording permission is not granted\nprivate helper details",
+    ] {
+        let response = error_response(BrokerError::ComputerUse(BackendError {
+            kind: BackendErrorKind::PermissionDenied,
+            message: message.to_owned(),
+        }));
+        assert_eq!(response.code, ErrorCode::OsPermissionDenied);
+        assert_eq!(
+            response.message,
+            "an OS permission required for this operation is not granted"
+        );
+        assert!(response.retryable);
+    }
+}
+
+#[test]
 fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
     let response = error_response(BrokerError::ComputerUse(BackendError {
         kind: BackendErrorKind::Yielded,

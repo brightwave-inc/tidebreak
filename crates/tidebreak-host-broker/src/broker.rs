@@ -3738,7 +3738,17 @@ fn error_response(error: BrokerError) -> ErrorResponse {
         BrokerError::ComputerUse(error) => match error.kind {
             BackendErrorKind::PermissionDenied => (
                 ErrorCode::OsPermissionDenied,
-                "the OS screen-recording or accessibility permission is not granted",
+                // Only these canonical helper messages may cross the broker boundary.
+                // Unknown messages can contain host details and stay sanitized.
+                match error.message.as_str() {
+                    "Accessibility permission is not granted" => {
+                        "Accessibility permission is not granted"
+                    }
+                    "Screen Recording permission is not granted" => {
+                        "Screen Recording permission is not granted"
+                    }
+                    _ => "an OS permission required for this operation is not granted",
+                },
                 true,
             ),
             BackendErrorKind::NotFound => (
