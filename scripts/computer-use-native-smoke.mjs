@@ -153,6 +153,7 @@ function pngDimensions(bytes) {
 }
 
 async function saveScreenshot(call, fixtureDir, runID, name) {
+  const requestedAt = Date.now();
   const result = unwrapResult(
     await call("computer_capture_screen", { app_id: APP_ID, annotate: false }),
     "computer_capture_screen",
@@ -164,6 +165,7 @@ async function saveScreenshot(call, fixtureDir, runID, name) {
   if (typeof image.path === "string" && image.path) {
     const file = await stat(image.path);
     assert.ok(file.isFile(), "captured image path must be a regular file");
+    assert.ok(file.mtimeMs >= requestedAt - 1000, "captured image path must be updated by this capture");
     assert.ok(file.size > 0 && file.size <= MAX_SCREENSHOT_BYTES, "captured image has an invalid size");
     bytes = await readFile(image.path);
   } else if (typeof image === "string") {
@@ -219,6 +221,8 @@ export async function runNativeSmoke({
   readEvents = readFixtureEvents,
   snapshots = fixtureSnapshots,
 }) {
+  const invoke = call;
+  call = async (name, args) => unwrapResult(await invoke(name, args), name);
   fixtureDir = resolve(fixtureDir);
   assert.ok(runID && /^[A-Za-z0-9._-]{1,120}$/.test(runID), "valid --run-id required");
   assert.ok(appPath && isAbsolute(appPath), "--app-path must be an absolute path to the fixture app bundle");
@@ -275,6 +279,7 @@ export async function runNativeSmoke({
     findTarget(initialTree, identifier);
   }
 
+  const beforeScreenshot = await saveScreenshot(call, fixtureDir, runID, "before-submit.png");
   const text = "Native acceptance " + runID;
   const typeTarget = findTarget(initialTree, "fixture-text-input");
   await call("computer_click", {
@@ -286,7 +291,7 @@ export async function runNativeSmoke({
     text,
     target: { element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint },
   });
-  await waitFor((state) => state.submission_count === 0, "text entry");
+  await waitFor((state) => state.text_value === text, "text entry");
   let events = await readEvents(fixtureDir, runID);
   assert.ok(
     events.some((record) => record.event === "text_entry" && record.payload.value === text),
@@ -303,12 +308,14 @@ export async function runNativeSmoke({
   const submissions = events.filter((record) => record.event === "submission");
   assert.equal(submissions.length, 1, "native action must create exactly one fixture submission");
   assert.equal(submissions[0].payload.count, 1, "submission count must be exactly one");
+  assert.equal(submissions[0].payload.value, text, "submission must contain the typed text");
   const postSubmit = await currentSnapshot();
   await assertSnapshotValue(postSubmit, "submission_count", 1, "submission count");
 
   const screenshot = await saveScreenshot(call, fixtureDir, runID, "after-submit.png");
   assert.ok(screenshot.width >= 640 && screenshot.height >= 480, "screenshot must be desktop scale");
   assert.ok(screenshot.bytes >= 8 * 1024, "screenshot must contain real pixels");
+  assert.notEqual(screenshot.sha256, beforeScreenshot.sha256, "capture must show a change after submission");
 
   await call("computer_focus_window", { app_id: APP_ID, window_id: mainWindowId });
 
@@ -363,7 +370,7 @@ export async function runNativeSmoke({
     dx: 0,
     dy: 180,
   });
-  await waitFor((state) => (state.scroll_offset ?? -1) >= 0, "scroll evidence");
+  await waitFor((state) => state.scroll_offset > 0, "scroll evidence");
   const scrollSnap = await currentSnapshot();
   assert.ok(
     typeof scrollSnap.scroll_offset === "number" && scrollSnap.scroll_offset > 0,
@@ -404,6 +411,7 @@ export async function runNativeSmoke({
       "computer_list_windows",
     )).windows ?? [];
     assert.ok(twoWindows.length >= 2, "second fixture window must be listed");
+    await call("computer_focus_window", { app_id: APP_ID, window_id: mainWindowId });
     const closeButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
       app_id: APP_ID,
@@ -414,7 +422,7 @@ export async function runNativeSmoke({
 
   let resetVerified = null;
   if (verifyReset) {
-    const beforeReset = await readEvents(fixtureDir, runID);
+    assert.equal((await currentSnapshot()).submission_count, 1, "later actions must not submit again");
     const resetButton = findTarget(await readTree(call), "fixture-reset-button");
     await call("computer_click", {
       app_id: APP_ID,
@@ -426,10 +434,23 @@ export async function runNativeSmoke({
     const requested = afterReset.find((record) => record.event === "reset_requested");
     assert.ok(requested && requested.payload.new_run_id, "fixture reset must record the new run id");
     assert.equal(resetState.run_id, requested.payload.new_run_id, "reset must switch to a fresh run");
+    for (const [key, value] of Object.entries({
+      submission_count: 0,
+      text_value: "",
+      dropdown: "First",
+      checkbox: false,
+      hovered: false,
+      drag_dropped: false,
+      delayed_status: "idle",
+      second_window_open: false,
+      scroll_offset: 0,
+    })) {
+      assert.equal(resetState[key], value, "reset must clear " + key);
+    }
     resetVerified = resetState.run_id;
   }
 
-  const screenshots = [screenshot.metadata ?? screenshot];
+  const screenshots = [beforeScreenshot, screenshot];
   return {
     scope: "computer_use_native_smoke",
     status: "passed",

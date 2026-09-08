@@ -23,8 +23,8 @@ second session window.
 
 Every UI event is written as one atomic JSON object to
 `<fixture-dir>/events/<run-id>/<sequence>.json`. Submitting the text field via
-the `Add` button increments the exact submission count; resetting the fixture
-increments the reset count and clears the session. The fixture never infers
+the `Add` button records the submitted value and increments the count. Reset
+clears the controls and starts a fresh run. The fixture never infers
 that an interaction happened from a tool success string.
 
 ## Build and run
@@ -72,7 +72,7 @@ run's events live under `events/<new-run-id>/`. Each event JSON has this shape:
   "event": "submission",
   "run_id": "…",
   "sequence": 7,
-  "payload": {"slot": 1}
+  "payload": {"count": 1, "value": "Native acceptance example"}
 }
 ```
 
@@ -108,8 +108,23 @@ The runner never infers a pass from compile, from a helper success string, or
 from a screenshot that happens to exist. Each act is followed by the fixture's
 own atomic JSON evidence: exactly one submission record, a dropdown and
 checkbox transition, hover and drag state, scroll offset, delayed transition,
-and window geometry after resize. Screenshots are saved as PNG files under
+and window geometry after resize. The runner checks every native result for
+failure, waits for the actual text and scroll changes, and requires the before
+and after screenshots to differ. Screenshots are saved as PNG files under
 `<fixture-dir>/screenshots/<run-id>/` with a JSON metadata sidecar. Stop,
 takeover, approval surfaces, concurrent ownership, and uncertain-outcome
 recovery require live parent actions and are reported as separate remaining
 gates rather than claimed from the script.
+
+
+Run the runner tests and macOS type check before hardware acceptance:
+
+```sh
+node --test scripts/computer-use-native-smoke.test.mjs
+scripts/computer-use-fixture/validate.sh
+```
+
+On macOS, the test suite compiles the same `EventStore.swift` that the app uses.
+It writes real records and checks the runner's event schema, reset ownership,
+and refusal to reuse an existing run. Fake native calls test the runner's
+failure handling; those tests do not qualify hardware control.

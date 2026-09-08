@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+
+const exec = promisify(execFile);
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -21,6 +26,7 @@ function makeState(overrides = {}) {
     title: "Computer Use Fixture",
     run_id: RUN_ID,
     submission_count: 0,
+    text_value: "",
     dropdown: "First",
     checkbox: false,
     hovered: false,
@@ -34,14 +40,14 @@ function makeState(overrides = {}) {
   };
 }
 
-function fakePng(width = 640, height = 480) {
+function fakePng(width = 640, height = 480, seed = 0) {
   const raw = Buffer.alloc(height * (1 + width * 3));
   for (let y = 0; y < height; y += 1) {
     const row = y * (1 + width * 3);
     raw[row] = 0; // filter: None
     for (let x = 0; x < width; x += 1) {
       const offset = row + 1 + x * 3;
-      raw[offset] = (x * 7 + y * 13) % 256;
+      raw[offset] = (x * 7 + y * 13 + seed) % 256;
       raw[offset + 1] = (x * 11 + y * 5) % 256;
       raw[offset + 2] = (x * 3 + y * 17) % 256;
     }
@@ -127,9 +133,9 @@ function nativeFixture(options = {}) {
         return { nodes };
       }
       case "computer_capture_screen":
-        return { images: [{ mime_type: "image/png", base64: fakePng().toString("base64") }] };
+        return { images: [{ mime_type: "image/png", base64: fakePng(640, 480, options.staleScreenshot ? 0 : state.submission_count).toString("base64") }] };
       case "computer_type_text":
-        state.text_typed = args.text;
+        state.text_value = args.text;
         writeEvent("text_entry", { value: args.text });
         writeSnapshot();
         return { outcome: "completed" };
@@ -137,7 +143,8 @@ function nativeFixture(options = {}) {
         const identifier = tree().find((node) => node.element_id === args.target.element_id)?.identifier;
         if (identifier === "fixture-add-button" && !options.suppressAdd) {
           state.submission_count += 1;
-          writeEvent("submission", { count: state.submission_count });
+          writeEvent("submission", { count: state.submission_count, value: state.text_value });
+          state.text_value = "";
           writeSnapshot();
         }
         if (identifier === "fixture-checkbox") {
@@ -151,7 +158,7 @@ function nativeFixture(options = {}) {
           writeSnapshot();
         }
         if (identifier === "fixture-reset-button") {
-          state.run_id = "fresh-run";
+          Object.assign(state, makeState({ run_id: "fresh-run" }));
           writeEvent("reset_requested", { new_run_id: "fresh-run" });
           writeSnapshot();
           events.push({ event: "reset_completed", run_id: RUN_ID, sequence: ++sequence, payload: { new_run_id: "fresh-run" } });
@@ -310,7 +317,7 @@ test("the smoke report carries real evidence and non-mocked remaining gates", as
   const dir = join(resolve(tmpdir()), "cu-report-" + randomUUID());
   const report = await runNativeSmoke(smokeOptions(fixture, { fixtureDir: dir }));
   assert.equal(report.status, "passed");
-  assert.equal(report.screenshots.length, 1);
+  assert.equal(report.screenshots.length, 2);
   assert.ok(report.screenshots[0].bytes >= 8 * 1024, "screenshot must have real pixels");
   assert.ok(report.screenshots[0].width >= 640 && report.screenshots[0].height >= 480);
   assert.equal(report.reset_run_id, "fresh-run");
@@ -360,4 +367,67 @@ test("required identifier list is the fixture's acceptance contract", () => {
       "fixture-reset-button",
     ],
   );
+});
+
+
+test("every native refusal fails even when the fixture can reach the target state", async () => {
+  const fixture = nativeFixture();
+  const original = fixture.call;
+  fixture.call = async (name, args) => {
+    if (name === "computer_wait_for") {
+      return { outcome: "failed", error_code: "unsupported", message: "wait is unavailable" };
+    }
+    return original(name, args);
+  };
+  await assert.rejects(runNativeSmoke(smokeOptions(fixture)), /computer_wait_for failed.*unsupported/);
+});
+
+test("reset must clear the state rather than only replace its run id", async () => {
+  const fixture = nativeFixture();
+  const original = fixture.call;
+  fixture.call = async (name, args) => {
+    const result = await original(name, args);
+    if (name === "computer_click" && args.target.element_id === "e-reset") {
+      fixture.events.findLast((event) => event.event === "state_snapshot").payload.submission_count = 1;
+    }
+    return result;
+  };
+  await assert.rejects(runNativeSmoke(smokeOptions(fixture)), /reset must clear submission_count/);
+});
+
+test("the actual Swift EventStore writes the smoke schema and preserves reset ownership", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cu-event-store-"));
+  try {
+    const source = fileURLToPath(new URL("./computer-use-fixture/EventStore.swift", import.meta.url));
+    const driver = join(directory, "main.swift");
+    const binary = join(directory, "event-store-test");
+    await writeFile(driver, `import Foundation
+let root = URL(fileURLWithPath: CommandLine.arguments[1])
+let store = try EventStore(fixtureDirectory: root, runID: "contract-run")
+store.write("launch_ready", payload: ["app_id": "dev.tidebreak.ComputerUseFixture"])
+store.write("state_snapshot", payload: ["submission_count": 1, "run_id": "contract-run"])
+store.write("reset_requested", payload: ["new_run_id": "fresh-run"])
+store.write("state_snapshot", payload: ["submission_count": 0, "run_id": "fresh-run"])
+`);
+    await exec("swiftc", [source, driver, "-o", binary], { timeout: 60_000 });
+    await exec(binary, [directory], { timeout: 10_000 });
+    const events = await readFixtureEvents(directory, "contract-run");
+    assert.equal(events.length, 4);
+    assert.equal(events[0].payload.app_id, APP_ID);
+    assert.equal(events[1].payload.submission_count, 1);
+    assert.equal(events[3].run_id, "contract-run");
+    assert.equal(events[3].payload.run_id, "fresh-run");
+    assert.equal(events[3].payload.submission_count, 0);
+    await assert.rejects(exec(binary, [directory], { timeout: 10_000 }), /already has fixture events/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("a stale screenshot repeated across the submission fails acceptance", async () => {
+  const fixture = nativeFixture({ staleScreenshot: true });
+  await assert.rejects(runNativeSmoke(smokeOptions(fixture)), /capture must show a change after submission/);
 });

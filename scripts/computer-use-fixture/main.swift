@@ -14,78 +14,9 @@ let fixtureBundleID = "dev.tidebreak.ComputerUseFixture"
 let fixtureWindowTitle = "Computer Use Fixture"
 let requiredMacOSVersion = OperatingSystemVersion(majorVersion: 13, minorVersion: 0, patchVersion: 0)
 
-enum FixtureError: Error, CustomStringConvertible {
-    case unsupportedMacOS
-    case missingFixtureDirectory
-    case unresolvableRunID
-    case runIDAlreadyUsed
-
-    var description: String {
-        switch self {
-        case .unsupportedMacOS:
-            return "Computer Use Fixture requires macOS 13 or newer"
-        case .missingFixtureDirectory:
-            return "Pass --fixture-dir <directory> or TIDEBREAK_CU_FIXTURE_DIR"
-        case .unresolvableRunID:
-            return "Could not build a unique run id"
-        case .runIDAlreadyUsed:
-            return "The requested run id already has fixture events; choose a fresh run id"
-        }
-    }
-}
-
 struct AppArguments {
     var fixtureDirectory: URL
     var runID: String
-}
-
-// JSON events are written one object per file so a crash never leaves a
-// half-written record and a replay cannot silently reuse a sequence number.
-final class EventStore {
-    let eventsDirectory: URL
-    private let runID: String
-    private(set) var sequence = 0
-    private let serialQueue = DispatchQueue(label: "dev.tidebreak.ComputerUseFixture.events")
-    private let dateFormatter = ISO8601DateFormatter()
-
-    init(fixtureDirectory: URL, runID: String) throws {
-        let eventsDir = fixtureDirectory
-            .appendingPathComponent("events", isDirectory: true)
-            .appendingPathComponent(runID, isDirectory: true)
-        let manager = FileManager.default
-        if manager.fileExists(atPath: eventsDir.path),
-            let existing = try? manager.contentsOfDirectory(at: eventsDir, includingPropertiesForKeys: nil),
-            !existing.isEmpty {
-            throw FixtureError.runIDAlreadyUsed
-        }
-        try manager.createDirectory(at: eventsDir, withIntermediateDirectories: true)
-        self.eventsDirectory = eventsDir
-        self.runID = runID
-        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    }
-
-    func write(_ event: String, payload: [String: Any]) {
-        serialQueue.sync {
-            self.sequence += 1
-            let fileName = String(format: "%06d.json", self.sequence)
-            let url = eventsDirectory.appendingPathComponent(fileName)
-            var object: [String: Any] = [
-                "event": event,
-                "run_id": self.runID,
-                "timestamp": dateFormatter.string(from: Date()),
-                "sequence": self.sequence,
-            ]
-            for (key, value) in payload {
-                object[key] = value
-            }
-            do {
-                let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-                try data.write(to: url, options: [.atomic])
-            } catch {
-                NSLog("ComputerUseFixture: could not write %@: %@", fileName, String(describing: error))
-            }
-        }
-    }
 }
 
 // Bounded, inspectable fixture state. All state is intentionally observable
@@ -94,6 +25,7 @@ final class FixtureState {
     let runID: String
     private let store: EventStore
     private var submissionCounter = 0
+    private var textValue = ""
     private var dropdownSelection = "First"
     private var checkboxChecked = false
     private var hovered = false
@@ -121,15 +53,16 @@ final class FixtureState {
     func isSecondWindowOpen() -> Bool { secondWindowOpen }
 
     func snapshot() {
-        snapshot(runID: runID)
+        store.write("state_snapshot", payload: snapshotPayload())
     }
 
-    private func snapshot(runID overriddenRunID: String) {
-        store.write("state_snapshot", payload: [
+    private func snapshotPayload() -> [String: Any] {
+        [
             "app_id": fixtureBundleID,
             "title": fixtureWindowTitle,
-            "run_id": overriddenRunID,
+            "run_id": runID,
             "submission_count": submissionCounter,
+            "text_value": textValue,
             "dropdown": dropdownSelection,
             "checkbox": checkboxChecked,
             "hovered": hovered,
@@ -139,12 +72,13 @@ final class FixtureState {
             "second_window_open": secondWindowOpen,
             "scroll_offset": Int(scrollOffset),
             "window_size": ["width": Int(windowWidth), "height": Int(windowHeight)],
-        ])
+        ]
     }
 
-    func incrementSubmissions() {
+    func incrementSubmissions(text: String) {
         submissionCounter += 1
-        store.write("submission", payload: ["count": submissionCounter])
+        textValue = ""
+        store.write("submission", payload: ["count": submissionCounter, "value": text])
         snapshot()
     }
 
@@ -204,6 +138,7 @@ final class FixtureState {
     }
 
     func noteTextEntry(_ value: String) {
+        textValue = value
         store.write("text_entry", payload: ["value": value])
         snapshot()
     }
@@ -215,9 +150,9 @@ final class FixtureState {
     /// The old run's final snapshot describes the freshly reset run so the
     /// accepting runner can observe the transition from the directory it
     /// already owns. Events after this point belong to the new run.
-    func markResetCompleted(newRunID: String) {
-        store.write("reset_completed", payload: ["new_run_id": newRunID])
-        snapshot(runID: newRunID)
+    func markResetCompleted(newState: FixtureState) {
+        store.write("reset_completed", payload: ["new_run_id": newState.runID])
+        store.write("state_snapshot", payload: newState.snapshotPayload())
     }
 }
 
@@ -254,7 +189,7 @@ final class DragItemView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         dragOffset = convert(event.locationInWindow, from: nil)
-        onDragStarted?(accessibilityIdentifier() ?? "fixture-drag-item")
+        onDragStarted?(accessibilityIdentifier())
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -278,7 +213,7 @@ final class DragItemView: NSView {
         if let target = root.subviews.first(where: {
             $0.accessibilityIdentifier() == "fixture-drop-target" && $0.frame.intersects(frame)
         }) {
-            onDrop?(target.accessibilityIdentifier() ?? "fixture-drop-target")
+            onDrop?(target.accessibilityIdentifier())
             return
         }
         let point = root.convert(event.locationInWindow, from: nil)
@@ -369,7 +304,6 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         guard let window else { return }
         let root = FlippedView()
         root.setAccessibilityIdentifier("fixture-root")
-        root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView = root
 
         let title = NSTextField(labelWithString: fixtureWindowTitle)
@@ -416,9 +350,11 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             self.state.setHovered(hovered)
             self.hoverStatusLabel.stringValue = hovered ? "Status: hovered" : "Status: not hovered"
         }
+        hoverView.setAccessibilityElement(true)
+        hoverView.setAccessibilityRole(.group)
         hoverView.setAccessibilityIdentifier("fixture-hover-area")
         hoverView.setAccessibilityLabel("Hover status area")
-        hoverView.setAccessibilityDescription("Hover enters a mouse tracking area and switches the status")
+        hoverView.setAccessibilityHelp("Hover enters a mouse tracking area and switches the status")
         hoverView.wantsLayer = true
         hoverView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         hoverView.layer?.borderWidth = 1
@@ -458,9 +394,11 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         }
 
         let dragLabel = formLabel("Drag item", width: 120)
+        dragItem.setAccessibilityElement(true)
+        dragItem.setAccessibilityRole(.group)
         dragItem.setAccessibilityIdentifier("fixture-drag-item")
         dragItem.setAccessibilityLabel("Draggable item")
-        dragItem.setAccessibilityDescription("Mouse-drag this item onto the drop target")
+        dragItem.setAccessibilityHelp("Mouse-drag this item onto the drop target")
         dragItem.wantsLayer = true
         dragItem.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.18).cgColor
         dragItem.layer?.borderWidth = 1
@@ -480,9 +418,11 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             self.dropTargetLabel.stringValue = target == "fixture-drop-target" ? "Drop target: received" : "Drop target: missed"
         }
 
+        dropTarget.setAccessibilityElement(true)
+        dropTarget.setAccessibilityRole(.group)
         dropTarget.setAccessibilityIdentifier("fixture-drop-target")
         dropTarget.setAccessibilityLabel("Drop target")
-        dropTarget.setAccessibilityDescription("Drop the draggable item here")
+        dropTarget.setAccessibilityHelp("Drop the draggable item here")
         dropTarget.wantsLayer = true
         dropTarget.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.12).cgColor
         dropTarget.layer?.borderWidth = 1
@@ -566,17 +506,17 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             hoverStatusLabel.centerYAnchor.constraint(equalTo: hoverLabel.centerYAnchor),
             hoverStatusLabel.leadingAnchor.constraint(equalTo: hoverView.trailingAnchor, constant: 16),
 
-            scrollLabel.topAnchor.constraint(equalTo: hoverLabel.bottomAnchor, constant: 20),
+            scrollLabel.topAnchor.constraint(equalTo: hoverView.bottomAnchor, constant: 20),
             scrollLabel.leadingAnchor.constraint(equalTo: addLabel.leadingAnchor),
-            scrollView.centerYAnchor.constraint(equalTo: scrollLabel.centerYAnchor),
+            scrollView.topAnchor.constraint(equalTo: scrollLabel.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: inputField.leadingAnchor),
             scrollView.widthAnchor.constraint(equalToConstant: 360),
             scrollView.heightAnchor.constraint(equalToConstant: 120),
 
-            dragLabel.topAnchor.constraint(equalTo: scrollLabel.bottomAnchor, constant: 24),
+            dragLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 30),
             dragLabel.leadingAnchor.constraint(equalTo: addLabel.leadingAnchor),
             dropTarget.centerYAnchor.constraint(equalTo: dragLabel.centerYAnchor),
-            dropTarget.leadingAnchor.constraint(equalTo: inputField.leadingAnchor),
+            dropTarget.leadingAnchor.constraint(equalTo: inputField.leadingAnchor, constant: 148),
             dropTarget.widthAnchor.constraint(equalToConstant: 190),
             dropTarget.heightAnchor.constraint(equalToConstant: 48),
             dropTargetLabel.centerYAnchor.constraint(equalTo: dragLabel.centerYAnchor),
@@ -602,14 +542,14 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
     }
 
     private func positionDragItem() {
-        guard !positionedDragItem, let root = window?.contentView else { return }
+        guard !positionedDragItem, window?.contentView != nil else { return }
         let dropFrame = dropTarget.frame
         dragItem.frame = NSRect(x: max(0, dropFrame.minX - 148), y: dropFrame.midY - 24, width: 120, height: 48)
         positionedDragItem = true
     }
 
     @objc private func addPressed() {
-        state.incrementSubmissions()
+        state.incrementSubmissions(text: inputField.stringValue)
         updateSubmissionLabel()
         inputField.stringValue = ""
     }
@@ -629,6 +569,7 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
 
     @objc private func delayedStatusPressed() {
         delayedStatusLabel.stringValue = "Delayed status: pending"
+        state.setDelayedStatus("pending")
         delayedWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -660,7 +601,6 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         let controller = NSWindowController(window: second)
         self.secondWindowController = controller
         let secondRoot = FlippedView()
-        secondRoot.translatesAutoresizingMaskIntoConstraints = false
         second.contentView = secondRoot
         let note = NSTextField(labelWithString: "Second fixture window. Close it to continue.")
         note.translatesAutoresizingMaskIntoConstraints = false
@@ -668,10 +608,6 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         note.setAccessibilityLabel("Second window note")
         secondRoot.addSubview(note)
         NSLayoutConstraint.activate([
-            secondRoot.topAnchor.constraint(equalTo: second.contentLayoutGuide.topAnchor),
-            secondRoot.leadingAnchor.constraint(equalTo: second.contentLayoutGuide.leadingAnchor),
-            secondRoot.trailingAnchor.constraint(equalTo: second.contentLayoutGuide.trailingAnchor),
-            secondRoot.bottomAnchor.constraint(equalTo: second.contentLayoutGuide.bottomAnchor),
             note.centerXAnchor.constraint(equalTo: secondRoot.centerXAnchor),
             note.centerYAnchor.constraint(equalTo: secondRoot.centerYAnchor),
         ])
@@ -692,11 +628,17 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             secondWindowButton.title = "Open second window"
         }
         do {
-            state.markResetCompleted(newRunID: freshRunID)
             let store = try EventStore(fixtureDirectory: fixtureDirectory, runID: freshRunID)
             let newState = FixtureState(store: store, runID: freshRunID)
+            let oldState = state
             state = newState
             currentRunID = freshRunID
+            inputField.stringValue = ""
+            scrollView.contentView.scroll(to: .zero)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            lastScrollY = 0
+            positionedDragItem = false
+            positionDragItem()
             dropdown.selectItem(withTitle: "First")
             checkbox.state = .off
             hoverStatusLabel.stringValue = "Status: not hovered"
@@ -704,6 +646,9 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             dropTargetLabel.stringValue = "Drop target: waiting"
             runIDLabel.stringValue = "Run: \(freshRunID)"
             updateSubmissionLabel()
+            let size = window?.frame.size ?? .zero
+            newState.noteWindowResized(width: size.width, height: size.height)
+            oldState.markResetCompleted(newState: newState)
             newState.snapshot()
         } catch {
             NSSound.beep()
@@ -738,7 +683,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
         let app = NSApplication.shared
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
