@@ -385,6 +385,9 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
         | "browser origin is not shared for control"
         | "browser origin is not shared for screenshots"
         | "browser control was stopped by the user"
+        | "browser is controlled by another agent"
+        | "browser is not controlled by this agent"
+        | "browser tab was taken over while opening"
         | "browser has no authorized HTTP origin" => {
             return BrowserRuntimeError::NotAuthorized(error);
         }
@@ -419,11 +422,7 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
     let inner = strip_prefix(error.as_str());
     if matches!(
         inner,
-        "browser session is not registered"
-            | "browser session is not open"
-            | "browser is hidden"
-            | "browser is not controlled by this agent"
-            | "browser is controlled by another agent"
+        "browser session is not registered" | "browser session is not open" | "browser is hidden"
     ) || inner == format!("browser session {browser_id} belongs to a different workspace")
     {
         return BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned());
@@ -575,7 +574,21 @@ mod tests {
             ),
             (
                 "browser is controlled by another agent",
-                BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned()),
+                BrowserRuntimeError::NotAuthorized(
+                    "browser is controlled by another agent".to_owned(),
+                ),
+            ),
+            (
+                "browser is not controlled by this agent",
+                BrowserRuntimeError::NotAuthorized(
+                    "browser is not controlled by this agent".to_owned(),
+                ),
+            ),
+            (
+                "browser tab was taken over while opening",
+                BrowserRuntimeError::NotAuthorized(
+                    "browser tab was taken over while opening".to_owned(),
+                ),
             ),
             (
                 "browser is hidden",

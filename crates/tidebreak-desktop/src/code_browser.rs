@@ -48,7 +48,7 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-/// How long an agent-requested open waits for the renderer to stage the tab.
+/// How long an agent-requested open waits for a visible, loaded native tab.
 const AGENT_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long an agent-requested activation waits for the tab to become visible.
 const AGENT_ACTIVATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -624,34 +624,64 @@ pub(crate) async fn open_browser_for_agent(
         Some(destination.to_string()),
     );
 
-    let deadline = tokio::time::Instant::now() + AGENT_OPEN_TIMEOUT;
+    let label = browser_label(&browser_id)?;
+    let snapshot = wait_for_agent_browser_ready(
+        registry,
+        capability_id,
+        &browser_id,
+        &destination_origin,
+        AGENT_OPEN_TIMEOUT,
+        || app.get_webview(&label).is_some(),
+    )
+    .await?;
+    emit_controller_event(app, &snapshot);
+    Ok(BrowserOpenResult {
+        browser_id,
+        url: snapshot.url.unwrap_or_else(|| destination.to_string()),
+        load_state: BrowserLoadState::Ready,
+        document_epoch: snapshot.document_epoch.unwrap_or(0),
+        visible: true,
+    })
+}
+
+/// Registration precedes native view creation and the renderer reveals the
+/// view only after creation finishes. Await all three states so the next
+/// snapshot can use the returned id. Dropping this future cancels the wait;
+/// it never spawns a detached task that can acquire control later.
+async fn wait_for_agent_browser_ready(
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: &str,
+    destination_origin: &BrowserOrigin,
+    timeout: std::time::Duration,
+    executor_ready: impl Fn() -> bool,
+) -> Result<BrowserSnapshot, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut instance_id = None;
     loop {
-        if let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) {
-            // Background is the default: the renderer may stage the tab
-            // without revealing it, keeping the user's cursor and focus
-            // undisturbed. Controller acquisition needs visibility, so a
-            // hidden tab simply defers it to the first observation; the
-            // result reports the actual mode.
-            if snapshot.exists {
-                registry.mark_agent_opened(capability_id, &browser_id)?;
-                let visible = snapshot.visible.unwrap_or(false);
-                let snapshot = if visible {
-                    begin_agent_browser_control(app, registry, capability_id, &browser_id)
-                        .unwrap_or(snapshot)
-                } else {
-                    snapshot
-                };
-                return Ok(BrowserOpenResult {
-                    browser_id,
-                    url: snapshot.url.unwrap_or_else(|| destination.to_string()),
-                    load_state: snapshot.load_state.unwrap_or(BrowserLoadState::Loading),
-                    document_epoch: snapshot.document_epoch.unwrap_or(0),
-                    visible,
-                });
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), destination_origin)?;
+        if let Some((instance, snapshot)) =
+            registry.agent_open_state(capability_id, browser_id, instance_id)?
+        {
+            instance_id = Some(instance);
+            if snapshot.visible == Some(true)
+                && snapshot.load_state == Some(BrowserLoadState::Ready)
+                && snapshot.document_epoch.is_some_and(|epoch| epoch > 0)
+                && executor_ready()
+            {
+                // Reauthorize acquisition after the native lookup. Never turn
+                // a denied takeover into a successful open response.
+                match registry.begin_opened_agent_control(capability_id, browser_id, instance) {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(error)
+                        if error == "browser page is still loading"
+                            || error == "browser is hidden" => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("browser tab did not open before the deadline".to_owned());
+            return Err("browser tab did not become ready before the deadline".to_owned());
         }
         tokio::time::sleep(AGENT_LIFECYCLE_POLL_INTERVAL).await;
     }
@@ -2172,6 +2202,297 @@ fn browser_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opening_browser_registry() -> (BrowserRegistry, Uuid, BrowserOrigin) {
+        let registry = BrowserRegistry::default();
+        let origin = BrowserOrigin::from_url("https://example.com/fixture").unwrap();
+        registry
+            .register("grant-tab", "workspace-1", origin.as_str().to_owned(), true)
+            .unwrap();
+        registry
+            .grant_browser_access(
+                "grant-tab",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        let capability = registry.issue_agent_capability("workspace-1", "Code agent");
+        (registry, capability, origin)
+    }
+
+    fn register_opening_browser(registry: &BrowserRegistry, visible: bool) -> u64 {
+        registry
+            .register(
+                "opening-tab",
+                "workspace-1",
+                "https://example.com/fixture".to_owned(),
+                visible,
+            )
+            .unwrap()
+    }
+
+    fn finish_opening_browser(registry: &BrowserRegistry, instance: u64) {
+        registry
+            .page_started(
+                "opening-tab",
+                "workspace-1",
+                instance,
+                "https://example.com/fixture".to_owned(),
+            )
+            .unwrap();
+        registry
+            .page_finished(
+                "opening-tab",
+                "workspace-1",
+                instance,
+                "https://example.com/fixture".to_owned(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_waits_for_native_visible_loaded_tab_before_next_snapshot() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (registry, capability, origin) = opening_browser_registry();
+        let native_ready = Arc::new(AtomicBool::new(false));
+        let wait_registry = registry.clone();
+        let wait_native = Arc::clone(&native_ready);
+        let waiting = tokio::spawn(async move {
+            wait_for_agent_browser_ready(
+                &wait_registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || wait_native.load(Ordering::SeqCst),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "registration must happen first");
+        let instance = register_opening_browser(&registry, false);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "registration alone does not open a tab"
+        );
+        registry
+            .set_visible("opening-tab", "workspace-1", true)
+            .unwrap();
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "visible loading tab is not ready");
+        finish_opening_browser(&registry, instance);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "registry readiness cannot replace a native executor"
+        );
+        native_ready.store(true, Ordering::SeqCst);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        let opened = waiting.await.unwrap().unwrap();
+        assert_eq!(opened.visible, Some(true));
+        assert_eq!(opened.load_state, Some(BrowserLoadState::Ready));
+        assert!(opened.document_epoch.unwrap() > 0);
+        // These are the exact registry gates of the immediately following
+        // semantic snapshot; acquisition must succeed with a ready document.
+        let next = registry
+            .begin_agent_control(capability, "opening-tab")
+            .unwrap();
+        assert_eq!(next.load_state, Some(BrowserLoadState::Ready));
+        assert_eq!(next.document_epoch, opened.document_epoch);
+        assert!(registry
+            .observation_fence(capability, "opening-tab")
+            .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_wait_uses_one_bounded_deadline() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            wait_for_agent_browser_ready(
+                &registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || false
+            )
+            .await
+            .unwrap_err(),
+            "browser tab did not become ready before the deadline"
+        );
+        assert_eq!(tokio::time::Instant::now() - started, AGENT_OPEN_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_wait_observes_stop_revoke_close_replace_and_takeover() {
+        for operation in ["stop", "revoke", "close", "replace", "takeover", "unshare"] {
+            let (registry, capability, origin) = opening_browser_registry();
+            register_opening_browser(&registry, false);
+            let wait_registry = registry.clone();
+            let waiting = tokio::spawn(async move {
+                wait_for_agent_browser_ready(
+                    &wait_registry,
+                    capability,
+                    "opening-tab",
+                    &origin,
+                    AGENT_OPEN_TIMEOUT,
+                    || false,
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            let expected = match operation {
+                "stop" => {
+                    registry
+                        .stop_agent_control("opening-tab", "workspace-1")
+                        .await
+                        .unwrap();
+                    "browser control was stopped by the user"
+                }
+                "revoke" => {
+                    registry.revoke_agent_capability(capability);
+                    "browser capability is unavailable"
+                }
+                "close" | "replace" => {
+                    registry.remove("opening-tab", "workspace-1").unwrap();
+                    if operation == "replace" {
+                        register_opening_browser(&registry, true);
+                        "browser session was replaced while waiting"
+                    } else {
+                        "browser tab closed before it became ready"
+                    }
+                }
+                "takeover" => {
+                    registry
+                        .take_human_control("opening-tab", "workspace-1")
+                        .await
+                        .unwrap();
+                    "browser tab was taken over while opening"
+                }
+                "unshare" => {
+                    registry
+                        .revoke_browser_access("opening-tab", "workspace-1")
+                        .unwrap();
+                    "browser origin is not shared with this agent"
+                }
+                _ => unreachable!(),
+            };
+            tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+            assert_eq!(waiting.await.unwrap().unwrap_err(), expected, "{operation}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_agent_open_wait_never_acquires_control_later() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, false);
+        let wait_registry = registry.clone();
+        let waiting = tokio::spawn(async move {
+            wait_for_agent_browser_ready(
+                &wait_registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || true,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        registry
+            .set_visible("opening-tab", "workspace-1", true)
+            .unwrap();
+        finish_opening_browser(&registry, instance);
+        tokio::time::advance(AGENT_OPEN_TIMEOUT).await;
+        let snapshot = registry.snapshot("opening-tab", "workspace-1").unwrap();
+        assert_eq!(
+            snapshot.controller.unwrap().kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_cannot_reclaim_takeover_before_its_first_poll() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, true);
+        finish_opening_browser(&registry, instance);
+        registry
+            .take_human_control("opening-tab", "workspace-1")
+            .await
+            .unwrap();
+        let result = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || true,
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "browser tab was taken over while opening"
+        );
+        assert_eq!(
+            registry
+                .snapshot("opening-tab", "workspace-1")
+                .unwrap()
+                .controller
+                .unwrap()
+                .kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_rechecks_instance_at_native_executor_boundary() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, true);
+        finish_opening_browser(&registry, instance);
+        let result = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || {
+                // A replacement can land between registry inspection and native
+                // lookup; the final acquisition must preserve the instance fence.
+                registry.remove("opening-tab", "workspace-1").unwrap();
+                let replacement = register_opening_browser(&registry, true);
+                finish_opening_browser(&registry, replacement);
+                true
+            },
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "browser session was replaced while waiting"
+        );
+        assert_eq!(
+            registry
+                .snapshot("opening-tab", "workspace-1")
+                .unwrap()
+                .controller
+                .unwrap()
+                .kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
 
     #[test]
     fn recovered_browser_publishes_agent_control_before_observation() {

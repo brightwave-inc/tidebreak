@@ -307,6 +307,8 @@ struct BrowserRecord {
     /// The live agent capability that opened this tab via `browser_open`.
     /// Only that agent may close the tab; human takeover clears it.
     opened_by_capability: Option<Uuid>,
+    /// Preserve takeover even before an opening agent observes registration.
+    human_taken_over: bool,
     paused_origin: Option<BrowserOrigin>,
     pending_navigation_url: Option<String>,
     dispatch: BrowserDispatchState,
@@ -665,6 +667,7 @@ impl BrowserRegistry {
                 controller: BrowserController::default(),
                 controller_capability_id: None,
                 opened_by_capability: None,
+                human_taken_over: false,
                 paused_origin: None,
                 pending_navigation_url: None,
                 dispatch: BrowserDispatchState::default(),
@@ -1155,6 +1158,7 @@ impl BrowserRegistry {
     }
 
     /// Bind a freshly created tab to the agent capability that opened it.
+    #[cfg(test)]
     pub(crate) fn mark_agent_opened(
         &self,
         capability_id: Uuid,
@@ -1171,6 +1175,67 @@ impl BrowserRegistry {
         ensure_workspace(browser_id, &workspace_id, record)?;
         record.opened_by_capability = Some(capability_id);
         Ok(())
+    }
+
+    /// Follow one opening tab without accepting a replacement or reclaiming a
+    /// tab after human takeover. A missing record is expected only before the
+    /// renderer first registers the requested id.
+    pub(crate) fn agent_open_state(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        expected_instance: Option<u64>,
+    ) -> Result<Option<(u64, BrowserSnapshot)>, String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)?.clone();
+        let Some(record) = state.records.get(browser_id) else {
+            return if expected_instance.is_some() {
+                Err("browser tab closed before it became ready".to_owned())
+            } else {
+                Ok(None)
+            };
+        };
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if record.resetting
+            || expected_instance.is_some_and(|instance| instance != record.instance_id)
+        {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.human_taken_over
+            || (expected_instance.is_some() && record.opened_by_capability != Some(capability_id))
+        {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if record
+            .controller_capability_id
+            .is_some_and(|controller| controller != capability_id)
+        {
+            return Err("browser is controlled by another agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("opening browser was checked above");
+        record.opened_by_capability = Some(capability_id);
+        let record = &state.records[browser_id];
+        Ok(Some((
+            record.instance_id,
+            record.snapshot(browser_id, agent_access_for_record(&state, record)),
+        )))
     }
 
     /// Authorize a `browser_close` proposal: only the agent capability that
@@ -1422,13 +1487,45 @@ impl BrowserRegistry {
         capability_id: Uuid,
         browser_id: &str,
     ) -> Result<BrowserSnapshot, String> {
+        self.begin_agent_control_for_instance(capability_id, browser_id, None)
+    }
+
+    pub(crate) fn begin_opened_agent_control(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+    ) -> Result<BrowserSnapshot, String> {
+        self.begin_agent_control_for_instance(capability_id, browser_id, Some(instance_id))
+    }
+
+    fn begin_agent_control_for_instance(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        opening_instance: Option<u64>,
+    ) -> Result<BrowserSnapshot, String> {
         let mut state = self.lock();
         let capability = active_capability(&state, capability_id)?.clone();
-        let record = state
-            .records
-            .get(browser_id)
-            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        let record = state.records.get(browser_id).ok_or_else(|| {
+            if opening_instance.is_some() {
+                "browser tab closed before it became ready".to_owned()
+            } else {
+                "browser session is not registered".to_owned()
+            }
+        })?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if let Some(instance_id) = opening_instance {
+            if record.instance_id != instance_id || record.resetting {
+                return Err("browser session was replaced while waiting".to_owned());
+            }
+            if record.human_taken_over || record.opened_by_capability != Some(capability_id) {
+                return Err("browser tab was taken over while opening".to_owned());
+            }
+            if record.load_state != BrowserLoadState::Ready || record.document_epoch == 0 {
+                return Err("browser page is still loading".to_owned());
+            }
+        }
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
         if !record.visible {
@@ -1677,8 +1774,9 @@ impl BrowserRegistry {
                 record.controller_capability_id = None;
             }
             // Decision 94: human takeover ends the opening agent's lifecycle
-            // ownership. The tab stays under human control from here on.
+            // ownership. Preserve this even before its first open poll.
             record.opened_by_capability = None;
+            record.human_taken_over = true;
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
