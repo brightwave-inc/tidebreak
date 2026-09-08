@@ -749,12 +749,14 @@ fn parse_browser_screenshot_requires_identity_and_bounds_dimensions() {
             document_epoch,
             max_width,
             max_height,
+            output,
         } => {
             assert_eq!(browser_id, "browser-1");
             assert_eq!(snapshot_id, "snapshot-1");
             assert_eq!(document_epoch, 9);
             assert_eq!(max_width, Some(1440));
             assert_eq!(max_height, Some(0));
+            assert_eq!(output, None);
         }
         other => panic!("expected Screenshot, got {other:?}"),
     }
@@ -908,16 +910,47 @@ fn browser_mcp_registers_act_only_when_the_capability_is_true() {
         endpoint: "http://127.0.0.1:9876/code/browser".to_owned(),
         token: VALID_TOKEN.to_owned(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
-    assert!(browser_tool_registry(&client, false)
-        .get(tidebreak_core::BROWSER_ACT_TOOL)
-        .is_none());
-    let enabled = browser_tool_registry(&client, true);
+    let disabled = browser_tool_registry(&client, BrowserToolCapabilities::default());
+    for tool in [
+        tidebreak_core::BROWSER_ACT_TOOL,
+        tidebreak_core::BROWSER_OPEN_TOOL,
+        tidebreak_core::BROWSER_CLOSE_TOOL,
+        tidebreak_core::BROWSER_ACTIVATE_TOOL,
+        tidebreak_core::BROWSER_DIAGNOSTICS_TOOL,
+    ] {
+        assert!(disabled.get(tool).is_none(), "{tool} must stay unregistered");
+    }
+    let enabled = browser_tool_registry(
+        &client,
+        BrowserToolCapabilities {
+            semantic_actions: true,
+            lifecycle: true,
+            developer_diagnostics: true,
+        },
+    );
     let act = enabled
         .get(tidebreak_core::BROWSER_ACT_TOOL)
         .expect("browser_act must register");
     assert_eq!(act.approval_class(), ApprovalClass::Sensitive);
+    for (tool, class) in [
+        (tidebreak_core::BROWSER_OPEN_TOOL, ApprovalClass::Sensitive),
+        (tidebreak_core::BROWSER_CLOSE_TOOL, ApprovalClass::Sensitive),
+        (
+            tidebreak_core::BROWSER_ACTIVATE_TOOL,
+            ApprovalClass::Sensitive,
+        ),
+        (
+            tidebreak_core::BROWSER_DIAGNOSTICS_TOOL,
+            ApprovalClass::ReadOnly,
+        ),
+    ] {
+        let registered = enabled.get(tool).expect("capability tool must register");
+        assert_eq!(registered.approval_class(), class, "{tool}");
+    }
 }
 
 #[test]
@@ -1245,6 +1278,8 @@ async fn client_does_not_follow_redirects() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
 
@@ -1321,6 +1356,8 @@ async fn overlimit_response_body_is_refused() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut big_client = client.clone();
@@ -1420,6 +1457,8 @@ async fn browser_list_decodes_successful_json_response() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1479,6 +1518,8 @@ async fn browser_list_decodes_server_error_body() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1543,6 +1584,8 @@ async fn server_error_body_containing_token_is_scrubbed() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: token.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1622,6 +1665,8 @@ async fn browser_navigate_decodes_response() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1727,11 +1772,16 @@ async fn browser_mcp_text_can_drive_a_snapshot_action_sequence() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: true,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let ctx = ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None);
     let server = tidebreak_mcp::McpServer::new(
-        Arc::new(browser_tool_registry(&client, cap.semantic_actions)),
+        Arc::new(browser_tool_registry(
+            &client,
+            BrowserToolCapabilities::from_capfile(&cap),
+        )),
         ctx,
     )
     .with_approval_gate(Arc::new(AutoApproveGate));
@@ -1944,6 +1994,8 @@ async fn browser_client_ignores_ambient_http_proxy() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = {
         let _env_lock = PROXY_ENV_LOCK.lock().await;

@@ -42,6 +42,15 @@ const CAPFILE_SUBDIR: &str = "browser-caps";
 
 // ── data types ──────────────────────────────────────────────────────────────
 
+/// Runtime capability flags recorded in a session capfile so the MCP bridge
+/// only registers tools the native runtime can actually serve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BrowserChannelCapabilities {
+    pub semantic_actions: bool,
+    pub lifecycle: bool,
+    pub developer_diagnostics: bool,
+}
+
 /// The `{owner, workspace, session}` subject derived from a token look-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserSubject {
@@ -168,15 +177,34 @@ impl BrowserTokenRegistry {
         subject: BrowserSubject,
         bridge_command: &Path,
     ) -> Result<BrowserChannelSpec, String> {
-        self.issue_with_semantic_actions(subject, bridge_command, false)
+        self.issue_with_capabilities(subject, bridge_command, BrowserChannelCapabilities::default())
     }
 
     /// Mint a channel and record whether its runtime supports native actions.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn issue_with_semantic_actions(
         &self,
         subject: BrowserSubject,
         bridge_command: &Path,
         semantic_actions: bool,
+    ) -> Result<BrowserChannelSpec, String> {
+        self.issue_with_capabilities(
+            subject,
+            bridge_command,
+            BrowserChannelCapabilities {
+                semantic_actions,
+                ..BrowserChannelCapabilities::default()
+            },
+        )
+    }
+
+    /// Mint a channel and record the exact tool capabilities its runtime
+    /// reports, so the bridge's advertised tool set stays honest.
+    pub fn issue_with_capabilities(
+        &self,
+        subject: BrowserSubject,
+        bridge_command: &Path,
+        capabilities: BrowserChannelCapabilities,
     ) -> Result<BrowserChannelSpec, String> {
         if !bridge_command.is_absolute() {
             return Err(format!(
@@ -212,7 +240,7 @@ impl BrowserTokenRegistry {
             CAPFILE_VERSION,
             &loopback_base,
             &token,
-            semantic_actions,
+            capabilities,
         ) {
             Ok(()) => {}
             Err(e) => return Err(e),
@@ -234,7 +262,7 @@ impl BrowserTokenRegistry {
 
         Ok(
             BrowserChannelSpec::new(capfile_path, bridge_command.to_path_buf())
-                .with_semantic_actions(semantic_actions),
+                .with_semantic_actions(capabilities.semantic_actions),
         )
     }
 
@@ -349,7 +377,7 @@ fn write_capfile(
     version: u32,
     loopback_base: &str,
     token: &str,
-    semantic_actions: bool,
+    capabilities: BrowserChannelCapabilities,
 ) -> Result<(), String> {
     let parent = path
         .parent()
@@ -373,7 +401,9 @@ fn write_capfile(
         "version": version,
         "endpoint": endpoint,
         "token": token,
-        "semantic_actions": semantic_actions,
+        "semantic_actions": capabilities.semantic_actions,
+        "lifecycle": capabilities.lifecycle,
+        "developer_diagnostics": capabilities.developer_diagnostics,
     });
 
     let body_bytes =
