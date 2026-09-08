@@ -410,7 +410,7 @@ pub(crate) fn compose_for_surface(
         );
         if acting {
             lines.push(
-                "- Computer use is primarily for observing the user's apps. GUI control uses their real cursor, keyboard, and focus, so it is slower, more brittle, and more disruptive than reading or a dedicated tool; use it sparingly and only when a non-GUI path will not complete the request.",
+                "- Use computer use to operate graphical apps and verify work that depends on visible or interactive state. For coding tasks, reproduce the UI problem, make the code change, and repeat the relevant UI flow to verify the result. Prefer dedicated tools for data access that does not need the UI.",
             );
             lines.push(
                 "- Read before acting: confirm the target with `computer_read_app_content` or `computer_capture_screen` before `computer_click`, `computer_type_text`, or `computer_key_press`, and look again afterward to confirm the effect.",
@@ -422,7 +422,7 @@ pub(crate) fn compose_for_surface(
                 "- Prefer the accessibility tree for reading; when an app's tree is incomplete or unclear, capture a screenshot to see what is actually on screen before deciding.",
             );
             lines.push(
-                "- Acting may ask the user's approval once per app, and the user can stop control at any time; a refusal or a stop is a decision to respect, not an error to retry.",
+                "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
             );
             lines.push(
                 "- When work in another app is finished, use `computer_return_to_tidebreak` so the user can see completion and continue the conversation.",
