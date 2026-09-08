@@ -16,8 +16,8 @@ use std::sync::Arc;
 use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 
+use tidebreak_core::computer_session::validate_computer_session_arguments;
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseResult};
-use tidebreak_core::computer_use::validate_computer_use_arguments;
 use tidebreak_core::{db, CodeWorkspaceStatus, SessionLifecycle};
 
 use crate::code::native_channel::NativeSubject;
@@ -135,7 +135,7 @@ fn attached_runtime(state: &AppState) -> Result<Arc<dyn NativeRuntime>, ServerEr
 /// not validate. Unknown names fail here too — the registry is the single
 /// list of native primitives.
 fn require_well_formed(call: &ComputerUseCall) -> Result<(), ServerError> {
-    if validate_computer_use_arguments(&call.name, &call.arguments) {
+    if validate_computer_session_arguments(&call.name, &call.arguments) {
         Ok(())
     } else {
         Err(ServerError::unprocessable_kind(

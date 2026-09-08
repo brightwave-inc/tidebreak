@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use tidebreak_server_core as core;
 
+pub use core::chrome;
 pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
@@ -28,7 +29,6 @@ pub(crate) use core::{
     sandbox_agent_run_worker, sandbox_runtime, sandbox_task_plan_worker, scripted_harness,
     task_plan_tool, InstanceLock, HOST_MAX_CONNECTIONS,
 };
-pub use core::chrome;
 pub use core::{
     code_execution, connectors, consent, deprovision_provisioned_gateway, deprovision_target,
     ensure_home_dir, host_folders, listen_endpoint, logging, media_type, openapi_catalog,

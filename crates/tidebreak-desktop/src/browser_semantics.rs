@@ -3418,9 +3418,8 @@ fn native_action_resolution_script(
 fn action_hit_points(action: &tidebreak_core::BrowserAction) -> Vec<serde_json::Value> {
     use tidebreak_core::BrowserAction;
 
-    let point = |point: &tidebreak_core::BrowserPoint| {
-        serde_json::json!({ "x": point.x, "y": point.y })
-    };
+    let point =
+        |point: &tidebreak_core::BrowserPoint| serde_json::json!({ "x": point.x, "y": point.y });
     match action {
         BrowserAction::Click { at: Some(at) }
         | BrowserAction::Hover { at: Some(at) }
