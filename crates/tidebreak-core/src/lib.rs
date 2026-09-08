@@ -58,6 +58,7 @@ pub mod chat_journal;
 pub mod citation;
 pub mod client_tools;
 pub mod code;
+pub mod computer_session;
 pub mod computer_use;
 pub mod config;
 pub mod connected_app;
