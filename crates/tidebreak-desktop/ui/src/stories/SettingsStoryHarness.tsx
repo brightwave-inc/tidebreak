@@ -95,6 +95,7 @@ export const storySettings: RuntimeSettings = {
   harness_update_channel: "pinned",
   git_source_control: {
     auto_rename_branches: true,
+    keep_local_main_up_to_date: true,
     branch_prefix_mode: "account",
     account_prefix: "alex/",
     effective_branch_prefix: "alex/",

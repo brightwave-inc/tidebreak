@@ -173,6 +173,7 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
       harness_update_channel?: HarnessUpdateChannel;
       git_source_control?: {
         auto_rename_branches?: boolean;
+        keep_local_main_up_to_date?: boolean;
         branch_prefix_mode?: "account" | "custom" | "none";
         custom_branch_prefix?: string | null;
       };

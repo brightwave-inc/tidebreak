@@ -791,6 +791,8 @@ export function NewWorkspaceDialog({
       );
       return;
     }
+    if (workspace.base_refresh_warning)
+      toast.warning(workspace.base_refresh_warning);
     replaceWorkspace(pending.id, workspace);
     await startFirstSession({
       client,

@@ -35,12 +35,14 @@ import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
 
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
+const toastWarning = vi.hoisted(() => vi.fn());
 const hasLocalHostAuthority = vi.hoisted(() => vi.fn(() => true));
 const publishCodeImage = vi.hoisted(() => vi.fn());
 vi.mock("sonner", () => ({
   toast: {
     error: toastError,
     success: toastSuccess,
+    warning: toastWarning,
   },
 }));
 vi.mock("../host", async (importOriginal) => ({
@@ -84,6 +86,7 @@ afterEach(() => {
     workspaceStartups: {},
   });
   toastError.mockReset();
+  toastWarning.mockReset();
   toastSuccess.mockReset();
 });
 
@@ -427,56 +430,65 @@ describe("NewWorkspaceDialog", () => {
     ]);
   });
 
-  it("opens the workspace as soon as it exists, before the session starts", async () => {
-    const repos = [repo("repo-new", "tidebreak")];
-    useCodeCatalogStore.setState({
-      repos,
-      doctor: {
-        harnesses: [harness("claude_code")],
-        notices: [],
-      } as never,
-    });
-    const created = workspace(
-      "ws-early",
-      "repo-new",
-      "2026-08-24T12:00:00.000Z",
-    );
-    const sessionStart = deferred<CodeSessionSnapshot>();
-    const { router } = await renderWithRouter(
-      <AppContextProvider
-        value={app({
-          createCodeWorkspace: vi.fn(async () => created),
-          createCodeSession: vi.fn(() => sessionStart.promise),
-          listCodeHarnessModels: claudeModels(),
-        })}
-      >
-        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
-      </AppContextProvider>,
-      { initialUrl: "/code/w/ws-old" },
-    );
+  it.each([false, true])(
+    "opens the workspace and starts its session with a refresh warning: %s",
+    async (warn) => {
+      const repos = [repo("repo-new", "tidebreak")];
+      useCodeCatalogStore.setState({
+        repos,
+        doctor: {
+          harnesses: [harness("claude_code")],
+          notices: [],
+        } as never,
+      });
+      const created = workspace(
+        "ws-early",
+        "repo-new",
+        "2026-08-24T12:00:00.000Z",
+      );
+      const warning =
+        "Couldn't update main to the latest version. Your workspace uses the available local history.";
+      if (warn) created.base_refresh_warning = warning;
+      const sessionStart = deferred<CodeSessionSnapshot>();
+      const { router } = await renderWithRouter(
+        <AppContextProvider
+          value={app({
+            createCodeWorkspace: vi.fn(async () => created),
+            createCodeSession: vi.fn(() => sessionStart.promise),
+            listCodeHarnessModels: claudeModels(),
+          })}
+        >
+          <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+        </AppContextProvider>,
+        { initialUrl: "/code/w/ws-old" },
+      );
 
-    fireEvent.keyDown(screen.getByRole("dialog"), {
-      key: "Enter",
-      metaKey: true,
-    });
+      fireEvent.keyDown(screen.getByRole("dialog"), {
+        key: "Enter",
+        metaKey: true,
+      });
 
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/code/w/ws-early"),
-    );
-    expect(useCodeUiStore.getState().workspaceStartups["ws-early"]).toEqual({
-      harness: "claude_code",
-      hasFirstMessage: false,
-      phase: "starting_session",
-    });
-    sessionStart.resolve(
-      session("ws-early", "claude_code", "2026-08-24T12:00:00.000Z"),
-    );
-    await waitFor(() =>
-      expect(
-        useCodeUiStore.getState().workspaceStartups["ws-early"],
-      ).toBeUndefined(),
-    );
-  });
+      await waitFor(() =>
+        expect(router.state.location.pathname).toBe("/code/w/ws-early"),
+      );
+      if (warn) expect(toastWarning).toHaveBeenCalledWith(warning);
+      else expect(toastWarning).not.toHaveBeenCalled();
+      expect(toastError).not.toHaveBeenCalled();
+      expect(useCodeUiStore.getState().workspaceStartups["ws-early"]).toEqual({
+        harness: "claude_code",
+        hasFirstMessage: false,
+        phase: "starting_session",
+      });
+      sessionStart.resolve(
+        session("ws-early", "claude_code", "2026-08-24T12:00:00.000Z"),
+      );
+      await waitFor(() =>
+        expect(
+          useCodeUiStore.getState().workspaceStartups["ws-early"],
+        ).toBeUndefined(),
+      );
+    },
+  );
 
   it("removes a failed create and retries the captured request", async () => {
     const repos = [repo("repo-new", "tidebreak")];

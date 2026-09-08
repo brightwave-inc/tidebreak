@@ -347,6 +347,18 @@ impl ScopedCode {
             .await
     }
 
+    pub async fn create_workspace_with_warning(
+        &self,
+        repo_id: RepoId,
+        title: Option<String>,
+        suggested_title: Option<String>,
+        base_ref: Option<String>,
+    ) -> Result<(CodeWorkspace, Option<String>), ServerError> {
+        self.runtime
+            .create_workspace_with_warning(&self.owner, repo_id, title, suggested_title, base_ref)
+            .await
+    }
+
     pub async fn create_remote_workspace(
         &self,
         repo_id: RepoId,

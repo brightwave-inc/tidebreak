@@ -96,6 +96,10 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["code_turn_recaps_enabled"], true);
     assert_eq!(settings["git_source_control"]["auto_rename_branches"], true);
     assert_eq!(
+        settings["git_source_control"]["keep_local_main_up_to_date"],
+        true
+    );
+    assert_eq!(
         settings["git_source_control"]["branch_prefix_mode"],
         "account"
     );
@@ -135,6 +139,7 @@ async fn settings_default_then_update_roundtrips() {
                         },
                         "git_source_control": {
                             "auto_rename_branches": false,
+                            "keep_local_main_up_to_date": false,
                             "branch_prefix_mode": "custom",
                             "custom_branch_prefix": "team/alex"
                         }
@@ -147,6 +152,10 @@ async fn settings_default_then_update_roundtrips() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        settings["git_source_control"]["keep_local_main_up_to_date"],
+        false
+    );
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
     assert_eq!(

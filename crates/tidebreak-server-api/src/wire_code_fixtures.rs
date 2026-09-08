@@ -337,6 +337,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace",
             "workspace",
             &CodeWorkspaceSnapshot {
+                base_refresh_warning: None,
                 id: workspace_id(),
                 repo_id: repo_id(),
                 title: "Bound the code parser".to_owned(),
@@ -356,6 +357,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "released workspace",
             "workspace",
             &CodeWorkspaceSnapshot {
+                base_refresh_warning: None,
                 id: WorkspaceId(id(0x12)),
                 repo_id: repo_id(),
                 title: "Old work".to_owned(),

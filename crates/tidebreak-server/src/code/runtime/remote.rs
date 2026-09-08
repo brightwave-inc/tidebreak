@@ -355,7 +355,7 @@ impl CodeRuntime {
                     acts_as: Some(identity.acts_as),
                     ..settings
                 };
-                let workspace = self
+                let (workspace, _base_refresh_warning) = self
                     .create_workspace_with_git_credentials(
                         owner,
                         repo_id,

@@ -2009,6 +2009,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe("code frames against real server output", () => {
+  it("preserves creation warnings and rejects malformed warning values", () => {
+    const workspace = CODE_FRAMES.find(
+      ({ name }) => name === "workspace",
+    )?.value;
+    expect(isRecord(workspace)).toBe(true);
+    if (!isRecord(workspace)) throw new Error("Missing workspace fixture");
+    const warning =
+      "Couldn't update main to the latest version. Your workspace uses the available local history.";
+    expect(
+      parseCodeWorkspace({ ...workspace, base_refresh_warning: warning })
+        ?.base_refresh_warning,
+    ).toBe(warning);
+    expect(
+      parseCodeWorkspace({ ...workspace, base_refresh_warning: 42 }),
+    ).toBeNull();
+    expect(
+      parseCodeWorkspace({ ...workspace, base_refresh_warning: "" }),
+    ).toBeNull();
+  });
+
   it("carries every kind this file knows a parser for", () => {
     expect(CODE_FRAMES.length).toBeGreaterThan(40);
     const kinds = new Set(CODE_FRAMES.map(({ kind }) => kind));

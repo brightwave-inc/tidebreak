@@ -591,6 +591,175 @@ pub async fn resolve_named_base_ref(
     Err(WorktreeError::missing_base_ref(reference, &tried))
 }
 
+/// Refresh a branch before workspace creation. Tags and commit IDs stay pinned.
+/// A failed fetch or unsafe local update leaves workspace creation available.
+pub async fn refresh_local_base(repo_root: &Path, base: &str) -> Result<(), String> {
+    let resolved = git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--symbolic-full-name", "--verify", base],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    let (branch, remote, remote_branch) = if let Some(branch) = resolved.strip_prefix("refs/heads/")
+    {
+        let remote = git_stdout(
+            Some(repo_root),
+            &["config", "--get", &format!("branch.{branch}.remote")],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap_or_else(|_| "origin".into());
+        let upstream = git_stdout(
+            Some(repo_root),
+            &["config", "--get", &format!("branch.{branch}.merge")],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap_or_else(|_| format!("refs/heads/{branch}"));
+        let Some(remote_branch) = upstream.strip_prefix("refs/heads/") else {
+            return Ok(());
+        };
+        (branch.to_owned(), remote, remote_branch.to_owned())
+    } else if let Some(tracking) = resolved.strip_prefix("refs/remotes/") {
+        let Some((remote, branch)) = tracking.split_once('/') else {
+            return Ok(());
+        };
+        (branch.to_owned(), remote.to_owned(), branch.to_owned())
+    } else {
+        return Ok(());
+    };
+    // Local upstreams do not need a network refresh.
+    if remote == "." || remote.starts_with('-') {
+        return Ok(());
+    }
+    let tracking = format!("refs/remotes/{remote}/{remote_branch}");
+    let refspec = format!("refs/heads/{remote_branch}:{tracking}");
+    git(
+        Some(repo_root),
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            &remote,
+            &refspec,
+        ],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    let local = format!("refs/heads/{branch}");
+    let Ok(old) = git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--verify", &local],
+        GIT_TIMEOUT,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let new = git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--verify", &tracking],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    if old == new {
+        return Ok(());
+    }
+    git(
+        Some(repo_root),
+        &["merge-base", "--is-ancestor", &old, &new],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    let entries = git_nul_stdout(
+        Some(repo_root),
+        &["worktree", "list", "--porcelain", "-z"],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    let mut checkout = None;
+    let mut path = None;
+    for entry in entries {
+        if let Some(value) = entry.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(value));
+        }
+        if entry.strip_prefix("branch ") == Some(local.as_str()) {
+            checkout = path.clone();
+        }
+    }
+    if let Some(checkout) = checkout {
+        let status = git_stdout(
+            Some(&checkout),
+            &["status", "--porcelain", "--untracked-files=all"],
+            GIT_TIMEOUT,
+        )
+        .await?;
+        if !status.is_empty() {
+            return Err("the base checkout has uncommitted files".into());
+        }
+        for operation in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+            "sequencer",
+            "BISECT_LOG",
+        ] {
+            let path = git_stdout(
+                Some(&checkout),
+                &["rev-parse", "--git-path", operation],
+                GIT_TIMEOUT,
+            )
+            .await?;
+            if checkout.join(path).exists() {
+                return Err("the base checkout has a Git operation in progress".into());
+            }
+        }
+        let head = git_stdout(
+            Some(&checkout),
+            &["symbolic-ref", "--quiet", "HEAD"],
+            GIT_TIMEOUT,
+        )
+        .await?;
+        if head != local {
+            return Err("the base checkout changed branches during refresh".into());
+        }
+        // Git protects edits made after the status check and refuses divergence.
+        git(
+            Some(&checkout),
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "--ff-only",
+                "--no-autostash",
+                "--no-overwrite-ignore",
+                &new,
+            ],
+            GIT_TIMEOUT,
+        )
+        .await?;
+    } else {
+        // Compare the old tip so a concurrent commit cannot be overwritten.
+        git(
+            Some(repo_root),
+            &[
+                "update-ref",
+                "-m",
+                "Tidebreak: refresh local base",
+                &local,
+                &new,
+                &old,
+            ],
+            GIT_TIMEOUT,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Create a worktree and branch under the Tidebreak data directory.
 pub async fn create_worktree(
     repo_root: &Path,
@@ -2284,6 +2453,124 @@ mod tests {
             .unwrap()
             .complete()
             .await;
+    }
+
+    #[tokio::test]
+    async fn refresh_local_base_fast_forwards_clean_and_unchecked_branches() {
+        for sibling in [false, true] {
+            let (dir, origin) = init_repo();
+            let local = dir.path().join("local");
+            run(
+                dir.path(),
+                &[
+                    "git",
+                    "clone",
+                    origin.to_str().unwrap(),
+                    local.to_str().unwrap(),
+                ],
+            );
+            let old = branch_tip(&local, "main").await.unwrap();
+            if sibling {
+                run(&local, &["git", "switch", "-c", "feature"]);
+            }
+            std::fs::write(origin.join("README.md"), "updated\n").unwrap();
+            run(&origin, &["git", "commit", "-am", "update"]);
+            refresh_local_base(&local, "main").await.unwrap();
+            assert_eq!(
+                branch_tip(&local, "main").await.unwrap(),
+                branch_tip(&origin, "main").await.unwrap()
+            );
+            if sibling {
+                assert_eq!(branch_tip(&local, "feature").await.unwrap(), old);
+                assert_eq!(
+                    std::fs::read_to_string(local.join("README.md")).unwrap(),
+                    "hello\n"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(local.join("README.md")).unwrap(),
+                    "updated\n"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_local_base_preserves_dirty_diverged_and_untracked_work() {
+        for state in ["dirty", "diverged", "untracked", "merge"] {
+            let (dir, origin) = init_repo();
+            let local = dir.path().join("local");
+            run(
+                dir.path(),
+                &[
+                    "git",
+                    "clone",
+                    origin.to_str().unwrap(),
+                    local.to_str().unwrap(),
+                ],
+            );
+            run(&local, &["git", "config", "user.email", "dev@example.com"]);
+            run(&local, &["git", "config", "user.name", "Dev"]);
+            match state {
+                "dirty" | "diverged" => {
+                    std::fs::write(local.join("README.md"), "my work\n").unwrap();
+                    if state == "diverged" {
+                        run(&local, &["git", "commit", "-am", "local work"]);
+                    }
+                }
+                "untracked" => std::fs::write(local.join("new.txt"), "my work\n").unwrap(),
+                _ => std::fs::write(
+                    local.join(".git/MERGE_HEAD"),
+                    branch_tip(&local, "main").await.unwrap(),
+                )
+                .unwrap(),
+            }
+            let old = branch_tip(&local, "main").await.unwrap();
+            std::fs::write(origin.join("README.md"), "updated\n").unwrap();
+            run(&origin, &["git", "commit", "-am", "update"]);
+            let _ = refresh_local_base(&local, "main").await;
+            assert_eq!(branch_tip(&local, "main").await.unwrap(), old, "{state}");
+            if state == "dirty" || state == "diverged" {
+                assert_eq!(
+                    std::fs::read_to_string(local.join("README.md")).unwrap(),
+                    "my work\n"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_local_base_updates_the_sibling_checkout_and_preserves_pinned_refs() {
+        let (dir, origin) = init_repo();
+        let local = dir.path().join("local");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                origin.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        );
+        let old = branch_tip(&local, "main").await.unwrap();
+        run(&local, &["git", "-c", "tag.gpgSign=false", "tag", "v1"]);
+        run(&local, &["git", "switch", "-c", "feature"]);
+        let sibling = dir.path().join("sibling with spaces");
+        run(
+            &local,
+            &["git", "worktree", "add", sibling.to_str().unwrap(), "main"],
+        );
+        std::fs::write(origin.join("README.md"), "updated\n").unwrap();
+        run(&origin, &["git", "commit", "-am", "update"]);
+        refresh_local_base(&local, "v1").await.unwrap();
+        refresh_local_base(&local, &old).await.unwrap();
+        assert_eq!(branch_tip(&local, "main").await.unwrap(), old);
+        refresh_local_base(&local, "origin/main").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(sibling.join("README.md")).unwrap(),
+            "updated\n"
+        );
+        assert_eq!(branch_tip(&local, "feature").await.unwrap(), old);
     }
 
     #[tokio::test]

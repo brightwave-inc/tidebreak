@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fireEvent, fn, waitFor, within } from "storybook/test";
+import { Toaster } from "@/components/ui/sonner";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -23,6 +24,8 @@ import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
 import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
 import { ManagedPolicyContext } from "@/managedPolicy";
 import {
+  codeWorkspace,
+  codeSession,
   harnessDoctor,
   harnessDoctorCold,
   harnessDoctorDegraded,
@@ -446,5 +449,38 @@ export const FirstRepoWhileEngineDownloads: Story = {
         done: false,
       },
     },
+  },
+};
+
+/** A base refresh failure warns without stopping workspace or session creation. */
+export const BaseRefreshWarning: Story = {
+  args: {
+    client: {
+      createCodeWorkspace: async () => ({
+        ...codeWorkspace,
+        base_refresh_warning:
+          "Couldn't update main to the latest version. Your workspace uses the available local history.",
+      }),
+      createCodeSession: fn(async () => codeSession),
+    },
+  },
+  decorators: [
+    (Story) => (
+      <>
+        <Story />
+        <Toaster richColors duration={Number.POSITIVE_INFINITY} />
+      </>
+    ),
+  ],
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    const dialog = await body.findByRole("dialog");
+    await waitFor(() =>
+      expect(body.getByRole("button", { name: /^Create$/ })).toBeEnabled(),
+    );
+    fireEvent.keyDown(dialog, { key: "Enter", metaKey: true });
+    await body.findByText(
+      "Couldn't update main to the latest version. Your workspace uses the available local history.",
+    );
   },
 };

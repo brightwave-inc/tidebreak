@@ -137,3 +137,9 @@ export const Narrow: Story = {
     ),
   ],
 };
+
+export const MainUpdatesDisabled: Story = {
+  args: {
+    client: client(settings({ keep_local_main_up_to_date: false })) as never,
+  },
+};

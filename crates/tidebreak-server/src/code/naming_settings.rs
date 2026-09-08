@@ -5,6 +5,7 @@ use tidebreak_core::{OwnerId, Store};
 
 use super::worktree::slugify;
 
+pub const KEEP_LOCAL_MAIN_UP_TO_DATE_KEY: &str = "code.git.keep_local_main_up_to_date";
 pub const AUTO_RENAME_BRANCHES_KEY: &str = "code.git.auto_rename_branches";
 pub const BRANCH_PREFIX_MODE_KEY: &str = "code.git.branch_prefix_mode";
 pub const CUSTOM_BRANCH_PREFIX_KEY: &str = "code.git.custom_branch_prefix";
@@ -21,6 +22,7 @@ pub enum BranchPrefixMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct GitSourceControlSettings {
     pub auto_rename_branches: bool,
+    pub keep_local_main_up_to_date: bool,
     pub branch_prefix_mode: BranchPrefixMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -48,6 +50,28 @@ async fn read_value<T: serde::de::DeserializeOwned>(
         .get_setting(&user_setting_key(owner, key))
         .await?
         .and_then(|value| serde_json::from_value(value).ok()))
+}
+
+pub async fn keep_local_main_up_to_date(
+    store: &dyn Store,
+    owner: &OwnerId,
+) -> tidebreak_core::Result<bool> {
+    Ok(read_value(store, owner, KEEP_LOCAL_MAIN_UP_TO_DATE_KEY)
+        .await?
+        .unwrap_or(true))
+}
+
+pub async fn write_keep_local_main_up_to_date(
+    store: &dyn Store,
+    owner: &OwnerId,
+    enabled: bool,
+) -> tidebreak_core::Result<()> {
+    store
+        .set_setting(
+            &user_setting_key(owner, KEEP_LOCAL_MAIN_UP_TO_DATE_KEY),
+            &serde_json::json!(enabled),
+        )
+        .await
 }
 
 pub async fn auto_rename_branches(
@@ -83,6 +107,7 @@ pub async fn read(
     };
     Ok(GitSourceControlSettings {
         auto_rename_branches: auto_rename_branches(store, owner).await?,
+        keep_local_main_up_to_date: keep_local_main_up_to_date(store, owner).await?,
         branch_prefix_mode,
         custom_branch_prefix,
         account_prefix,
