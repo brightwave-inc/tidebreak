@@ -4,6 +4,7 @@ import {
   CircleCheck,
   CircleDashed,
   CircleMinus,
+  Cloud,
   ExternalLink,
   EyeOff,
   Files,
@@ -43,6 +44,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -130,11 +138,14 @@ export function CodeInspector({
   );
   const [file, setFile] = useState<string | undefined>();
   const turnId = scope?.turnId;
+  const remote = prResource?.data?.remote === true;
+  const worktreeReady = !prResource || (prResource.data !== null && !remote);
   const changedFiles = useChangedFilesResource({
     client,
     workspaceId,
     turnId,
     contentRevision,
+    enabled: worktreeReady,
   });
 
   useEffect(() => {
@@ -254,26 +265,44 @@ export function CodeInspector({
           value="files"
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <FilesPanel
-            client={client}
-            workspaceId={workspaceId}
-            contentRevision={contentRevision}
-            selected={file}
-            onOpenFile={openFile}
-          />
+          {worktreeReady ? (
+            <FilesPanel
+              client={client}
+              workspaceId={workspaceId}
+              contentRevision={contentRevision}
+              selected={file}
+              onOpenFile={openFile}
+            />
+          ) : (
+            <WorkspaceFilesUnavailable
+              remote={remote}
+              error={prResource?.error}
+              hasPr={Boolean(pr)}
+              onReview={() => setTab("pr")}
+            />
+          )}
         </TabsContent>
         <TabsContent
           value="source"
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <DiffOverviewContent
-              resource={changedFiles}
-              turnId={turnId}
-              turnLabel={scope?.label}
-              selected={file}
-              onOpenFile={openDiff}
-            />
+            {worktreeReady ? (
+              <DiffOverviewContent
+                resource={changedFiles}
+                turnId={turnId}
+                turnLabel={scope?.label}
+                selected={file}
+                onOpenFile={openDiff}
+              />
+            ) : (
+              <WorkspaceFilesUnavailable
+                remote={remote}
+                error={prResource?.error}
+                hasPr={Boolean(pr)}
+                onReview={() => setTab("pr")}
+              />
+            )}
           </div>
         </TabsContent>
         <TabsContent
@@ -291,6 +320,57 @@ export function CodeInspector({
         </TabsContent>
       </Tabs>
     </aside>
+  );
+}
+
+function WorkspaceFilesUnavailable({
+  remote,
+  error,
+  hasPr,
+  onReview,
+}: {
+  remote: boolean;
+  error?: string | null;
+  hasPr: boolean;
+  onReview: () => void;
+}) {
+  if (!remote) {
+    return error ? (
+      <p
+        role="alert"
+        className="notice-surface notice-critical m-4 rounded-md p-3 text-sm"
+      >
+        {error}
+      </p>
+    ) : (
+      <div
+        role="status"
+        className="flex items-center gap-2 p-4 text-sm text-muted-foreground"
+      >
+        <Spinner className="size-3.5" /> Loading workspace…
+      </div>
+    );
+  }
+  return (
+    <Empty className="rounded-none px-5 md:px-5">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <Cloud />
+        </EmptyMedia>
+        <EmptyTitle>Files are in the sandbox</EmptyTitle>
+        <EmptyDescription>
+          Ask in chat to inspect files or changes.{" "}
+          {hasPr
+            ? "You can also review the pull request."
+            : "When the task opens a pull request, you can review it here."}
+        </EmptyDescription>
+      </EmptyHeader>
+      {hasPr && (
+        <Button variant="outline" size="sm" onClick={onReview}>
+          Review pull request
+        </Button>
+      )}
+    </Empty>
   );
 }
 

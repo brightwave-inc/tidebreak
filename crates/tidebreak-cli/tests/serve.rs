@@ -102,3 +102,33 @@ fn serve_without_keychain_rejects_desktop_before_opening_storage() {
     assert!(!dir.path().join("tidebreak.lock").exists());
     assert!(!dir.path().join("tidebreak.db").exists());
 }
+
+/// The fixture verifies its debug engine without opening self-host storage.
+#[cfg(debug_assertions)]
+#[test]
+fn malformed_script_refuses_self_host_before_opening_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .arg("serve")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TIDEBREAK_PROFILE", "self_host")
+        .env("TIDEBREAK_DATA_DIR", dir.path())
+        .env("TIDEBREAK_BLOB_STORE_URL", "s3://fixture/test")
+        .env(
+            "TIDEBREAK_DATABASE_URL",
+            "postgres://fixture@127.0.0.1:1/fixture",
+        )
+        .env("TIDEBREAK_SCRIPTED_HARNESS", "{not json")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run self-host fixture smoke check");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TIDEBREAK_SCRIPTED_HARNESS is not a valid script"),
+        "stderr: {stderr}"
+    );
+    assert!(!dir.path().join("tidebreak.lock").exists());
+    assert!(!dir.path().join("tidebreak.db").exists());
+}

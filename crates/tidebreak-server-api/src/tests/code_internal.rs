@@ -18,8 +18,8 @@ use tower::ServiceExt;
 
 use tidebreak_core::{
     ApprovalClass, ChatRequest, ContentBlock, DbStore, ModelProvider, OwnerId, ProviderEvent,
-    ProviderId, SessionId, StopReason, Store, SubmitAgentRunResultOutcome, Tool, ToolCtx,
-    ToolOutput, ToolRegistry, ToolSpec, TurnId, TurnParkWait, TurnRunStatus, TurnStatus,
+    ProviderId, SessionId, StopReason, Store, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
+    TurnId, TurnParkWait, TurnRunStatus, TurnStatus,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -188,6 +188,22 @@ async fn internal_engine_app_capturing(
     Arc<ScriptedProvider>,
     AppState,
 ) {
+    internal_engine_app_with_location(steps, tidebreak_core::AgentRunExecutionLocation::InProcess)
+        .await
+}
+
+async fn internal_engine_app_with_location(
+    steps: Vec<Step>,
+    execution_location: tidebreak_core::AgentRunExecutionLocation,
+) -> (
+    axum::Router,
+    Arc<str>,
+    Arc<CodeRuntime>,
+    Arc<AtomicUsize>,
+    tempfile::TempDir,
+    Arc<ScriptedProvider>,
+    AppState,
+) {
     let (dir, store) = temp_db_store("internal.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -239,6 +255,7 @@ async fn internal_engine_app_capturing(
         state.clone(),
         runtime.db.clone(),
         runtime.bus.clone(),
+        execution_location,
     )));
     state.events.mirror_into(runtime.bus.clone());
     let runtime = Arc::new(runtime);
@@ -1398,13 +1415,14 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
 
 #[tokio::test]
 async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
-    let (router, token, runtime, _ran, _dir, _provider, state) =
+    let (router, token, runtime, _ran, _dir, provider, state) =
         internal_engine_app_capturing(vec![
             Step::Tool {
                 name: tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL,
                 input: serde_json::json!({ "task": "research the answer" }),
             },
             Step::WaitForSpawnedAgent,
+            Step::Text("research complete"),
             Step::Text("child result received"),
         ])
         .await;
@@ -1440,38 +1458,33 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
         (1, 2)
     );
 
-    let child_lease = uuid::Uuid::new_v4();
-    let claimed = runtime
-        .db
-        .claim_agent_run(child_lease, chrono::Duration::minutes(5), 4, 4)
-        .await
-        .unwrap()
-        .expect("the sandbox child is claimable");
-    assert_eq!(claimed.id, child_id);
-    assert!(matches!(
-        runtime
-            .db
-            .submit_agent_run_result(child_id, child_lease, "research complete")
-            .await
-            .unwrap(),
-        Some(SubmitAgentRunResultOutcome::Completed(_))
-    ));
+    let worker = crate::sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
+        state.store.clone(),
+        Arc::new(crate::sandbox_runtime::ServerSandboxHost::new(
+            state.store.clone(),
+            state.secrets.clone(),
+            state.resolver.clone(),
+            state.events.clone(),
+            None,
+        )),
+        state.agent_run_wake.clone(),
+        state.turn_job_wake.clone(),
+        state.sandbox_attempts.clone(),
+        state.agent_config.clone(),
+        Some(state.config.data_dir.join("scratch")),
+        crate::sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
+    );
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        crate::sandbox_agent_run_worker::SandboxAgentRunWorkerOutcome::Completed(child_id)
+    );
     let wait_id: tidebreak_core::CallId = parked.park_ref.as_deref().unwrap().parse().unwrap();
-    let resumed = runtime
-        .db
-        .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
-        .await
-        .unwrap()
-        .unwrap();
-    let event = match resumed {
-        tidebreak_core::ResumeTurnForAgentRunWaitSetOutcome::Resumed { event, .. } => event,
-        other => panic!("the ready wait did not resume: {other:?}"),
-    };
-    let _ = state
-        .events
-        .sender(tidebreak_core::SessionId(session_id.0))
-        .send(event);
-    state.turn_job_wake.notify_one();
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        crate::sandbox_agent_run_worker::SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(
+            wait_id
+        )
+    );
 
     let response = tokio::time::timeout(Duration::from_secs(20), response)
         .await
@@ -1496,6 +1509,65 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
         (after_resume.attempt_count, after_resume.claim_count),
         (1, 3)
     );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("research complete"))
+        })
+    }));
+    assert!(requests[0]
+        .tools
+        .iter()
+        .any(|tool| tool.name == tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL));
+    assert!(requests[0]
+        .tools
+        .iter()
+        .any(|tool| tool.name == tidebreak_core::WAIT_FOR_AGENTS_TOOL));
+}
+
+#[tokio::test]
+async fn an_internal_agent_spawn_uses_the_startup_execution_location() {
+    let (router, token, runtime, _ran, _dir, _provider, _state) =
+        internal_engine_app_with_location(
+            vec![
+                Step::Tool {
+                    name: tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL,
+                    input: serde_json::json!({ "task": "research in a container" }),
+                },
+                Step::WaitForSpawnedAgent,
+            ],
+            tidebreak_core::AgentRunExecutionLocation::Container,
+        )
+        .await;
+    let bearer = format!("Bearer {token}");
+    let session_id = create_internal_session(&router, &bearer, "allow").await;
+    let response = submit_internal_turn(&router, &bearer, session_id, "delegate this");
+    let parked = wait_for_durable_park(&runtime, session_id).await;
+    let TurnParkWait::AgentRuns { run_ids } = parked.park_wait.unwrap() else {
+        panic!("the internal session must wait for its child");
+    };
+    let child = runtime
+        .db
+        .get_agent_run(run_ids[0].parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.chat_id, session_id);
+    assert_eq!(
+        child.execution_location,
+        tidebreak_core::AgentRunExecutionLocation::Container
+    );
+    assert!(
+        runtime
+            .db
+            .claim_agent_run(uuid::Uuid::new_v4(), chrono::Duration::minutes(5), 4, 4)
+            .await
+            .unwrap()
+            .is_none(),
+        "the in-process worker cannot claim a container child"
+    );
+    response.abort();
 }
 
 #[tokio::test]

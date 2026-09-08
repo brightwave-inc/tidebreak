@@ -88,11 +88,13 @@ export function useChangedFilesResource({
   workspaceId,
   turnId,
   contentRevision = 0,
+  enabled = true,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceFiles">;
   workspaceId: string;
   turnId?: string;
   contentRevision?: number;
+  enabled?: boolean;
 }): LiveResource<CodeWorkspaceFiles> {
   const load = useCallback(
     () => client.listCodeWorkspaceFiles(workspaceId, turnId),
@@ -102,6 +104,7 @@ export function useChangedFilesResource({
     key: `${workspaceId}:${turnId ?? "workspace"}`,
     revision: contentRevision,
     load,
+    enabled,
     errorMessage: "Could not load changed files",
   });
 }

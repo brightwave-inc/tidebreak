@@ -424,6 +424,15 @@ decidable. External engines keep decision 33's posture: verbatim
 speak only sessions, turns, the journal, and approvals to it; nothing
 reaches the loop another way.
 
+The foreground engine exposes `spawn_sandbox_agent` and `wait_for_agents`.
+A background run belongs to the session and its foreground coordinator.
+The server's startup admission decision selects in-process or container execution
+for that run, as it does for chat turns. An ordered wait stores its child ids
+on the turn. The background worker settles the wait after those children finish;
+the session worker resumes the same turn with their results. The wait survives
+a session worker restart. These bounded background runs do not create separate
+child sessions or workspaces.
+
 ## The event vocabulary
 
 `CodeEvent` (journal payload; internally tagged, `#[non_exhaustive]`,
