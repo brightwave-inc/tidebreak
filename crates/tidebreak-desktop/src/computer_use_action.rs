@@ -50,7 +50,6 @@ pub(crate) enum ComputerUseExecutionMode {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ComputerUseCoordinateFrame {
     Viewport,
-    Window,
     Screen,
 }
 

@@ -355,7 +355,7 @@ async fn read_response_body_bounded(
             return Err(ClientFailure::ToolFailed {
                 detail: format!(
                     "native response exceeded the {NATIVE_FRAME_MAX_BYTES}-byte frame limit; \
-                     request a smaller capture (scope it to one app with app_id)"
+                     request a smaller capture (use app_id/max_dimension for native capture or max_width/max_height for Chrome)"
                 ),
             });
         }
@@ -532,7 +532,7 @@ fn oversized_image_failure() -> ClientFailure {
     ClientFailure::ToolFailed {
         detail: format!(
             "native image exceeds the {NATIVE_IMAGE_MAX_BYTES}-byte budget even after \
-             recompression; request a smaller capture (scope it to one app with app_id, \
+             recompression; request a smaller capture (use app_id/max_dimension for native capture or max_width/max_height for Chrome, \
              or capture a single window)"
         ),
     }
@@ -853,7 +853,10 @@ pub(crate) fn parse_computer(raw: Vec<String>) -> std::result::Result<ComputerCo
 pub(crate) async fn run_computer(command: ComputerCommand) -> Result<()> {
     if command.tool == "list-tools" {
         for spec in computer_session_tool_specs() {
-            println!("{}", spec.name);
+            println!(
+                "{}",
+                serde_json::json!({"name": spec.name, "description": spec.description, "input_schema": spec.input_schema})
+            );
         }
         return Ok(());
     }
@@ -880,6 +883,10 @@ pub(crate) async fn run_computer(command: ComputerCommand) -> Result<()> {
     };
     let images = decode_result_images(&result).map_err(|f| AgentError::msg(f.redacted_text()))?;
     let mut printed = result_data_without_images(&result);
+    printed["image_count"] = Value::from(images.len());
+    if images.len() > 1 {
+        printed["image_note"] = Value::String("The result contains several images. --output saves the first; use MCP to receive every image.".into());
+    }
     if let Some(path) = &command.output {
         match images.first() {
             Some(image) => {

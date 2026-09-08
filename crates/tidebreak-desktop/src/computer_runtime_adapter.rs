@@ -64,8 +64,9 @@ impl ChromeJournal {
 
     fn begin(&mut self, call: &ComputerUseCall) -> Result<(), NativeRuntimeError> {
         if self.fingerprints.len() >= MAX_REQUESTS {
-            return Err(NativeRuntimeError::Unsupported(
-                "more requests in this session; start a new coding session".into(),
+            return Err(NativeRuntimeError::Failed(
+                "This session reached its computer-use request limit. Start a new coding session."
+                    .into(),
             ));
         }
         self.fingerprints.insert(call.request_id, fingerprint(call));
@@ -106,6 +107,32 @@ fn unknown(call: &ComputerUseCall, message: &str) -> ComputerUseResult {
         data: serde_json::json!({}),
         error_code: Some("unknown_outcome".into()),
         images: vec![],
+    }
+}
+
+/// Every producer must fit the same image and frame budgets as the consumers.
+fn bound_chrome_result(call: &ComputerUseCall, result: ComputerUseResult) -> ComputerUseResult {
+    use base64::Engine as _;
+    let image_ok = result.images.iter().all(|image| {
+        image.mime_type == "image/png"
+            && image.base64.len() <= (1024usize * 1024).div_ceil(3) * 4
+            && base64::engine::general_purpose::STANDARD
+                .decode(&image.base64)
+                .is_ok_and(|bytes| {
+                    bytes.len() <= 1024 * 1024 && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                })
+    });
+    let frame_ok = serde_json::to_vec(&result).is_ok_and(|bytes| bytes.len() <= 2 * 1024 * 1024);
+    if image_ok && frame_ok {
+        return result;
+    }
+    ComputerUseResult {
+        request_id: call.request_id,
+        outcome: ComputerUseOutcome::Rejected,
+        text: "Chrome returned an image or result larger than the session budget. Request a screenshot with smaller max_width and max_height.".into(),
+        data: serde_json::Value::Null,
+        error_code: Some("result_too_large".into()),
+        images: Vec::new(),
     }
 }
 
@@ -262,6 +289,7 @@ impl NativeRuntime for DesktopComputerRuntime {
             },
             result = self.chrome.execute(&active_scope, call) => result,
         };
+        let result = bound_chrome_result(call, result);
         if let Some(activity) = activity {
             crate::computer_use_action::finish_call_activity(
                 &self.app,
@@ -360,5 +388,25 @@ mod tests {
         let journal = ChromeJournal::default();
         assert!(journal.recall(&call()).unwrap().is_none());
         assert!(journal.fingerprints.is_empty());
+    }
+    #[test]
+    fn chrome_producer_refuses_oversized_frames_before_journaling() {
+        let call = call();
+        let mut result = unknown(&call, "test");
+        result.text = "x".repeat(2 * 1024 * 1024);
+        let bounded = bound_chrome_result(&call, result);
+        assert_eq!(bounded.error_code.as_deref(), Some("result_too_large"));
+        assert!(bounded.images.is_empty());
+        assert_eq!(bounded.request_id, call.request_id);
+    }
+    #[test]
+    fn chrome_request_exhaustion_preserves_session_recovery_guidance() {
+        let mut journal = ChromeJournal::default();
+        for _ in 0..MAX_REQUESTS {
+            journal.begin(&call()).unwrap();
+        }
+        assert!(
+            matches!(journal.begin(&call()), Err(NativeRuntimeError::Failed(message)) if message.contains("new coding session"))
+        );
     }
 }
