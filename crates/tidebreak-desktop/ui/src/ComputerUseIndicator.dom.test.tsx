@@ -23,7 +23,15 @@ vi.mock("./computerUse", () => ({
   resumeComputerUseControl: mocks.resume,
 }));
 
-import { ComputerUseIndicator } from "./ComputerUseIndicator";
+vi.mock("./computerUseAction", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./computerUseAction")>()),
+  useComputerUseAction: () => null,
+}));
+
+import {
+  ComputerUseIndicator,
+  ComputerUseIndicatorView,
+} from "./ComputerUseIndicator";
 
 afterEach(cleanup);
 
@@ -67,5 +75,31 @@ describe("ComputerUseIndicator", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Resume" }));
     expect(mocks.resume).toHaveBeenCalledOnce();
+  });
+  it("names Chrome and uses the shared Stop control", async () => {
+    render(
+      <ComputerUseIndicatorView
+        snapshot={{ active: null, halted: false }}
+        onStop={mocks.stop}
+        onResume={mocks.resume}
+        action={{
+          actionId: "chrome-1",
+          sessionId: "session-1",
+          source: "chrome",
+          action: "click",
+          phase: "running",
+          executionMode: "background",
+          coordinateFrame: "viewport",
+          startedAtMillis: Date.now(),
+          visibleUntilMillis: Date.now() + 10000,
+        }}
+      />,
+    );
+    expect(
+      screen.getByText("Tidebreak is controlling Google Chrome"),
+    ).toBeTruthy();
+    expect(screen.getByText(/Working in the background/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(mocks.stop).toHaveBeenCalledOnce();
   });
 });
