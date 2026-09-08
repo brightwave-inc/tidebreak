@@ -962,12 +962,88 @@ async fn capture_screenshot(
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn snapshot_to_png_base64(
+    snapshot: *mut objc2::runtime::AnyObject,
+    error: *mut objc2_foundation::NSError,
+) -> Result<String, String> {
+    use std::ffi::c_void;
+
+    use objc2::msg_send;
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_core_graphics::CGImage;
+    use objc2_foundation::NSRect;
+    use tidebreak_core::browser::MAX_BROWSER_SCREENSHOT_PNG_BYTES;
+
+    if !error.is_null() {
+        let msg = (&*error).localizedDescription().to_string();
+        return Err(format!("screenshot failed: {msg}"));
+    }
+    if snapshot.is_null() {
+        return Err("screenshot produced no image".to_owned());
+    }
+
+    // WebKit snapshots can use NSCGImageSnapshotRep, which the array PNG
+    // encoder cannot serialize. Ask NSImage for its raster representation
+    // before creating an NSBitmapImageRep. AppKit owns the borrowed CGImage
+    // through the current autorelease pool; the bitmap retains its contents.
+    let cg_image: *const CGImage = msg_send![
+        snapshot,
+        CGImageForProposedRect: std::ptr::null_mut::<NSRect>(),
+        context: std::ptr::null::<AnyObject>(),
+        hints: std::ptr::null::<AnyObject>()
+    ];
+    if cg_image.is_null() {
+        return Err("screenshot image could not produce a bitmap".to_owned());
+    }
+
+    let bitmap_class = AnyClass::get(c"NSBitmapImageRep")
+        .ok_or_else(|| "AppKit NSBitmapImageRep is unavailable".to_owned())?;
+    let bitmap: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+    let bitmap: Option<Retained<AnyObject>> = msg_send![bitmap, initWithCGImage: cg_image];
+    let bitmap = bitmap.ok_or_else(|| "screenshot bitmap was unavailable".to_owned())?;
+    let dictionary_class = AnyClass::get(c"NSDictionary")
+        .ok_or_else(|| "Foundation NSDictionary is unavailable".to_owned())?;
+
+    // AppKit declares the PNG properties parameter nonnull, so pass an
+    // empty dictionary rather than nil.
+    let empty_properties: *mut AnyObject = msg_send![dictionary_class, dictionary];
+    if empty_properties.is_null() {
+        return Err("screenshot PNG properties were unavailable".to_owned());
+    }
+
+    // NSBitmapImageFileTypePNG = 4
+    let png_type: usize = 4;
+    let png_data: *mut AnyObject = msg_send![
+        &*bitmap,
+        representationUsingType: png_type,
+        properties: empty_properties
+    ];
+    if png_data.is_null() {
+        return Err("screenshot PNG conversion failed".to_owned());
+    }
+
+    let bytes_ptr: *const c_void = msg_send![png_data, bytes];
+    let byte_len: usize = msg_send![png_data, length];
+    if bytes_ptr.is_null() || byte_len == 0 {
+        return Err("screenshot PNG data is empty".to_owned());
+    }
+    if byte_len > MAX_BROWSER_SCREENSHOT_PNG_BYTES {
+        return Err(format!(
+            "screenshot PNG of {byte_len} bytes exceeds the encoded-image ceiling"
+        ));
+    }
+    let buf = std::slice::from_raw_parts(bytes_ptr.cast::<u8>(), byte_len);
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    Ok(BASE64.encode(buf))
+}
+
+#[cfg(target_os = "macos")]
 async fn capture_browser_image(
     webview: &Webview,
     max_width: Option<u64>,
     max_height: Option<u64>,
 ) -> Result<String, String> {
-    use std::ffi::c_void;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -978,9 +1054,7 @@ async fn capture_browser_image(
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::NSError;
     use objc2_web_kit::WKWebView;
-    use tidebreak_core::browser::{
-        MAX_BROWSER_SCREENSHOT_DIMENSION, MAX_BROWSER_SCREENSHOT_PNG_BYTES,
-    };
+    use tidebreak_core::browser::MAX_BROWSER_SCREENSHOT_DIMENSION;
     use tokio::{sync::oneshot, time::timeout};
 
     const SCREENSHOT_TIMEOUT_SECONDS: u64 = 30;
@@ -1022,68 +1096,6 @@ async fn capture_browser_image(
     unsafe impl Encode for CGRect {
         const ENCODING: Encoding =
             Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
-    }
-
-    // Convert an NSImage snapshot to PNG base64 via NSBitmapImageRep.
-    unsafe fn snapshot_to_png_base64(
-        snapshot: *mut AnyObject,
-        error: *mut NSError,
-    ) -> Result<String, String> {
-        if !error.is_null() {
-            let msg = (&*error).localizedDescription().to_string();
-            return Err(format!("screenshot failed: {msg}"));
-        }
-        if snapshot.is_null() {
-            return Err("screenshot produced no image".to_owned());
-        }
-
-        // [snapshot representations] → NSArray<NSImageRep>
-        let representations: *mut AnyObject = msg_send![snapshot, representations];
-        if representations.is_null() {
-            return Err("screenshot has no image representations".to_owned());
-        }
-        let representation_count: usize = msg_send![representations, count];
-        if representation_count == 0 {
-            return Err("screenshot image has zero representations".to_owned());
-        }
-
-        let bitmap_class = AnyClass::get(c"NSBitmapImageRep")
-            .ok_or_else(|| "AppKit NSBitmapImageRep is unavailable".to_owned())?;
-        let dictionary_class = AnyClass::get(c"NSDictionary")
-            .ok_or_else(|| "Foundation NSDictionary is unavailable".to_owned())?;
-
-        // AppKit declares the PNG properties parameter nonnull, so pass an
-        // empty dictionary rather than nil.
-        let empty_properties: *mut AnyObject = msg_send![dictionary_class, dictionary];
-        if empty_properties.is_null() {
-            return Err("screenshot PNG properties were unavailable".to_owned());
-        }
-
-        // NSBitmapImageFileTypePNG = 4
-        let png_type: usize = 4;
-        let png_data: *mut AnyObject = msg_send![
-            bitmap_class,
-            representationOfImageRepsInArray: representations,
-            usingType: png_type,
-            properties: empty_properties
-        ];
-        if png_data.is_null() {
-            return Err("screenshot PNG conversion failed".to_owned());
-        }
-
-        let bytes_ptr: *const c_void = msg_send![png_data, bytes];
-        let byte_len: usize = msg_send![png_data, length];
-        if bytes_ptr.is_null() || byte_len == 0 {
-            return Err("screenshot PNG data is empty".to_owned());
-        }
-        if byte_len > MAX_BROWSER_SCREENSHOT_PNG_BYTES {
-            return Err(format!(
-                "screenshot PNG of {byte_len} bytes exceeds the encoded-image ceiling"
-            ));
-        }
-        let buf = std::slice::from_raw_parts(bytes_ptr.cast::<u8>(), byte_len);
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        Ok(BASE64.encode(buf))
     }
 
     /// Build a `WKSnapshotConfiguration` cropping the capture when the view
@@ -6308,6 +6320,63 @@ async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn screenshot_encodes_cg_image_snapshot_representation() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use objc2::msg_send;
+        use objc2::rc::{autoreleasepool, Allocated, Retained};
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_core_graphics::CGImage;
+        use objc2_foundation::{NSData, NSSize};
+
+        autoreleasepool(|_| unsafe {
+            // A 3 × 2 RGBA fixture with every pixel set to [23, 91, 177, 255].
+            let source = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEUlEQVR4nGMQj974H4YZkDkAnUwMzcnnybYAAAAASUVORK5CYII=").unwrap();
+            let data = NSData::with_bytes(&source);
+            let bitmap_class = AnyClass::get(c"NSBitmapImageRep").unwrap();
+            let bitmap: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+            let bitmap: Retained<AnyObject> = msg_send![bitmap, initWithData: &*data];
+            let cg_image: *const CGImage = msg_send![&*bitmap, CGImage];
+            assert!(!cg_image.is_null());
+
+            // NSImage wraps this CGImage in a snapshot representation, which
+            // is not an NSBitmapImageRep and cannot use the array PNG encoder.
+            let image_class = AnyClass::get(c"NSImage").unwrap();
+            let image: Allocated<AnyObject> = msg_send![image_class, alloc];
+            let image: Retained<AnyObject> = msg_send![
+                image,
+                initWithCGImage: cg_image,
+                size: NSSize::new(3.0, 2.0)
+            ];
+            let encoded = super::snapshot_to_png_base64(
+                Retained::as_ptr(&image).cast_mut(),
+                std::ptr::null_mut(),
+            )
+            .unwrap();
+            let png = BASE64.decode(encoded).unwrap();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            let data = NSData::with_bytes(&png);
+            let decoded: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+            let decoded: Retained<AnyObject> = msg_send![decoded, initWithData: &*data];
+            let width: isize = msg_send![&*decoded, pixelsWide];
+            let height: isize = msg_send![&*decoded, pixelsHigh];
+            let samples: isize = msg_send![&*decoded, samplesPerPixel];
+            assert_eq!((width, height), (3, 2));
+            assert!((3..=4).contains(&samples));
+            for y in 0..height {
+                for x in 0..width {
+                    let mut pixel = [0usize; 4];
+                    let _: () = msg_send![&*decoded, getPixel: pixel.as_mut_ptr(), atX: x, y: y];
+                    assert_eq!(&pixel[..3], &[23, 91, 177]);
+                    if samples == 4 {
+                        assert_eq!(pixel[3], 255);
+                    }
+                }
+            }
+        });
+    }
+
     use super::*;
 
     static SOURCE: &str = include_str!("browser_semantics.rs");
