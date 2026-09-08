@@ -60,6 +60,9 @@ enum CaptureTargetKind: String, Decodable {
 /// rather than a crash.
 struct HelperRequest: Decodable {
     let op: HelperOp
+    /// Broker-owned cancellation generation for this operation.
+    let cancelPath: String?
+    let cancelGeneration: String?
     /// `capture` target discriminator.
     let target: CaptureTargetKind?
     /// macOS bundle id (e.g. "com.apple.Notes") — for app-scoped capture and
@@ -91,7 +94,7 @@ struct HelperRequest: Decodable {
     /// as AX frames) when no element.
     let x: Double?
     let y: Double?
-    /// type_text: the text to enter.
+    /// Text to enter, or the text to match for a wait condition.
     let text: String?
     /// key_press: the key name (e.g. "return", "a", "left") and its chord
     /// modifiers (cmd/shift/ctrl/alt).
@@ -115,8 +118,6 @@ struct HelperRequest: Decodable {
     let height: Double?
     let condition: WaitConditionKind?
     let timeoutSeconds: Double?
-    /// wait_condition text (text_present / text_absent).
-    let text: String?
     /// capture: optional long-edge cap in pixels (helper clamps 1...4096).
     let maxDimension: Int?
     /// scroll: pixel deltas (positive dy scrolls down, positive dx scrolls
@@ -166,7 +167,9 @@ struct HelperError: Error {
     let message: String
 }
 
-@main
+#if !HELPER_TESTS
+    @main
+#endif
 struct CUHelper {
     static func main() async {
         // Native helper APIs require macOS 14. The host broker still runs on
@@ -185,7 +188,8 @@ struct CUHelper {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             request = try decoder.decode(HelperRequest.self, from: input)
         } catch {
-            emitError(HelperError(code: .invalidRequest, message: "could not parse request: \(error)"))
+            emitError(
+                HelperError(code: .invalidRequest, message: "could not parse request: \(error)"))
             return
         }
 
@@ -212,7 +216,7 @@ struct CUHelper {
             case .focusWindow:
                 emit(try Control.focusWindow(request))
             case .launchApp:
-                emit(try Control.launchApp(request))
+                emit(try await Control.launchApp(request))
             case .hover:
                 emit(try Control.hover(request))
             case .drag:
@@ -265,7 +269,9 @@ func emitError(_ error: HelperError) {
 private func write<T: Encodable>(_ value: T) {
     guard let data = try? encoder().encode(value) else {
         FileHandle.standardOutput.write(
-            Data(#"{"ok":false,"code":"operation_failed","error":"could not encode response"}"#.utf8))
+            Data(
+                #"{"ok":false,"code":"operation_failed","error":"could not encode response"}"#.utf8)
+        )
         return
     }
     FileHandle.standardOutput.write(data)
