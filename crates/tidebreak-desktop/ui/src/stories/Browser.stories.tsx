@@ -22,6 +22,7 @@ type BrowserScenario =
   | "loading"
   | "unshared"
   | "shared"
+  | "shared-legacy"
   | "paused"
   | "agent"
   | "takeover"
@@ -101,6 +102,23 @@ const localSharedAccess: BrowserAgentAccess = {
   scope: "loopback_workspace",
   canObserve: true,
   canControl: true,
+  canCaptureScreens: true,
+  canDiagnose: true,
+  canTransferFiles: false,
+};
+
+// Consent persisted before the screenshot disclosure: the agent observes and
+// controls, but capture stays off until the user re-shares.
+const legacySharedAccess: BrowserAgentAccess = {
+  shared: true,
+  paused: false,
+  halted: false,
+  origin: "http://localhost:4173",
+  scope: "loopback_workspace",
+  canObserve: true,
+  canControl: true,
+  canCaptureScreens: false,
+  canDiagnose: false,
   canTransferFiles: false,
 };
 
@@ -210,9 +228,11 @@ function BrowserStory({
       ? undefined
       : scenario === "shared" || scenario === "agent" || scenario === "takeover"
         ? localSharedAccess
-        : scenario === "paused"
-          ? pausedAccess
-          : unsharedAccess;
+        : scenario === "shared-legacy"
+          ? legacySharedAccess
+          : scenario === "paused"
+            ? pausedAccess
+            : unsharedAccess;
   const profileResetScenario =
     scenario === "profile-reset-confirmation" ||
     scenario === "profile-resetting" ||
@@ -719,6 +739,15 @@ export const ReadyLocalUnshared: Story = {
 
 export const SharedLocalSites: Story = {
   args: { scenario: "shared" },
+};
+
+/**
+ * A grant persisted before the screenshot disclosure. The chip says text
+ * only and offers the explicit upgrade path; nothing is captured until the
+ * user approves the new disclosure.
+ */
+export const SharedWithoutScreenshots: Story = {
+  args: { scenario: "shared-legacy" },
 };
 
 export const AgentPausedAtNewOrigin: Story = {
