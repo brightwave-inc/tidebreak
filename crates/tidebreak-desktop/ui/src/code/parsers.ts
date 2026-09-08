@@ -2682,8 +2682,11 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "created_at",
       "external_origin",
       "execution_location",
+      "owner_kind",
     ]) ||
     !wireId(value.id) ||
+    // Absent for a person's session; a fixed token for a service's.
+    !optionalLine(value.owner_kind) ||
     !nullableWireId(value.workspace_id) ||
     !isMember(value.kind, SESSION_KINDS) ||
     // Absent from a server before decision 0088; present as a fixed token
@@ -2769,6 +2772,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       : {}),
     ...(fence_reason ? { fence_reason } : {}),
     ...(external_origin !== undefined ? { external_origin } : {}),
+    ...(value.owner_kind !== undefined ? { owner_kind: value.owner_kind } : {}),
   };
 }
 
