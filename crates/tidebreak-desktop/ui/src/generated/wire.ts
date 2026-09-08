@@ -5458,7 +5458,7 @@ accepted: boolean,
 /**
  * What the reader asked to change, when they sent it back.
  */
-feedback?: string, } | { "tool": "screen_capture",
+feedback?: string, } | { "tool": "images", images: Array<ImageRef>, } | { "tool": "screen_capture",
 /**
  * The captured screenshot, content-addressed in the blob store.
  */

@@ -911,6 +911,15 @@ async fn a_tool_preview_is_fetchable_only_through_its_chat() {
 
 #[tokio::test]
 async fn a_screen_capture_preview_is_fetchable_only_through_its_chat() {
+    capture_preview_is_fetchable_only_through_its_chat(false).await;
+}
+
+#[tokio::test]
+async fn all_images_in_a_screenshot_preview_are_fetchable_only_through_its_chat() {
+    capture_preview_is_fetchable_only_through_its_chat(true).await;
+}
+
+async fn capture_preview_is_fetchable_only_through_its_chat(multiple: bool) {
     let (router, token, _state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -947,15 +956,35 @@ async fn a_screen_capture_preview_is_fetchable_only_through_its_chat() {
         })
         .await
         .unwrap();
-    let preview = tidebreak_core::ToolResultPreview::ScreenCapture {
-        image: tidebreak_core::ImageRef {
-            blob_id,
-            media_type: tidebreak_core::ImageMediaType::Png,
-            width: 2056,
-            height: 1329,
-            byte_len: bytes.len() as u64,
-        },
-        mark_count: 12,
+    let image = tidebreak_core::ImageRef {
+        blob_id,
+        media_type: tidebreak_core::ImageMediaType::Png,
+        width: 2056,
+        height: 1329,
+        byte_len: bytes.len() as u64,
+    };
+    let mut image_ids = vec![blob_id];
+    let preview = if multiple {
+        let second_bytes = png_header(1024, 768);
+        let second_id = publish_png(&router, &bearer, chat.id, second_bytes.clone()).await;
+        image_ids.push(second_id);
+        tidebreak_core::ToolResultPreview::Images {
+            images: vec![
+                image,
+                tidebreak_core::ImageRef {
+                    blob_id: second_id,
+                    media_type: tidebreak_core::ImageMediaType::Png,
+                    width: 1024,
+                    height: 768,
+                    byte_len: second_bytes.len() as u64,
+                },
+            ],
+        }
+    } else {
+        tidebreak_core::ToolResultPreview::ScreenCapture {
+            image,
+            mark_count: 12,
+        }
     };
     store
         .resolve_server_tool_call_with_artifacts(
@@ -969,29 +998,32 @@ async fn a_screen_capture_preview_is_fetchable_only_through_its_chat() {
         .await
         .unwrap();
 
-    let available = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(transcript_image_uri(chat.id, blob_id))
-                .header(header::AUTHORIZATION, &bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(available.status(), StatusCode::OK);
-    let absent = router
-        .oneshot(
-            Request::builder()
-                .uri(transcript_image_uri(other_chat.id, blob_id))
-                .header(header::AUTHORIZATION, &bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+    for image_id in image_ids {
+        let available = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(transcript_image_uri(chat.id, image_id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(available.status(), StatusCode::OK);
+        let absent = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(transcript_image_uri(other_chat.id, image_id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]
