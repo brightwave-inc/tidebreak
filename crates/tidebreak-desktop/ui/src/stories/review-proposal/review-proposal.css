@@ -1,0 +1,32 @@
+.review-proposal {
+  container-type: inline-size;
+}
+@container (max-width: 760px) {
+  .review-proposal-heading {
+    flex-wrap: wrap;
+  }
+  .review-proposal-files {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+  .review-proposal-commit-row {
+    flex-wrap: wrap;
+  }
+  .review-proposal-commit-row input {
+    flex-basis: 100%;
+  }
+}
+@container (max-width: 560px) {
+  .review-proposal-files {
+    display: block;
+  }
+  .review-proposal-file-rail {
+    display: none;
+  }
+  .review-proposal-file-picker {
+    display: block;
+  }
+  .review-proposal-pr-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
