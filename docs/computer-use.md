@@ -31,8 +31,8 @@ keyboard focus in Tidebreak. It does not silently replace a background action.
 
 Native capture and control require macOS 14 or later, the packaged helper,
 Accessibility permission, and Screen Recording permission where applicable.
-Tidebreak asks for app access through a native dialog. Read and screenshot access do not authorize control. A whole-display screenshot
-needs its own grant.
+Tidebreak asks for app access through a native dialog. Read and screenshot access
+do not authorize control. A whole-display screenshot needs its own grant.
 The disclosure explains that screenshots and visible content can reach your
 selected model and provider.
 
@@ -59,8 +59,15 @@ The agent requests `chrome_connect` with one of two modes:
   the endpoint; the agent cannot supply one.
 
 Chrome uses the debugging protocol for page input and screenshots. New tabs open
-in the background. `chrome_activate_tab` explicitly brings a tab forward and
-requires native approval. Disconnecting a managed browser closes it and removes
+in the background. During an action, page-level focus emulation lets hidden pages
+receive input. The page can observe focus and visibility changes, but Tidebreak
+does not activate the browser. Tidebreak waits for restoration before returning
+a normal result. Stop and disconnect also clear the emulation. If setup or cleanup
+fails, the operation refuses further input instead of bringing the tab forward.
+
+Input supports nested, scaled, and rotated frames. Perspective-transformed frames
+return an unsupported-geometry result before input. `chrome_activate_tab`
+explicitly brings a tab forward and requires native approval. Disconnecting a managed browser closes it and removes
 its temporary profile. Disconnecting an existing browser leaves it open.
 
 ## Stop and recover
