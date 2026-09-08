@@ -82,17 +82,20 @@ impl WebSocketTransport {
             .to_owned()
             .into_client_request()
             .map_err(|error| CdpError(format!("invalid chrome endpoint: {error}")))?;
-        let (stream, _) = tokio_tungstenite::connect_async(request).await?;
-        let mut transport = Self { stream };
-        transport.stream.set_max_message_size(Some(MAX_WS_MESSAGE_BYTES));
-        Ok(transport)
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE_BYTES));
+        let (stream, _) =
+            tokio_tungstenite::connect_async_with_config(request, Some(config), false).await?;
+        Ok(Self { stream })
     }
 }
 
 #[async_trait]
 impl CdpTransport for WebSocketTransport {
     async fn send_text(&mut self, text: &str) -> Result<(), CdpError> {
-        self.stream.send(WsMessage::Text(text.to_owned())).await?;
+        self.stream
+            .send(WsMessage::Text(text.to_owned().into()))
+            .await?;
         Ok(())
     }
 
@@ -118,8 +121,10 @@ impl CdpTransport for WebSocketTransport {
                     }
                     return Ok(Some(CdpFrame::Binary(bytes.to_vec())));
                 }
-                Some(Ok(WsMessage::Close(_))) | Some(Ok(WsMessage::Ping(_)))
-                | Some(Ok(WsMessage::Pong(_))) => continue,
+                Some(Ok(WsMessage::Close(_))) => return Ok(Some(CdpFrame::Close)),
+                Some(Ok(WsMessage::Ping(_)))
+                | Some(Ok(WsMessage::Pong(_)))
+                | Some(Ok(WsMessage::Frame(_))) => continue,
                 Some(Err(error)) => return Err(error.into()),
                 None => return Ok(None),
             }
@@ -245,17 +250,38 @@ pub fn parse_event(frame: &Value, session_id: Option<String>) -> Option<CdpEvent
                     })
                     .unwrap_or_default();
             }
-            let stack = params.get("stackTrace").and_then(|stack| stack.get("callFrames")).and_then(Value::as_array).and_then(|frames| frames.first());
+            let stack = params
+                .get("stackTrace")
+                .and_then(|stack| stack.get("callFrames"))
+                .and_then(Value::as_array)
+                .and_then(|frames| frames.first());
             let (url, line, column) = match stack {
                 Some(frame) => (
-                    frame.get("url").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    frame
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
                     frame.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    frame.get("columnNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    frame
+                        .get("columnNumber")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
                 ),
                 None => (
-                    params.get("url").and_then(Value::as_str).unwrap_or("").to_owned(),
-                    params.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    params.get("columnNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    params
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    params
+                        .get("lineNumber")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
+                    params
+                        .get("columnNumber")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
                 ),
             };
             Some(CdpEvent::Console {
@@ -282,9 +308,16 @@ pub fn parse_event(frame: &Value, session_id: Option<String>) -> Option<CdpEvent
                 .and_then(|frames| frames.first());
             let (url, line, column) = match stack {
                 Some(frame) => (
-                    frame.get("url").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    frame
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
                     frame.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    frame.get("columnNumber").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    frame
+                        .get("columnNumber")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
                 ),
                 None => (String::new(), 0, 0),
             };
@@ -407,17 +440,18 @@ pub fn parse_event(frame: &Value, session_id: Option<String>) -> Option<CdpEvent
             }
             Some(CdpEvent::ContextCreated {
                 session_id,
-                context_id: context
-                    .get("id")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32,
+                context_id: context.get("id").and_then(Value::as_u64).unwrap_or(0) as u32,
                 frame_id: context
                     .get("auxData")
                     .and_then(|data| data.get("frameId"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
-                url: context.get("origin").and_then(Value::as_str).unwrap_or("").to_owned(),
+                url: context
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
             })
         }
         "Page.lifecycleEvent" => Some(CdpEvent::Lifecycle {
@@ -445,6 +479,7 @@ enum CdpCommandMsg {
         method: String,
         params: Value,
         reply: oneshot::Sender<Result<Value, CdpError>>,
+        authorized: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     },
     Shutdown,
 }
@@ -452,7 +487,6 @@ enum CdpCommandMsg {
 /// A session-correlated command futures holder.
 struct PendingCommand {
     reply: oneshot::Sender<Result<Value, CdpError>>,
-    session_id: Option<String>,
 }
 
 /// One multiplexed DevTools protocol session. Commands carry an optional
@@ -461,14 +495,16 @@ struct PendingCommand {
 #[derive(Clone)]
 pub struct CdpSession {
     commands: mpsc::UnboundedSender<CdpCommandMsg>,
-    next_id: std::sync::atomic::AtomicU64,
+    next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     events: std::sync::Arc<Mutex<Vec<CdpEvent>>>,
 }
 
 impl CdpSession {
     /// Connect through a real websocket. The endpoint is always host-derived.
     pub async fn connect(endpoint: &str) -> Result<Self, CdpError> {
-        Self::with_transport(WebSocketTransport::connect(endpoint).await?)
+        Ok(Self::with_transport(
+            WebSocketTransport::connect(endpoint).await?,
+        ))
     }
 
     /// Create a session over any transport (used by protocol tests).
@@ -477,7 +513,7 @@ impl CdpSession {
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
         let session = Self {
             commands: command_tx,
-            next_id: std::sync::atomic::AtomicU64::new(1),
+            next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             events: events.clone(),
         };
         tokio::spawn(reader_loop(transport, command_rx, events));
@@ -486,7 +522,8 @@ impl CdpSession {
 
     /// Send one CDP command and await its correlated reply.
     pub async fn command(&self, method: &str, params: Value) -> Result<Value, CdpError> {
-        self.command_in_session(None, method, params).await
+        self.command_guarded(None, method, params, std::sync::Arc::new(|| true))
+            .await
     }
 
     /// Send one CDP command in an attached target session.
@@ -496,6 +533,22 @@ impl CdpSession {
         method: &str,
         params: Value,
     ) -> Result<Value, CdpError> {
+        self.command_guarded(
+            Some(session_id),
+            method,
+            params,
+            std::sync::Arc::new(|| true),
+        )
+        .await
+    }
+
+    pub(crate) async fn command_guarded(
+        &self,
+        session_id: Option<&str>,
+        method: &str,
+        params: Value,
+        authorized: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Value, CdpError> {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -503,10 +556,11 @@ impl CdpSession {
         self.commands
             .send(CdpCommandMsg::Run {
                 id,
-                session_id: Some(session_id.to_owned()),
+                session_id: session_id.map(str::to_owned),
                 method: method.to_owned(),
                 params,
                 reply: reply_tx,
+                authorized,
             })
             .map_err(|_| CdpError("chrome protocol task is closed".to_owned()))?;
         reply_rx
@@ -542,7 +596,12 @@ async fn reader_loop(
                         }
                         return;
                     }
-                    Some(CdpCommandMsg::Run { id, session_id, method, params, reply }) => {
+                    Some(CdpCommandMsg::Run { id, session_id, method, params, reply, authorized }) => {
+                        pending.retain(|_, value| !value.reply.is_closed());
+                        if reply.is_closed() || !authorized() {
+                            let _ = reply.send(Err(CdpError("Chrome authority ended before dispatch".into())));
+                            continue;
+                        }
                         let mut request = json!({
                             "id": id,
                             "method": method,
@@ -555,7 +614,7 @@ async fn reader_loop(
                             let _ = reply.send(Err(error));
                             continue;
                         }
-                        pending.insert(id, PendingCommand { reply, session_id });
+                        pending.insert(id, PendingCommand { reply });
                     }
                 }
             }
@@ -582,11 +641,12 @@ async fn reader_loop(
                                 };
                                 let _ = pending_command.reply.send(result);
                             }
-                        } else if let Some(event) = parse_event(&parsed, None) {
+                        } else if let Some(event) = parse_event(&parsed, parsed.get("sessionId").and_then(Value::as_str).map(str::to_owned)) {
                             let mut stored = history.lock().expect("cdp event history");
                             stored.push(event);
                             if stored.len() > MAX_EVENT_HISTORY {
-                                stored.drain(..stored.len() - MAX_EVENT_HISTORY);
+                                let excess = stored.len() - MAX_EVENT_HISTORY;
+                                stored.drain(..excess);
                             }
                         }
                     }

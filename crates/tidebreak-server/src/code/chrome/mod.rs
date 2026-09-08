@@ -14,5 +14,5 @@ mod tests;
 
 pub use runtime::{
     ChromeAdapterState, ChromeCallOutcome, ChromeComputerUseService, ChromeConnectionSpec,
-    ChromeOwnership, ChromeScope,
+    ChromeDiscoveredTab, ChromeOwnership, ChromeScope,
 };
