@@ -866,7 +866,7 @@ pub fn computer_key_press_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerKeyPressArgs>(
         COMPUTER_KEY_PRESS_TOOL,
         &format!(
-            "Press a key, optionally with chord modifiers, in the focused app. Use for keyboard shortcuts and navigation keys.{ACTING_NOTE}"
+            "Press a key, optionally with chord modifiers, in the focused app. Use for keyboard shortcuts and navigation keys. Key presses deliver real keystrokes, so in background mode they usually refuse with `requires_foreground` — prefer `computer_type_text`, which can set a value without focus, or use foreground mode when a real shortcut is unavoidable.{ACTING_NOTE}"
         ),
     )
 }
@@ -921,7 +921,7 @@ pub fn computer_launch_app_tool_spec() -> ToolSpec {
 pub fn computer_hover_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerHoverArgs>(
         COMPUTER_HOVER_TOOL,
-        &format!("Move the pointer over an element or point in an app without pressing. Use to reveal hover menus, tooltips, or drag affordances before a read or drag. {TARGETING_NOTE}{ACTING_NOTE}"),
+        &format!("Move the pointer over an element or point in an app without pressing. Use to reveal hover menus, tooltips, or drag affordances before a read or drag. Hovering moves the user's real pointer, so in background mode it refuses with `requires_foreground`; it needs foreground mode and the user's takeover approval. {TARGETING_NOTE}{ACTING_NOTE}"),
     )
 }
 
@@ -930,7 +930,7 @@ pub fn computer_hover_tool_spec() -> ToolSpec {
 pub fn computer_drag_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerDragArgs>(
         COMPUTER_DRAG_TOOL,
-        &format!("Press at the `from` element/point and release at the `to` element/point within one app. Use for sliders, reordering, selection ranges, and custom canvas interactions. Both endpoints are resolved and validated against the app before the first mouse-down, and the duration is bounded. {TARGETING_NOTE}{ACTING_NOTE}"),
+        &format!("Press at the `from` element/point and release at the `to` element/point within one app. Use for sliders, reordering, selection ranges, and custom canvas interactions. Both endpoints are resolved and validated against the app before the first mouse-down, and the duration is bounded. Dragging moves the user's real pointer, so in background mode it refuses with `requires_foreground`; it needs foreground mode and the user's takeover approval. {TARGETING_NOTE}{ACTING_NOTE}"),
     )
 }
 

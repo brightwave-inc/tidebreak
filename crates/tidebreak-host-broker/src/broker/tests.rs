@@ -28,6 +28,25 @@ impl AuditSink for BreakableAudit {
     }
 }
 
+/// Reopen a durable state directory after dropping its broker, tolerating the
+/// brief lock-inheritance window: concurrently running tests spawn fake
+/// helper processes, and between fork and exec a child still holds every
+/// inherited (CLOEXEC) descriptor — including a just-dropped broker's flock —
+/// so an immediate reopen can transiently see the directory as owned. Only
+/// WouldBlock retries; every other error is the test's real signal.
+fn reopen_broker(temp: &tempfile::TempDir, state_dir: &std::path::Path) -> Broker {
+    for _ in 0..100 {
+        match Broker::open(test_policy(temp), state_dir) {
+            Ok(broker) => return broker,
+            Err(BrokerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("reopening the state directory failed: {error:?}"),
+        }
+    }
+    panic!("state directory stayed locked across the retry budget");
+}
+
 fn test_policy(temp: &tempfile::TempDir) -> RootPolicy {
     RootPolicy::for_test(
         temp.path().join("home"),
@@ -3064,7 +3083,7 @@ fn version_two_read_grants_migrate_without_gaining_write() {
         .retain(|grant| grant["capability"] != serde_json::json!("write_files"));
     std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
 
-    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let broker = reopen_broker(&temp, &state_dir);
     let state = broker.shared.state.lock().unwrap();
     assert!(state
         .grants
@@ -4925,6 +4944,65 @@ fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
     assert_eq!(response.code, ErrorCode::Yielded);
     assert_ne!(response.code, ErrorCode::Denied);
     assert!(!response.retryable);
+}
+
+#[test]
+fn execution_mode_reaches_the_backend_and_defaults_to_background() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // A wire payload without the field decodes to background, and the broker
+    // hands the backend exactly that mode.
+    let decoded: OperationEnvelope = serde_json::from_value(serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": crate::RequestId::new(),
+        "context": fixture.context,
+        "request": {
+            "operation": "cu_launch_app",
+            "payload": { "bundle_id": "com.example.app" }
+        }
+    }))
+    .unwrap();
+    unwrap_response(fixture.broker.operator().handle(decoded)).unwrap();
+
+    // An explicit foreground request is passed through untouched — and the
+    // truthful mode the backend reports comes back in the ControlMeta.
+    let result = fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 800.0,
+            height: 600.0,
+            execution_mode: ExecutionMode::Foreground,
+        })
+        .unwrap();
+    let OperationResult::CuResizeWindow(meta) = result else {
+        panic!("unexpected result");
+    };
+    assert_eq!(meta.execution_mode, Some(ExecutionMode::Foreground));
+
+    assert_eq!(
+        fixture.backend.modes(),
+        vec![
+            ("launch_app", ExecutionMode::Background),
+            ("resize_window", ExecutionMode::Foreground),
+        ]
+    );
+}
+
+#[test]
+fn requires_foreground_survives_the_operation_mapping_without_a_consent_card() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    *fixture.backend.fail_click.lock().unwrap() = Some(BackendErrorKind::RequiresForeground);
+
+    let error = fixture.click("com.example.app").unwrap_err();
+    // Its own code — never Denied, so the desktop cannot mistake a refused
+    // background takeover for a grant miss and raise a consent card, and
+    // never retryable, so nothing re-fires an uncertain action automatically.
+    assert_eq!(error.code, ErrorCode::RequiresForeground);
+    assert_ne!(error.code, ErrorCode::Denied);
+    assert!(!error.retryable);
 }
 
 #[test]
