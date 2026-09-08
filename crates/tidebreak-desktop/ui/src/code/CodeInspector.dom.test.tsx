@@ -709,3 +709,86 @@ it("keys the attributed set on full identity, not the number", async () => {
   expect(current).toHaveLength(1);
   expect(current[0].textContent).toContain("design-tokens");
 });
+
+function workspaceResource(
+  data: CodeWorkspacePrSnapshot | null,
+): CodeWorkspacePrResource {
+  return {
+    data,
+    error: null,
+    refreshing: data === null,
+    refresh: vi.fn(async () => undefined),
+    adopt: vi.fn(),
+    busy: null,
+    mutationError: null,
+    setMutationError: vi.fn(),
+    refreshFromHost: vi.fn(),
+    runMutation: vi.fn(),
+  } as unknown as CodeWorkspacePrResource;
+}
+
+it("waits for workspace placement before reading files and changes", async () => {
+  const client = makeClient();
+  const props = {
+    client: client as ApiClient,
+    workspaceId: "ws-1",
+    workspace: WORKSPACE,
+    contentRevision: 0,
+  };
+  const { rerender } = render(
+    <CodeInspector {...props} prResource={workspaceResource(null)} />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("Loading workspace");
+  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
+  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+  rerender(
+    <CodeInspector
+      {...props}
+      prResource={workspaceResource({ ...CLEAN_PR_SNAPSHOT, remote: true })}
+    />,
+  );
+  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
+  expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Source control" }));
+  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
+  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
+  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+  rerender(
+    <CodeInspector
+      {...props}
+      prResource={workspaceResource(CLEAN_PR_SNAPSHOT)}
+    />,
+  );
+  await waitFor(() =>
+    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledOnce(),
+  );
+  await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
+  await waitFor(() =>
+    expect(client.listCodeWorkspaceTree).toHaveBeenCalledOnce(),
+  );
+});
+
+it("keeps pull request review available for sandbox workspaces", async () => {
+  const client = makeClient();
+  render(
+    <CodeInspector
+      client={client as ApiClient}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+      prResource={workspaceResource({
+        ...CLEAN_PR_SNAPSHOT,
+        remote: true,
+        pr: PR,
+      })}
+    />,
+  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Review pull request" }));
+  await screen.findByText("Fix login flow");
+  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
+  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+});
