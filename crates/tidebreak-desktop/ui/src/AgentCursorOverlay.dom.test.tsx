@@ -135,7 +135,7 @@ describe("agent cursor preview", () => {
     );
     expect(screen.getByText("Needs foreground access")).toBeTruthy();
     expect(
-      screen.getByText("Waiting for permission to use the foreground"),
+      screen.getByText("Foreground control needs your approval"),
     ).toBeTruthy();
   });
 });

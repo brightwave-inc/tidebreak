@@ -171,7 +171,7 @@ export function computerUseActionLabel(action: ComputerUseAction): string {
 
 export function computerUseModeLabel(action: ComputerUseAction): string {
   if (action.phase === "foreground_required")
-    return "Waiting for permission to use the foreground";
+    return "Foreground control needs your approval";
   if (action.phase === "completed")
     return action.executionMode === "background"
       ? "Ran in the background"

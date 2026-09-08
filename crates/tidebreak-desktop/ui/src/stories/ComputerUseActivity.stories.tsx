@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, waitFor } from "storybook/test";
+import { useEffect, useState } from "react";
 import {
   AgentCursorOverlay,
   type AgentCursorPreview,
@@ -190,4 +191,59 @@ export const SeveralStoppedSessions: Story = {
 };
 export const ActiveWithStoppedSession: Story = {
   render: () => <NativeActivity stoppedSessions={1} />,
+};
+
+function BrowserActivityLayoutFixture() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    const toggle = () => setActive((current) => !current);
+    window.addEventListener("storybook:toggle-computer-action", toggle);
+    return () =>
+      window.removeEventListener("storybook:toggle-computer-action", toggle);
+  }, []);
+  return (
+    <div className="flex h-dvh flex-col bg-background">
+      <div className="h-control shrink-0 border-b px-3 py-2 text-xs">
+        localhost:5173/settings
+      </div>
+      <ComputerUseActionStatus
+        reserveSpace
+        action={active ? { ...action, phase: "completed" } : null}
+        now={NOW}
+      />
+      <div
+        data-activity-viewport=""
+        className="relative min-h-0 flex-1 overflow-hidden"
+      >
+        <PreviewFixture />
+      </div>
+    </div>
+  );
+}
+export const StatusKeepsViewportSize: Story = {
+  render: () => <BrowserActivityLayoutFixture />,
+  play: async ({ canvasElement }) => {
+    const viewport = canvasElement.querySelector("[data-activity-viewport]")!;
+    const before = viewport.getBoundingClientRect();
+    window.dispatchEvent(new Event("storybook:toggle-computer-action"));
+    await waitFor(() =>
+      expect(canvasElement.textContent).toContain("Action completed"),
+    );
+    const during = viewport.getBoundingClientRect();
+    await expect({
+      y: during.y,
+      width: during.width,
+      height: during.height,
+    }).toEqual({ y: before.y, width: before.width, height: before.height });
+    window.dispatchEvent(new Event("storybook:toggle-computer-action"));
+    await waitFor(() =>
+      expect(canvasElement.textContent).not.toContain("Action completed"),
+    );
+    const after = viewport.getBoundingClientRect();
+    await expect({
+      y: after.y,
+      width: after.width,
+      height: after.height,
+    }).toEqual({ y: before.y, width: before.width, height: before.height });
+  },
 };

@@ -1308,6 +1308,7 @@ function CodeBrowserTabSession({
         }
       />
       <ComputerUseActionStatus
+        reserveSpace
         action={
           runtime?.documentEpoch === undefined ||
           runtime?.controller?.halted ||

@@ -13,12 +13,26 @@ export function ComputerUseActionStatus({
   action,
   now = Date.now(),
   className,
+  reserveSpace = false,
 }: {
   action: ComputerUseAction | null;
   now?: number;
   className?: string;
+  /** Keep native viewport bounds stable while an action appears or expires. */
+  reserveSpace?: boolean;
 }) {
-  if (!isVisibleComputerUseAction(action, now)) return null;
+  const reservedClass = "h-control shrink-0 overflow-hidden";
+  if (!isVisibleComputerUseAction(action, now))
+    return reserveSpace ? (
+      <div
+        aria-hidden
+        className={cn(
+          "border-b border-border-subtle bg-background",
+          reservedClass,
+          className,
+        )}
+      />
+    ) : null;
   const tone: StatusTone =
     action.phase === "foreground_required"
       ? "warning"
@@ -40,6 +54,8 @@ export function ComputerUseActionStatus({
       role="status"
       className={cn(
         "flex min-w-0 items-start gap-2 border-b border-border-subtle bg-background px-3 py-2 text-xs",
+        reserveSpace && reservedClass,
+        reserveSpace && "items-center py-0",
         className,
       )}
     >
@@ -47,11 +63,27 @@ export function ComputerUseActionStatus({
         aria-hidden
         className={cn("mt-px size-3.5 shrink-0", STATUS_MARK[tone])}
       />
-      <div className="min-w-0">
-        <span className={cn("font-medium", STATUS_TEXT[tone])}>
+      <div
+        className={cn(
+          "min-w-0",
+          reserveSpace && "flex items-center overflow-hidden",
+        )}
+      >
+        <span
+          className={cn(
+            "font-medium",
+            STATUS_TEXT[tone],
+            reserveSpace && "shrink-0 whitespace-nowrap",
+          )}
+        >
           {computerUseActionLabel(action)}
         </span>
-        <span className="ml-2 text-muted-foreground">
+        <span
+          className={cn(
+            "ml-2 text-muted-foreground",
+            reserveSpace && "truncate",
+          )}
+        >
           {computerUseModeLabel(action)}
         </span>
       </div>
