@@ -1,7 +1,9 @@
 import type { LayoutState } from "@/panel/panelTypes";
 import {
   type CodeEditorRegion,
+  closeEditorTab,
   codeBrowserIds,
+  isEditorTab,
   openCodeEditor,
   removedCodeBrowserIds,
 } from "../codeChrome";
@@ -11,7 +13,7 @@ import {
   readBrowserTabLayout,
   writeBrowserTabLayout,
 } from "./browserTabLayout";
-import { closeCodeBrowser } from "../browser/browserHost";
+import { closeCodeBrowser, nativeCodeBrowserHost } from "../browser/browserHost";
 import { seedBrowserSession } from "../browser/browserPersistence";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -113,6 +115,84 @@ export function useBrowserTabs({
       openCodeEditor(layout, { type: "browser", browserId }, preferredRegion),
     );
   }
+
+  // The trusted native side mints agent tab lifecycle requests and this hook
+  // owns tab membership, so it adopts them here: staging an agent-opened tab,
+  // focusing a tab the agent asked to activate, and dropping a tab whose
+  // native session the agent already closed. Layout access goes through a
+  // ref because the subscription outlives any one render's layout.
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  const setLayoutRef = useRef(setLayout);
+  setLayoutRef.current = setLayout;
+  useEffect(() => {
+    if (attachedRemotely() || !nativeCodeBrowserHost.available()) return;
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    void nativeCodeBrowserHost
+      .subscribe((event) => {
+        if (cancelled || event.workspaceId !== workspaceId) return;
+        if (event.type === "agent_open_requested") {
+          const browserId = event.browserId;
+          seedBrowserSession({
+            browserId,
+            workspaceId,
+            initialUrl: event.url,
+          });
+          if (event.url) {
+            setBrowserInitialUrls((current) => ({
+              ...current,
+              [browserId]: event.url as string,
+            }));
+          }
+          setBrowserTitles((current) => ({
+            ...current,
+            [browserId]: "Browser (agent)",
+          }));
+          setLayoutRef.current(
+            openCodeEditor(layoutRef.current, { type: "browser", browserId }),
+          );
+        } else if (event.type === "agent_activate_requested") {
+          setLayoutRef.current(
+            openCodeEditor(layoutRef.current, {
+              type: "browser",
+              browserId: event.browserId,
+            }),
+          );
+        } else if (event.type === "agent_closed_tab") {
+          // The native session is already gone; only the panel remains.
+          closedBrowserIdsRef.current.add(event.browserId);
+          const current = layoutRef.current;
+          const editors = current.tabs.filter(isEditorTab);
+          const primaryIndex = editors.findIndex(
+            (tab) =>
+              tab.type === "browser" && tab.browserId === event.browserId,
+          );
+          if (primaryIndex >= 0) {
+            setLayoutRef.current(closeEditorTab(current, primaryIndex));
+            return;
+          }
+          const splitIndex =
+            current.editorSplit?.tabs.findIndex(
+              (tab) =>
+                tab.type === "browser" && tab.browserId === event.browserId,
+            ) ?? -1;
+          if (splitIndex >= 0) {
+            setLayoutRef.current(
+              closeEditorTab(current, splitIndex, "secondary"),
+            );
+          }
+        }
+      })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unsubscribe = stop;
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [workspaceId]);
 
   /** The page behind a tab reported its document title. */
   function setBrowserTitle(browserId: string, title: string) {
