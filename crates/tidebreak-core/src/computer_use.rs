@@ -435,6 +435,45 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
         .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s))
 }
 
+/// Return the canonical native computer-use surface for every agent transport.
+/// The host still authorizes each call against its session and app grants.
+#[must_use]
+pub fn computer_use_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        computer_list_windows_tool_spec(),
+        computer_capture_screen_tool_spec(),
+        computer_read_app_content_tool_spec(),
+        computer_click_tool_spec(),
+        computer_type_text_tool_spec(),
+        computer_key_press_tool_spec(),
+        computer_scroll_tool_spec(),
+        computer_focus_window_tool_spec(),
+        computer_return_to_tidebreak_tool_spec(),
+        computer_wait_tool_spec(),
+    ]
+}
+
+/// Validate a named call before a transport forwards it to the native host.
+/// Unknown tools never reach the host executor.
+#[must_use]
+pub fn validate_computer_use_arguments(name: &str, arguments: &Value) -> bool {
+    match name {
+        COMPUTER_LIST_WINDOWS_TOOL => validate_computer_list_windows_arguments(arguments),
+        COMPUTER_CAPTURE_SCREEN_TOOL => validate_computer_capture_screen_arguments(arguments),
+        COMPUTER_READ_APP_CONTENT_TOOL => validate_computer_read_app_content_arguments(arguments),
+        COMPUTER_CLICK_TOOL => validate_computer_click_arguments(arguments),
+        COMPUTER_TYPE_TEXT_TOOL => validate_computer_type_text_arguments(arguments),
+        COMPUTER_KEY_PRESS_TOOL => validate_computer_key_press_arguments(arguments),
+        COMPUTER_SCROLL_TOOL => validate_computer_scroll_arguments(arguments),
+        COMPUTER_FOCUS_WINDOW_TOOL => validate_computer_focus_window_arguments(arguments),
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
+            validate_computer_return_to_tidebreak_arguments(arguments)
+        }
+        COMPUTER_WAIT_TOOL => validate_computer_wait_arguments(arguments),
+        _ => false,
+    }
+}
+
 // MARK: - Tool specs
 
 /// Tool contract for [`COMPUTER_LIST_WINDOWS_TOOL`].
@@ -535,6 +574,24 @@ pub fn computer_wait_tool_spec() -> ToolSpec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_transport_surface_uses_canonical_specs_and_validation() {
+        let specs = computer_use_tool_specs();
+        assert_eq!(specs.len(), COMPUTER_USE_TOOLS.len());
+        for (spec, name) in specs.iter().zip(COMPUTER_USE_TOOLS) {
+            assert_eq!(spec.name, name);
+        }
+        assert!(validate_computer_use_arguments(
+            COMPUTER_LIST_WINDOWS_TOOL,
+            &json!({})
+        ));
+        assert!(!validate_computer_use_arguments("exec", &json!({})));
+        assert!(!validate_computer_use_arguments(
+            COMPUTER_CLICK_TOOL,
+            &json!({"app_id": "com.apple.Notes", "x": 20})
+        ));
+    }
 
     #[test]
     fn tool_name_classifiers_partition_the_surface() {
