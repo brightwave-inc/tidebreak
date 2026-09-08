@@ -737,7 +737,11 @@ impl ChromeComputerUseService {
                     return Err("Chrome URL is outside the approved scope".into());
                 }
                 let result = access
-                    .command(None, "Target.createTarget", json!({"url":args.url,"background":true}))
+                    .command(
+                        None,
+                        "Target.createTarget",
+                        json!({"url":args.url,"background":true}),
+                    )
                     .await?;
                 let target = result["targetId"]
                     .as_str()

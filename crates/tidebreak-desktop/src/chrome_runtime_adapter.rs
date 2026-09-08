@@ -362,7 +362,11 @@ impl ChromeRuntimeAdapter {
                     if call.name == tidebreak_core::CHROME_ACTIVATE_TAB_TOOL
                         && !native_focus_consent(&self.app).await.unwrap_or(false)
                     {
-                        return rejected(call, "Bringing Chrome forward was not approved.", "foreground_not_approved");
+                        return rejected(
+                            call,
+                            "Bringing Chrome forward was not approved.",
+                            "foreground_not_approved",
+                        );
                     }
                     let active_scope = ChromeScope {
                         cancel: stop.clone(),
@@ -654,13 +658,17 @@ async fn native_focus_consent(app: &AppHandle) -> Result<bool, String> {
         .title("Bring Chrome forward?")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom("Bring forward".into(), "Keep working".into()));
-    if let Some(window) = app.get_window("main") { dialog = dialog.parent(&window); }
+    if let Some(window) = app.get_window("main") {
+        dialog = dialog.parent(&window);
+    }
     dialog.show_with_result(move |answer| {
         let accepted = matches!(answer, MessageDialogResult::Ok)
             || matches!(answer, MessageDialogResult::Custom(ref value) if value == "Bring forward");
         let _ = send.send(accepted);
     });
-    receive.await.map_err(|_| "Chrome focus prompt closed.".to_owned())
+    receive
+        .await
+        .map_err(|_| "Chrome focus prompt closed.".to_owned())
 }
 
 async fn native_consent(

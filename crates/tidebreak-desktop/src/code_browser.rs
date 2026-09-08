@@ -885,8 +885,8 @@ fn create_browser(
     let builder = builder.data_store_identifier(profile.data_store_identifier());
     // Installed at document start in the page world so browser_diagnostics
     // can drain console, error, and instrumented network activity later.
-    let builder = builder
-        .initialization_script(crate::browser_semantics::BROWSER_DIAGNOSTICS_INIT_SCRIPT);
+    let builder =
+        builder.initialization_script(crate::browser_semantics::BROWSER_DIAGNOSTICS_INIT_SCRIPT);
     let builder = builder
         .on_navigation(move |url| {
             let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {

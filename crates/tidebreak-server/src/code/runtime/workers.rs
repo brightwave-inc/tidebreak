@@ -273,8 +273,7 @@ impl CodeRuntime {
                             crate::code::browser_channel::BrowserChannelCapabilities {
                                 semantic_actions: runtime.supports_semantic_actions(),
                                 lifecycle: runtime.supports_lifecycle(),
-                                developer_diagnostics: runtime
-                                    .supports_developer_diagnostics(),
+                                developer_diagnostics: runtime.supports_developer_diagnostics(),
                             },
                         )
                         .map_err(ServerError::internal)?,
