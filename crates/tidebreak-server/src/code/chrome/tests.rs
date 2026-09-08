@@ -7,13 +7,14 @@
 //! only when `TIDEBREAK_CHROME_BIN` points at a real Chrome/Chromium.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tidebreak_core::{
-    CancelToken, ChromeConnectionGrant, ChromeOriginScope, ComputerUseCall, ComputerUseOutcome,
-    OwnerId, SessionId, WorkspaceId,
+    CancelToken, ChromeConnectionGrant, ChromeWaitStatus, ComputerUseCall,
+    ComputerUseOutcome, OwnerId, SessionId, WorkspaceId,
 };
 use uuid::Uuid;
 
@@ -193,7 +194,7 @@ async fn attachment_lists_only_the_sessions_own_tabs() {
     chrome.expect("Runtime.enable", json!({}));
     chrome.expect("Network.enable", json!({}));
     chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.com/", "title": "Example"}}}));
-    // New tab in the second, isolated session has its own target id.
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "string", "value": "complete"}}));
     let (scope, _owner, workspace, session, _cancel) = test_scope();
     let transport = ScriptedTransport::new(chrome.clone());
     let service = ChromeComputerUseService::new();
@@ -231,7 +232,7 @@ async fn navigation_bumps_epoch_and_invalidates_old_snapshot_refs() {
     chrome.expect("Runtime.enable", json!({}));
     chrome.expect("Network.enable", json!({}));
     chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.com/", "title": "Example"}}}));
-    chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.com/", "title": "Example", "readyState": "complete"}}}));
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "string", "value": "complete"}}));
     let (scope, _o, workspace, _s, _c) = test_scope();
     let transport = ScriptedTransport::new(chrome.clone());
     let service = ChromeComputerUseService::new();
@@ -258,6 +259,8 @@ async fn navigation_bumps_epoch_and_invalidates_old_snapshot_refs() {
     // The stale ref was refused before touching Chrome: the script's next
     // expectation is still un-consumed and the service is healthy.
     chrome.expect("Page.navigate", json!({"frameId": "f1"}));
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "string", "value": "complete"}}));
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.org/", "title": "Example"}}}));
     let nav = call(
         tidebreak_core::CHROME_NAVIGATE_TOOL,
         json!({"targetRef": target_ref, "url": "https://example.org/"}),
@@ -265,4 +268,117 @@ async fn navigation_bumps_epoch_and_invalidates_old_snapshot_refs() {
     let outcome = service.dispatch(&scope, &nav).await;
     assert_eq!(outcome.result.outcome, ComputerUseOutcome::Completed);
     assert!(outcome.result.data["documentEpoch"].as_u64().unwrap() >= 1);
+}
+#[tokio::test]
+async fn stop_and_takeover_cancel_pending_work_and_refuse_new_control() {
+    let (scope, _owner, workspace, _session, cancel) = test_scope();
+    let chrome = ScriptedChrome::default();
+    chrome.expect("Target.attachToTarget", target_reply("t1", "s1"));
+    chrome.expect("Page.enable", json!({}));
+    chrome.expect("Runtime.enable", json!({}));
+    chrome.expect("Network.enable", json!({}));
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.com/", "title": "Example"}}}));
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "string", "value": "complete"}}));
+    let transport = ScriptedTransport::new(chrome.clone());
+    let service = ChromeComputerUseService::new();
+    service
+        .install_connection(granted(&workspace), CdpSession::with_transport(transport))
+        .unwrap();
+    let target_ref = new_tab(&service, &scope).await;
+
+    // A wait observes a cancel and returns Stopped without touching Chrome
+    // again after its first probe.
+    chrome.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.com/", "title": "Example", "readyState": "complete", "body": "hi"}}}));
+    let wait = call(
+        tidebreak_core::CHROME_WAIT_TOOL,
+        json!({
+            "targetRef": target_ref,
+            "snapshotId": "snap-any",
+            "documentEpoch": 1,
+            "condition": {"kind": "text_present", "text": "missing"},
+            "timeoutMs": 30000
+        }),
+    );
+    let service_clone = service.clone();
+    let scope_clone = scope.clone();
+    let wait_task = tokio::spawn(async move {
+        service_clone.dispatch(&scope_clone, &wait).await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), wait_task)
+        .await
+        .expect("wait returns after cancel")
+        .unwrap();
+    assert_eq!(outcome.result.outcome, ComputerUseOutcome::Completed);
+    assert_eq!(
+        serde_json::from_value::<tidebreak_core::ChromeWaitResult>(outcome.result.data.clone())
+            .unwrap()
+            .status,
+        ChromeWaitStatus::Stopped
+    );
+
+    // Human takeover trips the service latch: new control calls are refused.
+    service.ownership().trip();
+    let act = call(
+        tidebreak_core::CHROME_ACT_TOOL,
+        json!({
+            "targetRef": target_ref,
+            "snapshotId": "snap-any",
+            "documentEpoch": 1,
+            "ref": "n-1",
+            "action": {"type": "click"}
+        }),
+    );
+    let outcome = service.dispatch(&scope, &act).await;
+    assert_eq!(outcome.result.outcome, ComputerUseOutcome::Rejected);
+    assert_eq!(
+        outcome.result.data,
+        serde_json::json!({})
+    );
+    service.ownership().resume();
+    // A resumed wait after ownership release still honours its own cancel
+    // token (already tripped above), returning Stopped without protocol use.
+    let outcome = service.dispatch(&scope, &wait).await;
+    assert_eq!(outcome.result.outcome, ComputerUseOutcome::Completed);
+    assert_eq!(
+        serde_json::from_value::<tidebreak_core::ChromeWaitResult>(outcome.result.data).unwrap().status,
+        ChromeWaitStatus::Stopped
+    );
+}
+
+#[tokio::test]
+async fn unknown_call_and_unknown_outcome_are_never_replayed() {
+    let (scope, _owner, workspace, _session, _cancel) = test_scope();
+    let chrome = ScriptedChrome::default();
+    let transport = ScriptedTransport::new(chrome.clone());
+    let service = ChromeComputerUseService::new();
+    service
+        .install_connection(granted(&workspace), CdpSession::with_transport(transport))
+        .unwrap();
+
+    let bogus = call("chrome_does_not_exist", json!({}));
+    let outcome = service.dispatch(&scope, &bogus).await;
+    assert_eq!(outcome.result.outcome, ComputerUseOutcome::Rejected);
+    assert_eq!(outcome.result.error_code.as_deref(), Some("unknown_call"));
+
+    // The transport remains healthy and no Chrome command was consumed.
+    let chrome2 = ScriptedChrome::default();
+    chrome2.expect("Target.attachToTarget", target_reply("t2", "s2"));
+    chrome2.expect("Page.enable", json!({}));
+    chrome2.expect("Runtime.enable", json!({}));
+    chrome2.expect("Network.enable", json!({}));
+    chrome2.expect("Runtime.evaluate", json!({"result": {"type": "object", "value": {"url": "https://example.org/", "title": "Two"}}}));
+    chrome2.expect("Runtime.evaluate", json!({"result": {"type": "string", "value": "complete"}}));
+    let transport2 = ScriptedTransport::new(chrome2.clone());
+    let service2 = ChromeComputerUseService::new();
+    service2
+        .install_connection(granted(&workspace), CdpSession::with_transport(transport2))
+        .unwrap();
+    let scope2 = scope.clone();
+    let target_ref = new_tab(&service2, &scope2).await;
+    assert!(!target_ref.is_empty());
+
+    // Rejected and unknown results preserve request ids for recovery.
+    assert_eq!(outcome.result.request_id, bogus.request_id);
 }

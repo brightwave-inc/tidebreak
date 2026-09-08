@@ -67,6 +67,7 @@ async fn real_chrome_attaches_snapshots_and_acts() {
     let service = tidebreak_server_core::code::chrome::runtime::ChromeComputerUseService::new();
     let spec = tidebreak_server_core::code::chrome::runtime::ChromeConnectionSpec {
         connection_id: "real".into(),
+        workspace: tidebreak_core::WorkspaceId::new(),
         endpoint_label: "real headless".into(),
         websocket_endpoint: endpoint.clone(),
         grant: tidebreak_core::ChromeConnectionGrant::DeveloperAllSites,

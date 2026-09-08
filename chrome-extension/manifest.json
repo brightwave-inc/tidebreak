@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Tidebreak Chrome computer use (local)",
+  "version": "0.1.0",
+  "description": "Local bridge for Tidebreak's host-owned Chrome computer use. Unpacked for development; store publication is separate.",
+  "permissions": ["nativeMessaging", "tabs", "activeTab"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Tidebreak Chrome bridge"
+  },
+  "minimum_chrome_version": "144"
+}

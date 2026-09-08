@@ -268,6 +268,21 @@ impl ChromeComputerUseService {
         if !tidebreak_core::validate_chrome_computer_use_arguments(&call.name, &call.arguments) {
             return ChromeCallOutcome::rejected(call, "invalid chrome arguments", "invalid_arguments");
         }
+        if self.ownership.is_tripped()
+            && matches!(
+                call.name.as_str(),
+                tidebreak_core::CHROME_NEW_TAB_TOOL
+                    | tidebreak_core::CHROME_CLOSE_TAB_TOOL
+                    | tidebreak_core::CHROME_NAVIGATE_TOOL
+                    | tidebreak_core::CHROME_ACT_TOOL
+            )
+        {
+            return ChromeCallOutcome::rejected(
+                call,
+                "Chrome control is paused; the user took over",
+                "ownership_paused",
+            );
+        }
         match call.name.as_str() {
             tidebreak_core::CHROME_LIST_TABS_TOOL => {
                 let _: ChromeListTabsArgs = match parse(call, &call.arguments) {
@@ -593,17 +608,15 @@ impl ChromeComputerUseService {
         if scope.cancel.is_cancelled() {
             return Err("cancelled before navigation".into());
         }
-        let mut params = serde_json::json!({"url": args.url});
         let _ = resolved
             .cdp
-            .command_in_session(&resolved.session_id, "Page.navigate", params.clone())
+            .command_in_session(&resolved.session_id, "Page.navigate", serde_json::json!({"url": args.url}))
             .await
             .map_err(|error| format!("navigation command failed: {error}"))?;
         // Page.navigate returns as soon as navigation starts; the load gate
         // below observes the actual document.
         let timeout = args.timeout_ms.unwrap_or(15_000);
         let waited = wait_for_ready(&resolved.cdp, &resolved.session_id, timeout).await;
-        params = serde_json::json!({});
         let (url, title) = read_url_title(&resolved.cdp, &resolved.session_id)
             .await
             .unwrap_or((args.url.clone(), String::new()));
@@ -660,7 +673,7 @@ impl ChromeComputerUseService {
         let raw = result
             .get("value")
             .cloned()
-            .unwrap_or(serde_json::Value::Null);
+            .unwrap_or(result);
         let (nodes, frames, truncated) = project_snapshot(raw, args.bounded_max_nodes(), &grant);
         let (url, title) = read_url_title(&resolved.cdp, &resolved.session_id)
             .await
