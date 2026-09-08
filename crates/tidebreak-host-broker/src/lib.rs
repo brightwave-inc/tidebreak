@@ -31,7 +31,7 @@ pub use capability::{
 };
 pub use computer_use::{
     AxTree, BackendError, BackendErrorKind, CaptureMeta, CaptureTarget, ComputerUseBackend,
-    ControlMeta, ElementDescription, ElementTarget, HelperBackend, PermissionStatus,
+    ControlMeta, ElementDescription, ElementTarget, ExecutionMode, HelperBackend, PermissionStatus,
     UnsupportedBackend, WaitCondition, WaitObservation, WindowFrame, WindowInfo,
     HELPER_CANCEL_PATH_ENV, HELPER_PATH_ENV,
 };

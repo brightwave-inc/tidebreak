@@ -43,6 +43,32 @@ pub const HELPER_PATH_ENV: &str = "TIDEBREAK_CU_HELPER_PATH";
 /// Host-owned cancellation generation, never supplied by a model tool call.
 pub const HELPER_CANCEL_PATH_ENV: &str = "TIDEBREAK_CU_CANCEL_PATH";
 
+/// How a control op interacts with the user's live session. `Background` (the
+/// canonical default everywhere on this path) instructs the helper to act on
+/// the app directly while preserving the user's focus, pointer, and active
+/// window; a helper that cannot honor that refuses with `requires_foreground`
+/// instead of taking over. `Foreground` is an explicit takeover the desktop
+/// only dispatches after its own separate trusted approval — the broker and
+/// helper never escalate a background request on their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    Background,
+    Foreground,
+}
+
+impl ExecutionMode {
+    /// The wire value the helper protocol uses.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
 /// What a screen capture targets. Scoped per the broker's capability model: a
 /// whole-display capture needs the `Screen` scope; an app capture needs the
 /// `App { bundle_id }` scope.
@@ -104,6 +130,12 @@ pub enum BackendErrorKind {
     /// A raw coordinate target was refused because it does not fall inside an
     /// on-screen window owned by the granted app. The broker did not act.
     TargetOutsideApp,
+    /// A background-mode control op could not be performed without taking over
+    /// the user's focus or pointer, so the helper refused instead of acting.
+    /// Nothing ran; the agent must not retry automatically. A foreground
+    /// re-issue is a deliberate escalation that needs the user's separate
+    /// takeover approval.
+    RequiresForeground,
     /// A safety guard backed off instead of acting (a system
     /// security/authorization dialog owns the foreground). Recorded as denied,
     /// NOT retryable — the agent must surface it and stop, not re-fire input at
@@ -204,12 +236,16 @@ pub struct WaitObservation {
 
 /// Outcome of a control op (click/type/key/scroll/focus). `used_fallback` is
 /// true when AX targeting was not available and a coordinate/keystroke
-/// synthesis was used instead.
+/// synthesis was used instead. `execution_mode` is the mode the helper
+/// actually performed the action in, reported truthfully rather than echoing
+/// the request — absent when the helper predates the mode contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlMeta {
     pub success: bool,
     pub used_fallback: bool,
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// A read-only description of a target element, used by the broker's
@@ -271,12 +307,16 @@ pub trait ComputerUseBackend: Send + Sync {
     fn list_windows(&self, bundle_id: Option<&str>) -> Result<Vec<WindowInfo>, BackendError>;
     /// Click an element (AX press) or coordinate point in an app. `button` is
     /// "left" (default) or "right"; `click_count` 1 (single) or 2 (double).
+    /// `mode` (like every control op below) tells the helper whether it must
+    /// preserve the user's focus/pointer (background) or may take over
+    /// (foreground, already user-approved by the trusted desktop).
     fn click(
         &self,
         bundle_id: &str,
         target: &ElementTarget,
         button: Option<&str>,
         click_count: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Type text into the targeted element (focus + set value, else synthesize
     /// keystrokes) or, with an empty target, the app's focused field.
@@ -285,6 +325,7 @@ pub trait ComputerUseBackend: Send + Sync {
         bundle_id: &str,
         text: &str,
         target: &ElementTarget,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Press a key (optionally with chord modifiers) in the focused app.
     fn key_press(
@@ -292,6 +333,7 @@ pub trait ComputerUseBackend: Send + Sync {
         bundle_id: &str,
         key: &str,
         modifiers: Option<&[String]>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Scroll the targeted element or point by a pixel delta.
     fn scroll(
@@ -300,19 +342,27 @@ pub trait ComputerUseBackend: Send + Sync {
         target: &ElementTarget,
         dx: Option<f64>,
         dy: Option<f64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Bring an app (optionally a specific window) to the front.
     fn focus_window(
         &self,
         bundle_id: &str,
         window_id: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Launch the registered application for `bundle_id` via `NSWorkspace`.
     /// No path, executable, or argument ever reaches this method.
-    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError>;
+    fn launch_app(&self, bundle_id: &str, mode: ExecutionMode)
+        -> Result<ControlMeta, BackendError>;
     /// Move the pointer over an element or confined coordinate point without
     /// pressing any button.
-    fn hover(&self, bundle_id: &str, target: &ElementTarget) -> Result<ControlMeta, BackendError>;
+    fn hover(
+        &self,
+        bundle_id: &str,
+        target: &ElementTarget,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError>;
     /// Press at `from`, drag through bounded steps, and release at `to`.
     /// Both endpoints are resolved/confined before the first mouse-down.
     fn drag(
@@ -321,6 +371,7 @@ pub trait ComputerUseBackend: Send + Sync {
         from: &ElementTarget,
         to: &ElementTarget,
         duration_ms: Option<u64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Resize one window of the app to `width` × `height` logical points.
     fn resize_window(
@@ -329,6 +380,7 @@ pub trait ComputerUseBackend: Send + Sync {
         window_id: Option<u32>,
         width: f64,
         height: f64,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError>;
     /// Poll `condition` for up to `timeout_seconds` (mirrors
     /// [`WaitObservation`]). Pure observation: never synthesizes input.
@@ -394,10 +446,17 @@ impl ComputerUseBackend for UnsupportedBackend {
         _: &ElementTarget,
         _: Option<&str>,
         _: Option<u32>,
+        _: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn type_text(&self, _: &str, _: &str, _: &ElementTarget) -> Result<ControlMeta, BackendError> {
+    fn type_text(
+        &self,
+        _: &str,
+        _: &str,
+        _: &ElementTarget,
+        _: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
     fn key_press(
@@ -405,6 +464,7 @@ impl ComputerUseBackend for UnsupportedBackend {
         _: &str,
         _: &str,
         _: Option<&[String]>,
+        _: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
@@ -414,16 +474,27 @@ impl ComputerUseBackend for UnsupportedBackend {
         _: &ElementTarget,
         _: Option<f64>,
         _: Option<f64>,
+        _: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn focus_window(&self, _: &str, _: Option<u32>) -> Result<ControlMeta, BackendError> {
+    fn focus_window(
+        &self,
+        _: &str,
+        _: Option<u32>,
+        _: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn launch_app(&self, _: &str) -> Result<ControlMeta, BackendError> {
+    fn launch_app(&self, _: &str, _: ExecutionMode) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn hover(&self, _: &str, _: &ElementTarget) -> Result<ControlMeta, BackendError> {
+    fn hover(
+        &self,
+        _: &str,
+        _: &ElementTarget,
+        _: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
     fn drag(
@@ -432,6 +503,7 @@ impl ComputerUseBackend for UnsupportedBackend {
         _: &ElementTarget,
         _: &ElementTarget,
         _: Option<u64>,
+        _: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
@@ -441,6 +513,7 @@ impl ComputerUseBackend for UnsupportedBackend {
         _: Option<u32>,
         _: f64,
         _: f64,
+        _: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
@@ -820,8 +893,13 @@ impl ComputerUseBackend for HelperBackend {
         target: &ElementTarget,
         button: Option<&str>,
         click_count: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "click", "bundle_id": bundle_id });
+        let mut request = json!({
+            "op": "click",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        });
         apply_target(&mut request, target);
         if let Some(button) = button {
             request["button"] = json!(button);
@@ -837,8 +915,14 @@ impl ComputerUseBackend for HelperBackend {
         bundle_id: &str,
         text: &str,
         target: &ElementTarget,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "type_text", "bundle_id": bundle_id, "text": text });
+        let mut request = json!({
+            "op": "type_text",
+            "bundle_id": bundle_id,
+            "text": text,
+            "execution_mode": mode.as_str()
+        });
         apply_target(&mut request, target);
         self.run_control(request)
     }
@@ -848,8 +932,14 @@ impl ComputerUseBackend for HelperBackend {
         bundle_id: &str,
         key: &str,
         modifiers: Option<&[String]>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "key_press", "bundle_id": bundle_id, "key": key });
+        let mut request = json!({
+            "op": "key_press",
+            "bundle_id": bundle_id,
+            "key": key,
+            "execution_mode": mode.as_str()
+        });
         if let Some(modifiers) = modifiers {
             request["modifiers"] = json!(modifiers);
         }
@@ -862,8 +952,13 @@ impl ComputerUseBackend for HelperBackend {
         target: &ElementTarget,
         dx: Option<f64>,
         dy: Option<f64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "scroll", "bundle_id": bundle_id });
+        let mut request = json!({
+            "op": "scroll",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        });
         apply_target(&mut request, target);
         if let Some(dx) = dx {
             request["dx"] = json!(dx);
@@ -878,20 +973,42 @@ impl ComputerUseBackend for HelperBackend {
         &self,
         bundle_id: &str,
         window_id: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "focus_window", "bundle_id": bundle_id });
+        let mut request = json!({
+            "op": "focus_window",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        });
         if let Some(window_id) = window_id {
             request["window_id"] = json!(window_id);
         }
         self.run_control(request)
     }
 
-    fn launch_app(&self, bundle_id: &str) -> Result<ControlMeta, BackendError> {
-        self.run_control(json!({ "op": "launch_app", "bundle_id": bundle_id }))
+    fn launch_app(
+        &self,
+        bundle_id: &str,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        self.run_control(json!({
+            "op": "launch_app",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        }))
     }
 
-    fn hover(&self, bundle_id: &str, target: &ElementTarget) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "hover", "bundle_id": bundle_id });
+    fn hover(
+        &self,
+        bundle_id: &str,
+        target: &ElementTarget,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        let mut request = json!({
+            "op": "hover",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        });
         apply_target(&mut request, target);
         self.run_control(request)
     }
@@ -902,8 +1019,13 @@ impl ComputerUseBackend for HelperBackend {
         from: &ElementTarget,
         to: &ElementTarget,
         duration_ms: Option<u64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
-        let mut request = json!({ "op": "drag", "bundle_id": bundle_id });
+        let mut request = json!({
+            "op": "drag",
+            "bundle_id": bundle_id,
+            "execution_mode": mode.as_str()
+        });
         // Helper translates `from_*` / `to_*` snake_case fields back onto the
         // same explicit-point semantics as every other control op.
         apply_target_to(&mut request, "from", from);
@@ -920,12 +1042,14 @@ impl ComputerUseBackend for HelperBackend {
         window_id: Option<u32>,
         width: f64,
         height: f64,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         let mut request = json!({
             "op": "resize_window",
             "bundle_id": bundle_id,
             "width": width,
-            "height": height
+            "height": height,
+            "execution_mode": mode.as_str()
         });
         if let Some(window_id) = window_id {
             request["window_id"] = json!(window_id);
@@ -1076,6 +1200,7 @@ impl HelperBackend {
             success: parsed.success,
             used_fallback: parsed.used_fallback,
             detail: parsed.detail,
+            execution_mode: parsed.execution_mode,
         })
     }
 }
@@ -1102,6 +1227,7 @@ fn map_code(code: Option<&str>) -> BackendErrorKind {
         Some("not_found") => BackendErrorKind::NotFound,
         Some("invalid_request") => BackendErrorKind::InvalidRequest,
         Some("stale_element") => BackendErrorKind::StaleElement,
+        Some("requires_foreground") => BackendErrorKind::RequiresForeground,
         Some("yielded") => BackendErrorKind::Yielded,
         Some("target_outside_app") => BackendErrorKind::TargetOutsideApp,
         _ => BackendErrorKind::OperationFailed,
@@ -1154,6 +1280,10 @@ struct ControlResultJson {
     used_fallback: bool,
     #[serde(default)]
     detail: Option<String>,
+    /// The mode the helper actually performed in — truthful result metadata,
+    /// not an echo of the request.
+    #[serde(default)]
+    execution_mode: Option<ExecutionMode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1303,9 +1433,12 @@ mod tests {
             r#"cat >/dev/null; printf '{"ok":true,"result":{"success":true,"used_fallback":false,"detail":"launched"}}'"#,
         );
         let meta = HelperBackend::new(helper.path.clone())
-            .launch_app("com.example.app")
+            .launch_app("com.example.app", ExecutionMode::default())
             .unwrap();
         assert!(meta.success);
+        // A helper that predates the mode contract reports no mode; nothing
+        // is fabricated on its behalf.
+        assert_eq!(meta.execution_mode, None);
 
         let helper = fake_helper(
             "wait",
@@ -1322,6 +1455,64 @@ mod tests {
             .unwrap();
         assert!(observation.met);
         assert!(!observation.timed_out);
+    }
+
+    #[test]
+    fn control_requests_carry_the_execution_mode_to_the_helper() {
+        let staging = tempfile::tempdir().unwrap();
+        let request_path = staging.path().join("request.json");
+        let helper = fake_helper(
+            "mode",
+            &format!(
+                r#"cat > "{}"; printf '{{"ok":true,"result":{{"success":true,"used_fallback":false,"detail":null,"execution_mode":"background"}}}}'"#,
+                request_path.display()
+            ),
+        );
+        let backend = HelperBackend::new(helper.path.clone());
+
+        // The default mode is background, spelled out explicitly on the wire.
+        let meta = backend
+            .click(
+                "com.example.app",
+                &ElementTarget::default(),
+                None,
+                None,
+                ExecutionMode::default(),
+            )
+            .unwrap();
+        let request: Value =
+            serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
+        assert_eq!(request["op"], "click");
+        assert_eq!(request["execution_mode"], "background");
+        // The helper's reported mode is parsed as truthful result metadata.
+        assert_eq!(meta.execution_mode, Some(ExecutionMode::Background));
+
+        // An approved foreground request reaches the helper as such.
+        backend
+            .focus_window("com.example.app", None, ExecutionMode::Foreground)
+            .unwrap();
+        let request: Value =
+            serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
+        assert_eq!(request["op"], "focus_window");
+        assert_eq!(request["execution_mode"], "foreground");
+    }
+
+    #[test]
+    fn requires_foreground_envelope_maps_to_its_kind() {
+        let helper = fake_helper(
+            "requires-fg",
+            r#"cat >/dev/null; printf '{"ok":false,"code":"requires_foreground","error":"cannot preserve the pointer"}'"#,
+        );
+        let err = HelperBackend::new(helper.path.clone())
+            .drag(
+                "com.example.app",
+                &ElementTarget::default(),
+                &ElementTarget::default(),
+                None,
+                ExecutionMode::Background,
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, BackendErrorKind::RequiresForeground);
     }
 
     #[test]
