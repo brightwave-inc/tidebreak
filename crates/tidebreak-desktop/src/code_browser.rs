@@ -1391,44 +1391,6 @@ async fn share_browser_with_agent(
 /// include screenshot access.
 const CAPTURE_DISCLOSURE: &str = "Screenshots show everything visible in the tab and are sent to the agent's selected model and provider; automatic redaction is not guaranteed. Console, page-error, and in-page network diagnostics for this site are shared the same way.";
 
-/// Ask the user to approve foreground native input for one origin before any
-/// native (OS-event) dispatch. Background DOM actions never show this prompt
-/// and never move the real cursor or keyboard focus; only an explicit
-/// foreground request may take them, and only after this approval.
-///
-/// Call site contract: the semantics executor invokes this from
-/// `browser_native_act` when the proposed action's execution mode is
-/// `foreground`, after target re-resolution and before the first native
-/// event is synthesized. A declined prompt returns false and the action must
-/// report `requires_foreground` semantics without dispatching anything.
-pub(crate) async fn native_foreground_input_choice(
-    app: &AppHandle,
-    origin: &BrowserOrigin,
-) -> Result<bool, String> {
-    let origin = crate::native_security_label(origin.as_str());
-    let (sender, receiver) = oneshot::channel();
-    let mut dialog = app
-        .dialog()
-        .message(format!(
-            "Let the agent use your real mouse and keyboard on {origin}?\n\nForeground input moves the actual cursor and keyboard focus in this window while the agent works. Take over or press Stop at any time to end it immediately. Background actions do not need this."
-        ))
-        .title("Allow foreground input?")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Allow foreground input".to_owned(),
-            "Keep background only".to_owned(),
-        ));
-    if let Some(window) = app.get_window("main") {
-        dialog = dialog.parent(&window);
-    }
-    dialog.show(move |approved| {
-        let _ = sender.send(approved);
-    });
-    receiver
-        .await
-        .map_err(|_| "the native browser permission prompt closed unexpectedly".to_owned())
-}
-
 /// Offer the screenshot/diagnostics disclosure to a workspace whose existing
 /// grant predates it. Approval extends the covering grant; declining changes
 /// nothing.

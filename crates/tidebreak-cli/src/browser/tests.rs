@@ -2064,7 +2064,8 @@ fn parse_browser_act_requires_an_explicit_foreground_mode() {
             flags
                 .iter()
                 .chain(std::iter::once(&mode))
-                .map(|arg| arg.to_string()),
+                .map(|arg| arg.to_string())
+                .collect(),
         )
     };
     assert!(matches!(

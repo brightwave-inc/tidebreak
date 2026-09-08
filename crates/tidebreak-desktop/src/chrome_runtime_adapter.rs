@@ -542,42 +542,6 @@ impl ChromeRuntimeAdapter {
         }
     }
 
-    pub async fn state(&self, scope: &ChromeScope) -> ChromeConnectionView {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&ScopeKey::from(scope))
-            .cloned();
-        match session {
-            Some(session) => {
-                let state = session.state.lock().await;
-                view(&session, &state, scope)
-            }
-            None => ChromeConnectionView {
-                status: ChromeConnectionStatus::Disconnected,
-                mode: None,
-                tab_count: 0,
-                last_error: None,
-            },
-        }
-    }
-
-    /// Revoke the current connection without ending the coding session. A
-    /// subsequent connection requires a fresh native consent answer.
-    pub async fn disconnect_session(&self, scope: &ChromeScope) {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&ScopeKey::from(scope))
-            .cloned();
-        if let Some(session) = session {
-            session.stop();
-            session.state.lock().await.connection.take();
-        }
-    }
-
     /// Call on session termination. Its identity can never reconnect. The
     /// managed browser exits; a personal browser only loses its debugger.
     pub async fn revoke_session(&self, scope: &ChromeScope) {
@@ -1016,11 +980,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_arguments_keep_browser_security_and_visibility() {
+    fn managed_arguments_preserve_background_startup_and_security() {
         let args = managed_arguments(Path::new("/private/profile with spaces"));
         assert!(args.contains(&"--user-data-dir=/private/profile with spaces".into()));
         assert!(args.contains(&"--remote-debugging-port=0".into()));
-        assert!(args.contains(&"--new-window".into()));
+        assert!(args.contains(&"--no-startup-window".into()));
         for arg in args {
             let arg = arg.to_string_lossy();
             assert!(
