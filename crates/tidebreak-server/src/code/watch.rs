@@ -292,6 +292,10 @@ fn watch_session_settings(
             reasoning_effort: None,
             fast_mode: false,
             permission_mode_ceiling,
+            acts_as: sessions
+                .iter()
+                .find(|session| session.kind == SessionKind::Interactive)
+                .map(Session::acts_as),
         },
     ))
 }

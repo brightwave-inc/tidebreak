@@ -797,6 +797,7 @@ mod tests {
                 subagents: Vec::new(),
                 created_at: now(),
                 execution_location: location,
+                acts_as: None,
             },
         )
         .await
@@ -1441,6 +1442,7 @@ mod tests {
                 subagents: Vec::new(),
                 created_at: now(),
                 execution_location: tidebreak_core::ExecutionLocation::Machine,
+                acts_as: None,
             },
         )
         .await

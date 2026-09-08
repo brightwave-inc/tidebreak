@@ -34,6 +34,7 @@ impl CodeRuntime {
             suggested_title,
             base_ref,
             self.git_credentials().map(|lender| lender.as_ref()),
+            tidebreak_core::ActsAs::Person,
         )
         .await
     }
@@ -47,6 +48,7 @@ impl CodeRuntime {
         suggested_title: Option<String>,
         base_ref: Option<String>,
         lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+        acts_as: tidebreak_core::ActsAs,
     ) -> Result<CodeWorkspace, ServerError> {
         self.require_machine_execution()?;
         let repo = self.get_repo(owner, repo_id).await?;
@@ -176,7 +178,7 @@ impl CodeRuntime {
         // Before the setup script, which may itself commit: from here on,
         // anything this workspace commits should already carry the right
         // name.
-        self.name_workspace_author_with_lender(owner, &path, lender)
+        self.name_workspace_author_with_lender(owner, &path, lender, acts_as)
             .await;
         match run_setup_script(
             &path,

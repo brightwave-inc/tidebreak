@@ -78,6 +78,7 @@
     "kind": "session",
     "name": "session",
     "value": {
+      "acts_as": "bot",
       "attention": {
         "source": "lifecycle",
         "state": {
@@ -110,6 +111,7 @@
     "kind": "session",
     "name": "fenced session",
     "value": {
+      "acts_as": "bot",
       "attention": {
         "source": "lifecycle",
         "state": {

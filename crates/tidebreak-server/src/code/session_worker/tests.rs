@@ -186,6 +186,7 @@ async fn seeded_session_at(
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: location,
+            acts_as: None,
         },
     )
     .await

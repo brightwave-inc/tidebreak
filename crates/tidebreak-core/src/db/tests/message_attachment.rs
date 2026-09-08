@@ -788,6 +788,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             subagents: Vec::new(),
             created_at: now,
             execution_location: crate::code::ExecutionLocation::Machine,
+            acts_as: None,
         },
     )
     .await

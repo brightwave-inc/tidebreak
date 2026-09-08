@@ -292,14 +292,28 @@ async fn an_external_session_names_its_repository_by_origin() {
 
 /// A fake forge that lends one fixed credential for whichever repository is
 /// asked, recording the ask.
-struct LendingFake(StdMutex<Vec<String>>);
+struct LendingFake {
+    minted: StdMutex<Vec<String>>,
+    asked: StdMutex<Vec<crate::obo_gateway::GitForgeAttributionRequest>>,
+}
+
+impl LendingFake {
+    fn new() -> Self {
+        Self {
+            minted: StdMutex::new(Vec::new()),
+            asked: StdMutex::new(Vec::new()),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::obo_gateway::GitCredentialLender for LendingFake {
     async fn git_forge_identity(
         &self,
         _owner: &OwnerId,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
+        self.asked.lock().unwrap().push(attribution);
         Err(crate::obo_gateway::GitForgeError::NoGitForge)
     }
 
@@ -307,8 +321,10 @@ impl crate::obo_gateway::GitCredentialLender for LendingFake {
         &self,
         _owner: &OwnerId,
         repository: &str,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<crate::obo_gateway::GitCredential, crate::obo_gateway::GitForgeError> {
-        self.0.lock().unwrap().push(repository.to_owned());
+        self.asked.lock().unwrap().push(attribution);
+        self.minted.lock().unwrap().push(repository.to_owned());
         Ok(crate::obo_gateway::GitCredential {
             username: "x-access-token".to_owned(),
             secret: "lent-secret".to_owned(),
@@ -318,7 +334,9 @@ impl crate::obo_gateway::GitCredentialLender for LendingFake {
     async fn list_repositories(
         &self,
         _owner: &OwnerId,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<Vec<crate::obo_gateway::GitHubRepository>, crate::obo_gateway::GitForgeError> {
+        self.asked.lock().unwrap().push(attribution);
         Ok(Vec::new())
     }
 }
@@ -330,7 +348,7 @@ impl crate::obo_gateway::GitCredentialLender for LendingFake {
 /// unknown key is refused before anything is looked up.
 #[tokio::test]
 async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route() {
-    let lender = Arc::new(LendingFake(StdMutex::new(Vec::new())));
+    let lender = Arc::new(LendingFake::new());
     let gateway = Arc::new(
         crate::obo_gateway::OboGateway::new(
             "https://gateway.example",
@@ -389,9 +407,41 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
         "username=x-access-token\npassword=lent-secret\n"
     );
     assert_eq!(
-        lender.0.lock().unwrap().as_slice(),
+        lender.minted.lock().unwrap().as_slice(),
         ["acme/tools"],
         "minted for the workspace's own repository"
+    );
+    assert_eq!(
+        lender.asked.lock().unwrap().as_slice(),
+        [crate::obo_gateway::GitForgeAttributionRequest::Person],
+        "a person session asks to act as the person"
+    );
+
+    let person = runtime.get_session(&owner, session_id).await.unwrap();
+    let mut bot_session = person.clone();
+    bot_session.id = tidebreak_core::SessionId::new();
+    bot_session.acts_as = Some(tidebreak_core::ActsAs::Bot);
+    tidebreak_core::db::code::insert_session(&runtime.db, &bot_session)
+        .await
+        .unwrap();
+    let bot_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
+        owner: owner.clone(),
+        session: bot_session.id,
+    });
+    let bot_lent = ask(
+        "protocol=https\nhost=github.com\npath=acme/tools.git\n",
+        Some(&bot_key),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bot_lent.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        lender.asked.lock().unwrap().as_slice(),
+        [
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
+            crate::obo_gateway::GitForgeAttributionRequest::Installation,
+        ],
+        "a bot session asks to act as the installation"
     );
 
     for other in [
@@ -408,8 +458,8 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
         );
     }
     assert_eq!(
-        lender.0.lock().unwrap().len(),
-        1,
+        lender.minted.lock().unwrap().len(),
+        2,
         "no mint for a host that is not the origin"
     );
 
@@ -1741,6 +1791,7 @@ impl crate::obo_gateway::GitCredentialLender for RefusingFake {
     async fn git_forge_identity(
         &self,
         _owner: &OwnerId,
+        _attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
         Err(crate::obo_gateway::GitForgeError::NoGitForge)
     }
@@ -1749,6 +1800,7 @@ impl crate::obo_gateway::GitCredentialLender for RefusingFake {
         &self,
         _owner: &OwnerId,
         _repository: &str,
+        _attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<crate::obo_gateway::GitCredential, crate::obo_gateway::GitForgeError> {
         Err(match &self.0 {
             crate::obo_gateway::GitForgeError::SignInRequired(message) => {
@@ -1766,6 +1818,7 @@ impl crate::obo_gateway::GitCredentialLender for RefusingFake {
     async fn list_repositories(
         &self,
         _owner: &OwnerId,
+        _attribution: crate::obo_gateway::GitForgeAttributionRequest,
     ) -> Result<Vec<crate::obo_gateway::GitHubRepository>, crate::obo_gateway::GitForgeError> {
         Ok(Vec::new())
     }

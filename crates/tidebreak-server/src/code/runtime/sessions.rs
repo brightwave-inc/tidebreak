@@ -65,6 +65,7 @@ impl CodeRuntime {
             reasoning_effort,
             fast_mode,
             permission_mode_ceiling,
+            acts_as,
         }: NewSessionSettings,
         external_grant: Option<tidebreak_core::CodeGrantId>,
     ) -> Result<Session, ServerError> {
@@ -212,6 +213,7 @@ impl CodeRuntime {
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as,
         };
         if external_grant.is_none() {
             insert_session(&self.db, &session).await?;
@@ -253,6 +255,7 @@ impl CodeRuntime {
             reasoning_effort,
             fast_mode,
             permission_mode_ceiling,
+            acts_as,
         }: NewSessionSettings,
     ) -> Result<Session, ServerError> {
         let harness = HarnessKind::Internal;
@@ -308,6 +311,7 @@ impl CodeRuntime {
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as,
         };
         insert_session(&self.db, &session).await?;
         self.attach_and_spawn_worker(session).await

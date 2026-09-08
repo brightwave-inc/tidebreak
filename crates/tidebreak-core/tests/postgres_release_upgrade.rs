@@ -736,6 +736,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
     assert_eq!(
         snapshot.session_columns,
         [
+            ("acts_as".to_owned(), "<null>".to_owned()),
             ("attention_source".to_owned(), "lifecycle".to_owned()),
             (
                 "attention_state".to_owned(),

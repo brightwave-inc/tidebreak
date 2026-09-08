@@ -198,7 +198,12 @@ impl CodeRuntime {
             )
         };
         let github = if let Some(lender) = self.git_credentials() {
-            let outcome = lender.git_forge_identity(owner).await;
+            let outcome = lender
+                .git_forge_identity(
+                    owner,
+                    crate::obo_gateway::GitForgeAttributionRequest::Person,
+                )
+                .await;
             hosted_github_source(git, no_git(), outcome)
         } else if !owner.is_local() {
             CodeRepoSource {
@@ -305,7 +310,13 @@ impl CodeRuntime {
                 repositories: Vec::new(),
             });
         };
-        match lender.list_repositories(owner).await {
+        match lender
+            .list_repositories(
+                owner,
+                crate::obo_gateway::GitForgeAttributionRequest::Person,
+            )
+            .await
+        {
             Ok(repositories) => Ok(CodeGithubRepositories {
                 repositories: repositories
                     .into_iter()
@@ -417,7 +428,14 @@ impl CodeRuntime {
         // machine clones a GitHub repository with a dying, repository-scoped
         // credential the gateway mints for this caller (decision 63).
         let credential = match (source.github_slug.as_deref(), self.git_credentials()) {
-            (Some(slug), Some(lender)) => match lender.git_credential(owner, slug).await {
+            (Some(slug), Some(lender)) => match lender
+                .git_credential(
+                    owner,
+                    slug,
+                    crate::obo_gateway::GitForgeAttributionRequest::Person,
+                )
+                .await
+            {
                 Ok(credential) => Some(credential),
                 Err(refusal) => {
                     self.fail_clone(owner, id, git_forge_refusal_message(&refusal));
@@ -837,6 +855,11 @@ pub fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
                                                   not cover this repository. An administrator can \
                                                   add it to the installation on GitHub."
             .to_owned(),
+        GitForgeError::PersonNotOffered => {
+            "This session asked to act as you, and the deployment's git forge does not offer \
+             that identity. Ask as the App's bot, or connect a forge that can act as you."
+                .to_owned()
+        }
     }
 }
 

@@ -363,6 +363,7 @@ async fn seed_owner(
             subagents: Vec::new(),
             created_at: now(),
             execution_location: crate::code::ExecutionLocation::Machine,
+            acts_as: None,
         },
     )
     .await
@@ -2289,6 +2290,7 @@ async fn one_id_resolves_in_one_space() {
             subagents: Vec::new(),
             created_at: now(),
             execution_location: crate::code::ExecutionLocation::Machine,
+            acts_as: None,
         },
     )
     .await
@@ -2710,6 +2712,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             subagents: Vec::new(),
             created_at: now(),
             execution_location: crate::code::ExecutionLocation::Machine,
+            acts_as: None,
         },
     )
     .await
@@ -4991,6 +4994,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         subagents: Vec::new(),
         created_at: now(),
         execution_location: crate::code::ExecutionLocation::Machine,
+        acts_as: None,
     };
     (workspace, session)
 }
@@ -6161,4 +6165,30 @@ async fn an_old_generation_refresh_replay_still_revokes() {
         raced.is_err(),
         "the live-identity index must refuse a second live row"
     );
+}
+
+/// A null `acts_as` column reads as the owner-kind default.
+#[tokio::test]
+async fn a_null_acts_as_column_reads_as_the_owner_kind_default() {
+    let (_dir, store) = temp_store().await;
+    let person = OwnerId::new("user:person-acts").unwrap();
+    let (person_session, _) = seed_owner(&store, &person, "person-acts").await;
+    let stored = get_session(&store, &person, person_session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.acts_as, None);
+    assert_eq!(stored.acts_as(), crate::code::ActsAs::Person);
+
+    let mut service_row = stored.clone();
+    service_row.id = SessionId::new();
+    service_row.owner_kind = Some("service".to_owned());
+    service_row.acts_as = None;
+    insert_session(&store, &service_row).await.unwrap();
+    let stored = get_session(&store, &person, service_row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.acts_as, None);
+    assert_eq!(stored.acts_as(), crate::code::ActsAs::Bot);
 }

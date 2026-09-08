@@ -124,7 +124,7 @@ struct UserSlot {
     subject: std::sync::Mutex<Arc<str>>,
     token: tokio::sync::Mutex<Option<CachedToken>>,
     catalog: tokio::sync::Mutex<Option<CachedCatalog>>,
-    git_forge: tokio::sync::Mutex<Option<CachedGitForge>>,
+    git_forge: tokio::sync::Mutex<HashMap<GitForgeAttributionRequest, CachedGitForge>>,
 }
 
 /// One caller's probed git-forge answer and when it was read.
@@ -261,8 +261,40 @@ pub enum GitForgeError {
     ForgeAppNotInstalled,
     /// The App installation does not cover the requested repository.
     RepositoryNotInstalled,
+    /// The session asked to act as the person and the gateway does not offer
+    /// that identity.
+    PersonNotOffered,
     /// The gateway or the forge could not serve the request; retryable.
     Unavailable(String),
+}
+
+/// Which identity the machine asked the gateway to lend (decision 0090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GitForgeAttributionRequest {
+    /// The caller's own GitHub account.
+    Person,
+    /// The deployment's GitHub App installation bot.
+    Installation,
+}
+
+impl GitForgeAttributionRequest {
+    /// Query and body token the gateway accepts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Installation => "installation",
+        }
+    }
+}
+
+impl From<tidebreak_core::ActsAs> for GitForgeAttributionRequest {
+    fn from(value: tidebreak_core::ActsAs) -> Self {
+        match value {
+            tidebreak_core::ActsAs::Person => Self::Person,
+            tidebreak_core::ActsAs::Bot => Self::Installation,
+        }
+    }
 }
 
 /// One model row from a gateway compat listing, reduced to what an engine
@@ -422,7 +454,7 @@ impl OboGateway {
                         subject: std::sync::Mutex::new(bearer),
                         token: tokio::sync::Mutex::new(None),
                         catalog: tokio::sync::Mutex::new(None),
-                        git_forge: tokio::sync::Mutex::new(None),
+                        git_forge: tokio::sync::Mutex::new(HashMap::new()),
                     }),
                 );
             }
@@ -786,6 +818,7 @@ impl OboGateway {
     pub async fn git_forge_identity(
         &self,
         owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<GitForgeIdentity, GitForgeError> {
         let Some(slot) = self.slot_for(owner)? else {
             return Err(GitForgeError::SignInRequired(
@@ -796,13 +829,13 @@ impl OboGateway {
         // like the inference token and the catalog.
         let mut cached = slot.git_forge.lock().await;
         let now = unix_time();
-        if let Some(held) = cached.as_ref() {
+        if let Some(held) = cached.get(&attribution) {
             if now.saturating_sub(held.fetched_at_unix) < GIT_FORGE_FRESH_SECONDS {
                 return held.outcome.clone();
             }
         }
         let subject = subject_of(&slot)?;
-        let outcome = self.fetch_git_forge(&subject).await;
+        let outcome = self.fetch_git_forge(&subject, attribution).await;
         match &outcome {
             Ok(_)
             | Err(
@@ -811,12 +844,16 @@ impl OboGateway {
                 | GitForgeError::ConnectModeForge
                 | GitForgeError::NotConnected { .. }
                 | GitForgeError::ForgeAppNotInstalled
-                | GitForgeError::RepositoryNotInstalled,
+                | GitForgeError::RepositoryNotInstalled
+                | GitForgeError::PersonNotOffered,
             ) => {
-                *cached = Some(CachedGitForge {
-                    outcome: outcome.clone(),
-                    fetched_at_unix: now,
-                });
+                cached.insert(
+                    attribution,
+                    CachedGitForge {
+                        outcome: outcome.clone(),
+                        fetched_at_unix: now,
+                    },
+                );
             }
             Err(GitForgeError::SignInRequired(_) | GitForgeError::Unavailable(_)) => {}
         }
@@ -839,6 +876,7 @@ impl OboGateway {
         &self,
         owner: &OwnerId,
         repository: &str,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<GitCredential, GitForgeError> {
         let Some(slot) = self.slot_for(owner)? else {
             return Err(GitForgeError::SignInRequired(
@@ -853,11 +891,7 @@ impl OboGateway {
             .json(&serde_json::json!({
                 "resource": self.resource,
                 "repository": repository,
-                // This machine renders person attribution (decision 65), so
-                // a connect-mode forge may lend the caller's own credential.
-                // A gateway that predates the field ignores it and refuses
-                // connect-mode forges exactly as before.
-                "attribution": "person",
+                "attribution": attribution.as_str(),
             }))
             .send()
             .await
@@ -899,6 +933,7 @@ impl OboGateway {
     pub async fn list_repositories(
         &self,
         owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<Vec<GitHubRepository>, GitForgeError> {
         let Some(slot) = self.slot_for(owner)? else {
             return Err(GitForgeError::SignInRequired(
@@ -911,7 +946,7 @@ impl OboGateway {
             .get(self.git_repositories_url.clone())
             .query(&[
                 ("resource", self.resource.as_str()),
-                ("attribution", "person"),
+                ("attribution", attribution.as_str()),
             ])
             .bearer_auth(subject.as_ref())
             .send()
@@ -961,17 +996,19 @@ impl OboGateway {
     /// One probe of the gateway's git-forge surface with the caller's
     /// machine-bound token.
     ///
-    /// The `attribution=person` parameter declares that this machine renders
-    /// person attribution (decision 65): a connect-mode forge may answer with
-    /// the caller's own identity instead of refusing. A gateway that predates
-    /// the parameter ignores it.
-    async fn fetch_git_forge(&self, subject: &str) -> Result<GitForgeIdentity, GitForgeError> {
+    /// The `attribution` query names the identity this session asked for
+    /// (decision 0090). A gateway that predates the parameter ignores it.
+    async fn fetch_git_forge(
+        &self,
+        subject: &str,
+        attribution: GitForgeAttributionRequest,
+    ) -> Result<GitForgeIdentity, GitForgeError> {
         let response = self
             .client
             .get(self.git_forge_url.clone())
             .query(&[
                 ("resource", self.resource.as_str()),
-                ("attribution", "person"),
+                ("attribution", attribution.as_str()),
             ])
             .bearer_auth(subject)
             .send()
@@ -1059,7 +1096,7 @@ impl OboGateway {
             users.get(owner).cloned()
         };
         if let Some(slot) = slot {
-            if let Some(held) = slot.git_forge.lock().await.as_mut() {
+            for held in slot.git_forge.lock().await.values_mut() {
                 held.fetched_at_unix = 0;
             }
         }
@@ -1171,6 +1208,7 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
             }
             "forge_app_not_installed" => return GitForgeError::ForgeAppNotInstalled,
             "repository_not_installed" => return GitForgeError::RepositoryNotInstalled,
+            "person_not_offered" => return GitForgeError::PersonNotOffered,
             "forge_credential_mint_failed" => {
                 return GitForgeError::Unavailable(format!(
                     "the deployment's git forge could not mint a credential: {detail}"
@@ -1338,7 +1376,11 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
 #[async_trait]
 pub trait GitCredentialLender: Send + Sync {
     /// The identity work would land as, or the named reason none is offered.
-    async fn git_forge_identity(&self, owner: &OwnerId) -> Result<GitForgeIdentity, GitForgeError>;
+    async fn git_forge_identity(
+        &self,
+        owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
+    ) -> Result<GitForgeIdentity, GitForgeError>;
 
     /// Borrow one repository-scoped credential for one git operation against
     /// `repository` (`owner/repo`).
@@ -1346,34 +1388,42 @@ pub trait GitCredentialLender: Send + Sync {
         &self,
         owner: &OwnerId,
         repository: &str,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<GitCredential, GitForgeError>;
 
     /// Repositories this caller can clone (decision 70).
     async fn list_repositories(
         &self,
         owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<Vec<GitHubRepository>, GitForgeError>;
 }
 
 #[async_trait]
 impl GitCredentialLender for OboGateway {
-    async fn git_forge_identity(&self, owner: &OwnerId) -> Result<GitForgeIdentity, GitForgeError> {
-        OboGateway::git_forge_identity(self, owner).await
+    async fn git_forge_identity(
+        &self,
+        owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
+    ) -> Result<GitForgeIdentity, GitForgeError> {
+        OboGateway::git_forge_identity(self, owner, attribution).await
     }
 
     async fn git_credential(
         &self,
         owner: &OwnerId,
         repository: &str,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<GitCredential, GitForgeError> {
-        OboGateway::git_credential(self, owner, repository).await
+        OboGateway::git_credential(self, owner, repository, attribution).await
     }
 
     async fn list_repositories(
         &self,
         owner: &OwnerId,
+        attribution: GitForgeAttributionRequest,
     ) -> Result<Vec<GitHubRepository>, GitForgeError> {
-        OboGateway::list_repositories(self, owner).await
+        OboGateway::list_repositories(self, owner, attribution).await
     }
 }
 
@@ -1390,6 +1440,7 @@ pub mod test_support {
         pub mint_refusal: std::sync::Mutex<Option<GitForgeError>>,
         pub minted: std::sync::Mutex<Vec<String>>,
         pub listed: std::sync::Mutex<Result<Vec<GitHubRepository>, GitForgeError>>,
+        pub asked: std::sync::Mutex<Vec<GitForgeAttributionRequest>>,
     }
 
     impl FakeLender {
@@ -1405,6 +1456,7 @@ pub mod test_support {
                 mint_refusal: std::sync::Mutex::new(None),
                 minted: std::sync::Mutex::new(Vec::new()),
                 listed: std::sync::Mutex::new(Ok(Vec::new())),
+                asked: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1422,6 +1474,7 @@ pub mod test_support {
                 })),
                 mint_refusal: std::sync::Mutex::new(None),
                 minted: std::sync::Mutex::new(Vec::new()),
+                asked: std::sync::Mutex::new(Vec::new()),
                 listed: std::sync::Mutex::new(Ok(vec![GitHubRepository {
                     full_name: format!("{login}/notes"),
                     private: true,
@@ -1436,6 +1489,7 @@ pub mod test_support {
                 identity: std::sync::Mutex::new(Err(error.clone())),
                 mint_refusal: std::sync::Mutex::new(Some(error.clone())),
                 minted: std::sync::Mutex::new(Vec::new()),
+                asked: std::sync::Mutex::new(Vec::new()),
                 listed: std::sync::Mutex::new(Err(error)),
             }
         }
@@ -1444,6 +1498,11 @@ pub mod test_support {
         pub fn minted(&self) -> Vec<String> {
             self.minted.lock().expect("minted").clone()
         }
+
+        /// Every attribution request the test asked for, in order.
+        pub fn asked(&self) -> Vec<GitForgeAttributionRequest> {
+            self.asked.lock().expect("asked").clone()
+        }
     }
 
     #[async_trait]
@@ -1451,7 +1510,9 @@ pub mod test_support {
         async fn git_forge_identity(
             &self,
             _owner: &OwnerId,
+            attribution: GitForgeAttributionRequest,
         ) -> Result<GitForgeIdentity, GitForgeError> {
+            self.asked.lock().expect("asked").push(attribution);
             self.identity.lock().expect("identity").clone()
         }
 
@@ -1459,7 +1520,9 @@ pub mod test_support {
             &self,
             _owner: &OwnerId,
             repository: &str,
+            attribution: GitForgeAttributionRequest,
         ) -> Result<GitCredential, GitForgeError> {
+            self.asked.lock().expect("asked").push(attribution);
             self.minted
                 .lock()
                 .expect("minted")
@@ -1476,7 +1539,9 @@ pub mod test_support {
         async fn list_repositories(
             &self,
             _owner: &OwnerId,
+            attribution: GitForgeAttributionRequest,
         ) -> Result<Vec<GitHubRepository>, GitForgeError> {
+            self.asked.lock().expect("asked").push(attribution);
             self.listed.lock().expect("listed").clone()
         }
     }
@@ -1669,6 +1734,8 @@ mod tests {
         /// The probe answer the git-forge route serves, or `None` for the
         /// default bot-attributed answer.
         forge_answer: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+        /// Last `attribution` query or body token the git surfaces saw.
+        last_attribution: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     impl FakeGateway {
@@ -1683,6 +1750,7 @@ mod tests {
                 credential_mints: Arc::new(AtomicUsize::new(0)),
                 git_refusal: Arc::new(std::sync::Mutex::new(None)),
                 forge_answer: Arc::new(std::sync::Mutex::new(None)),
+                last_attribution: Arc::new(std::sync::Mutex::new(None)),
                 catalog: Arc::new(std::sync::Mutex::new(serde_json::json!({
                     "models": [
                         {
@@ -1849,13 +1917,8 @@ mod tests {
                                 query.get("resource").map(String::as_str),
                                 Some(TEST_RESOURCE)
                             );
-                            // The machine declares it renders person
-                            // attribution (decision 65) — asserted server-side
-                            // so a drifted client fails the test.
-                            assert_eq!(
-                                query.get("attribution").map(String::as_str),
-                                Some("person")
-                            );
+                            *state.last_attribution.lock().unwrap() =
+                                query.get("attribution").cloned();
                             state.forge_probes.fetch_add(1, Ordering::SeqCst);
                             if let Some(refused) = state.next_git_refusal() {
                                 return refused;
@@ -1896,8 +1959,8 @@ mod tests {
                                 repository.split('/').count() == 2,
                                 "the mint must name owner/repo, got {repository:?}"
                             );
-                            // Decision 65's opt-in rides every mint.
-                            assert_eq!(body["attribution"], "person");
+                            *state.last_attribution.lock().unwrap() =
+                                body["attribution"].as_str().map(str::to_owned);
                             state.credential_mints.fetch_add(1, Ordering::SeqCst);
                             if let Some(refused) = state.next_git_refusal() {
                                 return refused;
@@ -1931,10 +1994,8 @@ mod tests {
                                 query.get("resource").map(String::as_str),
                                 Some(TEST_RESOURCE)
                             );
-                            assert_eq!(
-                                query.get("attribution").map(String::as_str),
-                                Some("person")
-                            );
+                            *state.last_attribution.lock().unwrap() =
+                                query.get("attribution").cloned();
                             if let Some(refused) = state.next_git_refusal() {
                                 return refused;
                             }
@@ -2456,13 +2517,97 @@ mod tests {
         let alice = owner("user:alice");
         obo.record_caller(&alice, "mg_at_alice".into());
 
-        let first = obo.git_credential(&alice, "acme/demo").await.unwrap();
+        let first = obo
+            .git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
         assert_eq!(first.username, "x-access-token");
         assert!(first.secret.ends_with("for_acme/demo"));
-        let second = obo.git_credential(&alice, "acme/demo").await.unwrap();
+        let second = obo
+            .git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
         assert_ne!(first.secret, second.secret, "each operation borrows anew");
         assert_eq!(gateway.credential_mints.load(Ordering::SeqCst), 2);
         assert_eq!(gateway.served(), 0, "no exchange is involved");
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("person")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_git_surfaces_name_the_asked_attribution() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("person")
+        );
+        obo.git_forge_identity(&alice, GitForgeAttributionRequest::Installation)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("installation")
+        );
+
+        obo.git_credential(
+            &alice,
+            "acme/demo",
+            GitForgeAttributionRequest::Installation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("installation")
+        );
+        obo.git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("person")
+        );
+
+        obo.list_repositories(&alice, GitForgeAttributionRequest::Installation)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("installation")
+        );
+        obo.list_repositories(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("person")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_person_not_offered_refusal_is_typed() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+        *gateway.git_refusal.lock().unwrap() = Some((403, "person_not_offered".to_owned()));
+        assert_eq!(
+            obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
+            GitForgeError::PersonNotOffered
+        );
         server.abort();
     }
 
@@ -2475,7 +2620,14 @@ mod tests {
         let alice = owner("user:alice");
         obo.record_caller(&alice, "mg_at_alice".into());
 
-        let identity = obo.git_forge_identity(&alice).await.unwrap();
+        let identity = obo
+            .git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
+        assert_eq!(
+            gateway.last_attribution.lock().unwrap().as_deref(),
+            Some("person")
+        );
         assert_eq!(identity.app_name, "Acme Forge");
         assert_eq!(
             identity.attribution,
@@ -2484,7 +2636,9 @@ mod tests {
             },
             "an answer without an attribution field is the App's bot"
         );
-        obo.git_forge_identity(&alice).await.unwrap();
+        obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
         assert_eq!(
             gateway.forge_probes.load(Ordering::SeqCst),
             1,
@@ -2492,7 +2646,9 @@ mod tests {
         );
 
         obo.expire_git_forge_for_test(&alice).await;
-        obo.git_forge_identity(&alice).await.unwrap();
+        obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
         assert_eq!(gateway.forge_probes.load(Ordering::SeqCst), 2);
         server.abort();
     }
@@ -2515,7 +2671,10 @@ mod tests {
             "display_name": "Mira Chen",
             "commit_email": "8675309+mira-chen@users.noreply.github.com",
         }));
-        let identity = obo.git_forge_identity(&alice).await.unwrap();
+        let identity = obo
+            .git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap();
         assert_eq!(
             identity.attribution,
             GitForgeAttribution::Person {
@@ -2534,7 +2693,9 @@ mod tests {
         obo.expire_git_forge_for_test(&alice).await;
         assert!(
             matches!(
-                obo.git_forge_identity(&alice).await.unwrap_err(),
+                obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+                    .await
+                    .unwrap_err(),
                 GitForgeError::Unavailable(_)
             ),
             "an unknown attribution must refuse, never guess an identity"
@@ -2552,21 +2713,28 @@ mod tests {
         obo.record_caller(&alice, "mg_at_alice".into());
 
         *gateway.git_refusal.lock().unwrap() = Some((403, "not_connected".to_owned()));
-        let refusal = obo.git_forge_identity(&alice).await.unwrap_err();
+        let refusal = obo
+            .git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap_err();
         assert_eq!(
             refusal,
             GitForgeError::NotConnected {
                 connect_url: Some("https://gateway.example/account/apps".to_owned()),
             }
         );
-        obo.git_forge_identity(&alice).await.unwrap_err();
+        obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+            .await
+            .unwrap_err();
         assert_eq!(
             gateway.forge_probes.load(Ordering::SeqCst),
             1,
             "not-connected is settled until the caller acts; it must not re-probe"
         );
         assert_eq!(
-            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            obo.git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             refusal,
             "the mint refuses with the same typed cause"
         );
@@ -2585,11 +2753,15 @@ mod tests {
 
         *gateway.git_refusal.lock().unwrap() = Some((404, "no_git_forge".to_owned()));
         assert_eq!(
-            obo.git_forge_identity(&alice).await.unwrap_err(),
+            obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::NoGitForge
         );
         assert_eq!(
-            obo.git_forge_identity(&alice).await.unwrap_err(),
+            obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::NoGitForge
         );
         assert_eq!(
@@ -2601,13 +2773,17 @@ mod tests {
         *gateway.git_refusal.lock().unwrap() = Some((403, "connect_mode_forge".to_owned()));
         obo.expire_git_forge_for_test(&alice).await;
         assert_eq!(
-            obo.git_forge_identity(&alice).await.unwrap_err(),
+            obo.git_forge_identity(&alice, GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::ConnectModeForge
         );
 
         *gateway.git_refusal.lock().unwrap() = Some((422, "repository_not_installed".to_owned()));
         assert_eq!(
-            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            obo.git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::RepositoryNotInstalled
         );
         server.abort();
@@ -2624,19 +2800,23 @@ mod tests {
 
         *gateway.git_refusal.lock().unwrap() = Some((401, "invalid_token".to_owned()));
         assert!(matches!(
-            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            obo.git_credential(&alice, "acme/demo", GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::SignInRequired(_)
         ));
 
         let stranger = owner("user:stranger");
         assert!(matches!(
-            obo.git_credential(&stranger, "acme/demo")
+            obo.git_credential(&stranger, "acme/demo", GitForgeAttributionRequest::Person)
                 .await
                 .unwrap_err(),
             GitForgeError::SignInRequired(_)
         ));
         assert!(matches!(
-            obo.git_forge_identity(&stranger).await.unwrap_err(),
+            obo.git_forge_identity(&stranger, GitForgeAttributionRequest::Person)
+                .await
+                .unwrap_err(),
             GitForgeError::SignInRequired(_)
         ));
         assert_eq!(gateway.credential_mints.load(Ordering::SeqCst), 1);

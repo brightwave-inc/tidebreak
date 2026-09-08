@@ -793,6 +793,7 @@ mod tests {
             subagents: Vec::new(),
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as: None,
         }
     }
 

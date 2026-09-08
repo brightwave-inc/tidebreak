@@ -29,6 +29,7 @@ mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
 mod session_access;
+mod session_acts_as;
 mod session_owner_kind;
 mod turn_actor;
 
@@ -91,6 +92,7 @@ impl MigratorTrait for Migrator {
             Box::new(session_access::SessionAccess),
             Box::new(turn_actor::TurnActor),
             Box::new(session_owner_kind::SessionOwnerKind),
+            Box::new(session_acts_as::SessionActsAs),
         ]
     }
 }

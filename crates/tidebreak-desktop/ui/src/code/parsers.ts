@@ -358,6 +358,7 @@ const EXECUTION_LOCATIONS = new Set<"sandbox" | "machine">([
   "sandbox",
   "machine",
 ]);
+const ACTS_AS = new Set<"person" | "bot">(["person", "bot"]);
 const SESSION_ACTIVITIES = new Set<CodeSessionActivity>([
   "agent",
   "shell",
@@ -2683,6 +2684,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "external_origin",
       "execution_location",
       "owner_kind",
+      "acts_as",
     ]) ||
     !wireId(value.id) ||
     // Absent for a person's session; a fixed token for a service's.
@@ -2693,6 +2695,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     // since.
     (value.execution_location !== undefined &&
       !isMember(value.execution_location, EXECUTION_LOCATIONS)) ||
+    (value.acts_as !== undefined && !isMember(value.acts_as, ACTS_AS)) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalLine(value.harness_version) ||
     !optionalLine(value.harness_resume_ref) ||
@@ -2773,6 +2776,9 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     ...(fence_reason ? { fence_reason } : {}),
     ...(external_origin !== undefined ? { external_origin } : {}),
     ...(value.owner_kind !== undefined ? { owner_kind: value.owner_kind } : {}),
+    ...(value.acts_as !== undefined
+      ? { acts_as: value.acts_as as "person" | "bot" }
+      : {}),
   };
 }
 

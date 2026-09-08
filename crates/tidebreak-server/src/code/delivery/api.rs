@@ -635,7 +635,13 @@ pub(super) async fn delivery_access(
     force_refresh: bool,
 ) -> tidebreak_code_delivery::DeliveryAccess {
     if let Some(lender) = runtime.git_credentials() {
-        return match lender.git_forge_identity(owner).await {
+        return match lender
+            .git_forge_identity(
+                owner,
+                crate::obo_gateway::GitForgeAttributionRequest::Person,
+            )
+            .await
+        {
             Ok(identity) => {
                 let viewer_login = match identity.attribution {
                     GitForgeAttribution::Person { login, .. } => Some(login),
@@ -707,7 +713,11 @@ async fn borrow_delivery_credential(
         .git_credentials()
         .ok_or_else(|| "this machine has no hosted forge lender".to_owned())?;
     lender
-        .git_credential(owner, &format!("{}/{}", target.owner, target.name))
+        .git_credential(
+            owner,
+            &format!("{}/{}", target.owner, target.name),
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
+        )
         .await
         .map_err(|refusal| crate::code::clone::git_forge_refusal_message(&refusal))
 }

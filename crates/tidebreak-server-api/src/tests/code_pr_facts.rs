@@ -185,6 +185,7 @@ async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> 
         visibility: tidebreak_core::SessionVisibility::Private,
         created_at: chrono::Utc::now(),
         execution_location: tidebreak_core::ExecutionLocation::Machine,
+        acts_as: None,
     };
     insert_session(store, &session).await.unwrap();
     let turn_id = TurnId::new();

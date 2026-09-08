@@ -30,4 +30,27 @@ describe("SessionOriginBanner", () => {
       "Started from Slack; runs in a sandbox.",
     );
   });
+
+  it("names whether the session acts as you or the bot", () => {
+    const { rerender } = render(
+      <SessionOriginBanner
+        origin={origin}
+        executionLocation="machine"
+        actsAs="person"
+      />,
+    );
+    expect(screen.getByTestId("session-origin-banner")).toHaveTextContent(
+      "Started from Slack; runs on this machine as you.",
+    );
+    rerender(
+      <SessionOriginBanner
+        origin={origin}
+        executionLocation="machine"
+        actsAs="bot"
+      />,
+    );
+    expect(screen.getByTestId("session-origin-banner")).toHaveTextContent(
+      "Started from Slack; runs on this machine as the bot.",
+    );
+  });
 });
