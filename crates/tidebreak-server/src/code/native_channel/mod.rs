@@ -312,7 +312,9 @@ mod tests {
         let owner = OwnerId::new("local").unwrap();
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
-        let path = reg.issue(subject(session, workspace, owner.clone())).unwrap();
+        let path = reg
+            .issue(subject(session, workspace, owner.clone()))
+            .unwrap();
         assert!(path.to_string_lossy().contains("native-cap-"));
         let raw = std::fs::read_to_string(&path).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -321,7 +323,10 @@ mod tests {
             reg.subject_for_token(&token),
             Some(subject(session, workspace, owner.clone()))
         );
-        assert_eq!(reg.revoke(session), Some(subject(session, workspace, owner)));
+        assert_eq!(
+            reg.revoke(session),
+            Some(subject(session, workspace, owner))
+        );
         assert!(reg.subject_for_token(&token).is_none());
         assert!(!path.exists());
     }
@@ -339,8 +344,7 @@ mod tests {
         );
         let first = reg.issue(subject.clone()).unwrap();
         let first_raw = std::fs::read_to_string(&first).unwrap();
-        let first_token = serde_json::from_str::<serde_json::Value>(&first_raw)
-            .unwrap()["token"]
+        let first_token = serde_json::from_str::<serde_json::Value>(&first_raw).unwrap()["token"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -348,8 +352,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(!first.exists());
         let second_raw = std::fs::read_to_string(&second).unwrap();
-        let second_token = serde_json::from_str::<serde_json::Value>(&second_raw)
-            .unwrap()["token"]
+        let second_token = serde_json::from_str::<serde_json::Value>(&second_raw).unwrap()["token"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -367,10 +370,7 @@ mod tests {
         std::fs::write(&stale, b"stale").unwrap();
         reg.delete_all_stale_capfiles().unwrap();
         assert!(!stale.exists());
-        assert_eq!(
-            std::fs::read_dir(reg.capfile_dir()).unwrap().count(),
-            0
-        );
+        assert_eq!(std::fs::read_dir(reg.capfile_dir()).unwrap().count(), 0);
     }
 
     #[test]

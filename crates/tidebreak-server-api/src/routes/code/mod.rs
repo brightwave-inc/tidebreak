@@ -44,7 +44,6 @@ pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{
     browser_act, browser_list, browser_navigate, browser_screenshot, browser_snapshot, browser_wait,
 };
-pub(crate) use native::{native_execute, native_result};
 pub(crate) use delivery::{
     act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,
     discover_repositories as discover_delivery_repositories,
@@ -75,6 +74,7 @@ pub(crate) use llm::{
     harness_git_credential, harness_llm_anthropic_messages, harness_llm_openai_models,
     harness_llm_openai_responses, MAX_GIT_CREDENTIAL_BODY_BYTES, MAX_HARNESS_LLM_BODY_BYTES,
 };
+pub(crate) use native::{native_execute, native_result};
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_github_repositories,
     list_repos, patch_repo, repo_sources, start_clone,
