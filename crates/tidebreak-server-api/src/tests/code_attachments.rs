@@ -565,3 +565,170 @@ async fn a_session_cannot_attach_an_image_published_to_another_session() {
         "the refusal must name authority, not blob absence: {body}"
     );
 }
+
+/// First turn on a brand-new session: create → publish → submit, in that order.
+///
+/// The hosted first-message path (new workspace / start session with a pasted
+/// image) does exactly this. A regression that resolved attachments without a
+/// per-session publication row fails the submit half. Uses in-process oneshot
+/// so the contract is exercised without a bound TCP listener.
+#[tokio::test]
+async fn the_first_turn_of_a_new_session_accepts_an_image_published_after_create() {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let bearer = format!("Bearer {token}");
+    let repo = init_git_repo(dir.path());
+
+    let registered = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/code/repos")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "path": repo }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    let repo_body: serde_json::Value = super::json_body(registered).await;
+
+    let workspace_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/code/workspaces")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repo_id": json_id(&repo_body),
+                        "title": "first image turn",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(workspace_response.status(), StatusCode::CREATED);
+    let workspace: serde_json::Value = super::json_body(workspace_response).await;
+
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/workspaces/{}/sessions", json_id(&workspace)))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "harness": "claude_code",
+                        "permission_mode": "plan",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let session: serde_json::Value = super::json_body(created).await;
+    let session_id = json_id(&session).to_owned();
+
+    // Publish only after the session exists — the same order the desktop uses
+    // for a first turn that carries a pasted image.
+    let published = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/attachments/images"))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(one_pixel_png()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        published.status(),
+        StatusCode::CREATED,
+        "publishing the fixture image failed"
+    );
+    let published: serde_json::Value = super::json_body(published).await;
+    let blob_id = published["attachment_id"]
+        .as_str()
+        .or_else(|| published["blob_id"].as_str())
+        .expect("the publication names the blob")
+        .to_owned();
+
+    let first_turn = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/turns"))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "what is in this screenshot",
+                        "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = first_turn.status();
+    let body_bytes = axum::body::to_bytes(first_turn.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body_bytes);
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "first turn with a just-published image must be accepted: {body}"
+    );
+    assert!(
+        !body.contains("was not published to session"),
+        "publication for this session must satisfy the first turn: {body}"
+    );
+
+    // Publication is not one-shot: a later turn on the same session may reuse
+    // the reservation. The client still sends the first message only once.
+    let follow_up = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/turns"))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "and again",
+                        "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        follow_up.status(),
+        StatusCode::ACCEPTED,
+        "publication remains valid for later turns on the same session"
+    );
+}

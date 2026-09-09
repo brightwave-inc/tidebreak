@@ -9,9 +9,6 @@ import type {
   PermissionMode,
   ReasoningEffort,
 } from "../api/types";
-import { publishCodeImage } from "../attachments";
-import { uploadImageAttachment } from "../ImageAttachments";
-import { hasLocalHostAuthority } from "../host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore, type WorkspaceStartup } from "./CodeUiStore";
@@ -20,6 +17,7 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
 } from "./labels";
+import { submitFirstCodeTurn } from "./publishCodeSessionImages";
 
 /** What the first session of a workspace is created with. */
 export type FirstSessionSettings = {
@@ -74,9 +72,10 @@ export async function resolveSessionModel(input: {
  * workspace composer, and a failed first turn does the same, so typed words
  * and pasted images are never dropped.
  *
- * The handoff clears as soon as the session exists. `POST /turns` waits for
- * the worker to finish the turn, so leaving the overlay up until submit
- * returns would cover the conversation for the whole first reply.
+ * While a first message still has images to publish, the handoff stays up so
+ * the session composer cannot send a second first turn with unpublished
+ * ids. Once publication finishes, the handoff drops so the socket can open
+ * and stream; `POST /turns` may still run for the whole first reply.
  */
 export async function startFirstSession(input: {
   client: ApiClient;
@@ -153,27 +152,25 @@ export async function startFirstSession(input: {
     });
     useCodeCatalogStore.getState().rememberSession(session);
     input.onSessionCreated?.(session, posted);
-    // Drop the steps before posting the first turn so the workspace page can
-    // open the session socket and stream. The route does not return until
-    // the turn ends.
-    setWorkspaceStartup(workspace.id, null);
     if (prompt) {
+      // Keep the handoff while images publish so the new session's composer
+      // cannot race a second send with ids that are not yet reserved here.
+      if (images.length > 0) {
+        setWorkspaceStartup(workspace.id, {
+          ...base,
+          hasFirstMessage: true,
+          phase: "sending_message",
+        });
+      } else {
+        setWorkspaceStartup(workspace.id, null);
+      }
       try {
-        const attachments = await publishFirstTurnImages(
+        await submitFirstCodeTurn({
           client,
-          session.id,
+          sessionId: session.id,
+          message: prompt,
           images,
-        );
-        if (attachments.length > 0) {
-          await client.submitCodeTurn(
-            session.id,
-            prompt,
-            undefined,
-            attachments,
-          );
-        } else {
-          await client.submitCodeTurn(session.id, prompt);
-        }
+        });
       } catch (error) {
         // Never drop typed words or pasted images: the workspace composer
         // holds them.
@@ -182,6 +179,8 @@ export async function startFirstSession(input: {
           `${turnFailed} ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
         );
       }
+    } else {
+      setWorkspaceStartup(workspace.id, null);
     }
     return session;
   } catch (error) {
@@ -195,27 +194,4 @@ export async function startFirstSession(input: {
   } finally {
     setWorkspaceStartup(workspace.id, null);
   }
-}
-
-async function publishFirstTurnImages(
-  client: ApiClient,
-  sessionId: string,
-  files: readonly File[],
-): Promise<readonly { blob_id: string; media_type: string }[]> {
-  const published = await Promise.all(
-    files.map(async (file) => {
-      if (hasLocalHostAuthority()) {
-        return publishCodeImage(sessionId, file);
-      }
-      return uploadImageAttachment(client, sessionId, file, {
-        onProgress: () => undefined,
-        signal: new AbortController().signal,
-        path: (id) => `/sessions/${encodeURIComponent(id)}/attachments/images`,
-      });
-    }),
-  );
-  return published.map((image) => ({
-    blob_id: image.attachmentId,
-    media_type: image.mediaType,
-  }));
 }
