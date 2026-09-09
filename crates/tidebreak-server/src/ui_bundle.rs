@@ -60,10 +60,23 @@ pub async fn serve(dist: Arc<PathBuf>, request: Request) -> Response {
         Ok(response) if response.status() != StatusCode::NOT_FOUND => {
             with_cache_policy(response.map(Body::new), &path)
         }
-        Ok(_) if navigation => index(&dist).await,
-        Ok(_) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        // tower-http 0.7.1: `try_call` returns `Err(NotFound)` for a missing
+        // file instead of a 404 response. Treat that as absent, not a 500.
+        Err(err) if !missing_file(&err) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ if navigation => index(&dist).await,
+        _ => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+fn missing_file(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    let not_a_directory = err.raw_os_error() == Some(20);
+    #[cfg(not(unix))]
+    let not_a_directory = false;
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    ) || not_a_directory
 }
 
 async fn index(dist: &Path) -> Response {
