@@ -18,6 +18,7 @@ import {
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
+  adoptAgentBrowser,
   removedCodeBrowserIds,
   removedCodeTerminalIds,
   adoptCodeTerminalId,
@@ -582,5 +583,57 @@ describe("code chrome layout", () => {
       { type: "file", path: "src/main.rs" },
     ]);
     expect(opened.editorSplit?.activeIndex).toBe(1);
+  });
+});
+
+describe("agent browser placement", () => {
+  it("appends an inactive tab without selecting it or adding a split", () => {
+    const file = openCodeEditor(EMPTY_LAYOUT, {
+      type: "file",
+      path: "app.tsx",
+    });
+    for (const layout of [file, { ...file, conversationFocused: true }]) {
+      const next = adoptAgentBrowser(layout, "agent-1");
+      expect(next.tabs).toEqual([
+        ...layout.tabs,
+        { type: "browser", browserId: "agent-1" },
+      ]);
+      expect(next.activeIndex).toBe(layout.activeIndex);
+      expect(next.conversationFocused).toBe(layout.conversationFocused);
+      expect(next.editorSplit).toBe(layout.editorSplit);
+    }
+  });
+
+  it("preserves both editor groups and the selected secondary file", () => {
+    const layout = openCodeEditor(
+      openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
+      { type: "file", path: "b.ts" },
+      "secondary",
+    );
+    const next = adoptAgentBrowser(layout, "agent-1");
+    expect(next.editorSplit).toBe(layout.editorSplit);
+    expect(next.activeIndex).toBe(layout.activeIndex);
+    expect(next.tabs[layout.activeIndex]).toEqual(
+      layout.tabs[layout.activeIndex],
+    );
+  });
+
+  it("keeps Main agent selected when the empty workspace gains its first browser", () => {
+    const next = adoptAgentBrowser(EMPTY_LAYOUT, "agent-1");
+    expect(next.conversationFocused).toBe(true);
+    expect(next.editorSplit).toBeUndefined();
+    expect(next.tabs).toEqual([{ type: "browser", browserId: "agent-1" }]);
+  });
+
+  it("never moves or duplicates a browser that already belongs to either group", () => {
+    for (const region of ["primary", "secondary"] as const) {
+      const layout = openCodeEditor(
+        openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
+        { type: "browser", browserId: "agent-1" },
+        region,
+      );
+      expect(adoptAgentBrowser(layout, "agent-1")).toBe(layout);
+      expect(codeBrowserIds(layout)).toEqual(["agent-1"]);
+    }
   });
 });

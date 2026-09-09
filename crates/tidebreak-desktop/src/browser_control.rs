@@ -20,9 +20,7 @@ pub(crate) use tidebreak_core::{
 use tidebreak_core::{
     BrowserEngineName, BrowserGrantCapability, BrowserOrigin, BrowserOriginScope, OwnerId,
 };
-#[cfg(any(target_os = "macos", test))]
-use tokio::sync::OwnedMutexGuard;
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::browser_grants::{BrowserGrant, BrowserGrantStore};
@@ -55,9 +53,10 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // the engine-neutral semantic command contract.
             semantic_snapshot: cfg!(target_os = "macos"),
             semantic_actions: cfg!(target_os = "macos"),
-            // WKWebView can consume parser-created closed shadow roots before
-            // Tidebreak can prove that their rendered content is safe.
-            screenshot: false,
+            // Decision 94: capture is gated on the disclosed capture grant,
+            // not on proving closed-shadow privacy first.
+            screenshot: cfg!(target_os = "macos"),
+            developer_diagnostics: cfg!(target_os = "macos"),
             cross_origin_frames: false,
             profile_reset: cfg!(target_os = "macos"),
         },
@@ -88,6 +87,8 @@ pub(crate) struct BrowserAgentAccess {
     pub(crate) scope: Option<BrowserAgentAccessScope>,
     pub(crate) can_observe: bool,
     pub(crate) can_control: bool,
+    pub(crate) can_capture_screens: bool,
+    pub(crate) can_diagnose: bool,
     pub(crate) can_transfer_files: bool,
 }
 
@@ -110,6 +111,8 @@ pub(crate) struct BrowserSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) independent_input: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) engine: Option<BrowserEngineDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) controller: Option<BrowserController>,
@@ -131,6 +134,7 @@ impl BrowserSnapshot {
             load_state: None,
             document_epoch: None,
             visible: None,
+            independent_input: None,
             engine: None,
             controller: None,
             agent_access: None,
@@ -199,6 +203,12 @@ impl BrowserDispatchResult for tidebreak_core::BrowserWaitResult {
 impl BrowserDispatchResult for tidebreak_core::BrowserUploadResult {
     fn audit_succeeded(&self) -> bool {
         self.status == tidebreak_core::BrowserUploadStatus::Uploaded
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserDiagnosticsResult {
+    fn audit_succeeded(&self) -> bool {
+        true
     }
 }
 
@@ -294,9 +304,16 @@ struct BrowserRecord {
     load_state: BrowserLoadState,
     document_epoch: u64,
     visible: bool,
+    // Native-only availability. Preview visibility never grants this authority.
+    independent_host: bool,
     engine: BrowserEngineDescriptor,
     controller: BrowserController,
     controller_capability_id: Option<Uuid>,
+    /// The live agent capability that opened this tab via `browser_open`.
+    /// Only that agent may close the tab; human takeover clears it.
+    opened_by_capability: Option<Uuid>,
+    /// Preserve takeover even before an opening agent observes registration.
+    human_taken_over: bool,
     paused_origin: Option<BrowserOrigin>,
     pending_navigation_url: Option<String>,
     dispatch: BrowserDispatchState,
@@ -334,6 +351,8 @@ struct BrowserAgentCapability {
     workspace_id: String,
     controller_label: String,
     expires_at: Instant,
+    /// Session Stop survives capability rotation and new-tab proposals.
+    stopped: bool,
 }
 
 #[derive(Clone)]
@@ -420,6 +439,10 @@ pub(crate) enum BrowserNavigationDecision {
 }
 
 impl BrowserRecord {
+    fn agent_available(&self) -> bool {
+        self.visible || self.independent_host
+    }
+
     fn snapshot(&self, browser_id: &str, agent_access: BrowserAgentAccess) -> BrowserSnapshot {
         BrowserSnapshot {
             exists: true,
@@ -431,6 +454,7 @@ impl BrowserRecord {
             load_state: Some(self.load_state),
             document_epoch: Some(self.document_epoch),
             visible: Some(self.visible),
+            independent_input: Some(self.independent_host),
             engine: Some(self.engine.clone()),
             controller: Some(self.controller.clone()),
             agent_access: Some(agent_access),
@@ -445,6 +469,7 @@ impl BrowserRecord {
             title: self.title.clone(),
             load_state: self.load_state,
             visible: self.visible,
+            independent_input: self.independent_host,
             engine: self.engine.clone(),
             controller: self.controller.clone(),
         }
@@ -649,9 +674,12 @@ impl BrowserRegistry {
                 load_state: BrowserLoadState::Loading,
                 document_epoch: 0,
                 visible,
+                independent_host: false,
                 engine: platform_default_engine(),
                 controller: BrowserController::default(),
                 controller_capability_id: None,
+                opened_by_capability: None,
+                human_taken_over: false,
                 paused_origin: None,
                 pending_navigation_url: None,
                 dispatch: BrowserDispatchState::default(),
@@ -893,6 +921,7 @@ impl BrowserRegistry {
                 workspace_id: workspace_id.to_owned(),
                 controller_label: clean_controller_text(controller_label, 80, "Agent"),
                 expires_at: Instant::now() + ttl,
+                stopped: false,
             },
         );
         capability_id
@@ -946,6 +975,7 @@ impl BrowserRegistry {
                 workspace_id: workspace_id.to_owned(),
                 controller_label: controller_label.clone(),
                 expires_at: Instant::now() + AGENT_CAPABILITY_TTL,
+                stopped: previous.stopped,
             },
         );
         for record in state.records.values_mut() {
@@ -954,6 +984,9 @@ impl BrowserRegistry {
                 if record.controller.kind == BrowserControllerKind::Agent {
                     record.controller.label = Some(controller_label.clone());
                 }
+            }
+            if record.opened_by_capability == Some(capability_id) {
+                record.opened_by_capability = Some(replacement);
             }
         }
         state
@@ -1014,6 +1047,9 @@ impl BrowserRegistry {
         }
 
         let owner_id = record.owner_id.clone();
+        let stopped_owner = record.controller_capability_id;
+        let _stopped_dispatches =
+            lock_stopped_browser_dispatches(&state, stopped_owner, workspace_id)?;
         let mut next = state.grants.clone();
         if let Some(grant) = next.iter_mut().find(|grant| {
             grant.owner_id == owner_id && grant.workspace_id == workspace_id && grant.scope == scope
@@ -1029,6 +1065,7 @@ impl BrowserRegistry {
         }
         persist_browser_grants(&state, &next)?;
         state.grants = next;
+        resume_stopped_browser_session(&mut state, stopped_owner, workspace_id);
 
         {
             let record = state
@@ -1055,6 +1092,329 @@ impl BrowserRegistry {
             .get(browser_id)
             .expect("browser was checked above");
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Add disclosed capabilities for the exact origin shown in the native
+    /// consent dialog. Existing broad grants do not widen this disclosure.
+    pub(crate) fn extend_browser_access(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        target_origin: &BrowserOrigin,
+        capabilities: &[BrowserGrantCapability],
+    ) -> Result<BrowserSnapshot, String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if share_target_for_record(record).as_ref() != Some(target_origin) {
+            return Err("browser origin changed while permission was being requested".to_owned());
+        }
+        let owner_id = record.owner_id.clone();
+        if !state.grants.iter().any(|grant| {
+            grant.owner_id == owner_id
+                && grant.workspace_id == workspace_id
+                && grant.scope.covers(target_origin)
+        }) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let scope = BrowserOriginScope::Origin {
+            origin: target_origin.clone(),
+        };
+        let mut next = state.grants.clone();
+        if let Some(grant) = next.iter_mut().find(|grant| {
+            grant.owner_id == owner_id && grant.workspace_id == workspace_id && grant.scope == scope
+        }) {
+            grant.capabilities.extend(capabilities.iter().copied());
+        } else {
+            next.push(BrowserGrant {
+                owner_id,
+                workspace_id: workspace_id.to_owned(),
+                scope,
+                capabilities: capabilities.iter().copied().collect(),
+            });
+        }
+        persist_browser_grants(&state, &next)?;
+        state.grants = next;
+        let record = state
+            .records
+            .get(browser_id)
+            .expect("browser was checked above");
+        Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Authorize a `browser_open` proposal before anything is created: the
+    /// capability must be live and the destination origin must already be
+    /// covered by a control grant for this owner and workspace. Opening a tab
+    /// never creates consent.
+    pub(crate) fn authorize_agent_open(
+        &self,
+        capability_id: Uuid,
+        owner_id: &OwnerId,
+        destination: &BrowserOrigin,
+    ) -> Result<String, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        if !grants_cover(
+            &state,
+            owner_id,
+            &capability.workspace_id,
+            destination,
+            BrowserGrantCapability::BrowserControlOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        Ok(capability.workspace_id.clone())
+    }
+
+    /// Bind a freshly created tab to the agent capability that opened it.
+    #[cfg(test)]
+    pub(crate) fn mark_agent_opened(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let workspace_id = active_capability(&state, capability_id)?
+            .workspace_id
+            .clone();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &workspace_id, record)?;
+        record.opened_by_capability = Some(capability_id);
+        Ok(())
+    }
+
+    /// Bind the opening capability before WebKit can load or redirect a page.
+    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    pub(crate) fn bind_independent_open(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)?.clone();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if record.instance_id != instance_id || record.resetting {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if record.human_taken_over {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record
+            .controller_capability_id
+            .is_some_and(|id| id != capability_id)
+            || record
+                .opened_by_capability
+                .is_some_and(|id| id != capability_id)
+        {
+            return Err("browser is controlled by another agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserControlOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("opening record was checked");
+        record.opened_by_capability = Some(capability_id);
+        record.controller_capability_id = Some(capability_id);
+        record.controller = BrowserController {
+            kind: BrowserControllerKind::Agent,
+            label: Some(capability.controller_label),
+            action: None,
+            halted: false,
+            takeover_required: false,
+        };
+        Ok(())
+    }
+
+    /// Publish executor availability only after its native view exists.
+    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    pub(crate) fn mark_independent_host_ready(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        instance_id: u64,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        let capability_id = record
+            .opened_by_capability
+            .ok_or_else(|| "browser tab was taken over while opening".to_owned())?;
+        active_capability(&state, capability_id)?;
+        if record.instance_id != instance_id || record.resetting {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if record.human_taken_over || record.controller_capability_id != Some(capability_id) {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        state
+            .records
+            .get_mut(browser_id)
+            .expect("opening record was checked")
+            .independent_host = true;
+        Ok(())
+    }
+
+    /// Let a remounted renderer discover tabs opened while another route was showing.
+    pub(crate) fn independent_tabs(&self, workspace_id: &str) -> Vec<BrowserSnapshot> {
+        let state = self.lock();
+        let mut tabs: Vec<_> = state
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                record.workspace_id == workspace_id && record.independent_host && !record.resetting
+            })
+            .map(|(id, record)| record.snapshot(id, agent_access_for_record(&state, record)))
+            .collect();
+        tabs.sort_by(|left, right| left.browser_id.cmp(&right.browser_id));
+        tabs
+    }
+
+    /// Follow one opening tab without accepting a replacement or reclaiming a
+    /// tab after human takeover. A missing record is expected only before the
+    /// renderer first registers the requested id.
+    pub(crate) fn agent_open_state(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        expected_instance: Option<u64>,
+    ) -> Result<Option<(u64, BrowserSnapshot)>, String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)?.clone();
+        let Some(record) = state.records.get(browser_id) else {
+            return if expected_instance.is_some() {
+                Err("browser tab closed before it became ready".to_owned())
+            } else {
+                Ok(None)
+            };
+        };
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if record.resetting
+            || expected_instance.is_some_and(|instance| instance != record.instance_id)
+        {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.human_taken_over
+            || (expected_instance.is_some() && record.opened_by_capability != Some(capability_id))
+        {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if record
+            .controller_capability_id
+            .is_some_and(|controller| controller != capability_id)
+        {
+            return Err("browser is controlled by another agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("opening browser was checked above");
+        record.opened_by_capability = Some(capability_id);
+        let record = &state.records[browser_id];
+        Ok(Some((
+            record.instance_id,
+            record.snapshot(browser_id, agent_access_for_record(&state, record)),
+        )))
+    }
+
+    /// Authorize a `browser_close` proposal: only the agent capability that
+    /// opened the tab may close it, and only while that capability is live.
+    /// Returns the workspace id so the caller can perform the native close.
+    pub(crate) fn authorize_agent_close(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<String, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.opened_by_capability != Some(capability_id) {
+            return Err("browser tab was not opened by this agent".to_owned());
+        }
+        Ok(capability.workspace_id.clone())
+    }
+
+    /// Authorize a `browser_activate` proposal: the capability must be live,
+    /// the tab must be in its workspace, and the tab's current origin must be
+    /// shared for observation. Returns the workspace id and whether the tab
+    /// is already visible.
+    pub(crate) fn authorize_agent_activation(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<(String, bool), String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        Ok((capability.workspace_id.clone(), record.agent_available()))
     }
 
     pub(crate) fn revoke_browser_access(
@@ -1151,6 +1511,10 @@ impl BrowserRegistry {
         if !grants_cover(&state, &record.owner_id, workspace_id, &origin, required) {
             return Ok(None);
         }
+        let stopped_owner = record.controller_capability_id;
+        let _stopped_dispatches =
+            lock_stopped_browser_dispatches(&state, stopped_owner, workspace_id)?;
+        resume_stopped_browser_session(&mut state, stopped_owner, workspace_id);
         let record = state
             .records
             .get_mut(browser_id)
@@ -1220,7 +1584,7 @@ impl BrowserRegistry {
             .iter()
             .filter(|(_, record)| {
                 record.workspace_id == capability.workspace_id
-                    && record.visible
+                    && record.agent_available()
                     && !record.resetting
             })
             .filter(|(_, record)| {
@@ -1245,16 +1609,48 @@ impl BrowserRegistry {
         capability_id: Uuid,
         browser_id: &str,
     ) -> Result<BrowserSnapshot, String> {
+        self.begin_agent_control_for_instance(capability_id, browser_id, None)
+    }
+
+    pub(crate) fn begin_opened_agent_control(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+    ) -> Result<BrowserSnapshot, String> {
+        self.begin_agent_control_for_instance(capability_id, browser_id, Some(instance_id))
+    }
+
+    fn begin_agent_control_for_instance(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        opening_instance: Option<u64>,
+    ) -> Result<BrowserSnapshot, String> {
         let mut state = self.lock();
         let capability = active_capability(&state, capability_id)?.clone();
-        let record = state
-            .records
-            .get(browser_id)
-            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        let record = state.records.get(browser_id).ok_or_else(|| {
+            if opening_instance.is_some() {
+                "browser tab closed before it became ready".to_owned()
+            } else {
+                "browser session is not registered".to_owned()
+            }
+        })?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if let Some(instance_id) = opening_instance {
+            if record.instance_id != instance_id || record.resetting {
+                return Err("browser session was replaced while waiting".to_owned());
+            }
+            if record.human_taken_over || record.opened_by_capability != Some(capability_id) {
+                return Err("browser tab was taken over while opening".to_owned());
+            }
+            if record.load_state != BrowserLoadState::Ready || record.document_epoch == 0 {
+                return Err("browser page is still loading".to_owned());
+            }
+        }
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -1328,7 +1724,7 @@ impl BrowserRegistry {
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -1407,29 +1803,78 @@ impl BrowserRegistry {
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
     }
 
+    #[cfg(test)]
     pub(crate) async fn stop_agent_control(
         &self,
         browser_id: &str,
         workspace_id: &str,
     ) -> Result<BrowserSnapshot, String> {
-        let gate = {
+        self.stop_agent_control_with(browser_id, workspace_id, |_| {})
+            .await
+    }
+
+    /// Publish every halted tab before waiting for its current action to finish.
+    pub(crate) async fn stop_agent_control_with(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        mut publish: impl FnMut(&BrowserSnapshot),
+    ) -> Result<BrowserSnapshot, String> {
+        let (gates, snapshots) = {
             let mut state = self.lock();
             let record = state
                 .records
-                .get_mut(browser_id)
+                .get(browser_id)
                 .ok_or_else(|| "browser session is not registered".to_owned())?;
             ensure_workspace(browser_id, workspace_id, record)?;
-            record.dispatch.halt.send_replace(true);
-            if record.controller.kind == BrowserControllerKind::Agent {
-                record.controller.halted = true;
-                record.controller.action = None;
-                record.controller.takeover_required = false;
+            let capability_id = record.controller_capability_id;
+            if let Some(capability) = capability_id.and_then(|id| state.capabilities.get_mut(&id)) {
+                capability.stopped = true;
+            }
+            // Stop every tab this session owns before waiting on any dispatch.
+            // Other code/chat sessions retain their independent browser access.
+            let mut gates = Vec::new();
+            let mut affected = Vec::new();
+            for (id, record) in &mut state.records {
+                if record.workspace_id != workspace_id
+                    || (id != browser_id
+                        && (capability_id.is_none()
+                            || record.controller_capability_id != capability_id))
+                {
+                    continue;
+                }
+                record.dispatch.halt.send_replace(true);
+                if record.controller.kind == BrowserControllerKind::Agent {
+                    record.controller.halted = true;
+                    record.controller.action = None;
+                    record.controller.takeover_required = false;
+                }
                 record.semantic_snapshot = None;
                 record.screenshot_epoch = None;
+                gates.push(Arc::clone(&record.dispatch.gate));
+                affected.push(id.clone());
             }
-            Arc::clone(&record.dispatch.gate)
+            if let Some(capability_id) = capability_id {
+                state
+                    .confirmations
+                    .retain(|_, confirmation| confirmation.capability_id != capability_id);
+            }
+            affected.sort();
+            let snapshots = affected
+                .iter()
+                .map(|id| {
+                    let record = &state.records[id];
+                    record.snapshot(id, agent_access_for_record(&state, record))
+                })
+                .collect::<Vec<_>>();
+            (gates, snapshots)
         };
-        let _dispatch = gate.lock().await;
+        for snapshot in &snapshots {
+            publish(snapshot);
+        }
+        for gate in gates {
+            let _dispatch = gate.lock().await;
+        }
         self.snapshot(browser_id, workspace_id)
     }
 
@@ -1450,6 +1895,11 @@ impl BrowserRegistry {
                 record.controller = BrowserController::default();
                 record.controller_capability_id = None;
             }
+            // Decision 94: human takeover ends the opening agent's lifecycle
+            // ownership. Preserve this even before its first open poll.
+            record.opened_by_capability = None;
+            record.human_taken_over = true;
+            record.independent_host = false;
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
@@ -2097,7 +2547,7 @@ impl BrowserRegistry {
             {
                 return Err("browser document changed while it was being inspected".to_owned());
             }
-            if !record.visible {
+            if !record.agent_available() {
                 return Err("browser is hidden".to_owned());
             }
             if *record.dispatch.halt.borrow() {
@@ -2186,7 +2636,7 @@ impl BrowserRegistry {
                     "browser document changed while screenshot was being captured".to_owned(),
                 );
             }
-            if !record.visible {
+            if !record.agent_available() {
                 return Err("browser is hidden".to_owned());
             }
             if *record.dispatch.halt.borrow() {
@@ -2207,6 +2657,17 @@ impl BrowserRegistry {
                 BrowserGrantCapability::BrowserObserveOrigin,
             ) {
                 return Err("browser origin is not shared for this operation".to_owned());
+            }
+            // Capture consent is separate from observation: only a grant taken
+            // under the screenshot disclosure may record captured pixels.
+            if !grants_cover(
+                &state,
+                &record.owner_id,
+                &workspace_id,
+                &origin,
+                BrowserGrantCapability::BrowserCaptureVisibleTab,
+            ) {
+                return Err("browser origin is not shared for screenshots".to_owned());
             }
             let Some(snapshot) = &record.semantic_snapshot else {
                 return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
@@ -2242,7 +2703,7 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -2333,7 +2794,7 @@ impl BrowserRegistry {
         {
             return Err(BrowserTargetError::StaleTarget);
         }
-        if !record.visible {
+        if !record.agent_available() {
             return Err(BrowserTargetError::BrowserHidden);
         }
         let Some(snapshot) = &record.semantic_snapshot else {
@@ -2425,7 +2886,7 @@ fn authorize_native_action_phase_locked(
     {
         return Err("browser document changed during native input".to_owned());
     }
-    if !record.visible {
+    if !record.agent_available() {
         return Err("browser is hidden".to_owned());
     }
     if *record.dispatch.halt.borrow() {
@@ -2452,11 +2913,98 @@ fn active_capability(
     state: &BrowserRegistryState,
     capability_id: Uuid,
 ) -> Result<&BrowserAgentCapability, String> {
-    state
+    let capability = state
         .capabilities
         .get(&capability_id)
         .filter(|capability| capability.expires_at > Instant::now())
-        .ok_or_else(|| "browser capability is unavailable".to_owned())
+        .ok_or_else(|| "browser capability is unavailable".to_owned())?;
+    if capability.stopped {
+        return Err("browser control was stopped by the user".to_owned());
+    }
+    Ok(capability)
+}
+
+/// Keep Resume behind every dispatch that Stop is still draining.
+fn lock_stopped_browser_dispatches(
+    state: &BrowserRegistryState,
+    capability_id: Option<Uuid>,
+    workspace_id: &str,
+) -> Result<Vec<OwnedMutexGuard<()>>, String> {
+    let Some(capability_id) = capability_id else {
+        return Ok(Vec::new());
+    };
+    if !state
+        .capabilities
+        .get(&capability_id)
+        .is_some_and(|capability| capability.workspace_id == workspace_id && capability.stopped)
+    {
+        return Ok(Vec::new());
+    }
+    state
+        .records
+        .values()
+        .filter(|record| {
+            record.workspace_id == workspace_id
+                && record.controller_capability_id == Some(capability_id)
+        })
+        .map(|record| {
+            Arc::clone(&record.dispatch.gate)
+                .try_lock_owned()
+                .map_err(|_| {
+                    "browser control is still stopping; try Share again after it stops".to_owned()
+                })
+        })
+        .collect()
+}
+
+/// Only trusted Share/Resume on a stopped session's tab re-arms that session.
+/// If all of its tabs are closed, the caller must end and restart the session.
+fn resume_stopped_browser_session(
+    state: &mut BrowserRegistryState,
+    capability_id: Option<Uuid>,
+    workspace_id: &str,
+) {
+    let Some(capability_id) = capability_id else {
+        return;
+    };
+    let Some(capability) = state.capabilities.get_mut(&capability_id) else {
+        return;
+    };
+    if capability.workspace_id != workspace_id || !capability.stopped {
+        return;
+    }
+    capability.stopped = false;
+    let resumable = state
+        .records
+        .iter()
+        .filter(|(_, record)| {
+            record.workspace_id == workspace_id
+                && record.controller_capability_id == Some(capability_id)
+                && !record.resetting
+                && record.paused_origin.is_none()
+                && current_origin(record).is_some_and(|origin| {
+                    grants_cover(
+                        state,
+                        &record.owner_id,
+                        workspace_id,
+                        &origin,
+                        BrowserGrantCapability::BrowserObserveOrigin,
+                    )
+                })
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in resumable {
+        let record = state
+            .records
+            .get_mut(&id)
+            .expect("resumable browser exists");
+        record.dispatch.halt.send_replace(false);
+        record.controller = BrowserController::default();
+        record.controller_capability_id = None;
+        record.semantic_snapshot = None;
+        record.screenshot_epoch = None;
+    }
 }
 
 fn current_origin(record: &BrowserRecord) -> Option<BrowserOrigin> {
@@ -2524,6 +3072,8 @@ fn agent_access_for_record(
             scope: None,
             can_observe: false,
             can_control: false,
+            can_capture_screens: false,
+            can_diagnose: false,
             can_transfer_files: false,
         };
     };
@@ -2547,6 +3097,8 @@ fn agent_access_for_record(
     };
     let can_observe = covers(BrowserGrantCapability::BrowserObserveOrigin);
     let can_control = covers(BrowserGrantCapability::BrowserControlOrigin);
+    let can_capture_screens = covers(BrowserGrantCapability::BrowserCaptureVisibleTab);
+    let can_diagnose = covers(BrowserGrantCapability::BrowserDiagnoseOrigin);
     let can_transfer_files = covers(BrowserGrantCapability::BrowserTransferFiles);
     let scope = matching
         .iter()
@@ -2564,6 +3116,8 @@ fn agent_access_for_record(
         scope,
         can_observe,
         can_control,
+        can_capture_screens,
+        can_diagnose,
         can_transfer_files,
     }
 }
@@ -2591,7 +3145,7 @@ fn authorize_agent_dispatch(
     if current_origin(record).as_ref() != Some(origin) {
         return Err("browser origin changed before dispatch".to_owned());
     }
-    if !record.visible {
+    if !record.agent_available() {
         return Err("browser is hidden".to_owned());
     }
     if *record.dispatch.halt.borrow() {

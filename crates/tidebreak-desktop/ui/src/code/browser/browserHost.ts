@@ -45,6 +45,12 @@ export type BrowserAgentAccess = {
   scope?: "origin" | "loopback_workspace";
   canObserve: boolean;
   canControl: boolean;
+  /**
+   * Whether this grant was taken under the screenshot disclosure. Legacy
+   * grants observe and control without capture until the user re-shares.
+   */
+  canCaptureScreens?: boolean;
+  canDiagnose?: boolean;
   canTransferFiles: boolean;
 };
 
@@ -82,6 +88,7 @@ export type BrowserHostSnapshot = {
   loadState?: "loading" | "ready" | "failed";
   documentEpoch?: number;
   visible?: boolean;
+  independentInput?: boolean;
   engine?: {
     name: "wk_webview" | "webview2" | "webkitgtk" | "unsupported";
     capabilities: {
@@ -90,6 +97,7 @@ export type BrowserHostSnapshot = {
       semanticSnapshot: boolean;
       semanticActions: boolean;
       screenshot: boolean;
+      developerDiagnostics?: boolean;
       crossOriginFrames: boolean;
       profileReset: boolean;
     };
@@ -116,6 +124,9 @@ export type BrowserHostEvent = {
     | "controller_changed"
     | "agent_navigation_paused"
     | "agent_access_changed"
+    | "agent_open_requested"
+    | "agent_activate_requested"
+    | "agent_closed_tab"
     | "profile_reset_closing"
     | "profile_reset_deleting_data"
     | "profile_reset_reconstruct";
@@ -184,6 +195,15 @@ export const nativeCodeBrowserHost: CodeBrowserHost = {
     }
   },
 };
+
+/** Recover live agent tabs after the renderer mounts on a different route. */
+export function listIndependentBrowserTabs(
+  workspaceId: string,
+): Promise<BrowserHostSnapshot[]> {
+  return invoke<BrowserHostSnapshot[]>("code_browser_agent_tabs", {
+    workspaceId,
+  });
+}
 
 async function logicalBrowserAction(
   action: BrowserHostAction,

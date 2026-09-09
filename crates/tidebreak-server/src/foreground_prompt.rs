@@ -398,7 +398,7 @@ pub(crate) fn compose_for_surface(
             .iter()
             .any(|name| tidebreak_core::is_computer_use_control_tool(name));
         let mut lines = vec![if acting {
-            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_focus_window`, `computer_return_to_tidebreak`, and `computer_wait` to act."
+            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_launch_app`, `computer_hover`, `computer_drag`, `computer_resize_window`, and `computer_wait` to act."
         } else {
             "- This turn can see the user's display and read app content with `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content`; acting on apps is not available this turn."
         }];
@@ -410,7 +410,7 @@ pub(crate) fn compose_for_surface(
         );
         if acting {
             lines.push(
-                "- Computer use is primarily for observing the user's apps. GUI control uses their real cursor, keyboard, and focus, so it is slower, more brittle, and more disruptive than reading or a dedicated tool; use it sparingly and only when a non-GUI path will not complete the request.",
+                "- Use computer use to operate graphical apps and verify work that depends on visible or interactive state. For coding tasks, reproduce the UI problem, make the code change, and repeat the relevant UI flow to verify the result. Prefer dedicated tools for data access that does not need the UI.",
             );
             lines.push(
                 "- Read before acting: confirm the target with `computer_read_app_content` or `computer_capture_screen` before `computer_click`, `computer_type_text`, or `computer_key_press`, and look again afterward to confirm the effect.",
@@ -422,10 +422,10 @@ pub(crate) fn compose_for_surface(
                 "- Prefer the accessibility tree for reading; when an app's tree is incomplete or unclear, capture a screenshot to see what is actually on screen before deciding.",
             );
             lines.push(
-                "- Acting may ask the user's approval once per app, and the user can stop control at any time; a refusal or a stop is a decision to respect, not an error to retry.",
+                "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop control or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
             );
             lines.push(
-                "- When work in another app is finished, use `computer_return_to_tidebreak` so the user can see completion and continue the conversation.",
+                "- Use independent background input and preserve the user's focus and pointer. If an action returns independent_input_unavailable or the legacy requires_foreground error, report the unsupported action. Never request foreground control or retry through a takeover path. Report completion without bringing Tidebreak or another app to the front.",
             );
         }
         push_section(&mut prompt, COMPUTER_USE_HEADING, &lines);
@@ -976,18 +976,7 @@ mod tests {
 
     #[test]
     fn computer_use_section_tracks_the_exact_surface() {
-        let full = compose(&[
-            spec(tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL),
-            spec(tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL),
-            spec(tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL),
-            spec(tidebreak_core::COMPUTER_CLICK_TOOL),
-            spec(tidebreak_core::COMPUTER_TYPE_TEXT_TOOL),
-            spec(tidebreak_core::COMPUTER_KEY_PRESS_TOOL),
-            spec(tidebreak_core::COMPUTER_SCROLL_TOOL),
-            spec(tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL),
-            spec(tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL),
-            spec(tidebreak_core::COMPUTER_WAIT_TOOL),
-        ]);
+        let full = compose(&tidebreak_core::computer_use_tool_specs());
         assert!(full.contains(COMPUTER_USE_HEADING));
         assert!(full.contains("`computer_click`"));
         assert!(
@@ -1002,6 +991,11 @@ mod tests {
             full.contains("Read before acting"),
             "read-first guidance is required: {full}"
         );
+        assert!(full.contains("Use independent background input"));
+        assert!(full.contains("Never request foreground control"));
+        assert!(!full.contains("`computer_focus_window`"));
+        assert!(!full.contains("`computer_return_to_tidebreak`"));
+        assert!(!full.contains("execution_mode set to foreground"));
         assert!(full.contains("do not inspect code through computer-use screenshots"));
         assert!(full.contains("unless the user explicitly asks for on-screen inspection"));
         assert!(full.contains("say that you cannot inspect the source"));

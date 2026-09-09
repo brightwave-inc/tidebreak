@@ -1234,6 +1234,7 @@ requires_openai_auth = true
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(!plan

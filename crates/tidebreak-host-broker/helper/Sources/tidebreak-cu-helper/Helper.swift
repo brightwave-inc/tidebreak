@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Entry point and wire protocol for the computer-use helper.
@@ -15,22 +16,39 @@ import Foundation
 /// The operation the broker is asking the helper to perform. snake_case on the
 /// wire.
 enum HelperOp: String, Decodable {
+    // Broker-only recovery; this operation is never exposed in tool schemas.
+    case releaseRecordedInput = "release_recorded_input"
     case permissions
     case requestPermissions = "request_permissions"
     case listWindows = "list_windows"
     case capture
     case readAxTree = "read_ax_tree"
     // Control ops (Accessibility input synthesis). `wait` is intentionally
-    // absent — it is an inert broker-side sleep that never reaches the helper.
+    // absent — it is an inert broker-side sleep that never reaches the helper;
+    // `wait_condition` does reach it because conditions need live app/window
+    // / accessibility state.
     case click
     case typeText = "type_text"
     case keyPress = "key_press"
     case scroll
     case focusWindow = "focus_window"
+    case launchApp = "launch_app"
+    case hover
+    case drag
+    case resizeWindow = "resize_window"
+    case waitCondition = "wait_condition"
     // Read-only: report a target element's role + label without acting, for the
     // broker's forced-confirmation tripwire (it classifies whether a control op
     // is consequential before acting).
     case describeElement = "describe_element"
+}
+
+/// `wait_condition` request kinds.
+enum WaitConditionKind: String, Decodable {
+    case appRunning = "app_running"
+    case windowVisible = "window_visible"
+    case textPresent = "text_present"
+    case textAbsent = "text_absent"
 }
 
 /// What a `capture` request targets.
@@ -40,11 +58,24 @@ enum CaptureTargetKind: String, Decodable {
     case app
 }
 
+enum ExecutionMode: String, Codable {
+    case background
+    case foreground
+}
+
 /// A single helper request. All operation parameters are optional and validated
 /// per-op; an absent required field yields a structured `invalid_request` error
 /// rather than a crash.
 struct HelperRequest: Decodable {
     let op: HelperOp
+    /// Background is the default. Foreground requires explicit caller consent.
+    let executionMode: ExecutionMode?
+    /// Broker-owned cancellation generation for this operation.
+    let cancelPath: String?
+    let cancelGeneration: String?
+    let inputJournalPath: String?
+    let inputCancelPath: String?
+    let inputInvocationId: String?
     /// `capture` target discriminator.
     let target: CaptureTargetKind?
     /// macOS bundle id (e.g. "com.apple.Notes") — for app-scoped capture and
@@ -76,7 +107,7 @@ struct HelperRequest: Decodable {
     /// as AX frames) when no element.
     let x: Double?
     let y: Double?
-    /// type_text: the text to enter.
+    /// Text to enter, or the text to match for a wait condition.
     let text: String?
     /// key_press: the key name (e.g. "return", "a", "left") and its chord
     /// modifiers (cmd/shift/ctrl/alt).
@@ -86,10 +117,36 @@ struct HelperRequest: Decodable {
     /// double).
     let button: String?
     let clickCount: Int?
+    /// hover/drag/launch/resize/wait parameters.
+    let fromElementId: String?
+    let fromElementFingerprint: String?
+    let fromX: Double?
+    let fromY: Double?
+    let toElementId: String?
+    let toElementFingerprint: String?
+    let toX: Double?
+    let toY: Double?
+    let durationMs: Int?
+    let width: Double?
+    let height: Double?
+    let condition: WaitConditionKind?
+    let timeoutSeconds: Double?
+    /// capture: optional long-edge cap in pixels (helper clamps 1...4096).
+    let maxDimension: Int?
     /// scroll: pixel deltas (positive dy scrolls down, positive dx scrolls
     /// right).
     let dx: Double?
     let dy: Double?
+}
+
+extension HelperRequest {
+    func requireIndependentInput() throws {
+        guard op == .releaseRecordedInput || executionMode != .foreground else {
+            throw HelperError(
+                code: .independentInputUnavailable,
+                message: "foreground input is disabled; use independent background input")
+        }
+    }
 }
 
 struct CaptureMark: Decodable {
@@ -123,6 +180,11 @@ enum HelperErrorCode: String, Encodable {
     case targetOutsideApp = "target_outside_app"
     /// The native API failed for some other reason.
     case operationFailed = "operation_failed"
+    /// The helper requires macOS 14+; the host is older. Explicit, so the
+    /// broker reports an unsupported build rather than a generic failure.
+    case unsupported = "unsupported"
+    case requiresForeground = "requires_foreground"
+    case independentInputUnavailable = "independent_input_unavailable"
 }
 
 struct HelperError: Error {
@@ -130,9 +192,22 @@ struct HelperError: Error {
     let message: String
 }
 
-@main
+#if !HELPER_TESTS
+    @main
+#endif
 struct CUHelper {
+    @MainActor
     static func main() async {
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        // Native helper APIs require macOS 14. The host broker still runs on
+        // older macOS; only this computer-use surface is unsupported.
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 14 {
+            emitError(
+                HelperError(
+                    code: .unsupported,
+                    message: "computer use requires macOS 14 or newer; this host is unsupported"))
+            return
+        }
         let request: HelperRequest
         do {
             let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -140,12 +215,16 @@ struct CUHelper {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             request = try decoder.decode(HelperRequest.self, from: input)
         } catch {
-            emitError(HelperError(code: .invalidRequest, message: "could not parse request: \(error)"))
+            emitError(
+                HelperError(code: .invalidRequest, message: "could not parse request: \(error)"))
             return
         }
 
         do {
+            try request.requireIndependentInput()
             switch request.op {
+            case .releaseRecordedInput:
+                emit(try InputRecovery.releaseRecorded(request))
             case .permissions:
                 emit(Permissions.status())
             case .requestPermissions:
@@ -166,6 +245,16 @@ struct CUHelper {
                 emit(try Control.scroll(request))
             case .focusWindow:
                 emit(try Control.focusWindow(request))
+            case .launchApp:
+                emit(try await Control.launchApp(request))
+            case .hover:
+                emit(try Control.hover(request))
+            case .drag:
+                emit(try Control.drag(request))
+            case .resizeWindow:
+                emit(try Control.resizeWindow(request))
+            case .waitCondition:
+                emit(try Control.waitCondition(request))
             case .describeElement:
                 emit(try Control.describeElement(request))
             }
@@ -210,7 +299,9 @@ func emitError(_ error: HelperError) {
 private func write<T: Encodable>(_ value: T) {
     guard let data = try? encoder().encode(value) else {
         FileHandle.standardOutput.write(
-            Data(#"{"ok":false,"code":"operation_failed","error":"could not encode response"}"#.utf8))
+            Data(
+                #"{"ok":false,"code":"operation_failed","error":"could not encode response"}"#.utf8)
+        )
         return
     }
     FileHandle.standardOutput.write(data)

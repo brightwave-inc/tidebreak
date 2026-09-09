@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tidebreak_core::{SessionId, Store};
 use tidebreak_host_broker::{
@@ -150,7 +150,9 @@ impl HostAccess {
         };
         let mut orphan_conversations = std::collections::HashSet::new();
         for grant in grants {
-            if grant.subject.kind() != tidebreak_host_broker::SubjectKind::Conversation {
+            if grant.native_app_all_sessions
+                || grant.subject.kind() != tidebreak_host_broker::SubjectKind::Conversation
+            {
                 continue;
             }
             let conversation_id = grant.subject.id();
@@ -226,6 +228,31 @@ impl HostAccess {
             .ok_or_else(|| "conversation not found".to_owned())?;
         let project_id = chat.project_id.map(|project_id| project_id.0);
         authoritative_context(chat_id, project_id)
+    }
+
+    /// Withdraw every broker grant held by an ended code session's
+    /// conversation-scoped subject. Idempotent; called when the session's
+    /// native computer-use authority is revoked.
+    pub(super) async fn purge_session_native_subject(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(), String> {
+        if session_id.is_nil() {
+            return Err("invalid session id".to_owned());
+        }
+        let result = self
+            .broker
+            .control(ControlRequest::PurgeConversationSubject(
+                tidebreak_host_broker::PurgeConversationSubjectRequest {
+                    conversation_id: session_id,
+                },
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ControlResult::PurgeConversationSubject(_) = result else {
+            return Err("host broker returned an unexpected response".to_owned());
+        };
+        Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -549,6 +576,19 @@ impl AuthoritativeContext {
     }
 }
 
+/// Authority for a native computer-use operation issued by a code session.
+///
+/// A code session is not a chat: it has no project row in the chat store, so
+/// its broker subject is always the conversation-scoped one keyed by the
+/// session id. Session grants end with the session. An explicit saved native
+/// app permission applies across tasks and remains independently revocable.
+pub(super) fn session_native_context(session_id: Uuid) -> Result<AuthoritativeContext, String> {
+    if session_id.is_nil() {
+        return Err("invalid session id".to_owned());
+    }
+    authoritative_context(session_id, None)
+}
+
 fn authoritative_context(
     chat_id: Uuid,
     project_id: Option<Uuid>,
@@ -804,6 +844,9 @@ async fn capability_statement(
         Capability::ReadFiles => HostCapability::ReadFiles,
         Capability::WriteFiles => HostCapability::WriteFiles,
         Capability::ExecuteCommands => HostCapability::ExecuteCommands,
+        Capability::CaptureScreen => HostCapability::CaptureScreen,
+        Capability::ReadAppContent => HostCapability::ReadAppContent,
+        Capability::ControlApp => HostCapability::ControlApp,
         _ => return None,
     };
     let method = match grant.consent_method {
@@ -838,6 +881,11 @@ async fn capability_statement(
     };
     let resource = match &grant.scope {
         Scope::Subject => ConsentResource::HostSubject,
+        Scope::App { bundle_id } => ConsentResource::HostApp {
+            bundle_id: bundle_id.clone(),
+            display_name: None,
+        },
+        Scope::Screen => ConsentResource::HostScreen,
         Scope::Root { root_id } => ConsentResource::HostRoot {
             root_id: root_id.to_string(),
             display_name: grant.root_display_name.clone(),
@@ -850,6 +898,7 @@ async fn capability_statement(
         _ => return None,
     };
     Some(ConsentStatementSnapshot {
+        native_app_all_sessions: grant.native_app_all_sessions.then_some(true),
         handle: ConsentHandle::CapabilityGrant {
             grant_id: grant.grant_id.to_string(),
         },
@@ -880,6 +929,7 @@ pub(crate) struct RevokeCapabilityConsentRequest {
 /// mismatched level revokes nothing and reports `false`.
 #[tauri::command]
 pub(crate) async fn revoke_capability_consent(
+    app: AppHandle,
     state: State<'_, HostAccess>,
     request: RevokeCapabilityConsentRequest,
 ) -> Result<bool, String> {
@@ -904,6 +954,9 @@ pub(crate) async fn revoke_capability_consent(
     let ControlResult::RevokeGrant(result) = result else {
         return Err("host broker returned an unexpected response".to_owned());
     };
+    if result.revoked {
+        let _ = app.emit("capability-consents-changed", ());
+    }
     Ok(result.revoked)
 }
 
@@ -1442,6 +1495,68 @@ mod tests {
         assert_eq!(project.execution.conversation_id(), chat_id);
         assert_eq!(project.execution.project_id(), Some(project_id));
         assert_eq!(project.subject.id(), project_id);
+    }
+
+    #[tokio::test]
+    async fn native_app_permissions_project_with_scope_and_revocation_identity() {
+        use tidebreak_host_broker::{ConsentMethod, GrantId, GrantStatementSummary, Scope};
+        let dir = tempfile::tempdir().unwrap();
+        let store = tidebreak_core::DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("native-consents.db").display()
+        ))
+        .await
+        .unwrap();
+        let subject = GrantSubject::conversation(Uuid::new_v4()).unwrap();
+        let grant_id = GrantId::new();
+        for (capability, scope, all_sessions) in [
+            (
+                Capability::ControlApp,
+                Scope::App {
+                    bundle_id: "dev.tidebreak.fixture".into(),
+                },
+                true,
+            ),
+            (
+                Capability::ReadAppContent,
+                Scope::App {
+                    bundle_id: "dev.tidebreak.fixture".into(),
+                },
+                false,
+            ),
+            (Capability::CaptureScreen, Scope::Screen, false),
+        ] {
+            let statement = capability_statement(
+                &store,
+                GrantStatementSummary {
+                    native_app_all_sessions: all_sessions,
+                    grant_id,
+                    subject,
+                    capability,
+                    scope,
+                    root_display_name: None,
+                    consent_method: ConsentMethod::PermissionDialog,
+                    granted_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("native permission must be visible in Settings");
+            let wire = serde_json::to_value(statement).unwrap();
+            assert_eq!(wire["handle"]["grant_id"], grant_id.to_string());
+            assert_eq!(wire["level"]["chat_id"], subject.id().to_string());
+            assert_eq!(
+                wire["native_app_all_sessions"].as_bool().unwrap_or(false),
+                all_sessions
+            );
+            assert_eq!(
+                wire["resource"]["kind"],
+                if capability == Capability::CaptureScreen {
+                    "host_screen"
+                } else {
+                    "host_app"
+                }
+            );
+        }
     }
 
     #[test]

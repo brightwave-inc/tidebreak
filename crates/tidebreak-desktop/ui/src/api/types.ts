@@ -775,6 +775,16 @@ export type ToolResultPreview =
       feedback: string | null;
     }
   | {
+      /** Screenshots retained in capture order for later turns. */
+      tool: "images";
+      images: {
+        attachmentId: string;
+        mediaType: string;
+        width: number;
+        height: number;
+      }[];
+    }
+  | {
       /** A computer-use screen capture: the image plus how many controls were
        * marked on it. The pixels live in the blob store, referenced here. */
       tool: "screen_capture";

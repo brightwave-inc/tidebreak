@@ -26,6 +26,7 @@ postgres = ["tidebreak-core/postgres", "sea-orm/sqlx-postgres", "tidebreak-core/
 test-support = ["tidebreak-core/test-util"]
 
 [dependencies]
+tokio-tungstenite = { workspace = true }
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-code-delivery = { path = "../tidebreak-code-delivery" }
@@ -46,6 +47,10 @@ axum = { workspace = true }
 sea-orm = { workspace = true }
 tokio = { workspace = true }
 tower-http = { version = "=0.7.1", features = ["cors", "fs", "limit"] }
+# Chrome computer use: direct CDP over the already-locked workspace websocket stack.
+# `futures-util` reuses futures 0.3.34 from the lockfile and keeps the driver's
+# stream plumbing explicit without pulling a second futures graph.
+futures-util = "=0.3.34"
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -124,4 +129,3 @@ tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
 # loopback socket, with only Docker and the host model mocked.
 tidebreak-sandbox-agent = { path = "../tidebreak-sandbox-agent" }
 tower = { version = "=0.5.3", features = ["util"] }
-tokio-tungstenite = { workspace = true }

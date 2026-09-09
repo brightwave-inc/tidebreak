@@ -1,10 +1,9 @@
 //! Grok CLI adapter. Best-effort tier.
 //!
-//! Process model for 1.0.4: one print-mode child per turn
-//! (`--prompt-file` + `--output-format streaming-json`). Chosen over
-//! `grok agent stdio` ACP because the captured print stream is a real
-//! machine-readable NDJSON surface and no ACP permission
-//! request/response pair was captured.
+//! Pins 1.0.4 and 1.0.5 use one print-mode child per turn. The captured
+//! 1.0.13 ACP channel carries native approvals, cancellation, and session
+//! loading over stdin/stdout. Other versions retain the print fallback
+//! without claiming a verified Auto posture.
 
 pub mod parse;
 pub mod session;
@@ -135,12 +134,26 @@ impl HarnessAdapter for GrokAdapter {
             transcript: CapLevel::Unsupported,
             memory_loopback: CapLevel::Unsupported,
         };
-        // Off the captured 1.0 line the unprompted-write observation behind
-        // Auto no longer holds; a later default posture is unproven
-        // (decision 31 rule 3). The Unsupported verdicts stay: this adapter
-        // composes no approval channel or plan flags at any version.
-        if crate::probe::off_pinned_line(probe.version.as_deref(), (1, 0)) {
+        // An unprompted write on an older pin does not establish a later
+        // release's default posture. ACP support is enabled separately below.
+        let captured_print_auto = probe.version.as_deref().is_some_and(|version| {
+            let version = version
+                .trim()
+                .strip_prefix("grok ")
+                .unwrap_or(version.trim());
+            matches!(version.split_whitespace().next(), Some("1.0.4" | "1.0.5"))
+        });
+        if !captured_print_auto {
             caps.auto_mode = CapLevel::Unknown;
+        }
+        if probe
+            .version
+            .as_deref()
+            .is_some_and(session::supports_acp_version)
+        {
+            caps.structured_approvals = CapLevel::Supported;
+            caps.auto_mode = CapLevel::Supported;
+            caps.image_input = CapLevel::Unsupported;
         }
         caps
     }
@@ -165,10 +178,10 @@ impl HarnessAdapter for GrokAdapter {
         let Some(binary) = spec.binary.as_deref().filter(|path| path.is_absolute()) else {
             return Err(HarnessError::NotFound);
         };
-        crate::grok::session::refuse_unhonored_mode(spec.permission_mode)?;
         let version = observe_version(binary, &spec.env)
             .await
             .unwrap_or_else(|_| "unknown".into());
+        crate::grok::session::refuse_versioned_mode(spec.permission_mode, &version)?;
         Ok(Box::new(GrokSession::new(spec, version)))
     }
 }
@@ -221,6 +234,49 @@ mod tests {
     use crate::HarnessEvent;
     use std::path::{Path, PathBuf};
     use tidebreak_core::PermissionMode;
+
+    #[test]
+    fn image_read_fixture_keeps_pixels_out_of_the_journal_preview() {
+        let (events, unrecognized) = replay_version("1.0.13", "image-read");
+        assert_eq!(unrecognized, 0);
+        let preview = events.iter().find_map(|event| match event {
+            HarnessEvent::ToolCompleted { preview, .. } => Some(preview.as_str()),
+            _ => None,
+        });
+        assert_eq!(preview, Some("Image received (image/png)."));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(!rendered.contains("iVBOR"));
+    }
+
+    #[test]
+    fn image_read_fixture_reaches_the_next_model_request_as_pixels() {
+        let directory = fixture_dir("1.0.13");
+        let stream = std::fs::read_to_string(directory.join("image-read.ndjson")).unwrap();
+        let image_update = stream
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|value| value.pointer("/rawOutput/ImageContent/data").is_some())
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.join("image-read-request.json")).unwrap(),
+        )
+        .unwrap();
+        let pixels = image_update
+            .pointer("/rawOutput/ImageContent/data")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let image = request["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "image_url")
+            .unwrap();
+        assert_eq!(
+            image["image_url"]["url"],
+            format!("data:image/png;base64,{pixels}")
+        );
+        assert_eq!(request["messages"][0]["role"], "tool");
+    }
 
     fn fixture_dir(version: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/grok/{version}"))

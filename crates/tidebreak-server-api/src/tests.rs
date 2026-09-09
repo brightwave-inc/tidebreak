@@ -55,6 +55,7 @@ mod code_external_model;
 mod code_git;
 mod code_hosted_execution;
 mod code_internal;
+mod code_native;
 mod code_owner_scope;
 mod code_policy;
 #[cfg(unix)]

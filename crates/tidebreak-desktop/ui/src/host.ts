@@ -148,13 +148,30 @@ export function listApprovedFolders(): Promise<ConnectedFolder[]> {
 
 /**
  * The capability half of the unified consent read model: every host-broker
- * grant over connected folders, in the same statement shape the server serves
+ * grant over folders, native apps, or displays, in the statement shape the server serves
  * for standing tool grants. Empty outside the native host — a browser build
  * has no broker and therefore no capability consent to report.
  */
 export function listCapabilityConsents(): Promise<ConsentStatementSnapshot[]> {
   if (!isTauri()) return Promise.resolve([]);
   return invoke("list_capability_consents");
+}
+
+/** Refresh saved app grants while a native consent dialog changes them. */
+export function onCapabilityConsentsChanged(handler: () => void): () => void {
+  if (!isTauri()) return () => {};
+  let disposed = false;
+  let unlisten: (() => void) | undefined;
+  void listen("capability-consents-changed", handler)
+    .then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    })
+    .catch(() => {});
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
 }
 
 /**

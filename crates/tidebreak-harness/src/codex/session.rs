@@ -75,7 +75,6 @@ pub struct CodexSession {
     interrupts_this_turn: AtomicU32,
     control_state: Arc<Mutex<ControlState>>,
     control_state_changed: Arc<Notify>,
-    pending_approvals: Mutex<HashMap<String, Value>>,
 }
 
 struct StdoutReader {
@@ -214,7 +213,6 @@ impl CodexSession {
                 interrupt: None,
             })),
             control_state_changed: Arc::new(Notify::new()),
-            pending_approvals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -787,6 +785,7 @@ pub(crate) fn compose_app_server_plan(
     cwd: &std::path::Path,
     extra_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&crate::NativeChannelSpec>,
     relay_key_env: Option<&str>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
@@ -801,16 +800,16 @@ pub(crate) fn compose_app_server_plan(
         // and control characters in a Windows or unusual path are turned
         // into valid JSON string characters. Reject non-UTF-8 paths
         // explicitly rather than silently replacing characters.
-        let bridge_path = spec.bridge_command().to_str().ok_or_else(|| {
-            HarnessError::Other(format!(
-                "browser bridge command path is not valid UTF-8: {}",
-                spec.bridge_command().display()
-            ))
-        })?;
-        let escaped = serde_json::to_string(bridge_path)
-            .expect("serializing a valid &str to JSON cannot fail");
+        let escaped = escaped_bridge_path(spec.bridge_command(), "browser")?;
         argv.push(
             format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"),
+        );
+    }
+    if let Some(spec) = native {
+        argv.push("-c".into());
+        let escaped = escaped_bridge_path(spec.bridge_command(), "native")?;
+        argv.push(
+            format!("mcp_servers.tb-native={{command={escaped},args=[\"computer-mcp\"],env_vars=[\"TIDEBREAK_NATIVE_CAPFILE\"]}}"),
         );
     }
     let mut env = extra_env.to_vec();
@@ -824,6 +823,21 @@ pub(crate) fn compose_app_server_plan(
     };
     validate_launch_plan(&plan)?;
     Ok(plan)
+}
+
+/// JSON-escape a bridge path for a Codex `-c mcp_servers.…` override,
+/// refusing non-UTF-8 paths rather than silently replacing characters.
+fn escaped_bridge_path(
+    bridge_command: &std::path::Path,
+    channel: &str,
+) -> Result<String, HarnessError> {
+    let bridge_path = bridge_command.to_str().ok_or_else(|| {
+        HarnessError::Other(format!(
+            "{channel} bridge command path is not valid UTF-8: {}",
+            bridge_command.display()
+        ))
+    })?;
+    Ok(serde_json::to_string(bridge_path).expect("serializing a valid &str to JSON cannot fail"))
 }
 
 /// `thread/start` sandbox + approvalPolicy for a permission mode.
@@ -877,6 +891,7 @@ impl CodexSession {
             &self.spec.worktree,
             &self.spec.extra_env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
             self.spec.relay_key_env.as_deref(),
         )?;
         let mut command = Command::new(&plan.argv[0]);
@@ -892,6 +907,7 @@ impl CodexSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdin = child
@@ -1205,7 +1221,24 @@ impl CodexSession {
                 *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
         }
-        let events = self.parser.lock().expect("codex parser").push_line(line);
+        let (events, rejected_elicitations) = {
+            let mut parser = self.parser.lock().expect("codex parser");
+            let events = parser.push_line(line);
+            (events, parser.take_rejected_elicitations())
+        };
+        for reply in rejected_elicitations {
+            if let Err(error) = self.write_message(&reply).await {
+                self.spec
+                    .sink
+                    .emit(HarnessEvent::HarnessNotice {
+                        level: tidebreak_core::HarnessNoticeLevel::Error,
+                        message: format!(
+                            "Could not decline the unsupported Codex MCP request: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
         let terminal = events.iter().any(|event| {
             matches!(
                 event,
@@ -1238,18 +1271,7 @@ impl CodexSession {
                 *self.resume_ref.lock().expect("codex resume") = Some(resume.clone());
             }
             if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
-                if let Some(id) = self
-                    .parser
-                    .lock()
-                    .expect("codex parser")
-                    .pending_approval_rpc_id(&harness_ref.call_id)
-                {
-                    self.pending_approvals
-                        .lock()
-                        .expect("codex approvals")
-                        .insert(harness_ref.call_id.clone(), id.clone());
-                }
-                if self.spec.permission_mode == PermissionMode::Allow {
+                if self.permission_mode() == PermissionMode::Allow {
                     // Allow is the engine's unsupervised posture. A request
                     // that still arrives must not park a card.
                     let _ = self
@@ -1360,39 +1382,21 @@ impl HarnessSession for CodexSession {
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        let rpc_id = self
-            .pending_approvals
-            .lock()
-            .expect("codex approvals")
-            .remove(&approval.call_id)
-            .or_else(|| {
-                self.parser
-                    .lock()
-                    .expect("codex parser")
-                    .take_pending_approval(&approval.call_id)
-            })
-            .ok_or_else(|| {
+        let response = {
+            let mut parser = self.parser.lock().expect("codex parser");
+            let pending = parser.pending_approval(&approval.call_id).ok_or_else(|| {
                 HarnessError::Other(format!(
                     "no parked approval with call_id {}",
-                    approval.call_id
+                    approval.call_id,
                 ))
             })?;
-        // Captured channel carries accept/decline only — no rejection string,
-        // and none of the richer decision variants (caps say so; this is the
-        // backstop).
-        let token = match decision {
-            ApprovalDecision::Approve => "accept",
-            ApprovalDecision::Deny { .. } => "decline",
-            ApprovalDecision::ApproveWithGrant { .. }
-            | ApprovalDecision::Answers { .. }
-            | ApprovalDecision::PlanDecision { .. } => {
-                return Err(HarnessError::DecisionUnsupported(
-                    "the codex approval channel takes accept or decline".into(),
-                ));
-            }
+            // Validate before consuming the request. An unsupported decision
+            // must leave the tool available for an accept or decline reply.
+            let response = pending.response(&decision)?;
+            parser.take_pending_approval(&approval.call_id);
+            response
         };
-        self.write_message(&json!({ "id": rpc_id, "result": { "decision": token } }))
-            .await?;
+        self.write_message(&response).await?;
         self.spec
             .sink
             .emit(HarnessEvent::ApprovalResolved {

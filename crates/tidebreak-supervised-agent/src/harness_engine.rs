@@ -278,6 +278,7 @@ impl HarnessEngine {
                 binary: Some(binary),
                 sink: self.sink.clone(),
                 browser: None,
+                native: None,
             })
             .await
             .map_err(|error| EngineError {

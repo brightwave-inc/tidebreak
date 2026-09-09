@@ -5,8 +5,8 @@
 //! no server executor). The calls are claimed and fulfilled by the desktop
 //! client, which authorizes against the host broker's per-app capability grants
 //! and performs the work on the host where the display and input devices live.
-//! Sandboxed and background agents never hold these tools: they run where there
-//! is no display.
+//! Agent transports use the desktop's session-scoped bridge. Input stays
+//! independent of the user's hardware pointer and keyboard focus.
 //!
 //! Targeting is accessibility-first. An element is addressed by its `mark` (a
 //! Set-of-Marks number from the most recent annotated screenshot) or by
@@ -33,7 +33,7 @@ pub const COMPUTER_READ_APP_CONTENT_TOOL: &str = "computer_read_app_content";
 pub const COMPUTER_CLICK_TOOL: &str = "computer_click";
 /// Type text into an element or the focused field.
 pub const COMPUTER_TYPE_TEXT_TOOL: &str = "computer_type_text";
-/// Press a key (optionally a chord) in the focused app.
+/// Send a key (optionally a chord) directly to the target app.
 pub const COMPUTER_KEY_PRESS_TOOL: &str = "computer_key_press";
 /// Scroll an element or point by a pixel delta.
 pub const COMPUTER_SCROLL_TOOL: &str = "computer_scroll";
@@ -43,6 +43,14 @@ pub const COMPUTER_FOCUS_WINDOW_TOOL: &str = "computer_focus_window";
 pub const COMPUTER_RETURN_TO_TIDEBREAK_TOOL: &str = "computer_return_to_tidebreak";
 /// Wait a bounded number of seconds (e.g. for an app to finish an action).
 pub const COMPUTER_WAIT_TOOL: &str = "computer_wait";
+/// Launch an app by its approved bundle id.
+pub const COMPUTER_LAUNCH_APP_TOOL: &str = "computer_launch_app";
+/// Move the pointer over an element or point in an app without pressing.
+pub const COMPUTER_HOVER_TOOL: &str = "computer_hover";
+/// Press and drag from one element/point to another within an app.
+pub const COMPUTER_DRAG_TOOL: &str = "computer_drag";
+/// Resize one window of an app in logical points.
+pub const COMPUTER_RESIZE_WINDOW_TOOL: &str = "computer_resize_window";
 
 /// Longest text `computer_type_text` will enter in one call. The helper's
 /// synthesized-keystroke fallback is further bounded (it would otherwise risk a
@@ -55,9 +63,29 @@ pub const MAX_READ_DEPTH: u32 = 25;
 pub const MAX_READ_NODES: u32 = 2000;
 /// Longest `computer_wait` sleep, in seconds.
 pub const MAX_WAIT_SECONDS: f64 = 10.0;
+/// Longest model-requested drag, in milliseconds. The helper enforces the
+/// same bound, so a drag is always finite and cancellable.
+pub const MAX_DRAG_DURATION_MS: u64 = 10_000;
+/// Longest condition text a wait may request, matching the browser wait
+/// surface.
+pub const MAX_WAIT_CONDITION_TEXT_CHARS: usize = 512;
+/// Upper bound on one requested window dimension (logical points). Keeps a
+/// nonsense request from reaching a window server resize.
+pub const MAX_WINDOW_DIMENSION: f64 = 10_000.0;
+/// Default long-edge cap applied to native captures when the model does not
+/// ask for one. Keeps PNGs near the MCP transport budget while staying
+/// readable.
+pub const DEFAULT_CAPTURE_MAX_DIMENSION: u32 = 1440;
+/// Hard cap a capture may request, applied again by the helper so a buggy
+/// caller cannot push an unbounded pixel buffer.
+pub const MAX_CAPTURE_MAX_DIMENSION: u32 = 4096;
+/// Default total time a condition wait polls, in seconds.
+pub const DEFAULT_CONDITION_TIMEOUT_SECONDS: f64 = 10.0;
+/// Hard bound a condition wait may request.
+pub const MAX_CONDITION_TIMEOUT_SECONDS: f64 = 30.0;
 
-/// All ten computer-use tool names.
-pub const COMPUTER_USE_TOOLS: [&str; 10] = [
+/// All fourteen computer-use tool names.
+pub const COMPUTER_USE_TOOLS: [&str; 14] = [
     COMPUTER_LIST_WINDOWS_TOOL,
     COMPUTER_CAPTURE_SCREEN_TOOL,
     COMPUTER_READ_APP_CONTENT_TOOL,
@@ -68,18 +96,27 @@ pub const COMPUTER_USE_TOOLS: [&str; 10] = [
     COMPUTER_FOCUS_WINDOW_TOOL,
     COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
     COMPUTER_WAIT_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL,
+    COMPUTER_HOVER_TOOL,
+    COMPUTER_DRAG_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL,
 ];
 
 /// The control (acting) tools, which require the `ControlApp` grant and gate
-/// behind the `ComputerMayControlApp` approval kind. Reads never card per-call
-/// once their grant exists. Scroll and focus are acting tools: they synthesize
-/// input, warp the cursor, and raise windows, so they are not read-only.
-pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 5] = [
+/// behind the `ComputerMayControlApp` approval kind. Launch, hover, drag, and
+/// resize all mutate the user's real host state or synthesize input, so they
+/// are control tools alongside click/type/key/scroll/focus. Reads never card
+/// per-call once their grant exists.
+pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 9] = [
     COMPUTER_CLICK_TOOL,
     COMPUTER_TYPE_TEXT_TOOL,
     COMPUTER_KEY_PRESS_TOOL,
     COMPUTER_SCROLL_TOOL,
     COMPUTER_FOCUS_WINDOW_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL,
+    COMPUTER_HOVER_TOOL,
+    COMPUTER_DRAG_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL,
 ];
 
 /// Whether `name` is any computer-use tool.
@@ -94,13 +131,29 @@ pub fn is_computer_use_control_tool(name: &str) -> bool {
     COMPUTER_USE_CONTROL_TOOLS.contains(&name)
 }
 
-/// Shared guidance folded into the acting tools' descriptions: computer use is
-/// primarily an observation surface, while GUI driving is a disruptive fallback.
-const ACTING_NOTE: &str = "\n\nUse GUI control sparingly. Clicking, typing, scrolling, and moving focus use the user's real interface and are slower, more brittle, and more disruptive than reading app content or using a dedicated tool. Read first, prefer a non-GUI path when one exists, and act only when it is necessary to complete the user's request. The user can stop control at any time.";
+/// Shared guidance for acting without taking over the user's input devices.
+const ACTING_NOTE: &str = "\n\nRead the app before acting and verify the result afterward. Actions use only `background` execution mode and preserve the user's hardware pointer, keyboard focus, and active window. The agent's cursor is separate from the hardware pointer. If the host cannot perform an action independently, it refuses with `independent_input_unavailable` or the legacy `requires_foreground` error. Never request foreground control, switch focus, or retry through a takeover path. Report the unsupported action and use an available independent alternative. Unknown outcomes require inspection; never replay uncertain input. The user can stop control at any time.";
 
 /// Shared targeting guidance: prefer a Set-of-Marks number or an element
 /// identity over raw coordinates.
 const TARGETING_NOTE: &str = "Target by `mark` (a number from the last annotated screenshot) or by `element_id` + `element_fingerprint` from `computer_read_app_content`. Use `x`/`y` coordinates only when the app exposes no usable accessibility element.";
+
+/// How a control action interacts with the user's live session. Only background
+/// input is supported. The foreground wire value remains readable so existing
+/// callers receive a refusal instead of silently changing execution modes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(description = "", transform = crate::client_tools::preserve_enum_wire_shape)]
+pub enum ExecutionMode {
+    /// Act without disturbing the user's focus or pointer (the default). An
+    /// action that cannot honor this refuses without a takeover fallback.
+    #[default]
+    #[schemars(description = "")]
+    Background,
+    /// Legacy wire value. Validation rejects it; models cannot select it.
+    #[schemars(skip)]
+    Foreground,
+}
 
 /// Which mouse button a click uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -164,10 +217,29 @@ pub struct ComputerCaptureScreenArgs {
     #[serde(default = "default_true")]
     #[schemars(description = "Annotate interactive elements with numbered marks.")]
     pub annotate: bool,
+    /// Select one window of the app (from `computer_list_windows`) instead of
+    /// every window of the app. Requires `app_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional window id to capture; app capture only.")]
+    pub window_id: Option<u32>,
+    /// Cap the longest image edge in pixels after capture so the image fits
+    /// the transport budget (default 1440, max 4096). The image is downscaled
+    /// to this edge. Use the returned coordinate frame to map screenshot
+    /// pixels into the global logical coordinates accepted by input tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 1, max = MAX_CAPTURE_MAX_DIMENSION),
+        description = "Max image edge in pixels (default 1440, max 4096)."
+    )]
+    pub max_dimension: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn window_dimension_ok(value: Option<f64>) -> bool {
+    value.is_none_or(|v| v.is_finite() && v > 0.0 && v <= MAX_WINDOW_DIMENSION)
 }
 
 /// Canonical arguments for [`COMPUTER_READ_APP_CONTENT_TOOL`].
@@ -233,6 +305,14 @@ pub struct ComputerClickArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Double-click when true (default single).")]
     pub double: Option<bool>,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_TYPE_TEXT_TOOL`].
@@ -248,9 +328,18 @@ pub struct ComputerTypeTextArgs {
         description = "Text to type."
     )]
     pub text: String,
-    /// Where to type. Omit to type into the focused field.
+    /// Where to type. Omit for the target app's focused field without changing
+    /// the user's keyboard focus.
     #[serde(flatten)]
     pub target: ElementTargetArgs,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_KEY_PRESS_TOOL`].
@@ -270,6 +359,14 @@ pub struct ComputerKeyPressArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Chord modifiers to hold (cmd/shift/ctrl/alt/fn).")]
     pub modifiers: Option<Vec<KeyModifier>>,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_SCROLL_TOOL`].
@@ -279,7 +376,8 @@ pub struct ComputerScrollArgs {
     /// The app to scroll in, by bundle id.
     #[schemars(description = "App bundle id.")]
     pub app_id: String,
-    /// Where to scroll. Omit to scroll at the current pointer location.
+    /// Where to scroll. Omit only when the app provides an independent default
+    /// scroll target.
     #[serde(flatten)]
     pub target: ElementTargetArgs,
     /// Horizontal pixel delta (positive scrolls right).
@@ -290,6 +388,14 @@ pub struct ComputerScrollArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Vertical pixel delta (positive = down).")]
     pub dy: Option<f64>,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_FOCUS_WINDOW_TOOL`].
@@ -303,26 +409,182 @@ pub struct ComputerFocusWindowArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Optional window id to raise.")]
     pub window_id: Option<u32>,
+    /// Retained for wire compatibility. Changing the user's keyboard focus is
+    /// unavailable in every execution mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Retained for compatibility. This tool is unavailable because it changes the user's keyboard focus."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Canonical arguments for [`COMPUTER_RETURN_TO_TIDEBREAK_TOOL`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ComputerReturnToTidebreakArgs {}
+pub struct ComputerReturnToTidebreakArgs {
+    /// Retained for wire compatibility. Raising Tidebreak changes the user's
+    /// keyboard focus, so this tool is unavailable in every execution mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Retained for compatibility. This tool is unavailable because it changes the user's keyboard focus."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
+}
 
 /// Canonical arguments for [`COMPUTER_WAIT_TOOL`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerWaitArgs {
+    /// App to observe. Required with a condition; omitted for a fixed pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "App bundle id, required when waiting for a condition.")]
+    pub app_id: Option<String>,
     /// How long to wait, in seconds (default 1, max 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Seconds to wait (default 1, max 10).")]
     pub seconds: Option<f64>,
+    /// Optional deterministic condition to wait for instead of a fixed pause.
+    /// App/window/text conditions poll the live app state; they never type or
+    /// click and never fall back to a fixed sleep when the condition fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional condition to wait for.")]
+    pub condition: Option<ComputerWaitConditionArgs>,
+    /// Total time to poll a `condition`, in seconds (default 10, max 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 0.1, max = MAX_CONDITION_TIMEOUT_SECONDS),
+        description = "Maximum condition wait in seconds (default 10, max 30)."
+    )]
+    pub condition_timeout_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ComputerWaitConditionArgs {
+    /// Wait until a process with `app_id` is a running application.
+    AppRunning,
+    /// Wait until `app_id` has at least one on-screen window.
+    WindowVisible,
+    /// Wait until the app's accessibility tree contains `text` exactly (case
+    /// sensitive, matching an element title/description/value).
+    TextPresent { text: String },
+    /// Wait until the app's accessibility tree no longer contains `text`
+    /// exactly (case sensitive, matching an element title/description/value).
+    TextAbsent { text: String },
+}
+
+/// Canonical arguments for [`COMPUTER_LAUNCH_APP_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerLaunchAppArgs {
+    /// The app to launch, by bundle id. The helper only opens the registered
+    /// application the id resolves to through NSWorkspace; arbitrary
+    /// executables, paths, and arguments are never accepted.
+    #[schemars(
+        length(min = 1, max = 256),
+        description = "App bundle id to launch (e.g. \"com.apple.Notes\")."
+    )]
+    pub app_id: String,
+    /// Only background launch is supported; it preserves the user's keyboard
+    /// focus and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) launches without changing the user's keyboard focus or active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
+}
+
+/// Canonical arguments for [`COMPUTER_HOVER_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerHoverArgs {
+    /// The app to hover in, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// The element or point to hover. Raw coordinates are global and are
+    /// re-validated against the app's on-screen windows immediately before
+    /// input is sent.
+    #[serde(flatten)]
+    pub target: ElementTargetArgs,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
+}
+
+/// Canonical arguments for [`COMPUTER_DRAG_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerDragArgs {
+    /// The app to drag in, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// Where the press goes down.
+    #[schemars(description = "Drag origin: element or point.")]
+    pub from: ElementTargetArgs,
+    /// Where the button releases.
+    #[schemars(description = "Drag destination: element or point.")]
+    pub to: ElementTargetArgs,
+    /// Duration of the drag in milliseconds (default 200, max 10000). Both
+    /// endpoints are validated before the first mouse-down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 0, max = MAX_DRAG_DURATION_MS),
+        description = "Drag duration in ms (default 200, max 10000)."
+    )]
+    pub duration_ms: Option<u64>,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
+}
+
+/// Canonical arguments for [`COMPUTER_RESIZE_WINDOW_TOOL`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerResizeWindowArgs {
+    /// The app owning the window, by bundle id.
+    #[schemars(description = "App bundle id.")]
+    pub app_id: String,
+    /// Which window to resize (from `computer_list_windows`). Omit for the
+    /// app's main/frontmost window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional window id to resize.")]
+    pub window_id: Option<u32>,
+    /// New width in logical points (max 10000).
+    #[schemars(range(min = 1.0, max = MAX_WINDOW_DIMENSION))]
+    pub width: f64,
+    /// New height in logical points (max 10000).
+    #[schemars(range(min = 1.0, max = MAX_WINDOW_DIMENSION))]
+    pub height: f64,
+    /// Only background input is supported; it preserves the user's hardware
+    /// pointer, keyboard focus, and active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "ExecutionMode",
+        description = "Execution mode: \"background\" (the only supported mode) preserves the user's hardware pointer, keyboard focus, and active window."
+    )]
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 // MARK: - Validation
 
 fn parse<T: for<'de> Deserialize<'de>>(arguments: &Value) -> Option<T> {
+    // Keep the legacy wire value readable, but never authorize or rewrite it.
+    if arguments.get("execution_mode").and_then(Value::as_str) == Some("foreground") {
+        return None;
+    }
     serde_json::from_value::<T>(arguments.clone()).ok()
 }
 
@@ -355,19 +617,29 @@ validate_fn!(
     validate_computer_list_windows_arguments,
     ComputerListWindowsArgs
 );
-validate_fn!(
-    validate_computer_focus_window_arguments,
-    ComputerFocusWindowArgs
-);
-validate_fn!(
-    validate_computer_return_to_tidebreak_arguments,
-    ComputerReturnToTidebreakArgs
-);
+/// Reject the legacy focus operation, which cannot preserve keyboard focus.
+#[must_use]
+pub fn validate_computer_focus_window_arguments(_arguments: &Value) -> bool {
+    false
+}
+
+/// Reject the legacy return operation, which cannot preserve keyboard focus.
+#[must_use]
+pub fn validate_computer_return_to_tidebreak_arguments(_arguments: &Value) -> bool {
+    false
+}
 
 /// Validate a `computer_capture_screen` payload.
 #[must_use]
 pub fn validate_computer_capture_screen_arguments(arguments: &Value) -> bool {
-    parse::<ComputerCaptureScreenArgs>(arguments).is_some()
+    let Some(args) = parse::<ComputerCaptureScreenArgs>(arguments) else {
+        return false;
+    };
+    args.max_dimension
+        .is_none_or(|edge| (1..=MAX_CAPTURE_MAX_DIMENSION).contains(&edge))
+        && args.app_id.as_ref().is_none_or(|id| !id.trim().is_empty())
+        && (args.window_id.is_none() || args.app_id.is_some())
+        && !(args.app_id.is_some() && args.display_id.is_some())
 }
 
 /// Validate a `computer_read_app_content` payload, enforcing the read bounds.
@@ -431,8 +703,114 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
     let Some(args) = parse::<ComputerWaitArgs>(arguments) else {
         return false;
     };
-    args.seconds
-        .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s))
+    let seconds_ok = args
+        .seconds
+        .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s));
+    let timeout_ok = args
+        .condition_timeout_seconds
+        .is_none_or(|s| s.is_finite() && (0.1..=MAX_CONDITION_TIMEOUT_SECONDS).contains(&s));
+    let condition_ok = match &args.condition {
+        None => true,
+        Some(ComputerWaitConditionArgs::AppRunning)
+        | Some(ComputerWaitConditionArgs::WindowVisible) => true,
+        Some(ComputerWaitConditionArgs::TextPresent { text })
+        | Some(ComputerWaitConditionArgs::TextAbsent { text }) => {
+            !text.trim().is_empty() && text.chars().count() <= MAX_WAIT_CONDITION_TEXT_CHARS
+        }
+    };
+    let scope_ok = if args.condition.is_some() {
+        args.app_id.as_ref().is_some_and(|id| !id.trim().is_empty()) && args.seconds.is_none()
+    } else {
+        args.app_id.is_none() && args.condition_timeout_seconds.is_none()
+    };
+    seconds_ok && timeout_ok && condition_ok && scope_ok
+}
+
+/// Validate a `computer_launch_app` payload.
+#[must_use]
+pub fn validate_computer_launch_app_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerLaunchAppArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+}
+
+/// Validate a `computer_hover` payload.
+#[must_use]
+pub fn validate_computer_hover_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerHoverArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty() && target_is_well_formed(&args.target)
+}
+
+/// Validate a `computer_drag` payload, enforcing the duration bound and the
+/// shape of both endpoints.
+#[must_use]
+pub fn validate_computer_drag_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerDragArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+        && target_is_well_formed(&args.from)
+        && target_is_well_formed(&args.to)
+        && args.duration_ms.is_none_or(|ms| ms <= MAX_DRAG_DURATION_MS)
+}
+
+/// Validate a `computer_resize_window` payload, enforcing the window bounds.
+#[must_use]
+pub fn validate_computer_resize_window_arguments(arguments: &Value) -> bool {
+    let Some(args) = parse::<ComputerResizeWindowArgs>(arguments) else {
+        return false;
+    };
+    !args.app_id.trim().is_empty()
+        && window_dimension_ok(Some(args.width))
+        && window_dimension_ok(Some(args.height))
+}
+
+/// Return the canonical native computer-use surface for every agent transport.
+/// The host still authorizes each call against its session and app grants.
+#[must_use]
+pub fn computer_use_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        computer_list_windows_tool_spec(),
+        computer_capture_screen_tool_spec(),
+        computer_read_app_content_tool_spec(),
+        computer_click_tool_spec(),
+        computer_type_text_tool_spec(),
+        computer_key_press_tool_spec(),
+        computer_scroll_tool_spec(),
+        computer_wait_tool_spec(),
+        computer_launch_app_tool_spec(),
+        computer_hover_tool_spec(),
+        computer_drag_tool_spec(),
+        computer_resize_window_tool_spec(),
+    ]
+}
+
+/// Validate a named call before a transport forwards it to the native host.
+/// Unknown tools never reach the host executor.
+#[must_use]
+pub fn validate_computer_use_arguments(name: &str, arguments: &Value) -> bool {
+    match name {
+        COMPUTER_LIST_WINDOWS_TOOL => validate_computer_list_windows_arguments(arguments),
+        COMPUTER_CAPTURE_SCREEN_TOOL => validate_computer_capture_screen_arguments(arguments),
+        COMPUTER_READ_APP_CONTENT_TOOL => validate_computer_read_app_content_arguments(arguments),
+        COMPUTER_CLICK_TOOL => validate_computer_click_arguments(arguments),
+        COMPUTER_TYPE_TEXT_TOOL => validate_computer_type_text_arguments(arguments),
+        COMPUTER_KEY_PRESS_TOOL => validate_computer_key_press_arguments(arguments),
+        COMPUTER_SCROLL_TOOL => validate_computer_scroll_arguments(arguments),
+        COMPUTER_FOCUS_WINDOW_TOOL => validate_computer_focus_window_arguments(arguments),
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
+            validate_computer_return_to_tidebreak_arguments(arguments)
+        }
+        COMPUTER_WAIT_TOOL => validate_computer_wait_arguments(arguments),
+        COMPUTER_LAUNCH_APP_TOOL => validate_computer_launch_app_arguments(arguments),
+        COMPUTER_HOVER_TOOL => validate_computer_hover_arguments(arguments),
+        COMPUTER_DRAG_TOOL => validate_computer_drag_arguments(arguments),
+        COMPUTER_RESIZE_WINDOW_TOOL => validate_computer_resize_window_arguments(arguments),
+        _ => false,
+    }
 }
 
 // MARK: - Tool specs
@@ -479,7 +857,7 @@ pub fn computer_type_text_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerTypeTextArgs>(
         COMPUTER_TYPE_TEXT_TOOL,
         &format!(
-            "Type text into an element or the focused field. {TARGETING_NOTE}{ACTING_NOTE}\n\nA newline in `text` is typed as the Return key, which submits many composers and forms instead of inserting a line break — keep `text` to a single line unless you intend to submit, or use Shift+Return via `computer_key_press` where the app supports it."
+            "Type text into an element or the target app's focused field without changing the user's keyboard focus. {TARGETING_NOTE}{ACTING_NOTE}\n\nA newline in `text` is typed as the Return key, which submits many composers and forms instead of inserting a line break — keep `text` to a single line unless you intend to submit, or use Shift+Return via `computer_key_press` where the app supports it."
         ),
     )
 }
@@ -490,7 +868,7 @@ pub fn computer_key_press_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerKeyPressArgs>(
         COMPUTER_KEY_PRESS_TOOL,
         &format!(
-            "Press a key, optionally with chord modifiers, in the focused app. Use for keyboard shortcuts and navigation keys.{ACTING_NOTE}"
+            "Send a key, optionally with chord modifiers, directly to the target app without changing the user's keyboard focus. Use for keyboard shortcuts and navigation keys when the app supports independent input. {ACTING_NOTE}"
         ),
     )
 }
@@ -509,7 +887,7 @@ pub fn computer_scroll_tool_spec() -> ToolSpec {
 pub fn computer_focus_window_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerFocusWindowArgs>(
         COMPUTER_FOCUS_WINDOW_TOOL,
-        &format!("Bring an app (or one of its windows) to the front. Use this only when focus must move to continue the task, such as before a key press or after another app took focus.{ACTING_NOTE}"),
+        "Unavailable: this compatibility operation changes the user's keyboard focus. Use independent actions on the target app without bringing it to the front. Do not retry in another execution mode.",
     )
 }
 
@@ -518,7 +896,7 @@ pub fn computer_focus_window_tool_spec() -> ToolSpec {
 pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerReturnToTidebreakArgs>(
         COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
-        "Return focus to the Tidebreak window. Use after finishing work in another app so the user can see that the task is done and continue the conversation.",
+        "Unavailable: this compatibility operation changes the user's keyboard focus. Keep the user's active window unchanged. Do not retry in another execution mode.",
     )
 }
 
@@ -527,7 +905,43 @@ pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
 pub fn computer_wait_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerWaitArgs>(
         COMPUTER_WAIT_TOOL,
-        "Wait a bounded number of seconds, e.g. for an app to finish an action or a window to appear, before the next read or capture.",
+        "Wait for an app to finish an action, appear, or reach a requested condition before the next read or capture. Without a condition, waits a bounded number of seconds. With a condition, polls the live app/window/accessibility state until it resolves or the bounded timeout expires; it never types, clicks, or falls back to a sleep when the condition is not met.",
+    )
+}
+
+/// Tool contract for [`COMPUTER_LAUNCH_APP_TOOL`].
+#[must_use]
+pub fn computer_launch_app_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerLaunchAppArgs>(
+        COMPUTER_LAUNCH_APP_TOOL,
+        &format!("Launch an app by its registered bundle id (e.g. \"com.apple.Notes\"). Only the system's approved application identity is opened — arbitrary executables, paths, and command arguments are never accepted. Use before listing/reading an app that is not running.{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_HOVER_TOOL`].
+#[must_use]
+pub fn computer_hover_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerHoverArgs>(
+        COMPUTER_HOVER_TOOL,
+        &format!("Hover over an element or point using independent app input without moving the user's hardware pointer. Use to reveal hover menus, tooltips, or drag affordances before a read or drag when the app supports it. {TARGETING_NOTE}{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_DRAG_TOOL`].
+#[must_use]
+pub fn computer_drag_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerDragArgs>(
+        COMPUTER_DRAG_TOOL,
+        &format!("Drag from the `from` element/point to the `to` element/point using independent app input. Use for sliders, reordering, selection ranges, and custom canvas interactions when the app supports it. Both endpoints are resolved and validated against the app before input, and the duration is bounded. Preserve the user's hardware pointer and keyboard focus. {TARGETING_NOTE}{ACTING_NOTE}"),
+    )
+}
+
+/// Tool contract for [`COMPUTER_RESIZE_WINDOW_TOOL`].
+#[must_use]
+pub fn computer_resize_window_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerResizeWindowArgs>(
+        COMPUTER_RESIZE_WINDOW_TOOL,
+        &format!("Resize one window of an app to the given width and height in logical points. Use to arrange testable window sizes; logical points map to physical pixels through the display backing scale factor. {ACTING_NOTE}"),
     )
 }
 
@@ -535,6 +949,53 @@ pub fn computer_wait_tool_spec() -> ToolSpec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_transport_surface_uses_canonical_specs_and_validation() {
+        let specs = computer_use_tool_specs();
+        let expected: Vec<_> = COMPUTER_USE_TOOLS
+            .into_iter()
+            .filter(|name| {
+                !matches!(
+                    *name,
+                    COMPUTER_FOCUS_WINDOW_TOOL | COMPUTER_RETURN_TO_TIDEBREAK_TOOL
+                )
+            })
+            .collect();
+        assert_eq!(specs.len(), expected.len());
+        for (spec, name) in specs.iter().zip(expected) {
+            assert_eq!(spec.name, name);
+        }
+        assert!(validate_computer_use_arguments(
+            COMPUTER_LIST_WINDOWS_TOOL,
+            &json!({})
+        ));
+        assert!(!validate_computer_use_arguments("exec", &json!({})));
+        assert!(!validate_computer_use_arguments(
+            COMPUTER_CLICK_TOOL,
+            &json!({"app_id": "com.apple.Notes", "x": 20})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_LAUNCH_APP_TOOL,
+            &json!({"app_id": "com.apple.Notes"})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_HOVER_TOOL,
+            &json!({"app_id": "com.apple.Notes", "x": 1.0, "y": 2.0})
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_DRAG_TOOL,
+            &json!({
+                "app_id": "com.apple.Notes",
+                "from": {"mark": 1},
+                "to": {"x": 10.0, "y": 20.0}
+            })
+        ));
+        assert!(validate_computer_use_arguments(
+            COMPUTER_RESIZE_WINDOW_TOOL,
+            &json!({"app_id": "com.apple.Notes", "width": 800.0, "height": 600.0})
+        ));
+    }
 
     #[test]
     fn tool_name_classifiers_partition_the_surface() {
@@ -558,6 +1019,10 @@ mod tests {
         // they are control tools.
         assert!(is_computer_use_control_tool(COMPUTER_SCROLL_TOOL));
         assert!(is_computer_use_control_tool(COMPUTER_FOCUS_WINDOW_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_LAUNCH_APP_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_HOVER_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_DRAG_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_RESIZE_WINDOW_TOOL));
         assert!(!is_computer_use_tool("read_file"));
     }
 
@@ -617,6 +1082,24 @@ mod tests {
         assert!(!validate_computer_wait_arguments(
             &json!({ "seconds": -1.0 })
         ));
+        assert!(validate_computer_wait_arguments(
+            &json!({ "app_id": "dev.tidebreak.fixture", "condition": { "kind": "app_running" } })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "condition": { "kind": "text_present", "text": "" } })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "condition": { "kind": "text_absent", "text": "x" }, "condition_timeout_seconds": 35.0 })
+        ));
+        for args in [
+            json!({ "condition": { "kind": "app_running" } }),
+            json!({ "app_id": "", "condition": { "kind": "window_visible" } }),
+            json!({ "app_id": "dev.tidebreak.fixture", "condition": { "kind": "app_running" }, "seconds": 1 }),
+            json!({ "app_id": "dev.tidebreak.fixture", "seconds": 1 }),
+            json!({ "condition_timeout_seconds": 1 }),
+        ] {
+            assert!(!validate_computer_wait_arguments(&args), "{args}");
+        }
         // serde_json cannot represent a non-finite float, so a NaN/Infinity
         // never survives a wire round-trip; the validator's `is_finite` guard
         // covers the in-memory case.
@@ -651,6 +1134,10 @@ mod tests {
             computer_focus_window_tool_spec(),
             computer_return_to_tidebreak_tool_spec(),
             computer_wait_tool_spec(),
+            computer_launch_app_tool_spec(),
+            computer_hover_tool_spec(),
+            computer_drag_tool_spec(),
+            computer_resize_window_tool_spec(),
         ] {
             assert_eq!(
                 spec.input_schema["additionalProperties"], false,
@@ -663,8 +1150,181 @@ mod tests {
         }
         assert_eq!(computer_click_tool_spec().name, COMPUTER_CLICK_TOOL);
         assert_eq!(
+            computer_launch_app_tool_spec().name,
+            COMPUTER_LAUNCH_APP_TOOL
+        );
+        assert_eq!(
             computer_read_app_content_tool_spec().name,
             COMPUTER_READ_APP_CONTENT_TOOL
         );
+    }
+
+    #[test]
+    fn execution_mode_keeps_foreground_wire_compatibility_without_authorizing_it() {
+        let args: ComputerClickArgs =
+            serde_json::from_value(json!({ "app_id": "com.apple.Notes", "mark": 3 })).unwrap();
+        assert_eq!(args.execution_mode, None);
+        assert_eq!(
+            args.execution_mode.unwrap_or_default(),
+            ExecutionMode::Background
+        );
+        let payload = json!({
+            "app_id": "com.apple.Notes",
+            "mark": 3,
+            "execution_mode": "foreground"
+        });
+        let args: ComputerClickArgs = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(args.execution_mode, Some(ExecutionMode::Foreground));
+        assert_eq!(serde_json::to_value(args).unwrap(), payload);
+        assert!(!validate_computer_click_arguments(&payload));
+    }
+
+    #[test]
+    fn acting_validators_and_schemas_allow_only_independent_input() {
+        type ValidationCase = (&'static str, fn(&Value) -> bool, Value);
+        let cases: &[ValidationCase] = &[
+            (
+                COMPUTER_CLICK_TOOL,
+                validate_computer_click_arguments,
+                json!({ "app_id": "a", "mark": 1 }),
+            ),
+            (
+                COMPUTER_TYPE_TEXT_TOOL,
+                validate_computer_type_text_arguments,
+                json!({ "app_id": "a", "text": "x" }),
+            ),
+            (
+                COMPUTER_KEY_PRESS_TOOL,
+                validate_computer_key_press_arguments,
+                json!({ "app_id": "a", "key": "tab" }),
+            ),
+            (
+                COMPUTER_SCROLL_TOOL,
+                validate_computer_scroll_arguments,
+                json!({ "app_id": "a", "dy": 10.0 }),
+            ),
+            (
+                COMPUTER_LAUNCH_APP_TOOL,
+                validate_computer_launch_app_arguments,
+                json!({ "app_id": "a" }),
+            ),
+            (
+                COMPUTER_HOVER_TOOL,
+                validate_computer_hover_arguments,
+                json!({ "app_id": "a", "mark": 1 }),
+            ),
+            (
+                COMPUTER_DRAG_TOOL,
+                validate_computer_drag_arguments,
+                json!({ "app_id": "a", "from": { "mark": 1 }, "to": { "mark": 2 } }),
+            ),
+            (
+                COMPUTER_RESIZE_WINDOW_TOOL,
+                validate_computer_resize_window_arguments,
+                json!({ "app_id": "a", "width": 800.0, "height": 600.0 }),
+            ),
+        ];
+        let specs = computer_use_tool_specs();
+        for (name, validate, args) in cases {
+            assert!(validate(args), "{name} defaults to independent input");
+            let mut with_mode = args.clone();
+            for mode in [json!("background"), Value::Null] {
+                with_mode["execution_mode"] = mode;
+                assert!(validate(&with_mode), "{name} accepts background");
+                assert!(validate_computer_use_arguments(name, &with_mode));
+            }
+            for mode in ["foreground", "takeover"] {
+                with_mode["execution_mode"] = json!(mode);
+                assert!(!validate(&with_mode), "{name} rejects {mode}");
+                assert!(!validate_computer_use_arguments(name, &with_mode));
+                assert_eq!(
+                    with_mode["execution_mode"], mode,
+                    "validation never rewrites input"
+                );
+            }
+            let spec = specs.iter().find(|spec| spec.name == *name).unwrap();
+            let mode_schema = &spec.input_schema["properties"]["execution_mode"];
+            assert_eq!(mode_schema["enum"], json!(["background"]), "{name}");
+            assert!(!mode_schema.to_string().contains("foreground"), "{name}");
+        }
+        assert!(!validate_computer_read_app_content_arguments(
+            &json!({ "app_id": "a", "execution_mode": "background" })
+        ));
+        assert!(!validate_computer_capture_screen_arguments(
+            &json!({ "execution_mode": "background" })
+        ));
+        assert!(
+            computer_read_app_content_tool_spec().input_schema["properties"]
+                .get("execution_mode")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_focus_tools_remain_recognized_but_cannot_take_focus() {
+        let specs = computer_use_tool_specs();
+        for (name, args) in [
+            (COMPUTER_FOCUS_WINDOW_TOOL, json!({ "app_id": "a" })),
+            (COMPUTER_RETURN_TO_TIDEBREAK_TOOL, json!({})),
+        ] {
+            assert!(is_computer_use_tool(name));
+            assert!(!specs.iter().any(|spec| spec.name == name));
+            assert!(!validate_computer_use_arguments(name, &args));
+            for mode in ["background", "foreground"] {
+                let mut with_mode = args.clone();
+                with_mode["execution_mode"] = json!(mode);
+                assert!(!validate_computer_use_arguments(name, &with_mode));
+            }
+        }
+        assert!(!validate_computer_focus_window_arguments(
+            &json!({ "app_id": "a" })
+        ));
+        assert!(!validate_computer_return_to_tidebreak_arguments(&json!({})));
+    }
+
+    #[test]
+    fn new_native_primitives_enforce_argument_bounds() {
+        assert!(!validate_computer_launch_app_arguments(
+            &json!({"app_id": " "})
+        ));
+        assert!(!validate_computer_launch_app_arguments(&json!({})));
+        assert!(validate_computer_hover_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "element_id": "0.0",
+            "element_fingerprint": "fp"
+        })));
+        assert!(!validate_computer_hover_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "x": 1.0
+        })));
+        assert!(!validate_computer_drag_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "from": {"mark": 1},
+            "to": {"x": 1.0}
+        })));
+        assert!(!validate_computer_drag_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "from": {"mark": 1},
+            "to": {"x": 1.0, "y": 2.0},
+            "duration_ms": 10001
+        })));
+        assert!(!validate_computer_resize_window_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "width": 0.0,
+            "height": 600.0
+        })));
+        assert!(!validate_computer_resize_window_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "width": 10001.0,
+            "height": 600.0
+        })));
+        assert!(validate_computer_capture_screen_arguments(&json!({
+            "app_id": "com.apple.Notes",
+            "window_id": 3,
+            "max_dimension": 4096
+        })));
+        assert!(!validate_computer_capture_screen_arguments(&json!({
+            "max_dimension": 4097
+        })));
     }
 }

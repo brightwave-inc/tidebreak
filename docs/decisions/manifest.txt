@@ -103,3 +103,4 @@
 0092  0092-workspace-grants.md
 0093  0093-a-session-can-have-several-conversation-bindings.md
 0094  0094-repository-optional-conversations-on-the-internal-engine.md
+0095  0095-computer-use-for-coding-harnesses.md

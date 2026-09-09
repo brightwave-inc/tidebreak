@@ -8,7 +8,9 @@
 //!
 //! `tidebreak browser-mcp` serves list, navigate, snapshot, wait, and screenshot
 //! tools over MCP stdio. It also serves `browser_act` when the native runtime
-//! supports semantic actions. All tools use the canonical core tool specs and
+//! supports semantic actions, `browser_open`/`browser_close`/`browser_activate`
+//! when it supports agent tab lifecycle, and `browser_diagnostics` when it can
+//! surface page diagnostics. All tools use the canonical core tool specs and
 //! validate typed arguments before sending them to the browser server.
 
 use std::path::PathBuf;
@@ -18,17 +20,22 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 use tidebreak_core::{
-    browser_act_tool_spec, browser_list_tool_spec, browser_navigate_tool_spec,
-    browser_screenshot_tool_spec, browser_snapshot_tool_spec, browser_wait_tool_spec,
-    validate_browser_act_arguments, validate_browser_list_arguments,
-    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    browser_act_tool_spec, browser_activate_tool_spec, browser_close_tool_spec,
+    browser_diagnostics_tool_spec, browser_list_tool_spec, browser_navigate_tool_spec,
+    browser_open_tool_spec, browser_screenshot_tool_spec, browser_snapshot_tool_spec,
+    browser_wait_tool_spec, validate_browser_act_arguments, validate_browser_activate_arguments,
+    validate_browser_close_arguments, validate_browser_diagnostics_arguments,
+    validate_browser_list_arguments, validate_browser_navigate_arguments,
+    validate_browser_open_arguments, validate_browser_screenshot_arguments,
     validate_browser_snapshot_arguments, validate_browser_wait_arguments, AgentError,
     ApprovalClass, AutoApproveGate, BrowserActArgs, BrowserActResult, BrowserAction,
-    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData, ImageMediaType, ImageRef,
-    Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec, MAX_IMAGE_BYTES,
-    MAX_IMAGE_DIMENSION,
+    BrowserActivateArgs, BrowserCloseArgs, BrowserDiagnosticsArgs, BrowserDiagnosticsResult,
+    BrowserLifecycleResult, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult,
+    BrowserOpenArgs, BrowserOpenResult, BrowserPageSnapshot, BrowserScreenshotArgs,
+    BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitCondition,
+    BrowserWaitResult, DocumentBlob, ImageData, ImageMediaType, ImageRef, Result, Tool, ToolCtx,
+    ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec,
+    MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +69,13 @@ const SCREENSHOT_BODY_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 /// Ceiling on a semantic action response body.
 const ACT_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
 
+/// Ceiling on a lifecycle (open/close/activate) response body.
+const LIFECYCLE_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
+
+/// Ceiling on a diagnostics response body: 200 bounded entries fit well
+/// within this.
+const DIAGNOSTICS_BODY_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
+
 /// Encoded form of the largest image the shared image pipeline will accept.
 const MAX_SCREENSHOT_BASE64_CHARS: usize = (MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
 
@@ -81,6 +95,8 @@ struct BrowserCapfile {
     endpoint: String,
     token: String,
     semantic_actions: bool,
+    lifecycle: bool,
+    developer_diagnostics: bool,
 }
 
 /// Wire shape of the capfile. The only supported version is 1.
@@ -92,6 +108,14 @@ struct BrowserCapfileWire {
     token: String,
     #[serde(default)]
     semantic_actions: bool,
+    /// Whether the runtime can open, close, and activate tabs. Absent on
+    /// servers that predate lifecycle support.
+    #[serde(default)]
+    lifecycle: bool,
+    /// Whether the runtime can surface page diagnostics. Absent on servers
+    /// that predate diagnostics support.
+    #[serde(default)]
+    developer_diagnostics: bool,
 }
 
 impl BrowserCapfile {
@@ -140,6 +164,8 @@ impl BrowserCapfile {
             endpoint: wire.endpoint,
             token: wire.token,
             semantic_actions: wire.semantic_actions,
+            lifecycle: wire.lifecycle,
+            developer_diagnostics: wire.developer_diagnostics,
         })
     }
 
@@ -556,6 +582,74 @@ async fn browser_act(
     BrowserClient::read_bounded_json(response, ACT_BODY_MAX_BYTES).await
 }
 
+async fn browser_open(
+    client: &BrowserClient,
+    args: &BrowserOpenArgs,
+) -> std::result::Result<BrowserOpenResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/open", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser open request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, LIFECYCLE_BODY_MAX_BYTES).await
+}
+
+async fn browser_close(
+    client: &BrowserClient,
+    args: &BrowserCloseArgs,
+) -> std::result::Result<BrowserLifecycleResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/close", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser close request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, LIFECYCLE_BODY_MAX_BYTES).await
+}
+
+async fn browser_activate(
+    client: &BrowserClient,
+    args: &BrowserActivateArgs,
+) -> std::result::Result<BrowserLifecycleResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/activate", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser activate request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, LIFECYCLE_BODY_MAX_BYTES).await
+}
+
+async fn browser_diagnostics(
+    client: &BrowserClient,
+    args: &BrowserDiagnosticsArgs,
+) -> std::result::Result<BrowserDiagnosticsResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/diagnostics", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser diagnostics request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, DIAGNOSTICS_BODY_MAX_BYTES).await
+}
+
 // ---------------------------------------------------------------------------
 // CLI parsing
 // ---------------------------------------------------------------------------
@@ -585,6 +679,9 @@ pub(crate) enum BrowserCommand {
         document_epoch: u64,
         max_width: Option<u64>,
         max_height: Option<u64>,
+        /// Write the decoded image privately to this path instead of
+        /// printing base-64 pixels on stdout.
+        output: Option<PathBuf>,
     },
     Act {
         browser_id: String,
@@ -592,6 +689,21 @@ pub(crate) enum BrowserCommand {
         document_epoch: u64,
         target_ref: String,
         action: BrowserAction,
+        execution_mode: tidebreak_core::BrowserExecutionMode,
+    },
+    Open {
+        url: String,
+    },
+    Close {
+        browser_id: String,
+    },
+    Activate {
+        browser_id: String,
+    },
+    Diagnostics {
+        browser_id: String,
+        after_sequence: Option<u64>,
+        max_entries: Option<usize>,
     },
 }
 
@@ -859,6 +971,7 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
             let mut document_epoch = None;
             let mut max_width = None;
             let mut max_height = None;
+            let mut output = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--browser-id" => {
@@ -938,6 +1051,18 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                         }
                         max_height = Some(h);
                     }
+                    "--output" => {
+                        if output.is_some() {
+                            return Err("duplicate --output".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--output requires a path".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--output requires a path".to_string());
+                        }
+                        output = Some(PathBuf::from(value));
+                    }
                     other => {
                         return Err(format!("unknown browser screenshot argument {other:?}"));
                     }
@@ -958,9 +1083,98 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                 document_epoch,
                 max_width,
                 max_height,
+                output,
             })
         }
         "act" => parse_browser_act(args),
+        "open" => {
+            let mut url = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--url" => parse_string_flag(&mut args, &mut url, "--url")?,
+                    other => return Err(format!("unknown browser open argument {other:?}")),
+                }
+            }
+            let Some(url) = url else {
+                return Err("browser open requires --url".to_string());
+            };
+            Ok(BrowserCommand::Open { url })
+        }
+        "close" => {
+            let mut browser_id = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
+                    other => return Err(format!("unknown browser close argument {other:?}")),
+                }
+            }
+            let Some(browser_id) = browser_id else {
+                return Err("browser close requires --browser-id".to_string());
+            };
+            Ok(BrowserCommand::Close { browser_id })
+        }
+        "activate" => {
+            let mut browser_id = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
+                    other => return Err(format!("unknown browser activate argument {other:?}")),
+                }
+            }
+            let Some(browser_id) = browser_id else {
+                return Err("browser activate requires --browser-id".to_string());
+            };
+            Ok(BrowserCommand::Activate { browser_id })
+        }
+        "diagnostics" => {
+            let mut browser_id = None;
+            let mut after_sequence = None;
+            let mut max_entries = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--browser-id" => {
+                        parse_string_flag(&mut args, &mut browser_id, "--browser-id")?
+                    }
+                    "--after-sequence" => {
+                        if after_sequence.is_some() {
+                            return Err("duplicate --after-sequence".to_string());
+                        }
+                        let value = required_flag_value(&mut args, "--after-sequence")?;
+                        after_sequence = Some(value.parse::<u64>().map_err(|_| {
+                            format!(
+                                "--after-sequence expects a non-negative integer, got {value:?}"
+                            )
+                        })?);
+                    }
+                    "--max-entries" => {
+                        if max_entries.is_some() {
+                            return Err("duplicate --max-entries".to_string());
+                        }
+                        let value = required_flag_value(&mut args, "--max-entries")?;
+                        let entries = value.parse::<usize>().map_err(|_| {
+                            format!("--max-entries expects a positive integer, got {value:?}")
+                        })?;
+                        if !(1..=200).contains(&entries) {
+                            return Err("--max-entries must be between 1 and 200".to_string());
+                        }
+                        max_entries = Some(entries);
+                    }
+                    other => return Err(format!("unknown browser diagnostics argument {other:?}")),
+                }
+            }
+            let Some(browser_id) = browser_id else {
+                return Err("browser diagnostics requires --browser-id".to_string());
+            };
+            Ok(BrowserCommand::Diagnostics {
+                browser_id,
+                after_sequence,
+                max_entries,
+            })
+        }
         other => Err(format!("unknown browser command {other:?}")),
     }
 }
@@ -973,6 +1187,7 @@ fn parse_browser_act(
     let mut document_epoch = None;
     let mut target_ref = None;
     let mut action = None;
+    let mut execution_mode = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -993,9 +1208,21 @@ fn parse_browser_act(
                 })?);
             }
             "--ref" => parse_string_flag(&mut args, &mut target_ref, "--ref")?,
-            "--click" => set_browser_action(&mut action, BrowserAction::Click)?,
+            "--execution-mode" => {
+                if execution_mode.is_some() {
+                    return Err("duplicate --execution-mode".into());
+                }
+                execution_mode = Some(
+                    match required_flag_value(&mut args, "--execution-mode")?.as_str() {
+                        "background" => tidebreak_core::BrowserExecutionMode::Background,
+                        "foreground" => tidebreak_core::BrowserExecutionMode::Foreground,
+                        _ => return Err("--execution-mode expects background or foreground".into()),
+                    },
+                );
+            }
+            "--click" => set_browser_action(&mut action, BrowserAction::Click { at: None })?,
             "--focus" => set_browser_action(&mut action, BrowserAction::Focus)?,
-            "--hover" => set_browser_action(&mut action, BrowserAction::Hover)?,
+            "--hover" => set_browser_action(&mut action, BrowserAction::Hover { at: None })?,
             "--fill" => {
                 let value = required_flag_value(&mut args, "--fill")?;
                 set_browser_action(&mut action, BrowserAction::Fill { value })?;
@@ -1035,12 +1262,14 @@ fn parse_browser_act(
                 .to_string(),
         );
     };
+    let execution_mode = execution_mode.unwrap_or_default();
     let arguments = BrowserActArgs {
         browser_id,
         snapshot_id,
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     };
     if !arguments.is_well_formed() {
         return Err("browser act arguments are not well-formed".to_string());
@@ -1051,6 +1280,7 @@ fn parse_browser_act(
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     } = arguments;
     Ok(BrowserCommand::Act {
         browser_id,
@@ -1058,6 +1288,7 @@ fn parse_browser_act(
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     })
 }
 
@@ -1106,11 +1337,21 @@ usage: tidebreak browser list --json
                --text-present <text> | --text-absent <text>) \
               [--timeout-ms <ms>] --json
        tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
-              --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
+              --document-epoch <n> [--max-width <px>] [--max-height <px>] \
+              [--output <path>] --json
        tidebreak browser act --browser-id <id> --snapshot-id <id> \
               --document-epoch <n> --ref <ref> \
               (--click | --focus | --hover | --fill <text> | --select <value> | \
-               --check | --uncheck | --press <key> | --scroll-into-view) --json
+               --check | --uncheck | --press <key> | --scroll-into-view) \
+              [--execution-mode <background|foreground>] --json
+       tidebreak browser open --url <url> --json
+       tidebreak browser close --browser-id <id> --json
+       tidebreak browser activate --browser-id <id> --json
+       tidebreak browser diagnostics --browser-id <id> \
+              [--after-sequence <n>] [--max-entries <n>] --json
+
+With --output, screenshot writes the decoded image to the given path with
+private permissions and prints JSON without base-64 pixels.
 
 Browser commands use the session-private capfile named by
 TIDEBREAK_BROWSER_CAPFILE. They do not take --server/--attach.";
@@ -1208,6 +1449,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             document_epoch,
             max_width,
             max_height,
+            output,
         } => {
             let args = BrowserScreenshotArgs {
                 browser_id,
@@ -1222,11 +1464,24 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_screenshot(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            match output {
+                Some(path) => {
+                    let receipt = write_screenshot_output(&result, &path)
+                        .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&receipt)
+                            .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+                    );
+                }
+                None => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&result)
+                            .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+                    );
+                }
+            }
             Ok(())
         }
         BrowserCommand::Act {
@@ -1235,6 +1490,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             document_epoch,
             target_ref,
             action,
+            execution_mode,
         } => {
             let args = BrowserActArgs {
                 browser_id,
@@ -1242,11 +1498,86 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
                 document_epoch,
                 target_ref,
                 action,
+                execution_mode,
             };
             if !args.is_well_formed() {
                 return Err(AgentError::msg("browser act arguments are not well-formed"));
             }
             let result = browser_act(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
+        BrowserCommand::Open { url } => {
+            let args = BrowserOpenArgs { url };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg("browser open url is not well-formed"));
+            }
+            let result = browser_open(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
+        BrowserCommand::Close { browser_id } => {
+            let args = BrowserCloseArgs { browser_id };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg(
+                    "browser close arguments are not well-formed",
+                ));
+            }
+            let result = browser_close(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
+        BrowserCommand::Activate { browser_id } => {
+            let args = BrowserActivateArgs { browser_id };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg(
+                    "browser activate arguments are not well-formed",
+                ));
+            }
+            let result = browser_activate(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
+        BrowserCommand::Diagnostics {
+            browser_id,
+            after_sequence,
+            max_entries,
+        } => {
+            let args = BrowserDiagnosticsArgs {
+                browser_id,
+                after_sequence,
+                max_entries,
+            };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg(
+                    "browser diagnostics arguments are not well-formed",
+                ));
+            }
+            let result = browser_diagnostics(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
             println!(
@@ -1287,7 +1618,10 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
 pub(crate) async fn run_browser_mcp() -> Result<()> {
     let cap = BrowserCapfile::from_env()?;
     let client = BrowserClient::new(&cap)?;
-    let tools = Arc::new(browser_tool_registry(&client, cap.semantic_actions));
+    let tools = Arc::new(browser_tool_registry(
+        &client,
+        BrowserToolCapabilities::from_capfile(&cap),
+    ));
 
     // No filesystem workspace: the tools reach the loopback server only.
     let ctx = ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None);
@@ -1300,7 +1634,31 @@ pub(crate) async fn run_browser_mcp() -> Result<()> {
         .map_err(|error| AgentError::msg(format!("MCP stdio error: {error}")))
 }
 
-fn browser_tool_registry(client: &BrowserClient, semantic_actions: bool) -> ToolRegistry {
+/// Capability flags that decide which optional MCP tools register. Every
+/// flag comes from the trusted capfile, which the server derived from the
+/// actual native runtime — the registry never advertises a tool the runtime
+/// reported it cannot serve.
+#[derive(Clone, Copy, Default)]
+struct BrowserToolCapabilities {
+    semantic_actions: bool,
+    lifecycle: bool,
+    developer_diagnostics: bool,
+}
+
+impl BrowserToolCapabilities {
+    fn from_capfile(cap: &BrowserCapfile) -> Self {
+        Self {
+            semantic_actions: cap.semantic_actions,
+            lifecycle: cap.lifecycle,
+            developer_diagnostics: cap.developer_diagnostics,
+        }
+    }
+}
+
+fn browser_tool_registry(
+    client: &BrowserClient,
+    capabilities: BrowserToolCapabilities,
+) -> ToolRegistry {
     let mut tools = ToolRegistry::new()
         .with(Box::new(BrowserListTool {
             client: client.clone(),
@@ -1317,8 +1675,25 @@ fn browser_tool_registry(client: &BrowserClient, semantic_actions: bool) -> Tool
         .with(Box::new(BrowserScreenshotTool {
             client: client.clone(),
         }));
-    if semantic_actions {
+    if capabilities.semantic_actions {
         tools = tools.with(Box::new(BrowserActTool {
+            client: client.clone(),
+        }));
+    }
+    if capabilities.lifecycle {
+        tools = tools
+            .with(Box::new(BrowserOpenTool {
+                client: client.clone(),
+            }))
+            .with(Box::new(BrowserCloseTool {
+                client: client.clone(),
+            }))
+            .with(Box::new(BrowserActivateTool {
+                client: client.clone(),
+            }));
+    }
+    if capabilities.developer_diagnostics {
+        tools = tools.with(Box::new(BrowserDiagnosticsTool {
             client: client.clone(),
         }));
     }
@@ -1573,6 +1948,169 @@ impl Tool for BrowserActTool {
     }
 }
 
+/// [`tidebreak_core::BROWSER_OPEN_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserOpenTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserOpenTool {
+    fn spec(&self) -> ToolSpec {
+        browser_open_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::Sensitive
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_open_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_open arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserOpenArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_open arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_open(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).unwrap_or(Value::Null);
+                let text = format!(
+                    "Opened browser {} at {}. Load state: {:?}, epoch: {}.",
+                    result.browser_id, result.url, result.load_state, result.document_epoch
+                );
+                Ok(browser_result_output(text, data))
+            }
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
+/// [`tidebreak_core::BROWSER_CLOSE_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserCloseTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserCloseTool {
+    fn spec(&self) -> ToolSpec {
+        browser_close_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::Sensitive
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_close_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_close arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserCloseArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_close arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_close(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).unwrap_or(Value::Null);
+                let text = format_lifecycle_summary("close", &result);
+                Ok(browser_result_output(text, data))
+            }
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
+/// [`tidebreak_core::BROWSER_ACTIVATE_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserActivateTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserActivateTool {
+    fn spec(&self) -> ToolSpec {
+        browser_activate_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::Sensitive
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_activate_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_activate arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserActivateArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_activate arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_activate(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).unwrap_or(Value::Null);
+                let text = format_lifecycle_summary("activate", &result);
+                Ok(browser_result_output(text, data))
+            }
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
+/// [`tidebreak_core::BROWSER_DIAGNOSTICS_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserDiagnosticsTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserDiagnosticsTool {
+    fn spec(&self) -> ToolSpec {
+        browser_diagnostics_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_diagnostics_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_diagnostics arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserDiagnosticsArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_diagnostics arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_diagnostics(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).unwrap_or(Value::Null);
+                let text = format_diagnostics_summary(&result);
+                Ok(browser_result_output(text, data))
+            }
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
 // -- helper functions --
 
 /// Keep the complete, bounded result available to MCP hosts that forward only
@@ -1630,6 +2168,31 @@ fn format_browser_wait_summary(result: &BrowserWaitResult) -> String {
     )
 }
 
+/// Build a concise model-readable summary of a lifecycle result.
+fn format_lifecycle_summary(operation: &str, result: &BrowserLifecycleResult) -> String {
+    format!(
+        "Browser {} {:?} on {}: {}",
+        operation, result.status, result.browser_id, result.message
+    )
+}
+
+/// Build a concise model-readable summary of a diagnostics read. Entry text
+/// is untrusted page data and stays in the structured payload only.
+fn format_diagnostics_summary(result: &BrowserDiagnosticsResult) -> String {
+    format!(
+        "Diagnostics for browser {} (epoch {}): {} entries{}{}.",
+        result.browser_id,
+        result.document_epoch,
+        result.entries.len(),
+        if result.truncated { ", truncated" } else { "" },
+        if result.network_captured {
+            ", network captured"
+        } else {
+            ", network not captured by this engine"
+        },
+    )
+}
+
 /// Build a concise model-readable summary of a screenshot capture.
 /// The text mentions dimensions and epoch; pixel bytes are in the
 /// accompanying [`ImageRef`] / [`ImageData`] pair only.
@@ -1656,8 +2219,58 @@ fn screenshot_tool_output(
     Ok(ToolOutput::text(text).with_images([(image_ref, image_data)]))
 }
 
-/// Decode and validate the base-64 screenshot payload, returning a
-/// content-addressed [`ImageRef`] + [`ImageData`] pair.
+/// JSON receipt printed by `browser screenshot --output`: everything about
+/// the capture except the pixels, which live only in the private file.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotFileReceipt {
+    browser_id: String,
+    snapshot_id: String,
+    document_epoch: u64,
+    mime_type: String,
+    path: String,
+    byte_len: u64,
+    width: u32,
+    height: u32,
+}
+
+/// Decode, validate, and budget-fit the screenshot, then write the image
+/// bytes to `path` with private permissions. The written bytes are exactly
+/// the bytes a model-facing image block would carry, so a harness reading
+/// the file sees the same pixels the model would.
+fn write_screenshot_output(
+    result: &BrowserScreenshotResult,
+    path: &std::path::Path,
+) -> std::result::Result<ScreenshotFileReceipt, ClientFailure> {
+    let fitted = decode_and_fit_screenshot(result)?;
+    crate::image_output::write_image_private(path, &fitted.bytes).map_err(|error| {
+        ClientFailure::ToolFailed {
+            detail: format!("could not write screenshot output file: {error}"),
+        }
+    })?;
+    Ok(ScreenshotFileReceipt {
+        browser_id: result.browser_id.clone(),
+        snapshot_id: result.snapshot_id.clone(),
+        document_epoch: result.document_epoch,
+        mime_type: fitted.media_type.as_str().to_owned(),
+        path: path.display().to_string(),
+        byte_len: fitted.bytes.len() as u64,
+        width: fitted.width,
+        height: fitted.height,
+    })
+}
+
+/// A decoded, validated, budget-fitted screenshot image.
+struct FittedScreenshot {
+    bytes: Vec<u8>,
+    media_type: ImageMediaType,
+    width: u32,
+    height: u32,
+}
+
+/// Decode and validate the base-64 screenshot payload and fit it within the
+/// model-facing image-block budget, returning a content-addressed
+/// [`ImageRef`] + [`ImageData`] pair.
 ///
 /// The base-64 bytes never appear in text, logs, errors, or structured
 /// data. Only identity, dimensions, and the opaque [`ImageData`] pixels
@@ -1665,16 +2278,39 @@ fn screenshot_tool_output(
 fn decode_screenshot_image(
     result: &BrowserScreenshotResult,
 ) -> std::result::Result<(ImageRef, ImageData), ClientFailure> {
+    let fitted = decode_and_fit_screenshot(result)?;
+    let blob = DocumentBlob::from_bytes(&fitted.bytes);
+    let image_ref = ImageRef {
+        blob_id: blob.id,
+        media_type: fitted.media_type,
+        width: fitted.width,
+        height: fitted.height,
+        byte_len: fitted.bytes.len() as u64,
+    };
+    image_ref
+        .validate()
+        .map_err(|reason| ClientFailure::ToolFailed {
+            detail: format!("screenshot image is invalid: {reason}"),
+        })?;
+    Ok((image_ref, ImageData::new(fitted.media_type, fitted.bytes)))
+}
+
+fn decode_and_fit_screenshot(
+    result: &BrowserScreenshotResult,
+) -> std::result::Result<FittedScreenshot, ClientFailure> {
     use base64::Engine as _;
 
-    if result.mime_type != "image/png" {
-        return Err(ClientFailure::ToolFailed {
-            detail: format!(
-                "screenshot mime type must be image/png, got {}",
-                result.mime_type
-            ),
-        });
-    }
+    let expected_format = match result.mime_type.as_str() {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        other => {
+            return Err(ClientFailure::ToolFailed {
+                detail: format!(
+                    "screenshot mime type must be image/png or image/jpeg, got {other}"
+                ),
+            });
+        }
+    };
     if result.image_base64.len() > MAX_SCREENSHOT_BASE64_CHARS {
         return Err(ClientFailure::ToolFailed {
             detail: "screenshot image exceeds the maximum size".to_string(),
@@ -1693,23 +2329,23 @@ fn decode_screenshot_image(
         });
     }
 
-    // Sniff the magic bytes. Reject anything that is not actually PNG.
+    // Sniff the magic bytes. Reject anything that does not match the
+    // declared mime type.
     let format = image::guess_format(&bytes).map_err(|_| ClientFailure::ToolFailed {
         detail: "screenshot bytes are not a recognized image".to_string(),
     })?;
-    if format != image::ImageFormat::Png {
+    if format != expected_format {
         return Err(ClientFailure::ToolFailed {
-            detail: "screenshot bytes are not PNG".to_string(),
+            detail: "screenshot bytes do not match the declared mime type".to_string(),
         });
     }
 
-    // Read dimensions from the PNG header without decoding pixels.
-    let (width, height) =
-        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png)
-            .into_dimensions()
-            .map_err(|_| ClientFailure::ToolFailed {
-                detail: "screenshot PNG header could not be read".to_string(),
-            })?;
+    // Read dimensions from the header without decoding pixels.
+    let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format)
+        .into_dimensions()
+        .map_err(|_| ClientFailure::ToolFailed {
+            detail: "screenshot image header could not be read".to_string(),
+        })?;
 
     if width == 0 || height == 0 {
         return Err(ClientFailure::ToolFailed {
@@ -1724,31 +2360,71 @@ fn decode_screenshot_image(
             ),
         });
     }
-
-    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if byte_len > MAX_IMAGE_BYTES {
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
         return Err(ClientFailure::ToolFailed {
-            detail: format!("screenshot size {byte_len} exceeds the maximum {MAX_IMAGE_BYTES}"),
+            detail: format!(
+                "screenshot size {} exceeds the maximum {MAX_IMAGE_BYTES}",
+                bytes.len()
+            ),
         });
     }
 
-    // Build the content-addressed identity. Use DocumentBlob for the
-    // canonical v5 UUID → byte mapping every Tidebreak image path shares.
-    let blob = DocumentBlob::from_bytes(&bytes);
-    let image_ref = ImageRef {
-        blob_id: blob.id,
-        media_type: ImageMediaType::Png,
-        width,
-        height,
-        byte_len,
+    let media_type = match expected_format {
+        image::ImageFormat::Jpeg => ImageMediaType::Jpeg,
+        _ => ImageMediaType::Png,
     };
-    image_ref
-        .validate()
-        .map_err(|reason| ClientFailure::ToolFailed {
-            detail: format!("screenshot image is invalid: {reason}"),
-        })?;
+    if bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES {
+        return Ok(FittedScreenshot {
+            bytes,
+            media_type,
+            width,
+            height,
+        });
+    }
+    fit_screenshot_to_image_block(&bytes, format)
+}
 
-    Ok((image_ref, ImageData::new(ImageMediaType::Png, bytes)))
+/// Re-encode an oversized screenshot until it fits the model-facing
+/// image-block budget: first as progressively stronger JPEG, then at halved
+/// resolutions. Failing to fit is reported, never silently dropped.
+fn fit_screenshot_to_image_block(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> std::result::Result<FittedScreenshot, ClientFailure> {
+    let decoded = image::load_from_memory_with_format(bytes, format).map_err(|_| {
+        ClientFailure::ToolFailed {
+            detail: "screenshot image could not be decoded for re-encoding".to_string(),
+        }
+    })?;
+    let mut current = decoded;
+    for _ in 0..4 {
+        for quality in [85u8, 70, 55, 40] {
+            let mut encoded = Vec::new();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                std::io::Cursor::new(&mut encoded),
+                quality,
+            );
+            if current.to_rgb8().write_with_encoder(encoder).is_err() {
+                continue;
+            }
+            if encoded.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES {
+                return Ok(FittedScreenshot {
+                    width: current.width(),
+                    height: current.height(),
+                    bytes: encoded,
+                    media_type: ImageMediaType::Jpeg,
+                });
+            }
+        }
+        let (width, height) = (current.width() / 2, current.height() / 2);
+        if width < 64 || height < 64 {
+            break;
+        }
+        current = current.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+    }
+    Err(ClientFailure::ToolFailed {
+        detail: "screenshot could not be compressed within the image budget".to_string(),
+    })
 }
 
 #[cfg(test)]

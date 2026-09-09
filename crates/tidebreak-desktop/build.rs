@@ -7,9 +7,11 @@ fn main() {
     };
     let host_broker = format!("binaries/tidebreak-host-broker-{target}{extension}");
     let cli = format!("binaries/tidebreak-{target}{extension}");
+    let native_helper = "resources/host-broker/tidebreak-cu-helper";
 
     println!("cargo:rerun-if-changed={host_broker}");
     println!("cargo:rerun-if-changed={cli}");
+    println!("cargo:rerun-if-changed={native_helper}");
     println!("cargo:rerun-if-changed=../../scripts/exec-documents");
 
     println!("cargo:rerun-if-env-changed=TIDEBREAK_CHANNEL");
@@ -32,6 +34,11 @@ fn main() {
     // real target-specific executables.
     let host_broker_present = std::path::Path::new(&host_broker).is_file();
     let cli_present = std::path::Path::new(&cli).is_file();
+
+    if release && target.contains("apple-darwin") && !std::path::Path::new(native_helper).is_file()
+    {
+        panic!("native computer-use helper missing; build the desktop through `cargo tauri build`");
+    }
 
     if release && (!host_broker_present || !cli_present) {
         let missing: Vec<&str> = [

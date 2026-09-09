@@ -372,8 +372,8 @@ fn code_routes_go_through_the_owner_scoped_view() {
         // `types.rs` declare and shape, and serve nothing.
         let serves_data = text.contains("pub async fn") && name != "mod.rs";
         if serves_data && !text.contains("ScopedCode") {
-            // Browser, harness inference, and external adapters are
-            // capability-bearer routes. Each derives the owner from a
+            // Browser, native computer use, harness inference, and external
+            // adapters are capability-bearer routes. Each derives the owner from a
             // narrower credential instead of accepting the app-token
             // `ScopedCode` extractor. Require each route's own authorization
             // path here.
@@ -386,6 +386,20 @@ fn code_routes_go_through_the_owner_scoped_view() {
                         "{name} is the capability-bearer browser route but is \
                          missing its `authorize` / `BrowserSubject` / \
                         `bearer_token` authorization path"
+                    ));
+                }
+            } else if name == "native.rs" {
+                if !text.contains("fn authorize(")
+                    || !text.contains("NativeSubject")
+                    || !text.contains("bearer_token")
+                    || !text.contains("subject_for_token(token)")
+                    || !text.contains("get_session(&code.db, &subject.owner, subject.session)")
+                    || !text.contains("get_workspace(&code.db, &subject.owner, subject.workspace)")
+                {
+                    findings.push(format!(
+                        "{name} is the capability-bearer native route but is \
+                         missing token-derived subject authorization or owner-scoped \
+                         session and workspace checks"
                     ));
                 }
             } else if name == "llm.rs" {

@@ -236,7 +236,6 @@ test("every browser surface injects the shared policy", () => {
     "SNAPSHOT_SCRIPT",
     "WAIT_TEXT_SCRIPT",
     "INSPECT_OVERLAY_SCRIPT",
-    "SCREENSHOT_PRIVACY_SCRIPT",
     "NATIVE_ACTION_RESOLUTION_SCRIPT",
   ]) {
     const start = semanticsSource.indexOf(`const ${constant}: &str`);

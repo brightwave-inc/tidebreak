@@ -143,9 +143,10 @@ where
         .map_err(store_err)?;
     Ok(candidates.into_iter().flatten().any(|value| {
         match serde_json::from_value::<crate::ToolResultPreview>(value) {
-            Ok(crate::ToolResultPreview::Exec { images, .. }) => {
-                images.iter().any(|image| image.blob_id == blob_id)
-            }
+            Ok(
+                crate::ToolResultPreview::Exec { images, .. }
+                | crate::ToolResultPreview::Images { images },
+            ) => images.iter().any(|image| image.blob_id == blob_id),
             Ok(crate::ToolResultPreview::ScreenCapture { image, .. }) => image.blob_id == blob_id,
             Ok(_) => false,
             Err(_) => true,

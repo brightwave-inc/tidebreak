@@ -1571,6 +1571,47 @@ describe("sandbox agent cancellation", () => {
 });
 
 describe("parseToolResultPreview closed results", () => {
+  it("retains screenshot order and rejects a preview that loses an image", () => {
+    const first = {
+      blob_id: "first",
+      media_type: "png",
+      width: 800,
+      height: 600,
+    };
+    const second = {
+      blob_id: "second",
+      media_type: "jpeg",
+      width: 600,
+      height: 800,
+    };
+    expect(
+      parseToolResultPreview({ tool: "images", images: [first, second] }),
+    ).toEqual({
+      tool: "images",
+      images: [
+        {
+          attachmentId: "first",
+          mediaType: "image/png",
+          width: 800,
+          height: 600,
+        },
+        {
+          attachmentId: "second",
+          mediaType: "image/jpeg",
+          width: 600,
+          height: 800,
+        },
+      ],
+    });
+    expect(parseToolResultPreview({ tool: "images", images: [] })).toBeNull();
+    expect(
+      parseToolResultPreview({
+        tool: "images",
+        images: [first, { ...second, width: 0 }],
+      }),
+    ).toBeNull();
+  });
+
   it("validates and remaps exec preview image references", () => {
     expect(
       parseToolResultPreview({

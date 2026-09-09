@@ -908,6 +908,9 @@ pub enum ToolResultPreview {
         #[ts(optional)]
         feedback: Option<String>,
     },
+    /// Images returned by a server-executed screenshot tool, in capture order.
+    /// The durable references let later turns reload every image from the blob store.
+    Images { images: Vec<crate::ImageRef> },
     /// A computer-use screen capture, as the captured image plus a bounded
     /// count of the interactive marks drawn over it.
     ///
@@ -960,7 +963,8 @@ impl ToolResultPreview {
     /// Project the result of a call from the tool's own output.
     ///
     /// A tool opts in through an enumerated error category, by putting the
-    /// enumerated fields in [`ToolOutput::data`], or — for an external MCP
+    /// enumerated fields in [`ToolOutput::data`], by returning screenshot images,
+    /// or — for an external MCP
     /// tool — by carrying the host-side [`ToolOutput::ui_view`] declaration.
     /// Everything else the output carries stays behind the boundary.
     #[must_use]
@@ -972,6 +976,15 @@ impl ToolResultPreview {
             return Some(Self::WebSearchProviderRequired);
         }
         match tool_name {
+            crate::BROWSER_SCREENSHOT_TOOL
+            | crate::COMPUTER_CAPTURE_SCREEN_TOOL
+            | crate::CHROME_SCREENSHOT_TOOL
+                if !output.is_error && !output.images.is_empty() =>
+            {
+                Some(Self::Images {
+                    images: output.images.clone(),
+                })
+            }
             "exec" => {
                 let data = output.data.as_ref()?;
                 Some(Self::Exec {
@@ -1092,6 +1105,7 @@ impl ToolResultPreview {
             // A recap of what the reader chose, which is the whole reason the
             // turn parked. Skipping everything is itself the answer.
             Self::UserQuestions { .. } | Self::PlanDecision { .. } => true,
+            Self::Images { images } => !images.is_empty(),
             // A capture always has its image to show.
             Self::ScreenCapture { .. } => true,
         }
@@ -2206,6 +2220,37 @@ mod tests {
         };
         assert_eq!(stdout.chars().count(), MAX_RESULT_STREAM_CHARS);
         assert_eq!(stderr, "kept\nlines\n[31mbut not escapes");
+    }
+
+    #[test]
+    fn screenshot_previews_require_a_successful_capture_from_a_known_tool() {
+        let image = crate::ImageRef {
+            blob_id: uuid::Uuid::new_v4(),
+            media_type: crate::ImageMediaType::Png,
+            width: 800,
+            height: 600,
+            byte_len: 16,
+        };
+        let output = crate::ToolOutput {
+            images: vec![image],
+            ..crate::ToolOutput::text("captured")
+        };
+        assert_eq!(ToolResultPreview::build("arbitrary_tool", &output), None);
+        for tool_name in [
+            crate::BROWSER_SCREENSHOT_TOOL,
+            crate::COMPUTER_CAPTURE_SCREEN_TOOL,
+            crate::CHROME_SCREENSHOT_TOOL,
+        ] {
+            assert_eq!(
+                ToolResultPreview::build(tool_name, &crate::ToolOutput::text("no image")),
+                None,
+            );
+            let failed = crate::ToolOutput {
+                is_error: true,
+                ..output.clone()
+            };
+            assert_eq!(ToolResultPreview::build(tool_name, &failed), None);
+        }
     }
 
     #[test]

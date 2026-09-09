@@ -405,11 +405,13 @@ pub(crate) fn is_provider_executed_record(call: &ToolCallRecord) -> bool {
 }
 
 /// The images a tool result carries into the transcript, gated by the caller
-/// on the model's image-input flag. Exec previews and computer-use screen
-/// captures are the two tools whose result is partly an image.
+/// on the model's image-input flag. Exec previews and screenshot tools retain
+/// their image references alongside their durable results.
 pub(crate) fn exec_preview_images(preview: &ToolResultPreview) -> Option<&[ImageRef]> {
     match preview {
-        ToolResultPreview::Exec { images, .. } => Some(images),
+        ToolResultPreview::Exec { images, .. } | ToolResultPreview::Images { images } => {
+            Some(images)
+        }
         ToolResultPreview::ScreenCapture { image, .. } => Some(std::slice::from_ref(image)),
         _ => None,
     }

@@ -1,0 +1,18 @@
+harness = "codex"
+version = "0.153.0"
+date = "2026-09-08"
+integration_path = "app-server-stdio"
+scenarios = ["mcp-approval-approve", "mcp-approval-deny"]
+
+# Captured from the installed pinned binary with an isolated home, an
+# unannotated local MCP tool, and a scripted loopback Responses provider.
+# Frames are filtered to the approval and tool lifecycle. No personal
+# settings, credentials, paid inference, or desktop control were used.
+# This capture verifies the protocol, not screenshot pixels or reasoning.
+verified = [
+  "mcpServer/elicitation/request mode=form with _meta.codex_approval_kind=mcp_tool_call",
+  "the prior item/started supplies server, tool, arguments, item id, thread id, and turn id",
+  "accept replies use action=accept, content={}, and _meta=null",
+  "decline replies use action=decline, content=null, and _meta=null",
+  "accept completes the tool; decline reports user rejected MCP tool call; both turns finish",
+]

@@ -32,6 +32,7 @@ enum AXTree {
         /// that drifted into the same path after a layout change.
         let fingerprint: String
         let role: String?
+        let identifier: String?
         let title: String?
         let value: String?
         let frame: Frame?
@@ -127,8 +128,10 @@ enum AXTree {
         }
         return Node(
             id: path,
-            fingerprint: fingerprint(role: role, title: title, hasValue: value != nil, frame: frame),
-            role: role, title: title, value: value, frame: frame, children: children)
+            fingerprint: fingerprint(
+                role: role, title: title, hasValue: value != nil, frame: frame),
+            role: role, identifier: copyString(element, kAXIdentifierAttribute as CFString),
+            title: title, value: value, frame: frame, children: children)
     }
 
     /// A short, cross-process-deterministic fingerprint of a node's identity.
@@ -136,7 +139,8 @@ enum AXTree {
     /// randomized per process: the tree is read in one helper process and
     /// re-validated in a later one, so a per-process seed would make every
     /// element look stale.
-    static func fingerprint(role: String?, title: String?, hasValue: Bool, frame: Frame?) -> String {
+    static func fingerprint(role: String?, title: String?, hasValue: Bool, frame: Frame?) -> String
+    {
         let bucket =
             frame.map {
                 "\(roundTo5($0.x)),\(roundTo5($0.y)),\(roundTo5($0.width)),\(roundTo5($0.height))"

@@ -31,6 +31,7 @@ __pycache__/
 crates/tidebreak-desktop/gen/
 crates/tidebreak-desktop/binaries/tidebreak-host-broker-*
 crates/tidebreak-desktop/binaries/tidebreak-*
+crates/tidebreak-desktop/resources/host-broker/tidebreak-cu-helper
 
 # OS / editor cruft
 .DS_Store

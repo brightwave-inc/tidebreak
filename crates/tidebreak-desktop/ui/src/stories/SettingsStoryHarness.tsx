@@ -416,6 +416,34 @@ const connectedApps: ConnectedAppsInfo = {
 
 const consentStatements: ConsentStatementSnapshot[] = [
   {
+    handle: { kind: "capability_grant", grant_id: "native-fixture-control" },
+    level: { level: "chat", chat_id: "completed-code-session" },
+    level_title: "Native app test",
+    native_app_all_sessions: true,
+    verb: { kind: "capability", capability: "control_app" },
+    resource: {
+      kind: "host_app",
+      bundle_id: "dev.tidebreak.fixture",
+      display_name: "Computer-use fixture",
+    },
+    method: "permission_dialog",
+    granted_at: "2026-09-09T12:00:00Z",
+  },
+  {
+    handle: { kind: "capability_grant", grant_id: "native-capture-task" },
+    level: { level: "chat", chat_id: "chat-filings" },
+    level_title: "Quarterly filings",
+    verb: { kind: "capability", capability: "capture_screen" },
+    resource: {
+      kind: "host_app",
+      bundle_id:
+        "dev.tidebreak.desktop-test.with-a-long-application-identifier",
+      display_name: "Desktop development target",
+    },
+    method: "permission_dialog",
+    granted_at: "2026-09-09T12:00:00Z",
+  },
+  {
     handle: { kind: "tool_grant", call_id: "grant-cargo" },
     level: { level: "chat", chat_id: "chat-filings" },
     level_title: "Quarterly filings",

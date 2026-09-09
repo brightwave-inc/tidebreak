@@ -10,13 +10,22 @@ import {
   writeBrowserTabLayout,
 } from "../workspace/browserTabLayout";
 import { foregroundBrowserScope } from "./foregroundBrowserScope";
+import type { BrowserHostEvent } from "./browserHost";
 import { useForegroundBrowserTabs } from "./useForegroundBrowserTabs";
 
 const mocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
   seed: vi.fn(),
+  list: vi.fn(async () => [] as import("./browserHost").BrowserHostSnapshot[]),
+  subscribe: vi.fn(
+    async (_listener: (event: BrowserHostEvent) => void) => () => {},
+  ),
 }));
-vi.mock("./browserHost", () => ({ closeCodeBrowser: mocks.close }));
+vi.mock("./browserHost", () => ({
+  closeCodeBrowser: mocks.close,
+  listIndependentBrowserTabs: mocks.list,
+  nativeCodeBrowserHost: { available: () => true, subscribe: mocks.subscribe },
+}));
 vi.mock("./browserPersistence", () => ({ seedBrowserSession: mocks.seed }));
 
 function browserLayout(...ids: string[]): LayoutState {
@@ -50,6 +59,50 @@ afterEach(() => {
 });
 
 describe("foreground browser tab membership", () => {
+  it("adopts agent tabs only from its chat without selecting another panel", () => {
+    const scope = foregroundBrowserScope("chat-1");
+    const layout: LayoutState = {
+      ...EMPTY_LAYOUT,
+      tabs: [{ type: "outputs" }],
+    };
+    const { result, setLayout, openPanel } = setup(layout);
+    const listener = mocks.subscribe.mock.calls[0]?.[0];
+    expect(listener).toBeDefined();
+    act(() =>
+      listener?.({
+        type: "agent_open_requested",
+        workspaceId: foregroundBrowserScope("chat-2"),
+        browserId: "other-chat-browser",
+        url: "https://example.test/other",
+      }),
+    );
+    expect(setLayout).not.toHaveBeenCalled();
+    expect(mocks.seed).not.toHaveBeenCalled();
+    act(() =>
+      listener?.({
+        type: "agent_open_requested",
+        workspaceId: scope,
+        browserId: "agent-browser",
+        url: "https://example.test/preview",
+      }),
+    );
+    expect(mocks.seed).toHaveBeenCalledExactlyOnceWith({
+      browserId: "agent-browser",
+      workspaceId: scope,
+      initialUrl: "https://example.test/preview",
+    });
+    expect(setLayout.mock.calls[0]?.[0].tabs).toEqual([
+      ...layout.tabs,
+      { type: "browser", browserId: "agent-browser" },
+    ]);
+    expect(setLayout.mock.calls[0]?.[0].activeIndex).toBe(layout.activeIndex);
+    expect(setLayout.mock.calls[0]?.[0].editorSplit).toBeUndefined();
+    expect(result.current.browserInitialUrls).toEqual({
+      "agent-browser": "https://example.test/preview",
+    });
+    expect(openPanel).not.toHaveBeenCalled();
+  });
+
   it("restores the same browser IDs on a bare chat revisit without reseeding native recovery", () => {
     const layout = { ...browserLayout("loaded", "blank"), activeIndex: 1 };
     const first = setup(layout);

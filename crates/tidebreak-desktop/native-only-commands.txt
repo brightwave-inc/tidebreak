@@ -29,6 +29,7 @@ is_window_focused: reports main-window focus; document.hidden is the tab, not th
 present_native_notification: posts an OS banner and asks for notification permission on first unfocused present.
 code_browser_import_legacy_state: moves one renderer browser record into private native storage and acknowledges disposal before the renderer deletes its old copy.
 code_browser_command: creates and controls sandboxed native child webviews whose bounds and lifecycle exist only in the desktop shell.
+code_browser_agent_tabs: read live independent native webview identities so the desktop can restore inactive previews after its renderer remounts; a headless server has no native views.
 open_code_worktree: opens a local Code worktree through this operating system's folder handler; a headless server cannot open desktop UI.
 open_in_editor: starts the editor installed on the machine the reader is sitting at, on one file inside a local worktree; the server may be that machine or another, and neither can raise a desktop editor here.
 detect_external_editors: probes this computer's PATH and application folders for installed editors, which only the client machine can see.
@@ -61,7 +62,10 @@ resolve_folder_access_request: carries the user's in-turn folder decision into t
 resolve_output_writeback_request: executes the approved write into a connected host folder, which only the desktop-side broker can reach.
 put_native_mcp_servers: shows the OS-native local-command warning and uses the host-only executor credential to save an approved configuration.
 
-# Computer-use control indicator and Stop
+# Computer-use control indicator, Stop, and native permission setup
+computer_use_permission_status: checks this desktop's native helper permissions and running bundle identity, which macOS uses to attribute screen recording and accessibility access.
+request_computer_use_permissions: asks macOS for screen recording and accessibility permission through the running desktop's native helper on an explicit user gesture.
+open_computer_use_permission_settings: opens a fixed local macOS System Settings pane for screen recording or accessibility permission.
 computer_use_state: reads the native control state (active app and halt latch) that lives only in this process.
 stop_computer_use_control: sets the native halt latch that short-circuits control ops before their next broker round-trip.
 resume_computer_use_control: clears that latch on an explicit user gesture.

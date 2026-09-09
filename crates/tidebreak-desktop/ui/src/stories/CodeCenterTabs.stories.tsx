@@ -32,6 +32,7 @@ function TabStrip({
   withTerminal = true,
   canNewTerminal = true,
   region = "primary" as const,
+  initialConversationFocused,
 }: {
   editorTabs: PanelContent[];
   conversations?: CodeConversationTab[];
@@ -40,9 +41,12 @@ function TabStrip({
   withTerminal?: boolean;
   canNewTerminal?: boolean;
   region?: "primary" | "secondary";
+  initialConversationFocused?: boolean;
 }) {
   const [active, setActive] = useState(editorTabs.length > 0 ? 0 : -1);
-  const [chatFocused, setChatFocused] = useState(editorTabs.length === 0);
+  const [chatFocused, setChatFocused] = useState(
+    initialConversationFocused ?? editorTabs.length === 0,
+  );
   const [conversation, setConversation] = useState<string | null>(
     conversations[0]?.id ?? null,
   );
@@ -113,6 +117,24 @@ type Story = StoryObj<typeof meta>;
 
 /** One agent alone; the `+` menu is the whole affordance. */
 export const ConversationOnly: Story = {};
+
+/** An agent opens a browser while Main agent remains selected. */
+export const IndependentBrowserPreview: Story = {
+  args: {
+    editorTabs: [{ type: "browser", browserId: "browser-1" }],
+    initialConversationFocused: true,
+  },
+};
+
+/** An agent browser remains inactive beside the file you are editing. */
+export const IndependentBrowserBesideFile: Story = {
+  args: {
+    editorTabs: [
+      { type: "file", path: "src/main.rs" },
+      { type: "browser", browserId: "browser-1" },
+    ],
+  },
+};
 
 /** The live mark on the agent the reader is looking at. */
 export const WorkingConversation: Story = {

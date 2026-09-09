@@ -231,26 +231,13 @@ impl McpServer {
     }
 
     fn initialize(&self, params: Value) -> Result<Value, RpcError> {
-        let params: InitializeParams = serde_json::from_value(params)
+        let _: InitializeParams = serde_json::from_value(params)
             .map_err(|e| RpcError::invalid_params(format!("invalid initialize params: {e}")))?;
 
-        // The protocol says the two sides agree on a version or the handshake
-        // fails. This face implements exactly one version, so a request for any
-        // other is refused with the supported set rather than answered with a
-        // version the client never asked for — the same strictness this crate's
-        // client applies to servers.
-        if params.protocol_version != PROTOCOL_VERSION {
-            let mut error = RpcError::invalid_params(format!(
-                "unsupported protocol version {}",
-                params.protocol_version
-            ));
-            error.data = Some(serde_json::json!({
-                "supported": [PROTOCOL_VERSION],
-                "requested": params.protocol_version,
-            }));
-            return Err(error);
-        }
-
+        // MCP version negotiation returns a version the server implements when
+        // the client proposes a different one. This server implements one
+        // revision, so its response always selects PROTOCOL_VERSION. The client
+        // accepts it with notifications/initialized or disconnects.
         self.session_state
             .compare_exchange(
                 SESSION_UNINITIALIZED,
@@ -860,25 +847,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_refuses_an_unsupported_protocol_version() {
-        let server = server();
-        let mut params = initialize_params();
-        params["protocolVersion"] = json!("2099-01-01");
-        let response = server
-            .handle(request(1, "initialize", params))
-            .await
-            .unwrap();
-        let error = response.error.unwrap();
-        assert_eq!(error.code, error_code::INVALID_PARAMS);
-        assert_eq!(error.data.unwrap()["supported"], json!([PROTOCOL_VERSION]));
+    async fn server_negotiates_its_supported_version_with_other_client_revisions() {
+        for requested in ["2024-11-05", "2025-11-25", "2099-01-01"] {
+            let server = server();
+            let mut params = initialize_params();
+            params["protocolVersion"] = json!(requested);
+            let response = server
+                .handle(request(1, "initialize", params))
+                .await
+                .unwrap();
+            assert!(response.error.is_none(), "client revision {requested}");
+            assert_eq!(
+                response.result.unwrap()["protocolVersion"],
+                PROTOCOL_VERSION
+            );
 
-        // A refused handshake leaves the session uninitialized, so the client can
-        // retry with a version this face speaks.
-        let retried = server
-            .handle(request(2, "initialize", initialize_params()))
-            .await
-            .unwrap();
-        assert_eq!(retried.result.unwrap()["protocolVersion"], PROTOCOL_VERSION);
+            // Negotiation does not allow tools before the client accepts it.
+            let early = server
+                .handle(request(2, "tools/list", Value::Null))
+                .await
+                .unwrap();
+            assert_eq!(early.error.unwrap().code, error_code::INVALID_REQUEST);
+
+            server.handle(initialized_notification(Value::Null)).await;
+            let ready = server
+                .handle(request(3, "tools/list", Value::Null))
+                .await
+                .unwrap();
+            assert!(ready.error.is_none());
+            assert!(ready.result.unwrap()["tools"].is_array());
+        }
     }
 
     #[tokio::test]

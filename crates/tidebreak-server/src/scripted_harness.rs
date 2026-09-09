@@ -1007,6 +1007,7 @@ mod tests {
             binary: Some(PathBuf::from("/scripted/engine")),
             sink,
             browser: None,
+            native: None,
         }
     }
 

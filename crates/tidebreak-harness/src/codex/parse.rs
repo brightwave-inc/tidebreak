@@ -1,7 +1,7 @@
 //! Parse captured Codex app-server JSON-RPC frames into [`HarnessEvent`]s.
 //!
-//! Written against the checked-in fixtures under `fixtures/codex/0.147.0/`
-//! and that version's generated app-server schema. Unknown methods increment
+//! Written against the checked-in fixtures for Codex 0.147.0 and 0.153.0
+//! and their generated app-server schemas. Unknown methods increment
 //! a counter and are logged (size-capped). They are never fatal and never
 //! dropped silently.
 //!
@@ -17,6 +17,10 @@ use tidebreak_core::{
 };
 
 use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+
+mod elicitation;
+use elicitation::ActiveMcpCall;
+pub(crate) use elicitation::PendingApproval;
 
 /// Longest unrecognized payload kept for the debug log.
 const MAX_UNRECOGNIZED_LOG: usize = 512;
@@ -49,8 +53,11 @@ pub struct CodexStreamParser {
     last_usage: TurnUsage,
     last_turn_id: Option<String>,
     outbound_methods: HashMap<String, String>,
-    /// itemId → JSON-RPC request id for a parked approval.
-    pending_approvals: HashMap<String, Value>,
+    /// Tool call id to its typed JSON-RPC approval request.
+    pending_approvals: HashMap<String, PendingApproval>,
+    active_turns: HashMap<String, String>,
+    active_mcp_calls: HashMap<String, ActiveMcpCall>,
+    rejected_elicitations: Vec<Value>,
     /// Counter-stripped text of the reconnect notice most recently emitted,
     /// while its retry storm is still the latest thing the engine said.
     open_reconnect: Option<String>,
@@ -95,12 +102,24 @@ impl CodexStreamParser {
     /// JSON-RPC request id for a parked approval `itemId`, when any.
     #[must_use]
     pub fn pending_approval_rpc_id(&self, call_id: &str) -> Option<&Value> {
-        self.pending_approvals.get(call_id)
+        self.pending_approvals
+            .get(call_id)
+            .map(|pending| &pending.rpc_id)
     }
 
     /// Take the JSON-RPC request id for a parked approval.
     pub fn take_pending_approval(&mut self, call_id: &str) -> Option<Value> {
-        self.pending_approvals.remove(call_id)
+        self.pending_approvals
+            .remove(call_id)
+            .map(|pending| pending.rpc_id)
+    }
+
+    pub(crate) fn pending_approval(&self, call_id: &str) -> Option<&PendingApproval> {
+        self.pending_approvals.get(call_id)
+    }
+
+    pub(crate) fn take_rejected_elicitations(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.rejected_elicitations)
     }
 
     /// Record an outbound client request so the matching inbound result can
@@ -160,28 +179,23 @@ impl CodexStreamParser {
         {
             self.note_outbound(id, method);
         }
-        if let Some(decision) = value.pointer("/result/decision").and_then(Value::as_str) {
-            let decision = match decision {
-                "accept" | "acceptForSession" | "approved" | "approved_for_session" => {
-                    ApprovalDecision::Approve
-                }
-                "decline" | "cancel" | "abort" => ApprovalDecision::Deny { feedback: None },
-                other => {
-                    self.count_unrecognized(&format!("decision/{other}"), value);
-                    return Vec::new();
-                }
-            };
+        if let Some(rpc_id) = value.get("id") {
             let call_id = self
                 .pending_approvals
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| value.get("id").map(id_key).unwrap_or_default());
-            self.pending_approvals.remove(&call_id);
-            return vec![HarnessEvent::ApprovalResolved {
-                harness_ref: HarnessApprovalRef::engine(call_id),
-                decision,
-            }];
+                .iter()
+                .find_map(|(call_id, pending)| {
+                    (pending.rpc_id == *rpc_id).then(|| call_id.clone())
+                });
+            if let Some(call_id) = call_id {
+                let pending = &self.pending_approvals[&call_id];
+                if let Some(decision) = pending.replayed_decision(value) {
+                    self.pending_approvals.remove(&call_id);
+                    return vec![HarnessEvent::ApprovalResolved {
+                        harness_ref: HarnessApprovalRef::engine(call_id),
+                        decision,
+                    }];
+                }
+            }
         }
         Vec::new()
     }
@@ -219,6 +233,7 @@ impl CodexStreamParser {
     fn parse_method(&mut self, method: &str, value: &Value) -> Vec<HarnessEvent> {
         let params = value.get("params").cloned().unwrap_or(Value::Null);
         let parent_thread = self.is_parent_thread(&params);
+        self.observe_mcp_lifecycle(method, &params, parent_thread);
         if parent_thread {
             if let Some(turn_id) = params
                 .get("turnId")
@@ -248,6 +263,7 @@ impl CodexStreamParser {
             "item/started" => self.parse_item_started(&params),
             "item/completed" => self.parse_item_completed(&params),
             "item/commandExecution/requestApproval" => self.parse_approval_request(value, &params),
+            "mcpServer/elicitation/request" => self.parse_elicitation(value, &params),
             "turn/started" => {
                 if !parent_thread {
                     return self.ensure_subagent_started(&params);
@@ -410,7 +426,8 @@ impl CodexStreamParser {
             return Vec::new();
         }
         if let Some(id) = value.get("id") {
-            self.pending_approvals.insert(call_id.clone(), id.clone());
+            self.pending_approvals
+                .insert(call_id.clone(), PendingApproval::command(id.clone()));
         }
         vec![HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef::engine(call_id),

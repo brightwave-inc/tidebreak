@@ -36,6 +36,7 @@ const AUTO_FLAG: &str = "--auto";
 const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
 /// MCP server name used in the OpenCode config for the browser tool bridge.
 const BROWSER_MCP_SERVER: &str = "tb-browser";
+const NATIVE_MCP_SERVER: &str = "tb-native";
 
 /// Live opencode session: one `serve` child, spawned on the first turn and
 /// replaced whenever a turn finds it parked or dead (decision 0064).
@@ -158,66 +159,74 @@ impl OpencodeSession {
 fn browser_mcp_config_json(
     bridge_command: &std::path::Path,
 ) -> Result<serde_json::Value, HarnessError> {
+    local_mcp_config_json(bridge_command, "browser-mcp", "browser")
+}
+
+/// Build the OpenCode MCP server entry for the native computer-use bridge.
+/// The capfile is inherited through `TIDEBREAK_NATIVE_CAPFILE`, never the
+/// JSON.
+fn native_mcp_config_json(
+    bridge_command: &std::path::Path,
+) -> Result<serde_json::Value, HarnessError> {
+    local_mcp_config_json(bridge_command, "computer-mcp", "native")
+}
+
+fn local_mcp_config_json(
+    bridge_command: &std::path::Path,
+    subcommand: &str,
+    channel: &str,
+) -> Result<serde_json::Value, HarnessError> {
     let bridge_command = bridge_command.to_str().ok_or_else(|| {
-        HarnessError::Other(
-            "browser bridge command path is not valid UTF-8 and cannot be emitted in the OpenCode config"
-                .into(),
-        )
+        HarnessError::Other(format!(
+            "{channel} bridge command path is not valid UTF-8 and cannot be emitted in the OpenCode config"
+        ))
     })?;
     Ok(serde_json::json!({
         "type": "local",
-        "command": [bridge_command, "browser-mcp"],
+        "command": [bridge_command, subcommand],
     }))
 }
 
-/// Merge the browser MCP server entry into an optional existing
+/// Merge the present channel MCP server entries into an optional existing
 /// `OPENCODE_CONFIG_CONTENT` JSON string.
 ///
 /// If `config_content` is `None` or empty, a fresh config object is created.
-/// If it parses as a JSON object, the browser entry is merged into its `mcp`
-/// key, preserving all unrelated entries. A conflicting `tb-browser` entry
+/// If it parses as a JSON object, each entry is merged into its `mcp` key,
+/// preserving all unrelated entries. A conflicting same-name entry
 /// (different content) is rejected. An identical entry is idempotent.
 /// Malformed or non-object JSON is rejected with a clear error.
-fn merge_browser_mcp(
+fn merge_channel_mcp(
     config_content: Option<&str>,
-    bridge_command: &std::path::Path,
+    entries: &[(&str, serde_json::Value)],
 ) -> Result<String, HarnessError> {
-    let browser_entry = browser_mcp_config_json(bridge_command)?;
-    match config_content.map(str::trim).filter(|s| !s.is_empty()) {
-        None => {
-            let config = serde_json::json!({
-                "mcp": { BROWSER_MCP_SERVER: browser_entry }
-            });
-            Ok(config.to_string())
-        }
-        Some(raw) => {
-            let mut config: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
-                HarnessError::Other(format!("OPENCODE_CONFIG_CONTENT is not valid JSON: {err}"))
-            })?;
-            let obj = config.as_object_mut().ok_or_else(|| {
-                HarnessError::Other("OPENCODE_CONFIG_CONTENT must be a JSON object".into())
-            })?;
-            let mcp = obj
-                .entry("mcp".to_owned())
-                .or_insert_with(|| serde_json::json!({}));
-            let mcp_obj = mcp.as_object_mut().ok_or_else(|| {
-                HarnessError::Other(
-                    "OPENCODE_CONFIG_CONTENT `mcp` key must be a JSON object".into(),
-                )
-            })?;
-            if let Some(existing) = mcp_obj.get(BROWSER_MCP_SERVER) {
-                if existing != &browser_entry {
-                    return Err(HarnessError::Other(format!(
-                        "OPENCODE_CONFIG_CONTENT already has a conflicting `{BROWSER_MCP_SERVER}` MCP entry"
-                    )));
-                }
-                // Identical entry — idempotent, no change needed.
-            } else {
-                mcp_obj.insert(BROWSER_MCP_SERVER.to_owned(), browser_entry);
+    let mut config = match config_content.map(str::trim).filter(|s| !s.is_empty()) {
+        None => serde_json::json!({}),
+        Some(raw) => serde_json::from_str(raw).map_err(|err| {
+            HarnessError::Other(format!("OPENCODE_CONFIG_CONTENT is not valid JSON: {err}"))
+        })?,
+    };
+    let obj = config.as_object_mut().ok_or_else(|| {
+        HarnessError::Other("OPENCODE_CONFIG_CONTENT must be a JSON object".into())
+    })?;
+    let mcp = obj
+        .entry("mcp".to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    let mcp_obj = mcp.as_object_mut().ok_or_else(|| {
+        HarnessError::Other("OPENCODE_CONFIG_CONTENT `mcp` key must be a JSON object".into())
+    })?;
+    for (server, entry) in entries {
+        if let Some(existing) = mcp_obj.get(*server) {
+            if existing != entry {
+                return Err(HarnessError::Other(format!(
+                    "OPENCODE_CONFIG_CONTENT already has a conflicting `{server}` MCP entry"
+                )));
             }
-            Ok(config.to_string())
+            // Identical entry — idempotent, no change needed.
+        } else {
+            mcp_obj.insert((*server).to_owned(), entry.clone());
         }
     }
+    Ok(config.to_string())
 }
 
 /// Case-insensitive environment-key equality on the same platforms the child
@@ -274,6 +283,7 @@ fn effective_existing_config_str<'a>(
 }
 
 /// Argv for the long-lived serve child. Prompt never appears here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compose_serve_plan(
     binary: &std::path::Path,
     extra_argv: &[String],
@@ -282,6 +292,7 @@ pub(crate) fn compose_serve_plan(
     extra_env: &[(String, String)],
     port: u16,
     browser: Option<&BrowserChannelSpec>,
+    native: Option<&crate::NativeChannelSpec>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -310,13 +321,26 @@ pub(crate) fn compose_serve_plan(
         .iter()
         .rev()
         .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT));
-    if let Some(spec) = browser {
-        // Snapshot-only config takes the merge path only when a browser
-        // channel is present. With no browser, apply_child_env_tokio already
-        // preserves the snapshot unchanged, so plan.env must not copy it or
-        // reject it (including non-UTF-8 values).
+    if browser.is_some() || native.is_some() {
+        // Snapshot-only config takes the merge path only when a channel is
+        // present. With no channel, apply_child_env_tokio already preserves
+        // the snapshot unchanged, so plan.env must not copy it or reject it
+        // (including non-UTF-8 values).
+        let mut entries = Vec::new();
+        if let Some(spec) = browser {
+            entries.push((
+                BROWSER_MCP_SERVER,
+                browser_mcp_config_json(spec.bridge_command())?,
+            ));
+        }
+        if let Some(spec) = native {
+            entries.push((
+                NATIVE_MCP_SERVER,
+                native_mcp_config_json(spec.bridge_command())?,
+            ));
+        }
         let existing_config = effective_existing_config_str(snapshot_env, extra_env)?;
-        let merged = merge_browser_mcp(existing_config, spec.bridge_command())?;
+        let merged = merge_channel_mcp(existing_config, &entries)?;
         env.push((OPENCODE_CONFIG_CONTENT.to_owned(), merged));
     } else if let Some(existing) = extra_config {
         // Explicit overlay without a browser channel: preserve it. The
@@ -511,6 +535,7 @@ impl OpencodeSession {
             &self.spec.extra_env,
             port,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         )?;
         let mut command = Command::new(&plan.argv[0]);
         command
@@ -525,6 +550,7 @@ impl OpencodeSession {
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),
+            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdout = child
@@ -1021,6 +1047,18 @@ where
 mod tests {
     use super::*;
 
+    /// Browser-only shim over [`merge_channel_mcp`], keeping the original
+    /// merge assertions byte-for-byte.
+    fn merge_browser_mcp(
+        config_content: Option<&str>,
+        bridge_command: &std::path::Path,
+    ) -> Result<String, HarnessError> {
+        merge_channel_mcp(
+            config_content,
+            &[(BROWSER_MCP_SERVER, browser_mcp_config_json(bridge_command)?)],
+        )
+    }
+
     struct Discard;
 
     #[async_trait]
@@ -1047,6 +1085,7 @@ mod tests {
             binary: Some(std::path::PathBuf::from("opencode")),
             sink: std::sync::Arc::new(Discard),
             browser: None,
+            native: None,
         })
     }
 
@@ -1234,6 +1273,7 @@ mod tests {
             &[],
             4096,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1261,6 +1301,7 @@ mod tests {
             &[],
             4096,
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
@@ -1275,6 +1316,7 @@ mod tests {
             &[],
             &[],
             4096,
+            None,
             None,
         )
         .unwrap_err();
@@ -1388,6 +1430,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1412,6 +1455,7 @@ mod tests {
             &[],
             &[],
             4096,
+            None,
             None,
         )
         .unwrap();
@@ -1480,6 +1524,73 @@ mod tests {
     }
 
     #[test]
+    fn native_channel_merges_a_tb_native_local_server() {
+        let native = crate::NativeChannelSpec::new(
+            std::path::PathBuf::from("/tmp/native-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            None,
+            Some(&native),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.clone())
+            .expect("config must be present");
+        let config: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        assert_eq!(config["mcp"]["tb-native"]["type"], "local");
+        assert_eq!(
+            config["mcp"]["tb-native"]["command"][0],
+            "/usr/local/bin/tidebreak"
+        );
+        assert_eq!(config["mcp"]["tb-native"]["command"][1], "computer-mcp");
+        // The capfile path is inherited through the environment, never config.
+        assert!(!config_str.contains("/tmp/native-cap.json"));
+        assert!(config["mcp"].get("tb-browser").is_none());
+    }
+
+    #[test]
+    fn browser_and_native_merge_into_one_config() {
+        let browser = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let native = crate::NativeChannelSpec::new(
+            std::path::PathBuf::from("/tmp/native-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            Some(&browser),
+            Some(&native),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.clone())
+            .expect("config must be present");
+        let config: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        assert!(config["mcp"].get("tb-browser").is_some());
+        assert!(config["mcp"].get("tb-native").is_some());
+    }
+
+    #[test]
     fn bridge_command_with_spaces_remains_one_array_element() {
         let spec = BrowserChannelSpec::new(
             std::path::PathBuf::from("/tmp/browser-cap.json"),
@@ -1493,6 +1604,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1523,6 +1635,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1606,6 +1719,7 @@ mod tests {
             &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing.clone())],
             4096,
             None,
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1661,6 +1775,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1706,6 +1821,7 @@ mod tests {
             &extra_env,
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1745,6 +1861,7 @@ mod tests {
             &[],
             4096,
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1774,6 +1891,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap();
         let config_str = plan
@@ -1817,6 +1935,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap_err();
         let message = err.to_string();
@@ -1840,6 +1959,7 @@ mod tests {
             &[],
             std::slice::from_ref(&entry),
             4096,
+            None,
             None,
         )
         .unwrap();
@@ -1873,6 +1993,7 @@ mod tests {
             &[],
             4096,
             Some(&spec),
+            None,
         )
         .unwrap_err();
         let message = err.to_string();

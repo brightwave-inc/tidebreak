@@ -1286,6 +1286,7 @@ mod tests {
             binary: Some(std::path::PathBuf::from("/scripted/engine")),
             sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
             browser: None,
+            native: None,
         })
         .await
         .unwrap();
@@ -1654,6 +1655,7 @@ mod tests {
                 binary: Some(std::path::PathBuf::from("/scripted/engine")),
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
+                native: None,
             })
             .await
             .unwrap();

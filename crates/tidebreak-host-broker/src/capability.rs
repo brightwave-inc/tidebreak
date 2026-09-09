@@ -155,6 +155,10 @@ pub struct Grant {
     /// See decision record 0013.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     single_use: bool,
+    /// Explicit app permission shared by local tasks in this Tidebreak profile.
+    /// Only native app authorization reads this flag; folders and displays do not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    native_app_all_sessions: bool,
 }
 
 impl Grant {
@@ -173,6 +177,7 @@ impl Grant {
             scope,
             consent,
             single_use: false,
+            native_app_all_sessions: false,
         })
     }
 
@@ -181,6 +186,27 @@ impl Grant {
     pub(crate) fn into_single_use(mut self) -> Self {
         self.single_use = true;
         self
+    }
+
+    /// Remember an exact native app permission across local tasks.
+    pub(crate) fn for_all_native_sessions(mut self) -> Result<Self, GrantError> {
+        if self.single_use
+            || self.consent.method() != ConsentMethod::PermissionDialog
+            || !matches!(
+                self.capability,
+                Capability::CaptureScreen | Capability::ReadAppContent | Capability::ControlApp
+            )
+            || !matches!(&self.scope, Scope::App { bundle_id } if !bundle_id.trim().is_empty() && bundle_id.len() <= 256 && !crate::is_blocked_control_bundle(bundle_id))
+        {
+            return Err(GrantError::InvalidCapabilityScope);
+        }
+        self.native_app_all_sessions = true;
+        Ok(self)
+    }
+
+    /// Whether explicit app consent applies across this profile's local tasks.
+    pub const fn native_app_all_sessions(&self) -> bool {
+        self.native_app_all_sessions
     }
 
     /// Stable identity recorded in operation receipts and audit entries.
@@ -228,6 +254,8 @@ impl<'de> Deserialize<'de> for Grant {
             consent: ConsentRecord,
             #[serde(default)]
             single_use: bool,
+            #[serde(default)]
+            native_app_all_sessions: bool,
         }
 
         let wire = WireGrant::deserialize(deserializer)?;
@@ -239,11 +267,16 @@ impl<'de> Deserialize<'de> for Grant {
             wire.consent,
         )
         .map_err(D::Error::custom)?;
-        Ok(if wire.single_use {
+        let grant = if wire.single_use {
             grant.into_single_use()
         } else {
             grant
-        })
+        };
+        if wire.native_app_all_sessions {
+            grant.for_all_native_sessions().map_err(D::Error::custom)
+        } else {
+            Ok(grant)
+        }
     }
 }
 

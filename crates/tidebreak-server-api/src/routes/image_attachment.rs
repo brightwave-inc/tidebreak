@@ -99,7 +99,8 @@ pub async fn get_chat_image_attachment(
             .into_iter()
             .filter_map(|call| call.result_preview)
             .find_map(|preview| match preview {
-                tidebreak_core::ToolResultPreview::Exec { images, .. } => images
+                tidebreak_core::ToolResultPreview::Exec { images, .. }
+                | tidebreak_core::ToolResultPreview::Images { images } => images
                     .into_iter()
                     .find(|image| image.blob_id == attachment_id),
                 tidebreak_core::ToolResultPreview::ScreenCapture { image, .. } => {
