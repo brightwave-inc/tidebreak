@@ -565,6 +565,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_remote_titles_get_distinct_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) =
+            runtime_with_remote_settings(dir.path(), settings()).await;
+        let (first, second) = tokio::join!(
+            runtime.create_remote_workspace(&owner, repo.id, Some("Verify this repository".into())),
+            runtime.create_remote_workspace(&owner, repo.id, Some("Verify this repository".into()))
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_ne!(first.branch_name, second.branch_name);
+        assert_eq!(first.title, second.title);
+        assert!(first.branch_name.starts_with(&repo.branch_prefix));
+        let third = runtime
+            .create_remote_workspace(&owner, repo.id, Some(first.title.clone()))
+            .await
+            .unwrap();
+        assert_ne!(first.branch_name, third.branch_name);
+        assert_ne!(second.branch_name, third.branch_name);
+    }
+
+    #[tokio::test]
     async fn a_service_owner_labels_the_remote_session_it_creates() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, _fake, owner, repo) =

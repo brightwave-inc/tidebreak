@@ -30,6 +30,8 @@ use crate::error::ServerError;
 use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
 use crate::principal::{legacy_owner_path_segment, owner_path_segment};
 
+mod external;
+
 const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
 /// Long enough for a cold binary to answer, short enough that a machine
 /// without git reports so rather than stalling the dialog that asked.
@@ -44,6 +46,7 @@ const SAFE_GIT_ENV: [&str; 5] = ["COMSPEC", "PATH", "PATHEXT", "SystemRoot", "WI
 /// In-memory clone jobs for this process. Not journaled; a restart drops them.
 #[derive(Debug, Default)]
 pub struct CloneJobs {
+    external_start_lock: tokio::sync::Mutex<()>,
     jobs: Mutex<std::collections::HashMap<Uuid, CloneJob>>,
 }
 
@@ -56,6 +59,7 @@ struct CloneJob {
     done: bool,
     error: Option<String>,
     repo_id: Option<RepoId>,
+    external_origin: Option<String>,
     finished_at: Option<Instant>,
 }
 
@@ -350,12 +354,30 @@ impl CodeRuntime {
         owner: &OwnerId,
         request: CloneRequest,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
+        self.start_clone_as(
+            owner,
+            request,
+            None,
+            crate::obo_gateway::GitForgeAttributionRequest::Person,
+            self.git_credentials().cloned(),
+        )
+        .await
+    }
+
+    async fn start_clone_as(
+        self: &std::sync::Arc<Self>,
+        owner: &OwnerId,
+        request: CloneRequest,
+        external_origin: Option<String>,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
+        lender: Option<std::sync::Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+    ) -> Result<CodeCloneJobSnapshot, ServerError> {
         let parent = self.clone_parent(request.parent_dir.as_deref()).await?;
         validate_parent_dir(&parent).await?;
         let source = resolve_clone_source(
             &request,
             self.gh_search_path(),
-            self.git_credentials().is_some(),
+            lender.is_some(),
             !owner.is_local(),
         )
         .await?;
@@ -404,6 +426,7 @@ impl CodeRuntime {
             done: false,
             error: None,
             repo_id: None,
+            external_origin,
             finished_at: None,
         };
         self.clone_jobs.insert(job.clone());
@@ -412,7 +435,9 @@ impl CodeRuntime {
         let runtime = std::sync::Arc::clone(self);
         let owner = owner.clone();
         tokio::spawn(async move {
-            runtime.run_clone(&owner, id, source, target).await;
+            runtime
+                .run_clone(&owner, id, source, target, attribution, lender)
+                .await;
         });
         Ok(job.to_snapshot())
     }
@@ -423,25 +448,22 @@ impl CodeRuntime {
         id: Uuid,
         source: CloneSource,
         target: PathBuf,
+        attribution: crate::obo_gateway::GitForgeAttributionRequest,
+        lender: Option<std::sync::Arc<dyn crate::obo_gateway::GitCredentialLender>>,
     ) {
         // Borrowed at the moment of use and dropped with this job: a hosted
         // machine clones a GitHub repository with a dying, repository-scoped
         // credential the gateway mints for this caller (decision 63).
-        let credential = match (source.github_slug.as_deref(), self.git_credentials()) {
-            (Some(slug), Some(lender)) => match lender
-                .git_credential(
-                    owner,
-                    slug,
-                    crate::obo_gateway::GitForgeAttributionRequest::Person,
-                )
-                .await
-            {
-                Ok(credential) => Some(credential),
-                Err(refusal) => {
-                    self.fail_clone(owner, id, git_forge_refusal_message(&refusal));
-                    return;
+        let credential = match (source.github_slug.as_deref(), lender.as_ref()) {
+            (Some(slug), Some(lender)) => {
+                match lender.git_credential(owner, slug, attribution).await {
+                    Ok(credential) => Some(credential),
+                    Err(refusal) => {
+                        self.fail_clone(owner, id, git_forge_refusal_message(&refusal));
+                        return;
+                    }
                 }
-            },
+            }
             _ => None,
         };
         match clone_into(
@@ -1236,6 +1258,7 @@ mod tests {
             done,
             error: None,
             repo_id: None,
+            external_origin: None,
             finished_at,
         }
     }

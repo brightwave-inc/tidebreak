@@ -258,6 +258,39 @@ impl CodeRuntime {
             acts_as,
         }: NewSessionSettings,
     ) -> Result<Session, ServerError> {
+        let session = self
+            .build_internal_session(
+                owner,
+                owner_kind,
+                NewSessionSettings {
+                    permission_mode,
+                    model,
+                    reasoning_effort,
+                    fast_mode,
+                    permission_mode_ceiling,
+                    acts_as,
+                },
+            )
+            .await?;
+        insert_session(&self.db, &session).await?;
+        self.attach_and_spawn_worker(session).await
+    }
+
+    /// Build without inserting so external sessions commit their grant binding
+    /// before a worker can resolve credentials or recover the conversation.
+    pub(super) async fn build_internal_session(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort,
+            fast_mode,
+            permission_mode_ceiling,
+            acts_as,
+        }: NewSessionSettings,
+    ) -> Result<Session, ServerError> {
         let harness = HarnessKind::Internal;
         let adapter = self.adapter(harness)?;
         let probe = self.probe_for_session_create(adapter.as_ref()).await;
@@ -313,8 +346,7 @@ impl CodeRuntime {
             execution_location: tidebreak_core::ExecutionLocation::Machine,
             acts_as,
         };
-        insert_session(&self.db, &session).await?;
-        self.attach_and_spawn_worker(session).await
+        Ok(session)
     }
 
     pub async fn get_session(

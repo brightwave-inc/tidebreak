@@ -33,6 +33,7 @@ mod one_journal;
 mod one_turn_lane;
 mod session_access;
 mod session_acts_as;
+mod session_context;
 mod session_owner_kind;
 mod turn_actor;
 
@@ -99,6 +100,7 @@ impl MigratorTrait for Migrator {
             Box::new(grant_kind::GrantKind),
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
             Box::new(external_thread_context::ExternalThreadContext),
+            Box::new(session_context::SessionContext),
         ]
     }
 }
