@@ -1,0 +1,290 @@
+name: Build and Submit Mobile
+
+concurrency:
+  group: mobile-build-${{ github.ref }}
+  # Cancel stale PR dry-runs when a new commit is pushed; never cancel real
+  # deploys (push to main / workflow_dispatch), since GH-side cancel doesn't
+  # propagate to EAS — serial FIFO is correct there.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mobile/**"
+      - ".github/workflows/build-mobile.yml"
+  # PRs always trigger the workflow so the `deploy` job can serve as a
+  # stable required status check on `main`. The path-aware short-circuit
+  # lives inside the workflow (`check-mobile-changes` → `deploy.if`):
+  # non-mobile PRs see `deploy` skipped, which GitHub treats as
+  # satisfying a required status check. Mobile PRs run the full routing
+  # + dry-run path (no real OTA, no real build, no submission — see the
+  # `if` guards on the deploy steps).
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platform"
+        required: true
+        default: ios
+        type: choice
+        options:
+          - ios
+          - android
+          - all
+      dry_run:
+        description: "Dry run (route only, skip deploy)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-mobile-changes:
+    name: Check for mobile changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            mobile:
+              - added|deleted|modified: 'mobile/**'
+              - added|deleted|modified: '.github/workflows/build-mobile.yml'
+
+  deploy:
+    needs: check-mobile-changes
+    name: Deploy (production / ${{ inputs.platform || 'ios' }})
+    # Skip on non-mobile PRs so `deploy` becomes a stable required status
+    # check that auto-passes on PRs unrelated to mobile (skipped jobs
+    # satisfy required status checks on `main`). `always()` is needed
+    # because `check-mobile-changes` is itself skipped on non-PR events,
+    # which would otherwise cascade-skip this job.
+    #
+    # Also skip for Dependabot PRs: Dependabot-triggered runs use the
+    # Dependabot secrets store and never see regular Actions secrets, so
+    # `secrets.EXPO_TOKEN` is empty and the first EAS step (`eas env:exec`
+    # in the routing dry-run) fails auth. Skipping satisfies the required
+    # check the same way non-mobile PRs do, instead of failing on a token
+    # Dependabot can't be granted.
+    if: |
+      always() &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || needs.check-mobile-changes.outputs.mobile == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # TODO(android): iOS-only until the Play Console side exists — see
+      # "Later, deliberately deferred" in mobile/DEPLOYING.md (Play app
+      # record, service-account reuse, EAS-held keystore, and the
+      # Console-UI-only first upload). Android is excluded from *routing*,
+      # not just from submission, and deliberately: with no finished
+      # Android EAS build there is no `runtimeVersion` to compare against,
+      # so an `android` row would miss on every run and pin the mode to
+      # `build` forever — the OTA path would never fire even for a
+      # JS-only change. Everything below is already per-platform, so
+      # enabling Android is this default (and the `workflow_dispatch`
+      # default above) flipping to `all`.
+      PLATFORM: ${{ inputs.platform || 'ios' }}
+      # The one shipping profile. TestFlight's internal group is an
+      # internal audience, so push-to-main deploys production directly —
+      # there is no staging build profile in eas.json.
+      PROFILE: production
+      # EAS environment name for `eas env:exec` (env vars for the local
+      # fingerprint compute). Matches eas.json's `environment: production`.
+      EAS_ENV: production
+      # Mirror the eas.json profile-level `env: { APP_VARIANT: ... }`.
+      # (Tidewatch calls this APP_ENV; Tidebreak's app.config.ts reads
+      # APP_VARIANT — production/staging/development.) Only `eas build`
+      # and `eas submit` apply the profile `env` automatically; `eas
+      # update` and a standalone fingerprint compute do not. Without it
+      # the local fingerprint — which sets the OTA's runtimeVersion —
+      # would depend on app.config.ts's fallback rather than on a stated
+      # variant, and any future change to that fallback would silently
+      # produce an orphan OTA targeting a runtimeVersion no installed
+      # client has.
+      APP_VARIANT: production
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Node/pnpm setup mirrors .github/workflows/mobile-checks.yml — this
+      # repo has no root .nvmrc (Tidewatch pins one and reads it with
+      # node-version-file), so the pnpm version comes from
+      # mobile/package.json's `packageManager` pin and Node is set
+      # explicitly. Keep the two mobile workflows in step.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install locked dependencies
+        run: pnpm --dir mobile install --frozen-lockfile
+
+      - uses: expo/expo-github-action@eab7a230208c952974db8c3245cfd78402c7b385 # v9
+        with:
+          eas-version: 18.8.1
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # Compare the local fingerprint (with EAS env vars applied so
+      # app.config.ts resolves to the same values EAS will see) against the
+      # last finished EAS build's runtimeVersion for each requested platform.
+      # Match on every platform → OTA. Any mismatch (or no prior build) →
+      # binary build + store submission.
+      - name: Route OTA vs binary build
+        id: route
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+
+          case "$PLATFORM" in
+            all) platforms=(ios android) ;;
+            ios) platforms=(ios) ;;
+            android) platforms=(android) ;;
+          esac
+
+          mode=ota
+          # Tee the routing table to both the step summary and a markdown file
+          # we can attach to a PR comment in a later step (PR dry-run only).
+          comment_file="$RUNNER_TEMP/routing-comment.md"
+          : > "$comment_file"
+          {
+            echo "### Fingerprint routing"
+            echo ""
+            echo "| Platform | Local hash | Last EAS build | Match |"
+            echo "|---|---|---|---|"
+          } | tee -a "$comment_file" >> "$GITHUB_STEP_SUMMARY"
+
+          for p in "${platforms[@]}"; do
+            # Write fingerprint JSON to a file inside the wrapped command so any
+            # stdout from `eas env:exec` itself (banners, auth notices) can't
+            # corrupt the pipe to jq.
+            #
+            # Use the project-resolved @expo/fingerprint via `pnpm exec` — NOT
+            # `npx @expo/fingerprint@latest`. The `fingerprint` bin ships with
+            # the pinned `expo` package (expo/bin/fingerprint) and runs the
+            # @expo/fingerprint version locked in mobile/pnpm-lock.yaml, which
+            # is the same one EAS resolves when it stamps a binary's
+            # `runtimeVersion`. A floating `@latest` drifts away from that pin
+            # whenever Expo publishes a hashing-behavior change, so its hash
+            # stops matching the runtimeVersion baked into every installed
+            # binary and routing flips to `build` on every push. `pnpm exec`
+            # auto-tracks future SDK bumps with no version to hand-maintain.
+            fp_file="$(mktemp)"
+            eas env:exec "$EAS_ENV" "pnpm exec fingerprint fingerprint:generate --platform $p . > $fp_file" --non-interactive
+            local_hash=$(jq -r '.hash' "$fp_file")
+            last_rv=$(eas build:list --build-profile "$PROFILE" --platform "$p" --status finished --limit 1 --json --non-interactive | jq -r '.[0].runtimeVersion // empty')
+
+            if [ -n "$last_rv" ] && [ "$local_hash" = "$last_rv" ]; then
+              match="✅"
+            else
+              match="❌"
+              mode=build
+            fi
+            echo "[$p] local=$local_hash  last_eas=${last_rv:-<none>}  match=$match"
+            echo "| $p | \`$local_hash\` | \`${last_rv:-<none>}\` | $match |" | tee -a "$comment_file" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo ""
+          echo "Routing mode: $mode"
+          {
+            echo ""
+            echo "**Mode:** \`$mode\`"
+          } | tee -a "$comment_file" >> "$GITHUB_STEP_SUMMARY"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Dry-run notice
+        if: github.event_name == 'pull_request' || inputs.dry_run
+        run: |
+          {
+            echo ""
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "**Dry run** — \`pull_request\` event. Skipping deploy steps. The routing decision above is what *would* run on push to \`main\` or \`workflow_dispatch\`."
+            else
+              echo "**Dry run** — \`workflow_dispatch\` with \`dry_run=true\`. Skipping deploy steps. The routing decision above is what *would* run with \`dry_run=false\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post routing decision to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          MODE: ${{ steps.route.outputs.mode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `${process.env.RUNNER_TEMP}/routing-comment.md`;
+            const routing = fs.readFileSync(path, 'utf8').trim();
+            const tag = '<!-- comment-tag: mobile_ci_routing -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const headline = process.env.MODE === 'build'
+              ? 'Merging will trigger an **EAS binary build + store submission** (TestFlight internal).'
+              : 'Merging will trigger an **OTA update** on the `production` channel.';
+            const body = [
+              tag,
+              '## Mobile CI: routing preview',
+              '',
+              headline,
+              '',
+              routing,
+              '',
+              `_Dry run from [workflow run](${runUrl}). Re-runs on each push to this PR._`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body?.includes(tag));
+            if (existing) {
+              try {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+                return;
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Publish OTA
+        if: steps.route.outputs.mode == 'ota' && github.event_name != 'pull_request' && !inputs.dry_run
+        working-directory: mobile
+        # Wrap in `eas env:exec` so the local fingerprint compute that sets
+        # the OTA's runtimeVersion sees the same EAS-stored env vars `eas
+        # build` applied when stamping the matching binary's runtimeVersion.
+        # Combined with APP_VARIANT at job env, this matches both env layers
+        # `eas build --profile production` applies natively.
+        #
+        # Unlike the build step this is not restricted to iOS: `eas update`
+        # publishes both platforms' bundles under one runtimeVersion, and an
+        # Android bundle nobody has installed yet is harmless.
+        run: eas env:exec "$EAS_ENV" "eas update --branch $PROFILE --auto --non-interactive" --non-interactive
+
+      - name: Build binary and auto-submit
+        if: |
+          steps.route.outputs.mode == 'build' &&
+          github.event_name != 'pull_request' &&
+          !inputs.dry_run
+        working-directory: mobile
+        # $PLATFORM is `ios` until Play Console setup lands — see the
+        # TODO(android) on the job `env` block above.
+        run: eas build --profile "$PROFILE" --platform "$PLATFORM" --non-interactive --auto-submit
