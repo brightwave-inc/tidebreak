@@ -106,6 +106,7 @@ pub fn journal_row(event: &AgentEvent) -> Event {
         },
         AgentEvent::TurnCompleted { usage, stop_reason } => Event::TurnCompleted {
             usage: code_usage(*usage),
+            cost: None,
             checkpoint: None,
             stop_reason: Some(*stop_reason),
         },
@@ -293,6 +294,16 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
         | Event::TurnCompleted {
             stop_reason: None, ..
         }
+        | Event::PullRequestOpened { .. }
+        | Event::PullRequestChecksPending { .. }
+        | Event::PullRequestChecksFailed { .. }
+        | Event::PullRequestReviewRequested { .. }
+        | Event::PullRequestChangesRequested { .. }
+        | Event::PullRequestApproved { .. }
+        | Event::PullRequestReview { .. }
+        | Event::PullRequestMergeable { .. }
+        | Event::PullRequestMerged { .. }
+        | Event::PullRequestWatch { .. }
         | Event::TurnFailed { detail: None, .. }
         | Event::TurnInterrupted { usage: None }
         | Event::UserSteered {
@@ -458,6 +469,7 @@ mod tests {
             },
             Event::TurnCompleted {
                 usage: TurnUsage::default(),
+                cost: None,
                 checkpoint: None,
                 stop_reason: None,
             },

@@ -3734,3 +3734,361 @@ async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targe
         "ended"
     );
 }
+
+/// Pull-request delivery events are durable per session: two bound sessions
+/// each journal once, a failed append retries without losing the event or
+/// suppressing it for the other session, repeated identical facts stay
+/// silent, and reconnect replay carries the fact.
+#[tokio::test]
+async fn pull_request_delivery_is_per_session_replays_and_retries() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let mut sessions = Vec::new();
+    for key in ["T1/PR/1.1", "T1/PR/2.2"] {
+        let created = client
+            .post(format!("http://{addr}/external/code/sessions"))
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({ "external_key": key, "repo_id": repo_id }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+        sessions.push(bound_session_id(&runtime, &owner, key).await);
+    }
+    let digest = tidebreak_core::PullRequestDigest {
+        number: 412,
+        url: Some("https://github.com/acme/tools/pull/412".to_owned()),
+        state: "open".to_owned(),
+        title: None,
+        checks_summary: None,
+        check_counts: None,
+        checks: None,
+        draft: None,
+        merged: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: None,
+        base_branch: None,
+        head_sha: None,
+        auto_merge_enabled: None,
+        in_merge_queue: None,
+    };
+    for session in &sessions {
+        let session = runtime.get_session(&owner, *session).await.unwrap();
+        let workspace = runtime
+            .get_workspace(
+                &owner,
+                session.workspace_id.expect("bound session has a workspace"),
+            )
+            .await
+            .unwrap();
+        tidebreak_core::db::code::set_active_workspace_pull_request(
+            &runtime.db,
+            &owner,
+            workspace.id,
+            &digest,
+        )
+        .await
+        .unwrap();
+    }
+    let fact = tidebreak_core::CodePullRequestFact {
+        id: tidebreak_core::CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".to_owned(),
+        repo_owner: "acme".to_owned(),
+        repo_name: "tools".to_owned(),
+        number: 412,
+        url: "https://github.com/acme/tools/pull/412".to_owned(),
+        title: "Fix the thing".to_owned(),
+        state: tidebreak_core::CodePullRequestState::Open,
+        draft: false,
+        author: Some("octocat".to_owned()),
+        head_branch: "feat/x".to_owned(),
+        base_branch: "main".to_owned(),
+        head_sha: Some("aaa111".to_owned()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: chrono::Utc::now(),
+        last_seen_at: chrono::Utc::now(),
+        live: None,
+    };
+    tidebreak_core::db::code::save_pull_request_fact(&runtime.db, &fact)
+        .await
+        .unwrap();
+    let event = tidebreak_core::Event::PullRequestChecksFailed {
+        pull_request: crate::code::pr_delivery_publisher::identity_of(&fact),
+        tenant: owner.to_string(),
+        head_sha: "aaa111".to_owned(),
+        failures: vec![tidebreak_core::PullRequestCheckFailure {
+            name: "ci".to_owned(),
+            detail: None,
+            url: None,
+        }],
+    };
+    crate::code::pr_delivery_publisher::publish_pull_request_event(
+        &runtime,
+        &owner,
+        &fact,
+        crate::code::pr_delivery_publisher::EventKind::ChecksFailed,
+        event.clone(),
+    )
+    .await;
+    for session in &sessions {
+        let pending =
+            tidebreak_core::db::code::pending_deliveries_for_session(&runtime.db, &owner, *session)
+                .await
+                .unwrap();
+        assert_eq!(pending.len(), 1, "one pending row per session");
+    }
+    // A stale spawn epoch fails the append for session A only.
+    let session_a = runtime.get_session(&owner, sessions[0]).await.unwrap();
+    let mut stale = session_a.clone();
+    stale.spawn_epoch = 999;
+    crate::code::pr_delivery_publisher::sweep_deliveries_for_session(&runtime, &stale).await;
+    assert_eq!(
+        tidebreak_core::db::code::pending_deliveries_for_session(&runtime.db, &owner, sessions[0])
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the failed append stays queued"
+    );
+    // Retry with the real epoch; B delivers independently.
+    crate::code::pr_delivery_publisher::sweep_deliveries_for_session(&runtime, &session_a).await;
+    let session_b = runtime.get_session(&owner, sessions[1]).await.unwrap();
+    crate::code::pr_delivery_publisher::sweep_deliveries_for_session(&runtime, &session_b).await;
+    for session in &sessions {
+        let page = tidebreak_core::db::code::list_events(&runtime.db, &owner, *session, 0, 200)
+            .await
+            .unwrap();
+        let failed = page
+            .events
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.event,
+                    tidebreak_core::Event::PullRequestChecksFailed { .. }
+                )
+            })
+            .count();
+        assert_eq!(failed, 1, "each session journals the fact once");
+        assert!(
+            tidebreak_core::db::code::pending_deliveries_for_session(&runtime.db, &owner, *session)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the outbox drains"
+        );
+    }
+    // Re-publish the same fact: no new rows, no duplicate journals.
+    crate::code::pr_delivery_publisher::publish_pull_request_event(
+        &runtime,
+        &owner,
+        &fact,
+        crate::code::pr_delivery_publisher::EventKind::ChecksFailed,
+        event,
+    )
+    .await;
+    for session in &sessions {
+        let page = tidebreak_core::db::code::list_events(&runtime.db, &owner, *session, 0, 200)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .filter(|row| matches!(
+                    row.event,
+                    tidebreak_core::Event::PullRequestChecksFailed { .. }
+                ))
+                .count(),
+            1,
+            "a repeated identical fact is not journaled twice"
+        );
+    }
+    // Reconnect replay carries the event to the adapter.
+    let mut request = format!("ws://{addr}/external/code/sessions/{}/events", sessions[0])
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", pair.token).parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let mut replayed = false;
+    for _ in 0..50 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("stream stays open")
+            .expect("frame")
+            .expect("text");
+        let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        if value["event"]["type"] == "pull_request_checks_failed" {
+            assert_eq!(value["event"]["failures"][0]["name"], "ci");
+            replayed = true;
+            break;
+        }
+    }
+    assert!(replayed, "reconnect replay must include the delivery event");
+    let _ = grant;
+}
+
+/// Watch transitions carry trigger attribution, and re-entrant transitions
+/// advance instead of being permanently suppressed by an equal state.
+#[tokio::test]
+async fn watch_delivery_attributes_trigger_and_advances() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/WATCH/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/WATCH/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    let workspace = runtime
+        .get_workspace(
+            &owner,
+            session.workspace_id.expect("bound session has a workspace"),
+        )
+        .await
+        .unwrap();
+    let digest = tidebreak_core::PullRequestDigest {
+        number: 10,
+        url: Some("https://github.com/acme/tools/pull/10".to_owned()),
+        state: "open".to_owned(),
+        title: None,
+        checks_summary: None,
+        check_counts: None,
+        checks: None,
+        draft: None,
+        merged: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: None,
+        base_branch: None,
+        head_sha: Some("bbb222".to_owned()),
+        auto_merge_enabled: None,
+        in_merge_queue: None,
+    };
+    tidebreak_core::db::code::set_active_workspace_pull_request(
+        &runtime.db,
+        &owner,
+        workspace.id,
+        &digest,
+    )
+    .await
+    .unwrap();
+    let fact = tidebreak_core::CodePullRequestFact {
+        id: tidebreak_core::CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".to_owned(),
+        repo_owner: "acme".to_owned(),
+        repo_name: "tools".to_owned(),
+        number: 10,
+        url: "https://github.com/acme/tools/pull/10".to_owned(),
+        title: "Watch me".to_owned(),
+        state: tidebreak_core::CodePullRequestState::Open,
+        draft: false,
+        author: Some("octocat".to_owned()),
+        head_branch: "feat/w".to_owned(),
+        base_branch: "main".to_owned(),
+        head_sha: Some("bbb222".to_owned()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: chrono::Utc::now(),
+        last_seen_at: chrono::Utc::now(),
+        live: None,
+    };
+    tidebreak_core::db::code::save_pull_request_fact(&runtime.db, &fact)
+        .await
+        .unwrap();
+    let watch = || tidebreak_core::CodeWatch {
+        id: tidebreak_core::CodeWatchId::new(),
+        owner: owner.clone(),
+        workspace_id: workspace.id,
+        session_id,
+        pr_number: 10,
+        state: tidebreak_core::CodeWatchState::Watching,
+        detail: None,
+        last_fix_head: None,
+        cycles: 0,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    crate::code::pr_delivery_publisher::publish_watch_transition(
+        &runtime,
+        &watch(),
+        crate::code::watch::delivery_triggers::USER,
+    )
+    .await;
+    let page = tidebreak_core::db::code::list_events(&runtime.db, &owner, session_id, 0, 200)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter(|row| matches!(row.event, tidebreak_core::Event::PullRequestWatch { .. }))
+            .count(),
+        1
+    );
+    // A re-entrant transition (blocked, then watching again) is a new
+    // occurrence rather than a suppressed equal state.
+    let mut blocked = watch();
+    blocked.state = tidebreak_core::CodeWatchState::Blocked;
+    blocked.detail = Some("a fix did not move the head".to_owned());
+    blocked.updated_at = chrono::Utc::now();
+    crate::code::pr_delivery_publisher::publish_watch_transition(
+        &runtime,
+        &blocked,
+        crate::code::watch::delivery_triggers::WATCH,
+    )
+    .await;
+    let mut watching_again = watch();
+    watching_again.detail = None;
+    watching_again.updated_at = chrono::Utc::now();
+    crate::code::pr_delivery_publisher::publish_watch_transition(
+        &runtime,
+        &watching_again,
+        crate::code::watch::delivery_triggers::RECONCILE,
+    )
+    .await;
+    let page = tidebreak_core::db::code::list_events(&runtime.db, &owner, session_id, 0, 200)
+        .await
+        .unwrap();
+    let watch_events: Vec<_> = page
+        .events
+        .iter()
+        .filter_map(|row| match &row.event {
+            tidebreak_core::Event::PullRequestWatch { watch, .. } => Some(watch.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(watch_events.len(), 3, "each transition journals");
+    assert_eq!(watch_events[0].trigger, "user");
+    assert_eq!(watch_events[0].state, "watching");
+    assert_eq!(watch_events[1].trigger, "watch");
+    assert_eq!(watch_events[1].state, "blocked");
+    assert_eq!(watch_events[2].trigger, "reconcile");
+    assert_eq!(watch_events[2].state, "watching");
+}

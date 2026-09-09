@@ -607,6 +607,7 @@ mod fork_replay_tests {
         events.extend(middle);
         events.push(Event::TurnCompleted {
             usage: Default::default(),
+            cost: None,
             checkpoint: None,
             stop_reason: None,
         });

@@ -140,11 +140,32 @@ pub async fn set_pull_request_live_state(
     repo_name: &str,
     number: u64,
     live: &CodePullRequestLiveState,
-) -> Result<Option<(CodePullRequestId, bool)>> {
+) -> Result<Option<(CodePullRequestId, bool, Option<CodePullRequestLiveState>)>> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
     let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
         return Ok(None);
+    };
+    let prior = match &row.live_observed_at {
+        Some(observed_at) => Some(CodePullRequestLiveState {
+            checks_summary: row.checks_summary.clone(),
+            checks: match row.checks.as_deref() {
+                Some(raw) => Some(serde_json::from_str(raw).map_err(|err| {
+                    AgentError::Store(format!(
+                        "pull request {} live checks are unreadable: {err}",
+                        row.id
+                    ))
+                })?),
+                None => None,
+            },
+            review_decision: row.review_decision.clone(),
+            mergeable: row.mergeable.clone(),
+            merge_state_status: row.merge_state_status.clone(),
+            auto_merge_enabled: row.auto_merge_enabled,
+            in_merge_queue: row.in_merge_queue,
+            observed_at: *observed_at,
+        }),
+        None => None,
     };
     let checks_json = match &live.checks {
         Some(checks) => Some(serde_json::to_string(checks).map_err(|err| {
@@ -173,7 +194,7 @@ pub async fn set_pull_request_live_state(
     model.in_merge_queue = Set(live.in_merge_queue);
     model.live_observed_at = Set(Some(live.observed_at));
     model.update(&store.conn).await.map_err(store_err)?;
-    Ok(Some((id, changed)))
+    Ok(Some((id, changed, prior)))
 }
 
 /// One observed pull request plus the transport hints the conditional

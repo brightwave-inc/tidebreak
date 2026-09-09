@@ -377,6 +377,12 @@ impl CodeRuntime {
             updated_at: now,
         };
         insert_watch(&self.db, &watch).await?;
+        super::pr_delivery_publisher::publish_watch_transition(
+            self,
+            &watch,
+            delivery_triggers::USER,
+        )
+        .await;
         self.ensure_watch_sweep();
         emit_workspace_digests(&self.db, &self.bus, owner, workspace_id).await;
         Ok(watch)
@@ -405,6 +411,12 @@ impl CodeRuntime {
             Some("stopped by the user".to_owned()),
         )
         .await?;
+        super::pr_delivery_publisher::publish_watch_transition(
+            self,
+            &watch,
+            delivery_triggers::USER,
+        )
+        .await;
         Ok(watch)
     }
 
@@ -959,6 +971,16 @@ async fn finish_watch(
     let owner = watch.owner.clone();
     runtime.end_session_row(&owner, watch.session_id).await?;
     emit_workspace_digests(&runtime.db, &runtime.bus, &watch.owner, watch.workspace_id).await;
+    super::pr_delivery_publisher::publish_watch_transition(
+        runtime,
+        watch,
+        if state == CodeWatchState::Done {
+            delivery_triggers::WATCH
+        } else {
+            delivery_triggers::RECONCILE
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -1376,5 +1398,27 @@ mod tests {
         ));
         watch.updated_at = now - chrono::Duration::seconds(180);
         assert!(watch_submission_reservation_expired(&watch, now));
+    }
+}
+
+/// The watch sweep's own submission is a trigger pinning the same name the
+/// fix turn carries on its transcript (decision 50). User actions name the
+/// phrase the routes already use, and the reconcile sweep names itself when
+/// it parks a watch it was mid-fix for. Keep the vocabulary small and stable;
+/// external adapters render the string verbatim.
+pub mod delivery_triggers {
+    pub const USER: &str = "user";
+    pub const WATCH: &str = "watch";
+    pub const RECONCILE: &str = "reconcile";
+}
+
+/// Drain every live session's pending pull-request delivery rows on the
+/// watch sweep's cadence. Failures are per session and retried next tick.
+pub(crate) async fn sweep_delivery_outboxes(runtime: &Arc<CodeRuntime>) {
+    let Ok(sessions) = tidebreak_core::db::code::list_sessions_all_owners(&runtime.db).await else {
+        return;
+    };
+    for session in sessions {
+        crate::code::pr_delivery_publisher::sweep_deliveries_for_session(runtime, &session).await;
     }
 }

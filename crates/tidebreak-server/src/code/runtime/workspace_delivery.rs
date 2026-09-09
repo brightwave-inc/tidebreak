@@ -1236,7 +1236,55 @@ impl CodeRuntime {
         )
         .await
         {
-            Ok(Some((_, changed))) => changed,
+            Ok(Some((_, changed, prior))) => {
+                if changed {
+                    if let Ok(Some(fact)) = tidebreak_core::db::code::get_pull_request_fact(
+                        &self.db,
+                        owner,
+                        &host,
+                        &repo_owner,
+                        &repo_name,
+                        number,
+                    )
+                    .await
+                    {
+                        let mut events =
+                            crate::code::pr_delivery_publisher::events_from_live_transition(
+                                &fact,
+                                prior.as_ref(),
+                            );
+                        let review_changed = prior
+                            .as_ref()
+                            .and_then(|old| old.review_decision.as_deref())
+                            != fact
+                                .live
+                                .as_ref()
+                                .and_then(|live| live.review_decision.as_deref());
+                        if review_changed {
+                            let comments = match source {
+                                Some(workspace_id) => self
+                                    .workspace_pr_comments(owner, workspace_id)
+                                    .await
+                                    .map(|comments| comments.comments)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            events.extend(
+                                crate::code::pr_delivery_publisher::review_delivery_events(
+                                    &fact, &comments,
+                                ),
+                            );
+                        }
+                        if !events.is_empty() {
+                            crate::code::pr_delivery_publisher::publish_pull_request_events(
+                                self, owner, &fact, &events,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                changed
+            }
             // No fact row yet: the detector or the reconcile sweep mints it,
             // and the next digest change lands on it.
             Ok(None) => return,

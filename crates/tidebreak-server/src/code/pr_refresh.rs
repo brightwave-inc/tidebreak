@@ -96,4 +96,5 @@ async fn sweep_hot(runtime: &Arc<CodeRuntime>) {
     for (owner, id) in targets {
         runtime.refresh_workspace_pr_row(&owner, id).await;
     }
+    super::watch::sweep_delivery_outboxes(runtime).await;
 }

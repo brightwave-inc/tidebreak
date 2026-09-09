@@ -866,6 +866,7 @@ fn event_frames() -> Vec<Fixture> {
                 50,
                 Event::TurnCompleted {
                     usage: usage(),
+                    cost: None,
                     checkpoint: Some(CheckpointHint {
                         checkpoint_ref: Some("refs/tidebreak/checkpoints/3".to_owned()),
                         diffstat: Some(diffstat()),

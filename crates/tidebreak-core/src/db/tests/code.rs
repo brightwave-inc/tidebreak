@@ -11,17 +11,19 @@ use crate::db::code::{
     append_event_with_notification, begin_permission_mode_change, bump_spawn_epoch,
     cancel_permission_mode_change, claim_approval, clear_session_harness_resume_ref,
     confirm_permission_mode_change, delete_queued_turn, delete_session_queued_turns,
-    discard_permission_mode_change, enqueue_queued_turn, fence_permission_mode_change,
-    get_approval, get_repo, get_repo_by_root_path, get_session, get_turn, get_workspace,
-    insert_approval, insert_approval_for_worker, insert_repo, insert_session, insert_turn,
-    insert_workspace, list_approvals, list_events, list_pending_permission_mode_changes,
-    list_queued_turns, list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
+    deliver_outbox_row, discard_permission_mode_change, enqueue_delivery, enqueue_queued_turn,
+    event_already_planned, fence_permission_mode_change, get_approval, get_repo,
+    get_repo_by_root_path, get_session, get_turn, get_workspace, insert_approval,
+    insert_approval_for_worker, insert_repo, insert_session, insert_turn, insert_workspace,
+    list_approvals, list_events, list_pending_permission_mode_changes, list_queued_turns,
+    list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed, plan_delivery,
     promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
     replace_session_attention, replace_session_execution_settings, save_session, save_turn,
     save_workspace, search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
     set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
-    CodeTranscriptSearchSource, JournalError, SessionExecutionSettings, MAX_REPLAY_EVENTS,
+    CodeTranscriptSearchSource, JournalError, PrDeliveryFamily, SessionExecutionSettings,
+    MAX_REPLAY_EVENTS,
 };
 use crate::db::entities;
 use crate::{
@@ -1739,6 +1741,7 @@ async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
     let owner = OwnerId::local();
     let event = Event::TurnCompleted {
         usage: Default::default(),
+        cost: None,
         checkpoint: None,
         stop_reason: None,
     };
@@ -1792,6 +1795,7 @@ async fn a_workspace_less_terminal_event_uses_the_chat_notification_and_dedupe_k
         (
             Event::TurnCompleted {
                 usage: Default::default(),
+                cost: None,
                 checkpoint: None,
                 stop_reason: None,
             },
@@ -4190,14 +4194,14 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         in_merge_queue: Some(false),
         observed_at: later,
     };
-    let (live_id, changed) =
+    let (live_id, changed, _) =
         set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
             .await
             .unwrap()
             .unwrap();
     assert_eq!(live_id, id);
     assert!(changed);
-    let (_, changed_again) =
+    let (_, changed_again, _) =
         set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
             .await
             .unwrap()
@@ -6456,4 +6460,253 @@ async fn external_context_cannot_follow_a_message_that_was_retracted() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn pr_delivery_outbox_is_per_session_and_retries_after_append_failure() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_a = seed_external_session(&store, &owner, "deliver-a").await;
+    let session_b = seed_external_session(&store, &owner, "deliver-b").await;
+    let event = Event::PullRequestChecksFailed {
+        pull_request: crate::code::PullRequestEventIdentity {
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 412,
+        },
+        tenant: owner.to_string(),
+        head_sha: "aaa111".into(),
+        failures: vec![crate::code::PullRequestCheckFailure {
+            name: "ci".into(),
+            detail: None,
+            url: None,
+        }],
+    };
+    let now = now();
+    // Plan + enqueue on both sessions.
+    for session in [session_a, session_b] {
+        let occurrence = plan_delivery(
+            &store,
+            &owner,
+            session,
+            "github.com",
+            "acme",
+            "tools",
+            412,
+            PrDeliveryFamily::ChecksFailed,
+            "aaa111/failed/ci",
+            now,
+        )
+        .await
+        .unwrap()
+        .expect("first transition plans");
+        assert!(enqueue_delivery(
+            &store,
+            &owner,
+            session,
+            "github.com",
+            "acme",
+            "tools",
+            412,
+            PrDeliveryFamily::ChecksFailed,
+            occurrence,
+            &event,
+            now,
+        )
+        .await
+        .unwrap());
+    }
+    // Re-planning the identical token plans nothing (duplicate suppression
+    // per session; the repeated fact is not journaled twice).
+    assert!(plan_delivery(
+        &store,
+        &owner,
+        session_a,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        PrDeliveryFamily::ChecksFailed,
+        "aaa111/failed/ci",
+        now,
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    // Session A's first delivery attempt fails on a stale spawn epoch.
+    let stale = deliver_outbox_row(
+        &store,
+        &owner,
+        session_a,
+        99,
+        PrDeliveryFamily::ChecksFailed,
+        1,
+        event.clone(),
+    )
+    .await;
+    assert!(stale.is_err());
+
+    // The retry with the true epoch journals it and marks delivered; session
+    // B journals its own row independently.
+    let epoch = crate::db::code::get_session(&store, &owner, session_a)
+        .await
+        .unwrap()
+        .unwrap()
+        .spawn_epoch;
+    let seq_a = deliver_outbox_row(
+        &store,
+        &owner,
+        session_a,
+        epoch,
+        PrDeliveryFamily::ChecksFailed,
+        1,
+        event.clone(),
+    )
+    .await
+    .unwrap()
+    .expect("retry delivers");
+    let seq_b = deliver_outbox_row(
+        &store,
+        &owner,
+        session_b,
+        crate::db::code::get_session(&store, &owner, session_b)
+            .await
+            .unwrap()
+            .unwrap()
+            .spawn_epoch,
+        PrDeliveryFamily::ChecksFailed,
+        1,
+        event.clone(),
+    )
+    .await
+    .unwrap()
+    .expect("own row delivers");
+    assert!(seq_a > 0 && seq_b > 0);
+    let page_a = list_events(&store, &owner, session_a, 0, 50).await.unwrap();
+    let page_b = list_events(&store, &owner, session_b, 0, 50).await.unwrap();
+    let failed_a = page_a
+        .events
+        .iter()
+        .filter(|row| matches!(row.event, Event::PullRequestChecksFailed { .. }))
+        .count();
+    let failed_b = page_b
+        .events
+        .iter()
+        .filter(|row| matches!(row.event, Event::PullRequestChecksFailed { .. }))
+        .count();
+    assert_eq!(failed_a, 1, "session A event journals once");
+    assert_eq!(failed_b, 1, "session B event journals independently once");
+    // A replayed delivery sweep sees nothing pending and appends nothing.
+    assert!(
+        crate::db::code::pending_deliveries_for_session(&store, &owner, session_a)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        crate::db::code::pending_deliveries_for_session(&store, &owner, session_b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(event_already_planned(
+        &store,
+        &owner,
+        session_a,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        PrDeliveryFamily::ChecksFailed,
+        "aaa111/failed/ci",
+    )
+    .await
+    .unwrap());
+}
+
+#[tokio::test]
+async fn pr_delivery_reentrant_transitions_are_not_permanently_suppressed() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "reenter").await;
+    let now = now();
+    let event = Event::PullRequestReviewRequested {
+        pull_request: crate::code::PullRequestEventIdentity {
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 7,
+        },
+        tenant: owner.to_string(),
+    };
+    let first = plan_delivery(
+        &store,
+        &owner,
+        session,
+        "github.com",
+        "acme",
+        "tools",
+        7,
+        PrDeliveryFamily::ReviewRequested,
+        "req/1",
+        now,
+    )
+    .await
+    .unwrap()
+    .expect("first review-request plans");
+    assert_eq!(first, 1);
+    // A different state token on the same family is a re-entrant transition:
+    // it plans occurrence 2 rather than being suppressed.
+    let second = plan_delivery(
+        &store,
+        &owner,
+        session,
+        "github.com",
+        "acme",
+        "tools",
+        7,
+        PrDeliveryFamily::ReviewRequested,
+        "req/2",
+        now,
+    )
+    .await
+    .unwrap()
+    .expect("re-entrant transition plans");
+    assert_eq!(second, 2);
+    assert!(enqueue_delivery(
+        &store,
+        &owner,
+        session,
+        "github.com",
+        "acme",
+        "tools",
+        7,
+        PrDeliveryFamily::ReviewRequested,
+        1,
+        &event,
+        now,
+    )
+    .await
+    .unwrap());
+    assert!(enqueue_delivery(
+        &store,
+        &owner,
+        session,
+        "github.com",
+        "acme",
+        "tools",
+        7,
+        PrDeliveryFamily::ReviewRequested,
+        2,
+        &event,
+        now,
+    )
+    .await
+    .unwrap());
+    let pending = crate::db::code::pending_deliveries_for_session(&store, &owner, session)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 2);
 }

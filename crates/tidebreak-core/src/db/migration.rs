@@ -31,6 +31,7 @@ mod idens;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
+mod pr_delivery_state;
 mod session_access;
 mod session_acts_as;
 mod session_owner_kind;
@@ -99,6 +100,7 @@ impl MigratorTrait for Migrator {
             Box::new(grant_kind::GrantKind),
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
             Box::new(external_thread_context::ExternalThreadContext),
+            Box::new(pr_delivery_state::PrDeliveryState),
         ]
     }
 }

@@ -24,6 +24,7 @@ pub mod harness_release;
 pub mod memory;
 pub mod memory_capture;
 pub mod naming_settings;
+pub mod pr_delivery_publisher;
 pub mod pr_facts;
 pub mod pr_fetch;
 pub mod pr_refresh;

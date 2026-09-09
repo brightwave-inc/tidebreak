@@ -26,7 +26,7 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BoundedError, CodeIncarnationId, DbStore, Event,
-    FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, SessionId, TurnId, TurnUsage,
+    FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, SessionId, TurnCost, TurnId, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
 };
 
@@ -48,6 +48,10 @@ pub(crate) struct IngestBinding {
     pub harness_kind: HarnessKind,
     /// The turn the driver is servicing, when one is running.
     pub turn_id: Option<TurnId>,
+    /// Metered spend reported by the environment for this stream, when this
+    /// deployment meters turns (issue 3203). `None` on unmetered machines;
+    /// the stream's `TurnCompleted` then carries no cost.
+    pub metered_cost: Option<TurnCost>,
 }
 
 /// What one sandbox event becomes on the session.
@@ -147,6 +151,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
             if success {
                 out.journal.push(Event::TurnCompleted {
                     usage: TurnUsage::default(),
+                    cost: binding.metered_cost,
                     checkpoint: None,
                     stop_reason: None,
                 });
@@ -367,6 +372,7 @@ mod tests {
             incarnation,
             harness_kind: session.harness_kind,
             turn_id: Some(TurnId::new()),
+            metered_cost: None,
         }
     }
 
@@ -597,5 +603,28 @@ mod tests {
         );
         let outcome = ingest_events(&db, &bus, &b, &undrained).await.unwrap();
         assert!(outcome.fence.is_none());
+    }
+
+    #[test]
+    fn a_turn_completion_carries_cost_only_when_the_environment_meters_spend() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
+        let _ = (db, bus);
+        let incarnation = seeded_incarnation(&db, &session).await;
+        let mut b = binding(&session, incarnation);
+        b.metered_cost = Some(TurnCost {
+            microusd: 1_250_000,
+        });
+        let projection = project_event(&b, "turn_completed", &json!({ "turn": 1, "exit_code": 0 }));
+        assert!(projection.journal.iter().any(|event| matches!(
+            event,
+            Event::TurnCompleted { cost: Some(cost), .. } if cost.microusd == 1_250_000
+        )));
+        b.metered_cost = None;
+        let projection = project_event(&b, "turn_completed", &json!({ "turn": 1, "exit_code": 0 }));
+        assert!(projection
+            .journal
+            .iter()
+            .any(|event| matches!(event, Event::TurnCompleted { cost: None, .. })));
     }
 }

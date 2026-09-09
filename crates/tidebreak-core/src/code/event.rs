@@ -19,6 +19,19 @@ use crate::preview::{ToolActionPreview, ToolResultPreview, MAX_ACTION_FIELD_CHAR
 use crate::provider::{RefusalOutcome, StopReason};
 use crate::tool::{ApprovalClass, ToolOutput};
 
+/// One compiled cost on a turn's token accounting.
+///
+/// The stream exposes a cost only when the deployment meters one. Standalone
+/// local engines stay unmetered and omit the field entirely; gateway-backed
+/// deployments publish the same integer micro-US expenditure the sandbox
+/// ledger and analytics dashboard carry. External adapters render nothing
+/// when the field is absent, so a local machine never fabricates a bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TurnCost {
+    /// Total inferred for the turn, in micro-US dollars (`1_000_000` = $1).
+    pub microusd: u64,
+}
+
 /// Longest assistant / reasoning / steer text stored on one event.
 pub const MAX_EVENT_TEXT_CHARS: usize = 8_192;
 /// Longest tool-result preview.
@@ -191,6 +204,114 @@ pub struct TurnUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub first_call_context_tokens: Option<u64>,
+}
+
+/// The repository identity one pull-request delivery event names.
+///
+/// `host`, `repo_owner`, `repo_name`, and `number` are the forge identity a
+/// client builds its stable card key from. One session's stream can carry
+/// several pull requests, so every fact and watch event repeats the full
+/// identity rather than an index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestEventIdentity {
+    /// Forge host, e.g. `github.com`.
+    pub host: String,
+    /// Repository owner login.
+    pub repo_owner: String,
+    /// Repository name.
+    pub repo_name: String,
+    /// Pull request number on the host.
+    pub number: u64,
+}
+
+/// One failing check on a checks-failed delivery event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestCheckFailure {
+    /// Check name as the host reports it.
+    pub name: String,
+    /// Host status phrase, when distinct from the bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    /// Host URL for this check, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+}
+
+/// One review finding counted on a changes-requested delivery event.
+///
+/// The host's own comment id, when it reports one, is the key a client uses
+/// to avoid double counting a review body on reconnect; a review that
+/// predates stable ids still renders, but its count is the server's current
+/// expectation and the adapter refetches when ids are missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestReviewFinding {
+    /// Stable host identifier when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    /// Author login, when the host reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<String>,
+    /// File path, on inline findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// What the finding asks, bounded.
+    pub summary: String,
+}
+
+/// One pull-request review observation, including review-bot reviews.
+///
+/// Review facts are per submitted review, not per comment thread, exactly the
+/// way GitHub's own reviews endpoint reports them. A review bot's `APPROVED`
+/// and `CHANGES_REQUESTED` submissions arrive here like any other reviewer;
+/// only the submitted review's body and its standing state decide what a
+/// changes-requested card counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestReviewEvent {
+    /// The host's review id, on submitted reviews that carry one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<u64>,
+    /// Reviewer login (a bot login for review bots).
+    pub author: String,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, or `DISMISSED`.
+    pub state: String,
+    /// The submitted review's body, bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub body: Option<String>,
+    /// Host submission time, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub submitted_at: Option<String>,
+}
+
+/// One watch transition on the delivery stream.
+///
+/// `trigger` explains who the transition came from: a person, the reconcile
+/// sweep, or the named trigger (usually the watch's own `fix` sweep). States
+/// and details match the durable [`CodeWatchState`] vocabulary so a client
+/// rebuilds the watch row from the stream alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestWatchEvent {
+    /// Watch state after this transition.
+    pub state: String,
+    /// Human-readable reason for the state, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    /// Head SHA the last fix turn ran against, when the transition knows one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_fix_head: Option<String>,
+    /// Fix turns submitted so far.
+    pub cycles: i64,
+    /// Who or what caused this transition, as one label.
+    pub trigger: String,
 }
 
 /// Hint that a turn recorded a checkpoint. The diff body is loaded separately.
@@ -712,6 +833,11 @@ pub enum Event {
     TurnCompleted {
         /// Token accounting as reported by the engine.
         usage: TurnUsage,
+        /// Compiled turn cost, when this deployment meters turns. Omitted
+        /// entirely on unmetered machines.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        cost: Option<TurnCost>,
         /// Checkpoint recorded at turn end, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -814,6 +940,107 @@ pub enum Event {
     CompactionFinished {
         /// Whether a new (or confirmed) checkpoint was stored.
         compacted: bool,
+    },
+    /// A pull request was observed for the first time with an open state.
+    PullRequestOpened {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// Title at first observation.
+        title: String,
+        /// Web URL.
+        url: String,
+        /// Whether the host reports the pull request as a draft.
+        draft: bool,
+        /// Head branch.
+        head_branch: String,
+        /// Base branch.
+        base_branch: String,
+    },
+    /// Checks transitioned to any non-failure bucket still working.
+    PullRequestChecksPending {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// Head commit the pending state was read against.
+        head_sha: String,
+        /// Checks still queued or running right now.
+        pending: Vec<String>,
+    },
+    /// Checks transitioned to failing, naming the failing lane.
+    PullRequestChecksFailed {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// Head commit the failure was read against.
+        head_sha: String,
+        /// The deliberately plural lane that failed: every failing check.
+        failures: Vec<PullRequestCheckFailure>,
+    },
+    /// A review requested by the repository's rules became the standing
+    /// review decision.
+    PullRequestReviewRequested {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+    },
+    /// The standing review decision became changes requested.
+    PullRequestChangesRequested {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// Reviews currently standing as requested-changes.
+        reviewers: Vec<String>,
+        /// Findings counted on these reviews, newest first.
+        findings: Vec<PullRequestReviewFinding>,
+    },
+    /// The standing review decision became approved.
+    PullRequestApproved {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// The reviewers whose approval made the decision stand.
+        reviewers: Vec<String>,
+    },
+    /// One review submission was observed (including review bots).
+    PullRequestReview {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// The observation.
+        review: PullRequestReviewEvent,
+    },
+    /// The host's mergeability transitioned to mergeable.
+    PullRequestMergeable {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+    },
+    /// The host reported the pull request as merged.
+    PullRequestMerged {
+        /// The pull request this fact belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// Commit the merge landed at, when the host reported one.
+        merged_at: String,
+    },
+    /// A durable watch task moved to a new state.
+    PullRequestWatch {
+        /// The pull request this watch belongs to.
+        pull_request: PullRequestEventIdentity,
+        /// Tidebreak principal whose observation produced this event.
+        tenant: String,
+        /// The transition.
+        watch: PullRequestWatchEvent,
     },
 }
 
@@ -993,6 +1220,16 @@ mod tests {
             Event::CompactionStarted => 23,
             Event::CompactionFinished { .. } => 24,
             Event::CredentialRefused { .. } => 25,
+            Event::PullRequestOpened { .. } => 26,
+            Event::PullRequestChecksPending { .. } => 27,
+            Event::PullRequestChecksFailed { .. } => 28,
+            Event::PullRequestReviewRequested { .. } => 29,
+            Event::PullRequestChangesRequested { .. } => 30,
+            Event::PullRequestApproved { .. } => 31,
+            Event::PullRequestReview { .. } => 32,
+            Event::PullRequestMergeable { .. } => 33,
+            Event::PullRequestMerged { .. } => 34,
+            Event::PullRequestWatch { .. } => 35,
         }
     }
 
@@ -1073,6 +1310,7 @@ mod tests {
                     context_tokens: 88,
                     first_call_context_tokens: Some(55),
                 },
+                cost: None,
                 checkpoint: Some(CheckpointHint {
                     checkpoint_ref: Some("refs/tidebreak/checkpoints/ws/1".into()),
                     diffstat: Some(Diffstat {
@@ -1144,7 +1382,92 @@ mod tests {
             },
             Event::CompactionStarted,
             Event::CompactionFinished { compacted: true },
+            Event::PullRequestOpened {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                title: "Add the thing".into(),
+                url: "https://github.com/acme/tools/pull/412".into(),
+                draft: false,
+                head_branch: "feat/x".into(),
+                base_branch: "main".into(),
+            },
+            Event::PullRequestChecksPending {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                head_sha: "aaa111".into(),
+                pending: vec!["CI".into()],
+            },
+            Event::PullRequestChecksFailed {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                head_sha: "aaa111".into(),
+                failures: vec![PullRequestCheckFailure {
+                    name: "CI".into(),
+                    detail: Some("failure".into()),
+                    url: Some("https://github.com/acme/tools/actions/runs/1".into()),
+                }],
+            },
+            Event::PullRequestReviewRequested {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+            },
+            Event::PullRequestChangesRequested {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                reviewers: vec!["reviewer".into()],
+                findings: vec![PullRequestReviewFinding {
+                    id: Some("1".into()),
+                    author: Some("reviewer".into()),
+                    path: Some("src/lib.rs".into()),
+                    summary: "use the fixtures directory".into(),
+                }],
+            },
+            Event::PullRequestApproved {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                reviewers: vec!["reviewer".into()],
+            },
+            Event::PullRequestReview {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                review: PullRequestReviewEvent {
+                    id: Some(1),
+                    author: "review-bot".into(),
+                    state: "CHANGES_REQUESTED".into(),
+                    body: Some("nits".into()),
+                    submitted_at: None,
+                },
+            },
+            Event::PullRequestMergeable {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+            },
+            Event::PullRequestMerged {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                merged_at: "2026-09-09T12:00:00Z".into(),
+            },
+            Event::PullRequestWatch {
+                pull_request: pull_request_identity(),
+                tenant: "local".into(),
+                watch: PullRequestWatchEvent {
+                    state: "watching".into(),
+                    detail: None,
+                    last_fix_head: None,
+                    cycles: 0,
+                    trigger: "user".into(),
+                },
+            },
         ]
+    }
+
+    fn pull_request_identity() -> PullRequestEventIdentity {
+        PullRequestEventIdentity {
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 412,
+        }
     }
 
     #[test]

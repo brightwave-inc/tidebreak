@@ -1142,6 +1142,38 @@ pub(crate) enum CodeWorkflowRunFetch {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum CodePrDeliveryState {
+    Table,
+    Owner,
+    SessionId,
+    Host,
+    RepoOwner,
+    RepoName,
+    Number,
+    Family,
+    LastStateToken,
+    NextOccurrence,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodePrDeliveryOutbox {
+    Table,
+    Owner,
+    SessionId,
+    Host,
+    RepoOwner,
+    RepoName,
+    Number,
+    Family,
+    Occurrence,
+    EventJson,
+    QueuedAt,
+    DeliveredAt,
+    DeliveredSeq,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum CodeExternalBinding {
     Table,
     Id,

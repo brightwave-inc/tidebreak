@@ -1799,6 +1799,61 @@ pub mod code_session_incarnation {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_pr_delivery_state {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_pr_delivery_state")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub family: String,
+        pub owner: String,
+        pub host: String,
+        pub repo_owner: String,
+        pub repo_name: String,
+        pub number: i64,
+        pub last_state_token: String,
+        pub next_occurrence: i64,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_pr_delivery_outbox {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_pr_delivery_outbox")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub family: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub occurrence: i64,
+        pub owner: String,
+        pub host: String,
+        pub repo_owner: String,
+        pub repo_name: String,
+        pub number: i64,
+        pub event_json: String,
+        pub queued_at: DateTimeUtc,
+        pub delivered_at: Option<DateTimeUtc>,
+        pub delivered_seq: Option<i64>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_external_binding {
     use sea_orm::entity::prelude::*;
 

@@ -2307,6 +2307,7 @@ async fn close_open_turn(
                         TurnStatus::Completed,
                         Event::TurnCompleted {
                             usage: turn.usage.clone().unwrap_or_default(),
+                            cost: None,
                             checkpoint: None,
                             stop_reason: None,
                         },
@@ -3130,6 +3131,7 @@ async fn drive_turn_inner(
                         TurnStatus::Completed,
                         Event::TurnCompleted {
                             usage: turn.usage.clone().unwrap_or_default(),
+                            cost: None,
                             checkpoint: None,
                             stop_reason: None,
                         },
@@ -4154,6 +4156,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
         },
         HarnessEvent::TurnCompleted { usage } => Event::TurnCompleted {
             usage,
+            cost: None,
             checkpoint: None,
             stop_reason: None,
         },

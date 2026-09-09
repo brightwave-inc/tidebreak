@@ -708,9 +708,13 @@ impl RemoteDriver<'_> {
         // Feed the spend ledger from the environment's own meter. Best
         // effort: a status fault costs one reading, and the terminal pump
         // records the final figure.
+        let mut metered_cost = None;
         if let Ok(status) = provisioner.status(&owner, session.id, &sandbox_id).await {
             if let Some(spend) = status.spend_microusd {
                 record_incarnation_spend(db, &owner, row.id, spend).await?;
+                metered_cost = Some(tidebreak_core::TurnCost {
+                    microusd: u64::try_from(spend).unwrap_or(u64::MAX),
+                });
             }
         }
 
@@ -724,6 +728,7 @@ impl RemoteDriver<'_> {
             incarnation: row.id,
             harness_kind: session.harness_kind,
             turn_id: running_turn.as_ref().map(|turn| turn.id),
+            metered_cost,
         };
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
