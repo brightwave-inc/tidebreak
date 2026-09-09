@@ -495,6 +495,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(routes::code::external_session_access),
         )
         .route(
+            "/external/code/sessions/{id}/approvals/{call}",
+            get(routes::code::external_approval),
+        )
+        .route(
             "/external/code/sessions/{id}/approvals/{call}/decision",
             post(routes::code::external_approval_decision),
         )

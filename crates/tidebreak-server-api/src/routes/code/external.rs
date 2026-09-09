@@ -770,6 +770,22 @@ pub struct ExternalDecisionBody {
     pub actor: Option<ExternalDecisionActor>,
 }
 
+/// Read the complete approval after verifying its session and adapter grant.
+/// The journal can then carry a bounded reference while cards load questions
+/// and plan text from the approval row.
+pub async fn external_approval(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, call)): Path<(SessionId, ApprovalId)>,
+) -> Result<Json<ApprovalSnapshot>, ServerError> {
+    let runtime = require_bound(&state, &grant, id).await?;
+    let approval = runtime.get_approval(&grant.owner, call).await?;
+    if approval.session_id != id {
+        return Err(ServerError::not_found("code session not found"));
+    }
+    Ok(Json(ApprovalSnapshot::from(approval)))
+}
+
 /// `POST /external/code/sessions/{id}/approvals/{call}/decision`
 pub async fn external_approval_decision(
     State(state): State<AppState>,

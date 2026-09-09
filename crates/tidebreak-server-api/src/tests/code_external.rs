@@ -3221,6 +3221,115 @@ async fn a_machine_session_parks_on_an_approval_a_contributor_can_settle() {
         }
     }
 
+    // The full row stays behind the same session/grant boundary as decisions.
+    let details_url = format!(
+        "http://{addr}/external/code/sessions/{session_id}/approvals/{}",
+        approval.id
+    );
+    let details = client
+        .get(&details_url)
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(details.status(), reqwest::StatusCode::OK);
+    let details: serde_json::Value = details.json().await.unwrap();
+    assert_eq!(details["kind"]["cmd"].as_str().unwrap().len(), 600);
+    assert!(details.get("server_capability").is_none());
+    assert!(details.get("decision_claim").is_none());
+    assert_eq!(
+        client.get(&details_url).send().await.unwrap().status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let (_, other_pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-other", "T1")
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .get(&details_url)
+            .bearer_auth(&other_pair.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let other_session = client.post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key": "T1/C-other/1.1", "repo_id": repo_id, "permission_mode": "ask"}))
+        .send().await.unwrap();
+    assert_eq!(other_session.status(), reqwest::StatusCode::CREATED);
+    let other_session_id = bound_session_id(&runtime, &owner, "T1/C-other/1.1").await;
+    let wrong_session_url = format!(
+        "http://{addr}/external/code/sessions/{other_session_id}/approvals/{}",
+        approval.id
+    );
+    assert_eq!(
+        client
+            .get(wrong_session_url)
+            .bearer_auth(&pair.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    let questions = vec![tidebreak_core::UserQuestion {
+        id: "target".into(),
+        header: "Target".into(),
+        question: "Where should the change run?".into(),
+        options: vec![tidebreak_core::UserQuestionOption {
+            id: "staging".into(),
+            label: "Staging".into(),
+            description: "Validate before production.".into(),
+        }],
+        question_type: tidebreak_core::UserQuestionType::SingleSelect,
+        allow_free_form: true,
+    }];
+    let plan = tidebreak_core::PlanProposalBody {
+        title: "Validate the change".into(),
+        plan: "Review the code and run the focused tests. Then publish the change for review."
+            .into(),
+    };
+    for (kind, raw) in [
+        (
+            tidebreak_core::ApprovalKind::Questions { questions },
+            serde_json::Value::Null,
+        ),
+        (
+            tidebreak_core::ApprovalKind::Plan {
+                proposed_mode: tidebreak_core::PermissionMode::Ask,
+            },
+            plan.to_raw().unwrap(),
+        ),
+    ] {
+        let mut row = approval.clone();
+        row.id = tidebreak_core::ApprovalId::new();
+        row.kind = kind.clone();
+        row.harness_raw = raw.clone();
+        row.native_call_id = None;
+        row.server_capability = None;
+        row.request_sha256 = None;
+        tidebreak_core::db::code::insert_approval(&runtime.db, &owner, &row)
+            .await
+            .unwrap();
+        let result = client
+            .get(format!(
+                "http://{addr}/external/code/sessions/{session_id}/approvals/{}",
+                row.id
+            ))
+            .bearer_auth(&pair.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), reqwest::StatusCode::OK);
+        let result: serde_json::Value = result.json().await.unwrap();
+        assert_eq!(result["kind"], serde_json::to_value(kind).unwrap());
+        assert_eq!(result["harness_raw_json"], raw.to_string());
+    }
+
     let grant_refused = client
         .post(format!(
             "http://{addr}/external/code/sessions/{session_id}/approvals/{}/decision",
