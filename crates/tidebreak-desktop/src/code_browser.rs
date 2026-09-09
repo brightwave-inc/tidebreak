@@ -48,10 +48,8 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-/// How long an agent-requested open waits for a visible, loaded native tab.
+/// How long an agent-requested open waits for its loaded native executor.
 const AGENT_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// How long an agent-requested activation waits for the tab to become visible.
-const AGENT_ACTIVATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const AGENT_LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 /// How often the host reads the view's URL while the tab is showing, on the
 /// platforms without a native URL observer. macOS pushes every change through
@@ -207,6 +205,15 @@ pub(crate) fn code_browser_import_legacy_state(
         &request.workspace_id,
         legacy,
     )
+}
+
+#[tauri::command]
+pub(crate) fn code_browser_agent_tabs(
+    registry: tauri::State<'_, BrowserRegistry>,
+    workspace_id: String,
+) -> Result<Vec<BrowserSnapshot>, String> {
+    validated_workspace_id(&workspace_id)?;
+    Ok(registry.independent_tabs(&workspace_id))
 }
 
 #[tauri::command]
@@ -623,12 +630,8 @@ pub(crate) async fn navigate_browser_for_agent(
 
 // ── Agent lifecycle ───────────────────────────────────────────────
 
-/// Open a new shared tab for an agent at an origin the user already granted.
-///
-/// The renderer owns tab layout, so the native side emits an adoption event
-/// and waits for the renderer to create the child webview through the normal
-/// `Create` command. Opening never creates consent: the destination origin
-/// must already be covered by a control grant for this workspace.
+/// Create an independent native tab before asking the renderer to adopt its preview.
+/// Opening does not select a page or change the human's editor layout.
 pub(crate) async fn open_browser_for_agent(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -656,6 +659,34 @@ pub(crate) async fn open_browser_for_agent(
         capability_id,
     )?;
 
+    let label = browser_label(&browser_id)?;
+    let profiles = app.state::<BrowserProfileStore>().inner().clone();
+    let downloads = app.state::<BrowserDownloadStore>().inner().clone();
+    {
+        // The same lock serializes renderer adoption and native creation.
+        let _lifecycle = profiles.lock_lifecycle().await;
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), &destination_origin)?;
+        let profile = profiles.get_or_create(&OwnerId::local())?;
+        create_browser(
+            app,
+            registry,
+            &profiles,
+            &downloads,
+            profile,
+            &workspace_id,
+            &browser_id,
+            &label,
+            destination.as_str(),
+            None,
+            CodeBrowserBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1024.0,
+                height: 768.0,
+            },
+            false,
+        )?;
+    }
     emit_agent_lifecycle_event(
         app,
         &workspace_id,
@@ -664,7 +695,6 @@ pub(crate) async fn open_browser_for_agent(
         Some(destination.to_string()),
     );
 
-    let label = browser_label(&browser_id)?;
     let snapshot = wait_for_agent_browser_ready(
         registry,
         capability_id,
@@ -682,14 +712,12 @@ pub(crate) async fn open_browser_for_agent(
         url: snapshot.url.unwrap_or_else(|| destination.to_string()),
         load_state: BrowserLoadState::Ready,
         document_epoch: snapshot.document_epoch.unwrap_or(0),
-        visible: true,
+        visible: snapshot.visible.unwrap_or(false),
     })
 }
 
-/// Registration precedes native view creation and the renderer reveals the
-/// view only after creation finishes. Await all three states so the next
-/// snapshot can use the returned id. Dropping this future cancels the wait;
-/// it never spawns a detached task that can acquire control later.
+/// Wait for a loaded executor without depending on a renderer or visible preview.
+/// Dropping the future cancels the open lease and cannot acquire control later.
 async fn wait_for_agent_browser_ready(
     registry: &BrowserRegistry,
     capability_id: Uuid,
@@ -706,7 +734,7 @@ async fn wait_for_agent_browser_ready(
             registry.agent_open_state(capability_id, browser_id, instance_id)?
         {
             instance_id = Some(instance);
-            if snapshot.visible == Some(true)
+            if (snapshot.visible == Some(true) || snapshot.independent_input == Some(true))
                 && snapshot.load_state == Some(BrowserLoadState::Ready)
                 && snapshot.document_epoch.is_some_and(|epoch| epoch > 0)
                 && executor_ready()
@@ -783,8 +811,7 @@ pub(crate) async fn close_browser_for_agent(
     ))
 }
 
-/// Make one shared tab visible without changing keyboard focus, then
-/// waiting for the native visibility to confirm.
+/// Keep a live independent executor usable without selecting its preview.
 pub(crate) async fn activate_browser_for_agent(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -794,8 +821,8 @@ pub(crate) async fn activate_browser_for_agent(
     if !arguments.is_well_formed() {
         return Err("browser activate request is not valid".to_owned());
     }
-    browser_label(&arguments.browser_id)?;
-    let (workspace_id, visible) =
+    let label = browser_label(&arguments.browser_id)?;
+    let (workspace_id, available) =
         match registry.authorize_agent_activation(capability_id, &arguments.browser_id) {
             Ok(authorized) => authorized,
             Err(error) if error == "browser session is not registered" => {
@@ -807,42 +834,23 @@ pub(crate) async fn activate_browser_for_agent(
             }
             Err(error) => return Err(error),
         };
-    if visible {
+    let snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+    if snapshot.independent_input != Some(true) {
+        return Err(crate::browser_independence::SHARED_TAB.to_owned());
+    }
+    registry.authorize_agent_close(capability_id, &arguments.browser_id)?;
+    if !available || app.get_webview(&label).is_none() {
         return Ok(lifecycle_result(
             &arguments.browser_id,
-            BrowserLifecycleStatus::Ok,
-            "The tab is already visible. Your keyboard focus is unchanged.",
+            BrowserLifecycleStatus::EngineFailure,
+            "The independent browser is unavailable. Open a new tab with browser_open.",
         ));
     }
-
-    emit_agent_lifecycle_event(
-        app,
-        &workspace_id,
+    Ok(lifecycle_result(
         &arguments.browser_id,
-        "agent_activate_requested",
-        None,
-    );
-    let deadline = tokio::time::Instant::now() + AGENT_ACTIVATE_TIMEOUT;
-    loop {
-        if registry
-            .snapshot(&arguments.browser_id, &workspace_id)
-            .is_ok_and(|snapshot| snapshot.visible.unwrap_or(false))
-        {
-            return Ok(lifecycle_result(
-                &arguments.browser_id,
-                BrowserLifecycleStatus::Ok,
-                "The tab is now visible. Your keyboard focus is unchanged.",
-            ));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(lifecycle_result(
-                &arguments.browser_id,
-                BrowserLifecycleStatus::EngineFailure,
-                "The tab did not become visible before the deadline.",
-            ));
-        }
-        tokio::time::sleep(AGENT_LIFECYCLE_POLL_INTERVAL).await;
-    }
+        BrowserLifecycleStatus::Ok,
+        "The independent browser is available. Your selected tab and keyboard focus stay unchanged.",
+    ))
 }
 
 fn lifecycle_result(
@@ -1000,7 +1008,15 @@ fn create_browser(
     let download_registry = registry.clone();
     let download_store = downloads.clone();
 
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(target)).focused(false);
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let guarded_initial_load = agent_host.is_some();
+    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    let guarded_initial_load = false;
+    let initial_target = initial_browser_url(&target, guarded_initial_load);
+    let initial_navigation_pending =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(guarded_initial_load));
+    let navigation_pending = std::sync::Arc::clone(&initial_navigation_pending);
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_target)).focused(false);
     #[cfg(target_os = "macos")]
     let builder = builder.data_store_identifier(profile.data_store_identifier());
     // Installed at document start in the page world so browser_diagnostics
@@ -1009,6 +1025,9 @@ fn create_browser(
         builder.initialization_script(crate::browser_semantics::BROWSER_DIAGNOSTICS_INIT_SCRIPT);
     let builder = builder
         .on_navigation(move |url| {
+            if guarded_initial_load && url.as_str() == "about:blank" {
+                return take_initial_navigation(&navigation_pending);
+            }
             let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {
                 emit_event(
                     &navigation_main,
@@ -1089,6 +1108,9 @@ fn create_browser(
             NewWindowResponse::Deny
         })
         .on_page_load(move |webview, payload| {
+            if guarded_initial_load && payload.url().as_str() == "about:blank" {
+                return;
+            }
             let snapshot = match payload.event() {
                 PageLoadEvent::Started => load_registry.page_started(
                     &load_browser,
@@ -1267,12 +1289,87 @@ fn create_browser(
         registry.remove_instance(browser_id, workspace_id, instance_id);
         return Err(error);
     }
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if guarded_initial_load {
+        let dialog_main = main.clone();
+        let dialog_browser = browser_id.to_owned();
+        let dialog_workspace = workspace_id.to_owned();
+        let guarded_webview = webview.clone();
+        let guarded_registry = registry.clone();
+        if let Err(error) = crate::agent_browser_dialogs::with_guarded_view(&webview, move |view| {
+            crate::agent_browser_host::authorize_initial_load(
+                &guarded_webview,
+                &guarded_registry,
+                &target,
+            )?;
+            crate::agent_browser_host::verify_native_window(view)?;
+            crate::agent_browser_dialogs::install(view, move |message| {
+                // Reuse the existing browser notice surface. The message is
+                // fixed host text and never copies the page's dialog content.
+                emit_event(
+                    &dialog_main,
+                    CodeBrowserEvent {
+                        workspace_id: dialog_workspace.clone(),
+                        browser_id: dialog_browser.clone(),
+                        kind: "navigation_blocked",
+                        url: None,
+                        title: None,
+                        message: Some(message.to_owned()),
+                        load_state: None,
+                        document_epoch: None,
+                        controller: None,
+                        agent_access: None,
+                        origin: None,
+                    },
+                );
+            })?;
+            let url = objc2_foundation::NSURL::URLWithString(
+                &objc2_foundation::NSString::from_str(target.as_str()),
+            )
+            .ok_or_else(|| "browser destination URL is not valid".to_owned())?;
+            let request = objc2_foundation::NSURLRequest::requestWithURL(&url);
+            // End the inert exception before the real page can navigate.
+            initial_navigation_pending.store(false, std::sync::atomic::Ordering::Release);
+            // Install the native guard and load in one main-thread callback.
+            unsafe { view.loadRequest(&request) }
+                .ok_or_else(|| "browser navigation could not start".to_owned())?;
+            Ok(())
+        }) {
+            let _ = close_browser_webview(&webview);
+            registry.remove_instance(browser_id, workspace_id, instance_id);
+            return Err(error);
+        }
+    }
     if let Err(error) = set_visible(&webview, visible) {
         let _ = close_browser_webview(&webview);
         registry.remove_instance(browser_id, workspace_id, instance_id);
         return Err(error);
     }
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if agent_host.is_some() {
+        if let Err(error) =
+            registry.mark_independent_host_ready(browser_id, workspace_id, instance_id)
+        {
+            let _ = close_browser_webview(&webview);
+            registry.remove_instance(browser_id, workspace_id, instance_id);
+            return Err(error);
+        }
+    }
     registry.snapshot(browser_id, workspace_id)
+}
+
+/// Agent hosts start without page content so no dialog can run before the
+/// per-view native guard is installed. Human tabs retain their normal load.
+fn initial_browser_url(target: &Url, independent: bool) -> Url {
+    if independent {
+        Url::parse("about:blank").expect("the inert browser URL is valid")
+    } else {
+        target.clone()
+    }
+}
+
+fn take_initial_navigation(pending: &std::sync::atomic::AtomicBool) -> bool {
+    pending.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
 /// Close a managed browser view, detaching the native URL observer first so
@@ -2288,6 +2385,23 @@ fn browser_error(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inert_navigation_exception_can_only_be_used_once() {
+        let pending = std::sync::atomic::AtomicBool::new(true);
+        assert!(super::take_initial_navigation(&pending));
+        assert!(!super::take_initial_navigation(&pending));
+    }
+
+    #[test]
+    fn independent_browser_starts_inert_before_page_dialogs_can_run() {
+        let target = url::Url::parse("https://example.com/dialogs").unwrap();
+        assert_eq!(
+            super::initial_browser_url(&target, true).as_str(),
+            "about:blank"
+        );
+        assert_eq!(super::initial_browser_url(&target, false), target);
+    }
+
     use super::*;
 
     fn opening_browser_registry() -> (BrowserRegistry, Uuid, BrowserOrigin) {
@@ -2400,6 +2514,36 @@ mod tests {
         assert!(registry
             .observation_fence(capability, "opening-tab")
             .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_completes_without_renderer_adoption_or_preview_visibility() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, false);
+        registry
+            .bind_independent_open(capability, "opening-tab", instance)
+            .unwrap();
+        registry
+            .mark_independent_host_ready("opening-tab", "workspace-1", instance)
+            .unwrap();
+        finish_opening_browser(&registry, instance);
+        let snapshot = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.visible, Some(false));
+        assert_eq!(snapshot.independent_input, Some(true));
+        assert!(registry
+            .observation_fence(capability, "opening-tab")
+            .is_ok());
+        assert_eq!(registry.independent_tabs("workspace-1").len(), 1);
+        assert!(registry.independent_tabs("other-workspace").is_empty());
     }
 
     #[tokio::test(start_paused = true)]

@@ -15,12 +15,16 @@ import { setAttachedRemotely } from "@/host";
 const mocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
   seed: vi.fn(),
+  list: vi.fn(
+    async () => [] as import("../browser/browserHost").BrowserHostSnapshot[],
+  ),
   subscribe: vi.fn(
     async (_listener: (event: BrowserHostEvent) => void) => () => {},
   ),
 }));
 vi.mock("../browser/browserHost", () => ({
   closeCodeBrowser: mocks.close,
+  listIndependentBrowserTabs: mocks.list,
   nativeCodeBrowserHost: { available: () => true, subscribe: mocks.subscribe },
 }));
 vi.mock("../browser/browserPersistence", () => ({
@@ -174,7 +178,7 @@ describe("useBrowserTabs", () => {
 });
 
 describe("agent browser lifecycle", () => {
-  it("opens agent previews beside the active file and preserves back-to-back requests", () => {
+  it("appends inactive tabs and preserves back-to-back requests", () => {
     const file = openCodeEditor(EMPTY, { type: "file", path: "app.tsx" });
     const { setLayout, result } = setup(file);
     const listener = mocks.subscribe.mock.calls.at(-1)![0];
@@ -188,26 +192,25 @@ describe("agent browser lifecycle", () => {
         });
     });
     const next = setLayout.mock.calls.at(-1)![0] as LayoutState;
-    expect(next.tabs).toEqual(file.tabs);
-    expect(next.activeIndex).toBe(file.activeIndex);
-    expect(next.editorSplit?.tabs).toEqual([
+    expect(next.tabs).toEqual([
+      ...file.tabs,
       { type: "browser", browserId: "agent-1" },
       { type: "browser", browserId: "agent-2" },
     ]);
-    expect(next.editorSplit?.focused).toBeUndefined();
+    expect(next.activeIndex).toBe(file.activeIndex);
+    expect(next.editorSplit).toBe(file.editorSplit);
     expect(result.current.browserInitialUrls).toEqual({
       "agent-1": "http://localhost:5173",
       "agent-2": "http://localhost:5173",
     });
   });
 
-  it("does not select an agent tab in the group where the user is typing", () => {
+  it("ignores activation events that would select an agent preview", () => {
     const layout = withBrowser(
       openCodeEditor(EMPTY, { type: "file", path: "app.tsx" }),
       "agent-1",
     );
-    const file = { ...layout, activeIndex: 0 };
-    const { setLayout } = setup(file);
+    const { setLayout } = setup({ ...layout, activeIndex: 0 });
     const listener = mocks.subscribe.mock.calls.at(-1)![0];
     act(() =>
       listener({
@@ -216,13 +219,96 @@ describe("agent browser lifecycle", () => {
         browserId: "agent-1",
       }),
     );
-    const next = setLayout.mock.calls.at(-1)![0] as LayoutState;
-    expect(next.tabs[next.activeIndex]).toEqual({
-      type: "file",
-      path: "app.tsx",
-    });
-    expect(next.editorSplit?.tabs).toEqual([
-      { type: "browser", browserId: "agent-1" },
+    expect(setLayout).not.toHaveBeenCalled();
+  });
+
+  it("discovers tabs opened while another route was showing without selecting them", async () => {
+    mocks.list.mockResolvedValueOnce([
+      {
+        exists: true,
+        workspaceId: "ws-1",
+        browserId: "agent-existing",
+        url: "https://example.test/live",
+        title: "Live fixture",
+        visible: false,
+        independentInput: true,
+      },
     ]);
+    const { setLayout, result } = setup(EMPTY);
+    await act(async () => {});
+    expect(mocks.list).toHaveBeenCalledWith("ws-1");
+    const next = setLayout.mock.calls.at(-1)![0] as LayoutState;
+    expect(next.tabs).toEqual([
+      { type: "browser", browserId: "agent-existing" },
+    ]);
+    expect(next.conversationFocused).toBe(true);
+    expect(next.editorSplit).toBeUndefined();
+    expect(result.current.browserTitles["agent-existing"]).toBe("Live fixture");
+  });
+
+  it("does not resurrect a tab closed while native discovery is pending", async () => {
+    let resolve!: (
+      tabs: import("../browser/browserHost").BrowserHostSnapshot[],
+    ) => void;
+    mocks.list.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const { setLayout } = setup(EMPTY);
+    await act(async () => {});
+    const listener = mocks.subscribe.mock.calls.at(-1)![0];
+    act(() =>
+      listener({
+        type: "agent_closed_tab",
+        workspaceId: "ws-1",
+        browserId: "agent-closed",
+      }),
+    );
+    await act(async () =>
+      resolve([
+        {
+          exists: true,
+          workspaceId: "ws-1",
+          browserId: "agent-closed",
+          independentInput: true,
+        },
+      ]),
+    );
+    expect(setLayout).not.toHaveBeenCalled();
+    expect(mocks.seed).not.toHaveBeenCalled();
+  });
+
+  it("never adopts a discovered tab from another workspace or after unmount", async () => {
+    let resolve!: (
+      tabs: import("../browser/browserHost").BrowserHostSnapshot[],
+    ) => void;
+    mocks.list.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const { setLayout, unmount } = setup(EMPTY);
+    await act(async () => {});
+    unmount();
+    await act(async () =>
+      resolve([
+        {
+          exists: true,
+          workspaceId: "ws-1",
+          browserId: "same",
+          independentInput: true,
+        },
+        {
+          exists: true,
+          workspaceId: "other",
+          browserId: "other",
+          independentInput: true,
+        },
+      ]),
+    );
+    expect(setLayout).not.toHaveBeenCalled();
   });
 });

@@ -111,6 +111,8 @@ pub(crate) struct BrowserSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) independent_input: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) engine: Option<BrowserEngineDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) controller: Option<BrowserController>,
@@ -132,6 +134,7 @@ impl BrowserSnapshot {
             load_state: None,
             document_epoch: None,
             visible: None,
+            independent_input: None,
             engine: None,
             controller: None,
             agent_access: None,
@@ -301,6 +304,8 @@ struct BrowserRecord {
     load_state: BrowserLoadState,
     document_epoch: u64,
     visible: bool,
+    // Native-only availability. Preview visibility never grants this authority.
+    independent_host: bool,
     engine: BrowserEngineDescriptor,
     controller: BrowserController,
     controller_capability_id: Option<Uuid>,
@@ -434,6 +439,10 @@ pub(crate) enum BrowserNavigationDecision {
 }
 
 impl BrowserRecord {
+    fn agent_available(&self) -> bool {
+        self.visible || self.independent_host
+    }
+
     fn snapshot(&self, browser_id: &str, agent_access: BrowserAgentAccess) -> BrowserSnapshot {
         BrowserSnapshot {
             exists: true,
@@ -445,6 +454,7 @@ impl BrowserRecord {
             load_state: Some(self.load_state),
             document_epoch: Some(self.document_epoch),
             visible: Some(self.visible),
+            independent_input: Some(self.independent_host),
             engine: Some(self.engine.clone()),
             controller: Some(self.controller.clone()),
             agent_access: Some(agent_access),
@@ -459,6 +469,7 @@ impl BrowserRecord {
             title: self.title.clone(),
             load_state: self.load_state,
             visible: self.visible,
+            independent_input: self.independent_host,
             engine: self.engine.clone(),
             controller: self.controller.clone(),
         }
@@ -663,6 +674,7 @@ impl BrowserRegistry {
                 load_state: BrowserLoadState::Loading,
                 document_epoch: 0,
                 visible,
+                independent_host: false,
                 engine: platform_default_engine(),
                 controller: BrowserController::default(),
                 controller_capability_id: None,
@@ -1177,6 +1189,116 @@ impl BrowserRegistry {
         Ok(())
     }
 
+    /// Bind the opening capability before WebKit can load or redirect a page.
+    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    pub(crate) fn bind_independent_open(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)?.clone();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if record.instance_id != instance_id || record.resetting {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if record.human_taken_over {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record
+            .controller_capability_id
+            .is_some_and(|id| id != capability_id)
+            || record
+                .opened_by_capability
+                .is_some_and(|id| id != capability_id)
+        {
+            return Err("browser is controlled by another agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &record.owner_id,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserControlOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("opening record was checked");
+        record.opened_by_capability = Some(capability_id);
+        record.controller_capability_id = Some(capability_id);
+        record.controller = BrowserController {
+            kind: BrowserControllerKind::Agent,
+            label: Some(capability.controller_label),
+            action: None,
+            halted: false,
+            takeover_required: false,
+        };
+        Ok(())
+    }
+
+    /// Publish executor availability only after its native view exists.
+    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    pub(crate) fn mark_independent_host_ready(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        instance_id: u64,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        let capability_id = record
+            .opened_by_capability
+            .ok_or_else(|| "browser tab was taken over while opening".to_owned())?;
+        active_capability(&state, capability_id)?;
+        if record.instance_id != instance_id || record.resetting {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if record.human_taken_over || record.controller_capability_id != Some(capability_id) {
+            return Err("browser tab was taken over while opening".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        state
+            .records
+            .get_mut(browser_id)
+            .expect("opening record was checked")
+            .independent_host = true;
+        Ok(())
+    }
+
+    /// Let a remounted renderer discover tabs opened while another route was showing.
+    pub(crate) fn independent_tabs(&self, workspace_id: &str) -> Vec<BrowserSnapshot> {
+        let state = self.lock();
+        let mut tabs: Vec<_> = state
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                record.workspace_id == workspace_id && record.independent_host && !record.resetting
+            })
+            .map(|(id, record)| record.snapshot(id, agent_access_for_record(&state, record)))
+            .collect();
+        tabs.sort_by(|left, right| left.browser_id.cmp(&right.browser_id));
+        tabs
+    }
+
     /// Follow one opening tab without accepting a replacement or reclaiming a
     /// tab after human takeover. A missing record is expected only before the
     /// renderer first registers the requested id.
@@ -1292,7 +1414,7 @@ impl BrowserRegistry {
         ) {
             return Err("browser origin is not shared with this agent".to_owned());
         }
-        Ok((capability.workspace_id.clone(), record.visible))
+        Ok((capability.workspace_id.clone(), record.agent_available()))
     }
 
     pub(crate) fn revoke_browser_access(
@@ -1462,7 +1584,7 @@ impl BrowserRegistry {
             .iter()
             .filter(|(_, record)| {
                 record.workspace_id == capability.workspace_id
-                    && record.visible
+                    && record.agent_available()
                     && !record.resetting
             })
             .filter(|(_, record)| {
@@ -1528,7 +1650,7 @@ impl BrowserRegistry {
         }
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -1602,7 +1724,7 @@ impl BrowserRegistry {
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
         let origin = current_origin(record)
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -1777,6 +1899,7 @@ impl BrowserRegistry {
             // ownership. Preserve this even before its first open poll.
             record.opened_by_capability = None;
             record.human_taken_over = true;
+            record.independent_host = false;
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
@@ -2424,7 +2547,7 @@ impl BrowserRegistry {
             {
                 return Err("browser document changed while it was being inspected".to_owned());
             }
-            if !record.visible {
+            if !record.agent_available() {
                 return Err("browser is hidden".to_owned());
             }
             if *record.dispatch.halt.borrow() {
@@ -2513,7 +2636,7 @@ impl BrowserRegistry {
                     "browser document changed while screenshot was being captured".to_owned(),
                 );
             }
-            if !record.visible {
+            if !record.agent_available() {
                 return Err("browser is hidden".to_owned());
             }
             if *record.dispatch.halt.borrow() {
@@ -2580,7 +2703,7 @@ impl BrowserRegistry {
             .get(browser_id)
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, &capability.workspace_id, record)?;
-        if !record.visible {
+        if !record.agent_available() {
             return Err("browser is hidden".to_owned());
         }
         if *record.dispatch.halt.borrow() {
@@ -2671,7 +2794,7 @@ impl BrowserRegistry {
         {
             return Err(BrowserTargetError::StaleTarget);
         }
-        if !record.visible {
+        if !record.agent_available() {
             return Err(BrowserTargetError::BrowserHidden);
         }
         let Some(snapshot) = &record.semantic_snapshot else {
@@ -2763,7 +2886,7 @@ fn authorize_native_action_phase_locked(
     {
         return Err("browser document changed during native input".to_owned());
     }
-    if !record.visible {
+    if !record.agent_available() {
         return Err("browser is hidden".to_owned());
     }
     if *record.dispatch.halt.borrow() {
@@ -3022,7 +3145,7 @@ fn authorize_agent_dispatch(
     if current_origin(record).as_ref() != Some(origin) {
         return Err("browser origin changed before dispatch".to_owned());
     }
-    if !record.visible {
+    if !record.agent_available() {
         return Err("browser is hidden".to_owned());
     }
     if *record.dispatch.halt.borrow() {

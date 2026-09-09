@@ -529,68 +529,20 @@ export function openCodeEditor(
   );
 }
 
-/** Reveal an agent browser beside the focused editor without changing its selection. */
-export function revealAgentBrowser(
+/** Add an agent preview without selecting it or changing either editor group. */
+export function adoptAgentBrowser(
   layout: LayoutState,
   browserId: string,
-  focusedRegion?: CodeEditorRegion,
 ): LayoutState {
-  const panel: CodeEditorPanel = { type: "browser", browserId };
-  const key = panelKey(panel);
-  const primary = layout.tabs[layout.activeIndex];
-  const split = layout.editorSplit;
-  const secondary = split?.tabs[split.activeIndex];
-  if (
-    (!layout.conversationFocused && primary && panelKey(primary) === key) ||
-    (secondary && panelKey(secondary) === key)
-  )
-    return layout;
-
-  const secondaryFocused = focusedRegion
-    ? focusedRegion === "secondary"
-    : Boolean(split?.focused);
-  if (secondaryFocused && split) {
-    const tabs = layout.tabs.slice();
-    let activeIndex = tabs.findIndex((tab) => panelKey(tab) === key);
-    if (activeIndex < 0) {
-      activeIndex = tabs.length;
-      tabs.push(panel);
-    }
-    const splitTabs = split.tabs.filter((tab) => panelKey(tab) !== key);
-    return {
-      ...layout,
-      tabs,
-      activeIndex,
-      conversationFocused: false,
-      editorSplit: {
-        ...split,
-        tabs: splitTabs,
-        focused: true,
-        activeIndex: secondary
-          ? splitTabs.findIndex((tab) => panelKey(tab) === panelKey(secondary))
-          : 0,
-      },
-    };
-  }
-
-  const tabs = layout.tabs.filter((tab) => panelKey(tab) !== key);
-  const splitTabs = split?.tabs.slice() ?? [];
-  let activeIndex = splitTabs.findIndex((tab) => panelKey(tab) === key);
-  if (activeIndex < 0) {
-    activeIndex = splitTabs.length;
-    splitTabs.push(panel);
-  }
-  const primaryIndex = primary
-    ? tabs.findIndex((tab) => panelKey(tab) === panelKey(primary))
-    : -1;
+  if (codeBrowserIds(layout).includes(browserId)) return layout;
   return {
     ...layout,
-    tabs,
-    activeIndex:
-      primaryIndex >= 0
-        ? primaryIndex
-        : Math.max(0, Math.min(layout.activeIndex, tabs.length - 1)),
-    editorSplit: { ...split, tabs: splitTabs, activeIndex, focused: undefined },
+    tabs: [...layout.tabs, { type: "browser", browserId }],
+    // The empty Code workspace shows Main agent. Keep that selection when
+    // the first browser becomes available as an inactive editor tab.
+    conversationFocused: layout.tabs.some(isEditorTab)
+      ? layout.conversationFocused
+      : true,
   };
 }
 

@@ -235,6 +235,7 @@ pub(crate) fn create_if_reserved(
     if authorized_workspace != workspace_id {
         return Err("agent browser opening no longer belongs to this workspace".to_owned());
     }
+    registry.bind_independent_open(opening.capability_id, browser_id, instance_id)?;
     let window = WindowBuilder::new(app, format!("{HOST_PREFIX}{}", opening.id.simple()))
         .title("Tidebreak agent browser")
         .decorations(false)
@@ -371,6 +372,41 @@ pub(crate) fn authorize_input(
     Ok(())
 }
 
+/// Recheck the still-live opening in the main-thread callback that starts
+/// external content. A canceled or replaced opening must stay inert.
+pub(crate) fn authorize_initial_load(
+    webview: &Webview,
+    registry: &BrowserRegistry,
+    target: &url::Url,
+) -> Result<(), String> {
+    let Some((browser_id, host)) = host_for_view(webview)? else {
+        return Err("agent browser host is unavailable before navigation".to_owned());
+    };
+    let opening = hosts(webview.app_handle())
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .opening
+        .get(&browser_id)
+        .cloned()
+        .ok_or_else(|| "agent browser opening was canceled".to_owned())?;
+    if opening.id != host.opening_id || host.human_takeover_started {
+        return Err("agent browser opening changed before navigation".to_owned());
+    }
+    opening.authorize(&host.workspace_id, Instant::now())?;
+    let origin = tidebreak_core::BrowserOrigin::from_url(target.as_str())
+        .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
+    let workspace = registry.authorize_agent_open(
+        opening.capability_id,
+        &tidebreak_core::OwnerId::local(),
+        &origin,
+    )?;
+    if workspace != host.workspace_id {
+        return Err("agent browser opening changed workspace".to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_native_window(view: &objc2_web_kit::WKWebView) -> Result<(), String> {
     let native_view: &objc2_app_kit::NSView =
         unsafe { &*(view as *const _ as *const objc2_app_kit::NSView) };
@@ -446,7 +482,8 @@ pub(crate) fn set_visible(webview: &Webview, visible: bool) -> Result<bool, Stri
             {
                 return Err("agent browser host cannot preserve independent input".to_owned());
             }
-            native_view.setHidden(!visible);
+            // Keep the view renderable while its preview window is ordered out.
+            native_view.setHidden(false);
             if visible {
                 window.orderFront(None)
             } else {
@@ -516,6 +553,12 @@ pub(crate) fn take_human_control(webview: &Webview) -> Result<(), String> {
         return Err(format!(
             "could not move the browser into human control: {error}"
         ));
+    }
+    if let Err(error) = crate::agent_browser_dialogs::with_guarded_view(webview, |view| {
+        crate::agent_browser_dialogs::restore(view)
+    }) {
+        let _ = webview.reparent(&host.window);
+        return Err(error);
     }
     {
         let store = hosts(webview.app_handle());

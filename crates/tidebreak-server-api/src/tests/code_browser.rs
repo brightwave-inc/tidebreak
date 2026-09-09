@@ -87,6 +87,7 @@ impl BrowserRuntime for FakeBrowserRuntime {
                 title: Some("Example".into()),
                 load_state: BrowserLoadState::Ready,
                 visible: true,
+                independent_input: false,
                 engine: engine(),
                 controller: BrowserControllerState::default(),
             }],

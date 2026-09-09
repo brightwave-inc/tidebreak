@@ -16,12 +16,14 @@ import { useForegroundBrowserTabs } from "./useForegroundBrowserTabs";
 const mocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
   seed: vi.fn(),
+  list: vi.fn(async () => [] as import("./browserHost").BrowserHostSnapshot[]),
   subscribe: vi.fn(
     async (_listener: (event: BrowserHostEvent) => void) => () => {},
   ),
 }));
 vi.mock("./browserHost", () => ({
   closeCodeBrowser: mocks.close,
+  listIndependentBrowserTabs: mocks.list,
   nativeCodeBrowserHost: { available: () => true, subscribe: mocks.subscribe },
 }));
 vi.mock("./browserPersistence", () => ({ seedBrowserSession: mocks.seed }));
@@ -89,10 +91,12 @@ describe("foreground browser tab membership", () => {
       workspaceId: scope,
       initialUrl: "https://example.test/preview",
     });
-    expect(setLayout.mock.calls[0]?.[0].tabs).toEqual(layout.tabs);
-    expect(setLayout.mock.calls[0]?.[0].editorSplit?.tabs).toEqual([
+    expect(setLayout.mock.calls[0]?.[0].tabs).toEqual([
+      ...layout.tabs,
       { type: "browser", browserId: "agent-browser" },
     ]);
+    expect(setLayout.mock.calls[0]?.[0].activeIndex).toBe(layout.activeIndex);
+    expect(setLayout.mock.calls[0]?.[0].editorSplit).toBeUndefined();
     expect(result.current.browserInitialUrls).toEqual({
       "agent-browser": "https://example.test/preview",
     });

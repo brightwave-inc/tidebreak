@@ -3208,3 +3208,198 @@ async fn sharing_an_unrelated_tab_does_not_resume_a_stopped_session() {
         .unwrap_err()
         .contains("stopped"));
 }
+
+fn independent_registry() -> (BrowserRegistry, u64, BrowserOrigin, Uuid, tempfile::TempDir) {
+    let (registry, instance, origin, capability, private) = controlled_registry();
+    registry
+        .bind_independent_open(capability, "browser-1", instance)
+        .unwrap();
+    registry
+        .mark_independent_host_ready("browser-1", "workspace-1", instance)
+        .unwrap();
+    registry
+        .set_visible("browser-1", "workspace-1", false)
+        .unwrap();
+    (registry, instance, origin, capability, private)
+}
+
+#[tokio::test]
+async fn hidden_independent_browser_keeps_observation_input_and_navigation() {
+    let (registry, instance, origin, capability, _private) = independent_registry();
+    registry
+        .extend_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            &[BrowserGrantCapability::BrowserCaptureVisibleTab],
+        )
+        .unwrap();
+    let sessions = registry.list_for_capability(capability).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(!sessions[0].visible);
+    assert!(sessions[0].independent_input);
+    let snapshot = registry
+        .begin_agent_control(capability, "browser-1")
+        .unwrap();
+    assert_eq!(snapshot.visible, Some(false));
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    registry
+        .complete_semantic_snapshot(
+            capability,
+            "browser-1",
+            instance,
+            fence.document_epoch,
+            "snapshot-hidden".to_owned(),
+            HashMap::from([("@e1".to_owned(), target("Continue"))]),
+        )
+        .unwrap();
+    registry
+        .begin_agent_observation(capability, "browser-1")
+        .unwrap();
+    registry
+        .semantic_target(
+            "browser-1",
+            "workspace-1",
+            "snapshot-hidden",
+            fence.document_epoch,
+            "@e1",
+        )
+        .unwrap();
+    registry
+        .complete_screenshot_recording(
+            capability,
+            "browser-1",
+            instance,
+            fence.document_epoch,
+            "snapshot-hidden",
+        )
+        .unwrap();
+    registry
+        .authorize_native_action_phase(capability, "browser-1", "workspace-1", &origin, fence)
+        .unwrap();
+    assert!(registry.allow_navigation("browser-1", "workspace-1", instance, &origin));
+    let ran = Arc::new(AtomicBool::new(false));
+    dispatch_probe(registry, capability, origin, Arc::clone(&ran))
+        .await
+        .unwrap();
+    assert!(ran.load(Ordering::SeqCst));
+}
+
+#[test]
+fn hiding_a_shared_browser_does_not_grant_independent_availability() {
+    let (registry, _instance, _origin, capability, _private) = controlled_registry();
+    registry
+        .set_visible("browser-1", "workspace-1", false)
+        .unwrap();
+    assert!(registry.list_for_capability(capability).unwrap().is_empty());
+    assert!(registry.independent_tabs("workspace-1").is_empty());
+    assert_eq!(
+        registry
+            .begin_agent_control(capability, "browser-1")
+            .unwrap_err(),
+        "browser is hidden"
+    );
+}
+
+#[tokio::test]
+async fn hidden_independent_browser_keeps_stop_takeover_origin_and_instance_fences() {
+    for change in ["stop", "takeover", "origin", "replace", "epoch"] {
+        let (registry, instance, origin, capability, _private) = independent_registry();
+        let fence = registry.observation_fence(capability, "browser-1").unwrap();
+        match change {
+            "stop" => {
+                registry
+                    .stop_agent_control("browser-1", "workspace-1")
+                    .await
+                    .unwrap();
+            }
+            "takeover" => {
+                registry
+                    .take_human_control("browser-1", "workspace-1")
+                    .await
+                    .unwrap();
+                assert!(registry.independent_tabs("workspace-1").is_empty());
+                assert!(registry
+                    .mark_independent_host_ready("browser-1", "workspace-1", instance)
+                    .is_err());
+            }
+            "origin" => {
+                registry
+                    .revoke_browser_access("browser-1", "workspace-1")
+                    .unwrap();
+            }
+            "replace" => {
+                registry.remove("browser-1", "workspace-1").unwrap();
+                registry
+                    .register(
+                        "browser-1",
+                        "workspace-1",
+                        origin.as_str().to_owned(),
+                        false,
+                    )
+                    .unwrap();
+                assert!(registry.independent_tabs("workspace-1").is_empty());
+                assert!(registry
+                    .mark_independent_host_ready("browser-1", "workspace-1", instance)
+                    .is_err());
+            }
+            "epoch" => {
+                registry
+                    .page_started(
+                        "browser-1",
+                        "workspace-1",
+                        instance,
+                        "https://example.com/next".to_owned(),
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            registry
+                .authorize_native_action_phase(
+                    capability,
+                    "browser-1",
+                    "workspace-1",
+                    &origin,
+                    fence
+                )
+                .is_err(),
+            "{change}"
+        );
+        assert!(
+            registry
+                .complete_semantic_snapshot(
+                    capability,
+                    "browser-1",
+                    instance,
+                    fence.document_epoch,
+                    "stale".to_owned(),
+                    HashMap::new()
+                )
+                .is_err(),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn opening_agent_owns_navigation_before_the_initial_page_loads() {
+    let (registry, instance, origin, capability, _private) = controlled_registry();
+    registry
+        .set_visible("browser-1", "workspace-1", false)
+        .unwrap();
+    registry
+        .bind_independent_open(capability, "browser-1", instance)
+        .unwrap();
+    assert!(registry.allow_navigation("browser-1", "workspace-1", instance, &origin));
+    let unshared = BrowserOrigin::from_url("https://unshared.example").unwrap();
+    assert!(!registry.allow_navigation("browser-1", "workspace-1", instance, &unshared));
+    assert!(registry
+        .bind_independent_open(capability, "browser-1", instance + 1)
+        .is_err());
+    assert!(registry
+        .mark_independent_host_ready("browser-1", "workspace-2", instance)
+        .is_err());
+    assert!(registry.independent_tabs("workspace-1").is_empty());
+}

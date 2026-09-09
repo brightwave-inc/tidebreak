@@ -1887,11 +1887,20 @@ async fn evaluate_background_action(
                 return;
             }
         };
+        #[cfg(feature = "independent-wk-host")]
+        let dialog_view = objc2::Message::retain(view);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
             let mut state = callback_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.cancelled {
+                return;
+            }
+            #[cfg(feature = "independent-wk-host")]
+            if let Err(message) = crate::agent_browser_dialogs::take_blocked(&dialog_view) {
+                if let Some(sender) = state.sender.take() {
+                    let _ = sender.send(Err(message));
+                }
                 return;
             }
             let result = if !error.is_null() {
@@ -2707,6 +2716,43 @@ unsafe fn ensure_native_event_processing_supported(
 }
 
 #[cfg(target_os = "macos")]
+type PendingNativeProcessing =
+    std::sync::Mutex<Option<oneshot::Sender<Result<(), NativeInputFailure>>>>;
+
+#[cfg(target_os = "macos")]
+struct NativeProcessingCancellation(std::sync::Arc<PendingNativeProcessing>);
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeProcessingCancellation {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn finish_native_processing(
+    pending: &PendingNativeProcessing,
+    deadline: tokio::time::Instant,
+    finish: impl FnOnce() -> Result<(), NativeInputFailure>,
+) {
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(sender) = pending.take() else {
+        return;
+    };
+    if sender.is_closed() || tokio::time::Instant::now() >= deadline {
+        return;
+    }
+    // Hold the cancellation fence while consuming a dialog report. A callback
+    // from a timed-out action must not steal the next action's report.
+    let _ = sender.send(finish());
+}
+
+#[cfg(target_os = "macos")]
 async fn wait_for_native_action_processing(
     webview: &Webview,
     action: &tidebreak_core::BrowserAction,
@@ -2725,6 +2771,9 @@ async fn wait_for_native_action_processing(
 
     let (sender, receiver) = oneshot::channel::<Result<(), NativeInputFailure>>();
     let sender = Arc::new(Mutex::new(Some(sender)));
+    let _cancellation = NativeProcessingCancellation(Arc::clone(&sender));
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS);
     let callback_sender = Arc::clone(&sender);
     with_browser_webview(webview, move |view| unsafe {
         let supported = match kind {
@@ -2754,14 +2803,18 @@ async fn wait_for_native_action_processing(
             }
             return;
         }
+        #[cfg(feature = "independent-wk-host")]
+        let dialog_view = objc2::Message::retain(view);
         let handler = RcBlock::new(move || {
-            if let Some(sender) = callback_sender
-                .lock()
-                .ok()
-                .and_then(|mut sender| sender.take())
-            {
-                let _ = sender.send(Ok(()));
-            }
+            finish_native_processing(&callback_sender, deadline, || {
+                #[cfg(feature = "independent-wk-host")]
+                {
+                    crate::agent_browser_dialogs::take_blocked(&dialog_view)
+                        .map_err(NativeInputFailure::Engine)
+                }
+                #[cfg(not(feature = "independent-wk-host"))]
+                Ok(())
+            });
         });
         match kind {
             NativePendingEventKind::Presentation => {
@@ -6717,6 +6770,30 @@ async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canceled_processing_callback_cannot_consume_the_next_dialog() {
+        use std::sync::{Arc, Mutex};
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let pending = Arc::new(Mutex::new(Some(sender)));
+        drop(super::NativeProcessingCancellation(Arc::clone(&pending)));
+        super::finish_native_processing(
+            &pending,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            || panic!("canceled processing consumed a dialog"),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expired_processing_callback_preserves_dialog_report() {
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let pending = std::sync::Mutex::new(Some(sender));
+        super::finish_native_processing(&pending, tokio::time::Instant::now(), || {
+            panic!("expired processing consumed a dialog")
+        });
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn screenshot_encodes_cg_image_snapshot_representation() {

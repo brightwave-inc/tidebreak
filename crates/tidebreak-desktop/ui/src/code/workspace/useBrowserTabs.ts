@@ -5,7 +5,7 @@ import {
   codeBrowserIds,
   isEditorTab,
   openCodeEditor,
-  revealAgentBrowser,
+  adoptAgentBrowser,
   removedCodeBrowserIds,
 } from "../codeChrome";
 import { attachedRemotely } from "@/host";
@@ -16,6 +16,7 @@ import {
 } from "./browserTabLayout";
 import {
   closeCodeBrowser,
+  listIndependentBrowserTabs,
   nativeCodeBrowserHost,
 } from "../browser/browserHost";
 import { seedBrowserSession } from "../browser/browserPersistence";
@@ -120,11 +121,8 @@ export function useBrowserTabs({
     );
   }
 
-  // The trusted native side mints agent tab lifecycle requests and this hook
-  // owns tab membership, so it adopts them here: staging an agent-opened tab,
-  // revealing agent tabs beside the focused editor, and dropping a tab whose
-  // native session the agent already closed. Layout access goes through a
-  // ref because the subscription outlives any one render's layout.
+  // Native creation does not depend on this page. Adopt its preview without
+  // selecting it, including tabs opened before this hook mounted.
   const layoutRef = useRef(layout);
   const renderedLayoutRef = useRef(layout);
   if (renderedLayoutRef.current !== layout) {
@@ -137,76 +135,73 @@ export function useBrowserTabs({
     if (attachedRemotely() || !nativeCodeBrowserHost.available()) return;
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
+    const adopt = (browserId: string, url?: string, title?: string) => {
+      if (cancelled || closedBrowserIdsRef.current.has(browserId)) return;
+      const next = adoptAgentBrowser(layoutRef.current, browserId);
+      if (next === layoutRef.current) return;
+      seedBrowserSession({ browserId, workspaceId, initialUrl: url });
+      if (url) {
+        setBrowserInitialUrls((current) => ({ ...current, [browserId]: url }));
+      }
+      setBrowserTitles((current) => ({
+        ...current,
+        [browserId]: title || "Browser (agent)",
+      }));
+      layoutRef.current = next;
+      setLayoutRef.current(next);
+    };
     void nativeCodeBrowserHost
       .subscribe((event) => {
         if (cancelled || event.workspaceId !== workspaceId) return;
-        const focusedRegion = document.activeElement
-          ?.closest("[data-code-editor-region]")
-          ?.getAttribute("data-code-editor-region");
-        const activeRegion =
-          focusedRegion === "primary" || focusedRegion === "secondary"
-            ? focusedRegion
-            : undefined;
         if (event.type === "agent_open_requested") {
-          const browserId = event.browserId;
-          seedBrowserSession({
-            browserId,
-            workspaceId,
-            initialUrl: event.url,
-          });
-          if (event.url) {
-            setBrowserInitialUrls((current) => ({
-              ...current,
-              [browserId]: event.url as string,
-            }));
-          }
-          setBrowserTitles((current) => ({
-            ...current,
-            [browserId]: "Browser (agent)",
-          }));
-          const next = revealAgentBrowser(
-            layoutRef.current,
-            browserId,
-            activeRegion,
-          );
-          layoutRef.current = next;
-          setLayoutRef.current(next);
-        } else if (event.type === "agent_activate_requested") {
-          const next = revealAgentBrowser(
-            layoutRef.current,
-            event.browserId,
-            activeRegion,
-          );
-          layoutRef.current = next;
-          setLayoutRef.current(next);
+          adopt(event.browserId, event.url, event.title);
         } else if (event.type === "agent_closed_tab") {
-          // The native session is already gone; only the panel remains.
+          // Remember closes even before discovery returns its snapshot.
           closedBrowserIdsRef.current.add(event.browserId);
           const current = layoutRef.current;
-          const editors = current.tabs.filter(isEditorTab);
-          const primaryIndex = editors.findIndex(
-            (tab) =>
-              tab.type === "browser" && tab.browserId === event.browserId,
-          );
-          if (primaryIndex >= 0) {
-            setLayoutRef.current(closeEditorTab(current, primaryIndex));
-            return;
-          }
+          const primaryIndex = current.tabs
+            .filter(isEditorTab)
+            .findIndex(
+              (tab) =>
+                tab.type === "browser" && tab.browserId === event.browserId,
+            );
           const splitIndex =
             current.editorSplit?.tabs.findIndex(
               (tab) =>
                 tab.type === "browser" && tab.browserId === event.browserId,
             ) ?? -1;
-          if (splitIndex >= 0) {
-            setLayoutRef.current(
-              closeEditorTab(current, splitIndex, "secondary"),
-            );
+          const next =
+            primaryIndex >= 0
+              ? closeEditorTab(current, primaryIndex)
+              : splitIndex >= 0
+                ? closeEditorTab(current, splitIndex, "secondary")
+                : current;
+          if (next !== current) {
+            layoutRef.current = next;
+            setLayoutRef.current(next);
           }
         }
       })
-      .then((stop) => {
-        if (cancelled) stop();
-        else unsubscribe = stop;
+      .then(async (stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        unsubscribe = stop;
+        // Subscribe first so a close racing with discovery cannot resurrect a tab.
+        for (const tab of await listIndependentBrowserTabs(workspaceId)) {
+          if (
+            tab.exists &&
+            tab.workspaceId === workspaceId &&
+            tab.independentInput
+          ) {
+            adopt(tab.browserId, tab.url, tab.title);
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          console.error("Could not discover independent browser tabs", error);
       });
     return () => {
       cancelled = true;

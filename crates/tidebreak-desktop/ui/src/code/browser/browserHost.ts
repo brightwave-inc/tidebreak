@@ -88,6 +88,7 @@ export type BrowserHostSnapshot = {
   loadState?: "loading" | "ready" | "failed";
   documentEpoch?: number;
   visible?: boolean;
+  independentInput?: boolean;
   engine?: {
     name: "wk_webview" | "webview2" | "webkitgtk" | "unsupported";
     capabilities: {
@@ -194,6 +195,15 @@ export const nativeCodeBrowserHost: CodeBrowserHost = {
     }
   },
 };
+
+/** Recover live agent tabs after the renderer mounts on a different route. */
+export function listIndependentBrowserTabs(
+  workspaceId: string,
+): Promise<BrowserHostSnapshot[]> {
+  return invoke<BrowserHostSnapshot[]>("code_browser_agent_tabs", {
+    workspaceId,
+  });
+}
 
 async function logicalBrowserAction(
   action: BrowserHostAction,

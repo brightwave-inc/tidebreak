@@ -18,6 +18,8 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 use tidebreak_core::Config;
 
 #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+mod agent_browser_dialogs;
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
 mod agent_browser_host;
 mod attachments;
 mod broker;
@@ -873,6 +875,7 @@ pub fn run() {
             present_native_notification,
             code_browser::code_browser_import_legacy_state,
             code_browser::code_browser_command,
+            code_browser::code_browser_agent_tabs,
             code_worktree::open_code_worktree,
             code_editor::open_in_editor,
             code_editor::detect_external_editors,

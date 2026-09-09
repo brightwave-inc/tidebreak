@@ -18,7 +18,7 @@ import {
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
-  revealAgentBrowser,
+  adoptAgentBrowser,
   removedCodeBrowserIds,
   removedCodeTerminalIds,
   adoptCodeTerminalId,
@@ -587,63 +587,53 @@ describe("code chrome layout", () => {
 });
 
 describe("agent browser placement", () => {
-  it("opens beside the primary file and preserves conversation selection", () => {
+  it("appends an inactive tab without selecting it or adding a split", () => {
     const file = openCodeEditor(EMPTY_LAYOUT, {
       type: "file",
       path: "app.tsx",
     });
     for (const layout of [file, { ...file, conversationFocused: true }]) {
-      const next = revealAgentBrowser(layout, "agent-1");
-      expect(next.tabs).toEqual(layout.tabs);
+      const next = adoptAgentBrowser(layout, "agent-1");
+      expect(next.tabs).toEqual([
+        ...layout.tabs,
+        { type: "browser", browserId: "agent-1" },
+      ]);
       expect(next.activeIndex).toBe(layout.activeIndex);
       expect(next.conversationFocused).toBe(layout.conversationFocused);
-      expect(next.editorSplit).toEqual({
-        tabs: [{ type: "browser", browserId: "agent-1" }],
-        activeIndex: 0,
-        focused: undefined,
-      });
+      expect(next.editorSplit).toBe(layout.editorSplit);
     }
   });
 
-  it("opens in the primary group when the secondary editor has focus", () => {
+  it("preserves both editor groups and the selected secondary file", () => {
     const layout = openCodeEditor(
       openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
       { type: "file", path: "b.ts" },
       "secondary",
     );
-    const next = revealAgentBrowser(layout, "agent-1");
-    expect(next.editorSplit).toEqual(layout.editorSplit);
-    expect(next.tabs[next.activeIndex]).toEqual({
-      type: "browser",
-      browserId: "agent-1",
-    });
-  });
-
-  it("moves an inactive browser beside the focused file without duplicating it", () => {
-    const layout = openCodeEditor(
-      openCodeEditor(EMPTY_LAYOUT, { type: "browser", browserId: "agent-1" }),
-      { type: "file", path: "a.ts" },
-    );
-    const next = revealAgentBrowser(layout, "agent-1");
-    expect(next.tabs).toEqual([{ type: "file", path: "a.ts" }]);
-    expect(next.activeIndex).toBe(0);
-    expect(codeBrowserIds(next)).toEqual(["agent-1"]);
-    expect(revealAgentBrowser(next, "agent-1")).toBe(next);
-  });
-
-  it("uses live input focus when the last selected tab belongs to the other group", () => {
-    const layout = openCodeEditor(
-      openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
-      { type: "file", path: "b.ts" },
-      "secondary",
-    );
-    const next = revealAgentBrowser(layout, "agent-1", "primary");
-    expect(next.tabs).toEqual(layout.tabs);
+    const next = adoptAgentBrowser(layout, "agent-1");
+    expect(next.editorSplit).toBe(layout.editorSplit);
     expect(next.activeIndex).toBe(layout.activeIndex);
-    expect(next.editorSplit?.focused).toBeUndefined();
-    expect(next.editorSplit?.tabs[next.editorSplit.activeIndex]).toEqual({
-      type: "browser",
-      browserId: "agent-1",
-    });
+    expect(next.tabs[layout.activeIndex]).toEqual(
+      layout.tabs[layout.activeIndex],
+    );
+  });
+
+  it("keeps Main agent selected when the empty workspace gains its first browser", () => {
+    const next = adoptAgentBrowser(EMPTY_LAYOUT, "agent-1");
+    expect(next.conversationFocused).toBe(true);
+    expect(next.editorSplit).toBeUndefined();
+    expect(next.tabs).toEqual([{ type: "browser", browserId: "agent-1" }]);
+  });
+
+  it("never moves or duplicates a browser that already belongs to either group", () => {
+    for (const region of ["primary", "secondary"] as const) {
+      const layout = openCodeEditor(
+        openCodeEditor(EMPTY_LAYOUT, { type: "file", path: "a.ts" }),
+        { type: "browser", browserId: "agent-1" },
+        region,
+      );
+      expect(adoptAgentBrowser(layout, "agent-1")).toBe(layout);
+      expect(codeBrowserIds(layout)).toEqual(["agent-1"]);
+    }
   });
 });

@@ -552,7 +552,21 @@ mod tests {
     #[test]
     fn only_acknowledged_fresh_native_screen_geometry_can_show() {
         let mut event = event();
-        assert!(position(&event, 200).is_some());
+        let shown = position(&event, 200).unwrap();
+        assert_eq!(shown.bundle_id, "dev.fixture");
+        assert_eq!(shown.window_id, 42);
+        let point = event.point.unwrap();
+        assert_eq!((shown.point.x, shown.point.y), (point.x, point.y));
+        let bounds = event.target_bounds.unwrap();
+        assert_eq!(
+            (
+                shown.bounds.x,
+                shown.bounds.y,
+                shown.bounds.width,
+                shown.bounds.height
+            ),
+            (bounds.x, bounds.y, bounds.width, bounds.height)
+        );
         event.phase = ComputerUseActionPhase::Running;
         assert!(position(&event, 200).is_none());
         event.phase = ComputerUseActionPhase::Completed;

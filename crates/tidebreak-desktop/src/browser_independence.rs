@@ -70,7 +70,9 @@ pub(crate) fn require_native_host(
     require_host(webview, registry, capability_id, workspace_id, fence)?;
     #[cfg(feature = "independent-wk-host")]
     {
-        crate::agent_browser_host::verify_native_window(view)
+        crate::agent_browser_host::verify_native_window(view)?;
+        crate::agent_browser_dialogs::verify(view)?;
+        crate::agent_browser_dialogs::take_blocked(view)
     }
     #[cfg(not(feature = "independent-wk-host"))]
     {
