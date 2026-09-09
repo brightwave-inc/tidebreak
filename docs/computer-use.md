@@ -19,15 +19,19 @@ not provide access to your computer.
 3. Ask your coding agent to inspect the page, reproduce a problem, edit the code,
    and repeat the flow after rebuilding.
 
-Your session can open more tabs for a shared origin. A first visit to an unshared
-origin needs sharing through the desktop. The agent can close tabs it opened.
-Showing an agent tab preserves the code editor's input focus and selection.
+Your session opens independent tabs for a shared origin, even while you use
+Settings or another page. A first visit to an unshared origin needs sharing
+through the desktop. The agent can close tabs it opened. Its previews appear as
+inactive tabs and preserve your selected editor, input focus, and selection.
 
-Browser actions run in background mode by default. They use DOM actions and show
-a temporary ghost cursor at the observed action position. They do not move your
-hardware pointer. DOM input is synthetic; sites that require trusted keyboard or
-pointer events can refuse it. A foreground browser action asks permission to use
-keyboard focus in Tidebreak. It does not silently replace a background action.
+Browser actions use a separate native host that cannot become the key window.
+DOM actions and trusted text insertion leave your hardware pointer and editor
+focus unchanged. A temporary ghost cursor shows the observed action position.
+Shared tabs in the main window refuse agent changes; the agent opens an
+independent tab instead. Sites that need unsupported trusted keyboard or pointer
+input can use managed Chrome. Page dialogs and file pickers are canceled before
+they open native UI. The agent receives an error and can use `browser_upload`
+for an approved upload.
 
 ## Use native macOS apps
 
@@ -44,13 +48,18 @@ do not authorize control. A whole-display screenshot needs its own grant.
 The disclosure explains that screenshots and visible content can reach your
 selected model and provider.
 
-Background native control uses accessibility actions. Supported apps can accept
-button presses, text changes, scrolling, and resizing without activation. Native
-hover, drag, key chords, menus, and inaccessible targets may return
-`requires_foreground`. To proceed with an action that needs your pointer or
-focus, the agent must request foreground mode and obtain separate approval.
-Some applications can raise their own windows in response to accessibility
-actions, so background mode cannot guarantee focus retention in every app.
+Native control uses accessibility actions and process-targeted input. A separate
+teal cursor shows the agent's action position. Tidebreak never moves your
+hardware pointer or activates the target app. If an action cannot run
+independently, it returns `independent_input_unavailable`; legacy clients may see
+`requires_foreground`. Neither response authorizes foreground control. Native
+tracking-area hover and system drag-and-drop still need app-specific validation.
+An app can raise its own windows after an action, so arbitrary app behavior
+cannot guarantee that your focus stays unchanged.
+
+Choose **Always allow this app** to save the exact app grant across local tasks
+in the same profile. Review or revoke it in Settings. This does not extend
+website, folder, whole-display, or sensitive-action access.
 
 To click a numbered screenshot target, the agent uses the badge from the most
 recent annotated capture of that app. Reading a narrower accessibility tree does
@@ -75,23 +84,23 @@ fails, the operation refuses further input instead of bringing the tab forward.
 
 Input supports nested, scaled, and rotated frames. Perspective-transformed frames
 return an unsupported-geometry result before input. `chrome_activate_tab`
-explicitly brings a tab forward and requires native approval. Disconnecting a managed browser closes it and removes
-its temporary profile. Disconnecting an existing browser leaves it open.
+refuses because it changes your selected tab. Disconnecting a managed browser
+closes it and removes its temporary profile. Disconnecting an existing browser leaves it open.
 
 ## Stop and recover
 
 The native/Chrome activity indicator distinguishes a pending request from a
-completed action. Choose **Stop** to cancel input. Foreground native, Chrome, and
-in-app browser actions share one input owner, so two sessions cannot take over
-focus at once. A stopped foreground operation drains before ownership changes.
+completed action. Choose **Stop** to cancel input. Native actions share one
+input owner so sessions cannot interleave an app event sequence. A stopped
+operation drains before ownership changes. Queued actions and condition waits
+cannot resume after Stop without a fresh admission.
 
 The browser's agent **Stop** halts every tab owned by that coding session. Opening
 a replacement tab or rotating a capability does not clear Stop. To resume, share
 a retained tab again through the desktop. If every owned tab has been closed,
 start a new coding session. Other sessions keep their own access.
 
-The native/Chrome indicator's **Resume** needs native approval. It does not
-restore foreground takeover approval. Native observation remains available under
+The native/Chrome indicator's **Resume** needs native approval. Native observation remains available under
 its existing read/capture grants after control stops. Chrome stops its whole
 connection, including observation, and requires a newly approved connection.
 Use **Stop sharing** or revoke the app grant to withdraw observation access.
@@ -104,7 +113,7 @@ position. The action's outcome remains unknown. This recovery requires the
 broker to remain running; it does not cover a desktop or system crash.
 
 If input cleanup fails, Tidebreak keeps the private recovery journal and refuses
-further foreground input. Release any held mouse buttons or keys before
+further native input. Release any held mouse buttons or keys before
 restarting Tidebreak. Native observation remains available.
 
 If a response is lost after an action starts, Tidebreak records an unknown

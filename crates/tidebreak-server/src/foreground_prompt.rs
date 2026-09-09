@@ -398,7 +398,7 @@ pub(crate) fn compose_for_surface(
             .iter()
             .any(|name| tidebreak_core::is_computer_use_control_tool(name));
         let mut lines = vec![if acting {
-            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_focus_window`, `computer_return_to_tidebreak`, and `computer_wait` to act."
+            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_launch_app`, `computer_hover`, `computer_drag`, `computer_resize_window`, and `computer_wait` to act."
         } else {
             "- This turn can see the user's display and read app content with `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content`; acting on apps is not available this turn."
         }];
@@ -425,7 +425,7 @@ pub(crate) fn compose_for_surface(
                 "- App access includes screenshots of the approved scope, which are sent to the selected model and provider. The user can stop control or revoke access. A refusal or Stop is a decision to respect; never switch tools, apps, or browser drivers to bypass it. If an action has an unknown outcome, inspect the app before proposing another action.",
             );
             lines.push(
-                "- Work in background mode by default and preserve the user's focus and pointer. An action that returns requires_foreground needs a separate request with execution_mode set to foreground and native approval; never retry that fallback automatically. After background work, report completion without bringing Tidebreak or another app to the front.",
+                "- Use independent background input and preserve the user's focus and pointer. If an action returns independent_input_unavailable or the legacy requires_foreground error, report the unsupported action. Never request foreground control or retry through a takeover path. Report completion without bringing Tidebreak or another app to the front.",
             );
         }
         push_section(&mut prompt, COMPUTER_USE_HEADING, &lines);
@@ -991,8 +991,11 @@ mod tests {
             full.contains("Read before acting"),
             "read-first guidance is required: {full}"
         );
-        assert!(full.contains("Work in background mode by default"));
-        assert!(full.contains("never retry that fallback automatically"));
+        assert!(full.contains("Use independent background input"));
+        assert!(full.contains("Never request foreground control"));
+        assert!(!full.contains("`computer_focus_window`"));
+        assert!(!full.contains("`computer_return_to_tidebreak`"));
+        assert!(!full.contains("execution_mode set to foreground"));
         assert!(full.contains("do not inspect code through computer-use screenshots"));
         assert!(full.contains("unless the user explicitly asks for on-screen inspection"));
         assert!(full.contains("say that you cannot inspect the source"));
