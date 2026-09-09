@@ -179,7 +179,7 @@ jobs:
             echo "Documentation checkout does not match the validated release." >&2
             exit 1
           }
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -493,7 +493,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
           role-session-name: tidebreak-inspect-${{ github.run_id }}
@@ -676,7 +676,7 @@ jobs:
           cache-targets: false
           save-if: false
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -990,7 +990,7 @@ jobs:
           install -m 755 "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
           install -m 644 "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -1778,7 +1778,7 @@ jobs:
           cp -p "$SIDECARS_ROOT/$cli_sidecar" "$cli_sidecar"
           cp "$DESKTOP_ROOT/release-config.json" "$RELEASE_CONFIG"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -1970,7 +1970,7 @@ jobs:
           cache-targets: false
           save-if: false
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -2108,7 +2108,7 @@ jobs:
         run: mkdir -p source-sbom
 
       - name: Generate the source-scoped release SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: release-source
           format: spdx-json
@@ -2358,7 +2358,7 @@ jobs:
           subject-checksums: ${{ runner.temp }}/immutable-release-files.sha256
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
           role-session-name: tidebreak-${{ github.run_id }}
