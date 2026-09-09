@@ -36,9 +36,12 @@ export default function RootLayout() {
             headerShadowVisible: false,
             headerStyle: { backgroundColor: "#f4f5f7" },
             contentStyle: { backgroundColor: "#f4f5f7" },
+            // Chevron-only back button; the default inherits the previous
+            // route's title and falls back to its file name ("index").
+            headerBackButtonDisplayMode: "minimal",
           }}
         >
-          <Stack.Screen name="index" options={{ headerShown: false }} />
+          <Stack.Screen name="index" options={{ headerShown: false, title: "Tidebreak" }} />
           <Stack.Screen name="pair" options={{ title: "Gateway" }} />
           <Stack.Screen name="attach" options={{ title: "Machine" }} />
           <Stack.Screen name="home" options={{ title: "Attached" }} />
