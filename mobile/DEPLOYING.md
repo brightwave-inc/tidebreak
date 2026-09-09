@@ -67,29 +67,83 @@ terminal, **(repo)** = already done in this repository.
 - **Android / Play Console** — package ids are already configured per
   variant; the Play record, service-account reuse, keystore, and the
   Console-UI-only first upload follow Tidewatch's DEPLOYING.md when a
-  slice needs it.
-- **The OTA + CI loop** — copy model-gateway's
-  `.github/workflows/build-mobile.yml` (fingerprint routing: JS-only
-  merges publish an OTA, native changes build + submit; PRs get a
-  dry-run comment). Requires an org Expo access token stored as this
-  repo's `EXPO_TOKEN` Actions secret:
-  `gh secret set EXPO_TOKEN -R brightwave-inc/tidebreak`.
+  slice needs it. Until then CI routes iOS only — see the next section.
 - **Per-variant icons** (tinted dev/staging) and a branded splash via
   the `expo-splash-screen` config plugin. The current icon is derived
   from the desktop tile; swap in a purpose-made 1024×1024 opaque source
   when design supplies one.
 
+## OTA + CI (the steady-state loop)
+
+`.github/workflows/build-mobile.yml` runs on every push to `main` touching
+`mobile/**` and routes by fingerprint, the same design as Tidewatch:
+
+- The local `@expo/fingerprint` hash — computed with the project-resolved
+  binary (`pnpm exec fingerprint`, which ships inside the pinned `expo`
+  package), under the EAS `production` environment and
+  `APP_VARIANT=production` — is compared against the last finished EAS
+  build's `runtimeVersion`, per platform.
+- **Hashes match** → `eas update` publishes an OTA to the `production`
+  channel; installed clients pick it up on next launch. JS-only merges
+  never touch the store.
+- **Any mismatch** (native dep, config plugin, SDK bump — or no prior
+  build) → `eas build --auto-submit` ships a binary to TestFlight.
+- PRs that touch `mobile/**` get a dry-run: a PR comment says which of the
+  two paths merging will take, with the per-platform hash table. Nothing is
+  published or built from a PR. PRs that touch nothing under `mobile/**`
+  skip the `deploy` job entirely, so it is safe to make a required status
+  check on `main` — a skipped job satisfies one.
+- Dependabot PRs also skip `deploy`. Dependabot-triggered runs read the
+  Dependabot secrets store and never see `secrets.EXPO_TOKEN`, so the first
+  EAS call would fail auth on a token Dependabot cannot be granted.
+
+Routing is currently **iOS-only**, and that restriction is on routing, not
+just on submission: with no finished Android build in EAS there is no
+`runtimeVersion` for an `android` row to match, so including it would miss
+on every run and pin the mode to `build` forever — the OTA path would never
+fire. `eas update` still publishes both platforms' bundles. The workflow's
+routing loop is already per-platform; enabling Android once the Play
+Console setup above lands is a one-line change of the `PLATFORM` default
+from `ios` to `all`.
+
+Diverging from Tidewatch: the variant env var is `APP_VARIANT`, not
+`APP_ENV`; there is no root `.nvmrc` here, so Node and pnpm are set up the
+way `.github/workflows/mobile-checks.yml` does it (pnpm from
+`mobile/package.json`'s `packageManager` pin, Node pinned explicitly).
+Keep the two mobile workflows in step when either changes.
+
+Fingerprint discipline: nothing non-deterministic in `app.config.ts` — a
+value that changes between runs makes every push look like a native change
+and the OTA path never fires.
+
+One-time CI prerequisite (the workflow cannot create it, and no run will
+get past its first EAS call without it):
+
+```sh
+gh secret set EXPO_TOKEN -R brightwave-inc/tidebreak
+```
+
+The value is an Expo access token (expo.dev → Access tokens; a robot token
+survives personnel changes). Tokens are org-scoped, so Tidewatch's token
+value works here — but the GitHub secret itself does not carry across
+repositories and must be set on this one.
+
+Expect the very first post-merge run to route to `build`, not `ota`: until
+one binary exists there is no `runtimeVersion` to match against.
+
 ## Every release after that
 
-Until the CI loop lands, releases are manual:
+Merge to `main`. CI routes OTA vs binary automatically. For a manual
+binary outside CI:
 
 ```sh
 cd mobile
 eas build --profile production --platform ios --auto-submit
 ```
 
-JS-only changes can ship over the air instead:
+Or a manual OTA:
 
 ```sh
-eas update --channel production
+cd mobile
+APP_VARIANT=production eas update --branch production --auto
 ```
