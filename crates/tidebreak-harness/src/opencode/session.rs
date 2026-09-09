@@ -282,18 +282,33 @@ fn effective_existing_config_str<'a>(
     Ok(Some(value))
 }
 
+/// Inputs for the long-lived Opencode serve child.
+pub(crate) struct ServeLaunch<'a> {
+    pub binary: &'a std::path::Path,
+    pub extra_argv: &'a [String],
+    pub cwd: &'a std::path::Path,
+    pub snapshot_env: &'a [(std::ffi::OsString, std::ffi::OsString)],
+    pub extra_env: &'a [(String, String)],
+    pub port: u16,
+    pub browser: Option<&'a BrowserChannelSpec>,
+    pub native: Option<&'a crate::NativeChannelSpec>,
+    /// The exact host-wired key used by shell tools to borrow forge credentials.
+    pub relay_key_env: Option<&'a str>,
+}
+
 /// Argv for the long-lived serve child. Prompt never appears here.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compose_serve_plan(
-    binary: &std::path::Path,
-    extra_argv: &[String],
-    cwd: &std::path::Path,
-    snapshot_env: &[(std::ffi::OsString, std::ffi::OsString)],
-    extra_env: &[(String, String)],
-    port: u16,
-    browser: Option<&BrowserChannelSpec>,
-    native: Option<&crate::NativeChannelSpec>,
-) -> Result<LaunchPlan, HarnessError> {
+pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, HarnessError> {
+    let ServeLaunch {
+        binary,
+        extra_argv,
+        cwd,
+        snapshot_env,
+        extra_env,
+        port,
+        browser,
+        native,
+        relay_key_env,
+    } = launch;
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
         "serve".into(),
@@ -313,7 +328,7 @@ pub(crate) fn compose_serve_plan(
     }
     let mut env = extra_env.to_vec();
     env.retain(|(key, _)| {
-        !BrowserChannelSpec::is_reserved_env_key(key)
+        !BrowserChannelSpec::is_reserved_env_key_except(key, relay_key_env)
             && key != "PWD"
             && !env_key_eq(key, OPENCODE_CONFIG_CONTENT)
     });
@@ -527,16 +542,17 @@ impl OpencodeSession {
             self.child_pid.store(0, Ordering::SeqCst);
         }
         let port = pick_loopback_port()?;
-        let plan = compose_serve_plan(
-            self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
-            &self.spec.extra_argv,
-            &self.spec.worktree,
-            &self.spec.env,
-            &self.spec.extra_env,
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
+            extra_argv: &self.spec.extra_argv,
+            cwd: &self.spec.worktree,
+            snapshot_env: &self.spec.env,
+            extra_env: &self.spec.extra_env,
             port,
-            self.spec.browser.as_ref(),
-            self.spec.native.as_ref(),
-        )?;
+            browser: self.spec.browser.as_ref(),
+            native: self.spec.native.as_ref(),
+            relay_key_env: self.spec.relay_key_env.as_deref(),
+        })?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -1263,18 +1279,71 @@ mod tests {
         assert!(session.child.lock().await.is_none());
     }
 
+    #[tokio::test]
+    async fn relay_wiring_preserves_only_the_host_key_for_forge_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let extra_env = vec![
+            ("TIDEBREAK_LLM_KEY".into(), "test-session-key".into()),
+            ("tidebreak_llm_key".into(), "untrusted".into()),
+            ("TIDEBREAK_BROWSER_CAPFILE".into(), "untrusted".into()),
+        ];
+        for relay_key_env in [Some("TIDEBREAK_LLM_KEY"), None] {
+            let plan = compose_serve_plan(ServeLaunch {
+                binary: std::path::Path::new("/usr/bin/opencode"),
+                extra_argv: &[],
+                cwd: dir.path(),
+                snapshot_env: &[],
+                extra_env: &extra_env,
+                port: 1234,
+                browser: None,
+                native: None,
+                relay_key_env,
+            })
+            .unwrap();
+            let value = plan
+                .env
+                .iter()
+                .find(|(name, _)| name == "TIDEBREAK_LLM_KEY");
+            assert_eq!(
+                value.map(|(_, value)| value.as_str()),
+                relay_key_env.map(|_| "test-session-key")
+            );
+            assert!(plan.env.iter().all(
+                |(name, _)| name != "tidebreak_llm_key" && name != "TIDEBREAK_BROWSER_CAPFILE"
+            ));
+            #[cfg(unix)]
+            if relay_key_env.is_some() {
+                let mut shell = tokio::process::Command::new("/bin/sh");
+                shell.args(["-c", r#"test "$TIDEBREAK_LLM_KEY" = test-session-key"#]);
+                apply_child_env_tokio(
+                    &mut shell,
+                    tidebreak_core::HarnessKind::Opencode,
+                    Vec::new(),
+                    &plan.env,
+                    None,
+                    None,
+                );
+                assert!(
+                    shell.status().await.unwrap().success(),
+                    "shell tools need the relay key"
+                );
+            }
+        }
+    }
+
     #[test]
     fn serve_plan_is_clean() {
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         assert_eq!(
             plan.argv,
@@ -1293,32 +1362,34 @@ mod tests {
 
     #[test]
     fn extra_auto_flag_is_rejected() {
-        let err = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &["--auto".into()],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let err = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &["--auto".into()],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
     }
 
     #[test]
     fn extra_bypass_flag_is_rejected() {
-        let err = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &["--dangerously-skip-permissions".into()],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let err = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &["--dangerously-skip-permissions".into()],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
     }
@@ -1422,16 +1493,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1448,16 +1520,17 @@ mod tests {
 
     #[test]
     fn browser_absent_does_not_add_opencode_config() {
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         assert!(
             !plan
@@ -1529,16 +1602,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/native-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            Some(&native),
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: Some(&native),
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1568,16 +1642,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/native-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            Some(&browser),
-            Some(&native),
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&browser),
+            native: Some(&native),
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1596,16 +1671,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1627,16 +1703,17 @@ mod tests {
             capfile.clone(),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1711,16 +1788,17 @@ mod tests {
             "mcp": { "other-server": { "type": "local", "command": ["foo"] } }
         })
         .to_string();
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing.clone())],
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing.clone())],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1767,16 +1845,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &snapshot,
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &snapshot,
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1813,16 +1892,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &snapshot,
-            &extra_env,
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &snapshot,
+            extra_env: &extra_env,
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1853,16 +1933,17 @@ mod tests {
             std::ffi::OsString::from(OPENCODE_CONFIG_CONTENT),
             std::ffi::OsString::from(existing),
         )];
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &snapshot,
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &snapshot,
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         assert!(
             !plan
@@ -1883,16 +1964,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &snapshot,
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &snapshot,
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let config_str = plan
             .env
@@ -1927,16 +2009,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from("/usr/local/bin/tidebreak"),
         );
-        let err = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &snapshot,
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let err = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &snapshot,
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap_err();
         let message = err.to_string();
         assert!(
@@ -1952,16 +2035,17 @@ mod tests {
         })
         .to_string();
         let entry = ("opencode_config_content".to_owned(), overlay);
-        let plan = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            std::slice::from_ref(&entry),
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: std::slice::from_ref(&entry),
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         let preserved = plan
             .env
@@ -1985,16 +2069,17 @@ mod tests {
             std::path::PathBuf::from("/tmp/browser-cap.json"),
             std::path::PathBuf::from(bridge),
         );
-        let err = compose_serve_plan(
-            std::path::Path::new("/usr/bin/opencode"),
-            &[],
-            std::path::Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            Some(&spec),
-            None,
-        )
+        let err = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: Some(&spec),
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap_err();
         let message = err.to_string();
         assert!(
