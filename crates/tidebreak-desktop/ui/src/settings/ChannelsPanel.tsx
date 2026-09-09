@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/empty";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+import { WorkspaceGrantRepositories } from "./WorkspaceGrantRepositories";
 
 /**
  * The grants an external channel holds on this machine, grouped by the
@@ -29,19 +30,26 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const { confirm, dialog } = useConfirm();
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setGrants(await client.listCodeGrants());
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [client]);
+  const reload = useCallback(
+    async (failureContext?: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        setGrants(await client.listCodeGrants());
+        setRefreshFailed(false);
+      } catch (err) {
+        setError([failureContext, String(err)].filter(Boolean).join(" "));
+        setRefreshFailed(true);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client],
+  );
 
   useEffect(() => {
     void reload();
@@ -97,12 +105,38 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
     }
   }
 
+  async function approveRepositories(
+    grantId: string,
+    channelId: string,
+    repositories: string[],
+  ): Promise<boolean> {
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await client.approveWorkspaceGrantChannelRepositories(
+        grantId,
+        channelId,
+        repositories,
+      );
+    } catch (err) {
+      setError(`Repositories could not be approved. ${String(err)}`);
+      setWorking(false);
+      return false;
+    }
+    setNotice(`Repositories approved for ${channelId}.`);
+    await reload("Repositories were approved, but the list could not refresh.");
+    setWorking(false);
+    return true;
+  }
+
   const groups = groupByWorkspace(grants ?? []);
+  const disabled = loading || working || refreshFailed;
 
   return (
     <SettingsPanel
       title="Channels"
-      description="External channels that can reach coding sessions on this machine. Each grant is one linked person in one channel workspace; revoking it cuts their access immediately."
+      description="Manage the people and Slack workspaces that can reach coding sessions on this machine. For channel sessions, approve the repositories that agents can choose from. GitHub access is still required."
       busy={loading || working}
     >
       {loading && grants === null ? (
@@ -112,7 +146,12 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
       ) : grants === null ? (
         <div className="flex flex-col items-start gap-3">
           <SettingsError>{error}</SettingsError>
-          <Button type="button" variant="outline" size="sm" onClick={reload}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void reload()}
+          >
             Try again
           </Button>
         </div>
@@ -144,52 +183,49 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
               {group.grants.map((grant) => (
                 <li
                   key={grant.id}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2"
+                  className="flex flex-col gap-3 rounded-md border px-3 py-2"
                 >
-                  <div className="flex min-w-0 items-start gap-3">
-                    <ChannelAvatar grant={grant} />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">
-                        {grant.kind === "workspace"
-                          ? `Workspace ${grant.workspace_name ?? grant.workspace_identity}`
-                          : (grant.display_name ?? grant.external_identity)}
-                      </p>
-                      {grant.kind !== "workspace" && grant.display_name && (
-                        <p className="truncate font-mono text-xs text-muted-foreground">
-                          {grant.external_identity}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <ChannelAvatar grant={grant} />
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">
+                          {grant.kind === "workspace"
+                            ? `Workspace ${grant.workspace_name ?? grant.workspace_identity}`
+                            : (grant.display_name ?? grant.external_identity)}
                         </p>
-                      )}
-                      {grant.kind === "workspace" &&
-                        grant.channels &&
-                        grant.channels.length > 0 && (
-                          <ul className="mt-1 text-xs text-muted-foreground">
-                            {grant.channels.map((channel) => (
-                              <li
-                                key={`${channel.channel_id}:${channel.repository}`}
-                              >
-                                {channel.channel_id} · {channel.repository} (
-                                {channel.state})
-                              </li>
-                            ))}
-                          </ul>
+                        {grant.kind !== "workspace" && grant.display_name && (
+                          <p className="truncate font-mono text-xs text-muted-foreground">
+                            {grant.external_identity}
+                          </p>
                         )}
-                      <p className="text-xs text-muted-foreground">
-                        {grant.revoked_at
-                          ? `Revoked ${formatDay(grant.revoked_at)} — ${grant.revoked_reason ?? "no reason recorded"}`
-                          : `Connected ${formatDay(grant.created_at)}`}
-                      </p>
+                        <p className="text-xs text-muted-foreground">
+                          {grant.revoked_at
+                            ? `Revoked ${formatDay(grant.revoked_at)} — ${grant.revoked_reason ?? "no reason recorded"}`
+                            : `Connected ${formatDay(grant.created_at)}`}
+                        </p>
+                      </div>
                     </div>
+                    {!grant.revoked_at && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={disabled}
+                        onClick={() => void revokeOne(grant)}
+                      >
+                        Revoke
+                      </Button>
+                    )}
                   </div>
-                  {!grant.revoked_at && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={working}
-                      onClick={() => void revokeOne(grant)}
-                    >
-                      Revoke
-                    </Button>
+                  {grant.kind === "workspace" && (
+                    <WorkspaceGrantRepositories
+                      grant={grant}
+                      disabled={disabled}
+                      onApprove={(channelId, repositories) =>
+                        approveRepositories(grant.id, channelId, repositories)
+                      }
+                    />
                   )}
                 </li>
               ))}
@@ -200,7 +236,7 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
                 variant="outline"
                 size="sm"
                 className="self-start"
-                disabled={working}
+                disabled={disabled}
                 onClick={() => void revokeWorkspace(group)}
               >
                 Revoke this workspace
@@ -209,7 +245,32 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
           </SettingsSection>
         ))
       )}
-      {grants !== null && error && <SettingsError>{error}</SettingsError>}
+      {notice && (
+        <p
+          className="notice-surface notice-success rounded-md border px-3 py-2 text-sm"
+          role="status"
+        >
+          {notice}
+        </p>
+      )}
+      {grants !== null && error && (
+        <div className="notice-surface notice-critical flex flex-col items-start gap-2 rounded-md border px-3 py-2">
+          <p className="text-sm break-words" role="alert">
+            {error}
+          </p>
+          {refreshFailed && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={loading || working}
+              onClick={() => void reload()}
+            >
+              Refresh grants
+            </Button>
+          )}
+        </div>
+      )}
       {dialog}
     </SettingsPanel>
   );

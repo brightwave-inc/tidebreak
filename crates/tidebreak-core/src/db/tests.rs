@@ -16,6 +16,7 @@ mod blob_retirement;
 mod chat;
 mod client_wait;
 mod code;
+mod code_channel_scope;
 mod connected_app;
 mod context_checkpoint;
 mod delegated_file_read;

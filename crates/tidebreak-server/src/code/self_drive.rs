@@ -141,7 +141,7 @@ impl Tool for SessionTool {
     fn spec(&self) -> ToolSpec {
         let (description, properties, required) = match self.name {
             "code_repos" => ("List repositories available to this conversation's personal or bot identity. Choose repositories from the task; the conversation does not need a default repository.", json!({}), json!([])),
-            "code_session_create" => ("Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. Repository access and channel confirmation apply.", json!({
+            "code_session_create" => ("Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. Repository access and the channel’s approved repository scope apply.", json!({
                 "repository":{"type":"string","description":"GitHub owner/name"},
                 "task":{"type":"string","maxLength":16000},
                 "request_key":{"type":"string","maxLength":128,"description":"Stable key for this task, reused on retries."},
@@ -373,7 +373,7 @@ impl SessionTool {
                     "Parent conversation",
                 )
                 .await?;
-                return Err(ServerError::conflict_kind("repository_unconfirmed", format!("An administrator must confirm {origin} for this Slack channel in Tidebreak Channels settings. Ask for that confirmation, then retry this request_key.")));
+                return Err(ServerError::conflict_kind("repository_unconfirmed", format!("This channel does not yet allow {origin}. Ask an administrator to add the repositories this task needs together in Tidebreak Settings > Channels. A chat answer does not change access. After the scope is saved, retry this request_key.")));
             }
         }
         if let Some(lender) = &auth.lender {

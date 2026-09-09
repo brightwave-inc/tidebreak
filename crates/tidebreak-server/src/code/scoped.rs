@@ -1059,6 +1059,27 @@ impl ScopedCode {
             .await
     }
 
+    pub async fn approve_workspace_channel_repositories(
+        &self,
+        grant_id: tidebreak_core::CodeGrantId,
+        channel_id: &str,
+        repositories: &[String],
+    ) -> Result<bool, ServerError> {
+        if !self.allow_unscoped_delivery || self.is_service {
+            return Err(ServerError::forbidden(
+                "a human administrator must approve channel repositories",
+            ));
+        }
+        self.runtime
+            .approve_workspace_channel_repositories_as_admin(
+                &self.owner,
+                grant_id,
+                channel_id,
+                repositories,
+            )
+            .await
+    }
+
     pub async fn start_workspace_handshake(
         &self,
         channel_kind: &str,

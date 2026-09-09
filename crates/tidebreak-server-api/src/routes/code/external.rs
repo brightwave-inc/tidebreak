@@ -331,6 +331,7 @@ pub async fn external_get_or_create(
         None => None,
     };
     let repository = match registered.as_ref() {
+        Some(repo) if grant.kind.is_workspace() => Some(workspace_repository_scope(repo)?),
         Some(repo) => match (repo.origin_owner.as_deref(), repo.origin_name.as_deref()) {
             (Some(owner), Some(name)) => Some(format!("{owner}/{name}")),
             _ => body.repository.clone(),
@@ -533,6 +534,30 @@ pub async fn external_attach_binding(
     }
 }
 
+/// An unqualified channel approval names a repository on github.com only.
+fn workspace_repository_scope(repo: &tidebreak_core::CodeRepo) -> Result<String, ServerError> {
+    let origin_unknown = || {
+        ServerError::conflict_kind(
+            "repo_origin_unknown",
+            "channel repository approval requires a recorded github.com origin",
+        )
+    };
+    if !repo
+        .origin_host
+        .as_deref()
+        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+    {
+        return Err(origin_unknown());
+    }
+    let (Some(owner), Some(name)) = (repo.origin_owner.as_deref(), repo.origin_name.as_deref())
+    else {
+        return Err(origin_unknown());
+    };
+    tidebreak_server_core::code::runtime::CodeRuntime::canonical_external_repository(&format!(
+        "{owner}/{name}"
+    ))
+}
+
 async fn require_binding_repository(
     runtime: &crate::code::runtime::CodeRuntime,
     grant: &CodeExternalGrant,
@@ -553,16 +578,7 @@ async fn require_binding_repository(
     if let Some(workspace_id) = session.workspace_id {
         let workspace = runtime.get_workspace(&grant.owner, workspace_id).await?;
         let repo = runtime.get_repo(&grant.owner, workspace.repo_id).await?;
-        let repository = repo
-            .origin_owner
-            .zip(repo.origin_name)
-            .map(|(owner, name)| format!("{owner}/{name}"))
-            .ok_or_else(|| {
-                ServerError::conflict_kind(
-                    "repo_origin_unknown",
-                    "the repository records no origin to confirm",
-                )
-            })?;
+        let repository = workspace_repository_scope(&repo)?;
         if !tidebreak_core::db::code::channel_repository_is_confirmed(
             &runtime.db,
             &grant.owner,

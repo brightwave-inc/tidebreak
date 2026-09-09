@@ -411,6 +411,10 @@ pub fn app(state: AppState) -> Router {
             "/deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/confirm",
             post(routes::code::confirm_workspace_channel_repository),
         )
+        .route(
+            "/deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/approve",
+            post(routes::code::approve_workspace_channel_repositories),
+        )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
     // The engine-facing browser channel. Authenticated per request by the

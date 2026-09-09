@@ -2700,6 +2700,432 @@ async fn call_json(
     (status, json)
 }
 
+async fn repository_scope_workspace_grant(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    workspace: &str,
+    token: &str,
+) -> tidebreak_core::CodeExternalGrant {
+    tidebreak_core::db::code::mint_external_grant(
+        &runtime.db,
+        owner,
+        tidebreak_core::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: workspace,
+            workspace_identity: workspace,
+            kind: tidebreak_core::CodeGrantKind::Workspace,
+        },
+        &crate::code::grants::hash_adapter_token(token),
+        &crate::code::grants::hash_adapter_token(&format!("refresh-{token}")),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn channel_repository_preapproval_is_additive_and_scoped_before_session_attempts() {
+    let (router, runtime, first_repo_id, service, dir) = workspace_grant_app().await;
+    let token = "workspace-preapproval-token";
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", token).await;
+    assert!(tidebreak_core::db::code::set_repo_origin(
+        &runtime.db,
+        &service,
+        first_repo_id,
+        "github.com",
+        "ACME",
+        "Tools"
+    )
+    .await
+    .unwrap());
+    let mut second_repo = runtime.get_repo(&service, first_repo_id).await.unwrap();
+    second_repo.id = RepoId::new();
+    second_repo.root_path = dir.path().join("api").display().to_string();
+    second_repo.display_name = "api".into();
+    second_repo.origin_name = Some("API".into());
+    insert_repo(&runtime.db, &second_repo).await.unwrap();
+    assert!(runtime
+        .list_channel_repository_confirms(&service, grant.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let approve = format!(
+        "/deployment/code/grants/workspace/{}/channels/C1/repositories/approve",
+        grant.id
+    );
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve,
+        ALICE_TOKEN,
+        Some(serde_json::json!({
+            "repositories": ["https://github.com/ACME/TOOLS.git/", "acme/API", "ACME/tools"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let rows = runtime
+        .list_channel_repository_confirms(&service, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "canonical aliases create one approval");
+    assert!(rows
+        .iter()
+        .all(|row| row.state == tidebreak_core::CodeChannelRepositoryState::Confirmed));
+    assert!(rows
+        .iter()
+        .all(|row| row.confirmed_by.as_ref().map(OwnerId::as_str) == Some("user:alice")));
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve,
+        ALICE_TOKEN,
+        Some(serde_json::json!({
+            "repositories": ["acme/third"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve,
+        ALICE_TOKEN,
+        Some(serde_json::json!({
+            "repositories": ["acme/tools"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "repeating an approval is idempotent"
+    );
+    assert_eq!(
+        runtime
+            .list_channel_repository_confirms(&service, grant.id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // Neither repository needs a failed session attempt or setter metadata first.
+    for (index, repo_id) in [first_repo_id, second_repo.id].into_iter().enumerate() {
+        let (status, body) = call_json(&router, "POST", "/external/code/sessions", token, Some(serde_json::json!({
+            "external_key": format!("T1/C1/{}.1", index + 1), "repo_id": repo_id, "channel_id": "C1"
+        }))).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let source_session = bound_session_id(&runtime, &service, "T1/C1/1.1").await;
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!(
+            "/deployment/code/grants/workspace/{}/channels/C3/repositories/approve",
+            grant.id
+        ),
+        ALICE_TOKEN,
+        Some(serde_json::json!({"repositories":["acme/tools"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{source_session}/bindings"),
+        token,
+        Some(serde_json::json!({"external_key":"T1/C3/1.1", "channel_id":"C3"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a mixed-case registered origin matches destination approval: {body}"
+    );
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        token,
+        Some(serde_json::json!({
+            "external_key": "T1/C2/1.1", "repo_id": first_repo_id, "channel_id": "C2",
+            "set_by": {"identity": "U1", "display": "Casey"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body["kind"], "repository_unconfirmed",
+        "another channel has no inherited scope"
+    );
+
+    let other_token = "other-workspace-preapproval-token";
+    let other_grant = repository_scope_workspace_grant(&runtime, &service, "T2", other_token).await;
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        other_token,
+        Some(serde_json::json!({
+            "external_key": "T2/C1/1.1", "repo_id": first_repo_id, "channel_id": "C1",
+            "set_by": {"identity": "U1", "display": "Casey"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body["kind"], "repository_unconfirmed",
+        "another grant has no inherited scope"
+    );
+    assert!(!tidebreak_core::db::code::channel_repository_is_confirmed(
+        &runtime.db,
+        &service,
+        other_grant.id,
+        "C1",
+        "acme/tools"
+    )
+    .await
+    .unwrap());
+    for repository in ["acme/tools", "acme/api", "acme/third"] {
+        assert!(tidebreak_core::db::code::channel_repository_is_confirmed(
+            &runtime.db,
+            &service,
+            grant.id,
+            "C1",
+            repository
+        )
+        .await
+        .unwrap());
+    }
+}
+
+#[tokio::test]
+async fn channel_repository_preapproval_never_matches_other_or_missing_registered_hosts() {
+    let (router, runtime, repo_id, service, dir) = workspace_grant_app().await;
+    let token = "preapproval-host-token";
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", token).await;
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!(
+            "/deployment/code/grants/workspace/{}/channels/C1/repositories/approve",
+            grant.id
+        ),
+        ALICE_TOKEN,
+        Some(serde_json::json!({"repositories":["acme/tools"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let template = runtime.get_repo(&service, repo_id).await.unwrap();
+    for (index, host) in [Some("gitlab.example"), None].into_iter().enumerate() {
+        let mut other = template.clone();
+        other.id = RepoId::new();
+        other.root_path = dir
+            .path()
+            .join(format!("other-host-{index}"))
+            .display()
+            .to_string();
+        other.origin_host = host.map(str::to_owned);
+        insert_repo(&runtime.db, &other).await.unwrap();
+        let (status, body) = call_json(
+            &router, "POST", "/external/code/sessions", token,
+            Some(serde_json::json!({"external_key":format!("T1/C1/{}.1", index + 1), "repo_id":other.id, "channel_id":"C1", "repository":"acme/tools"})),
+        ).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{host:?}: {body}");
+        assert_eq!(body["kind"], "repo_origin_unknown");
+    }
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        token,
+        Some(serde_json::json!({"external_key":"T1/C1/3.1", "repo_id":repo_id, "channel_id":"C1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let session_id = bound_session_id(&runtime, &service, "T1/C1/3.1").await;
+    assert!(tidebreak_core::db::code::set_repo_origin(
+        &runtime.db,
+        &service,
+        repo_id,
+        "gitlab.example",
+        "acme",
+        "tools",
+    )
+    .await
+    .unwrap());
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/bindings"),
+        token,
+        Some(serde_json::json!({"external_key":"T1/C1/4.1", "channel_id":"C1"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a changed host cannot reuse the GitHub approval: {body}"
+    );
+    assert_eq!(body["kind"], "repo_origin_unknown");
+    let rows = runtime
+        .list_channel_repository_confirms(&service, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].repository, "acme/tools");
+}
+
+#[tokio::test]
+async fn channel_repository_preapproval_refuses_nonadmin_service_missing_revoked_and_person_grants()
+{
+    let (router, runtime, _repo_id, service, _dir) = workspace_grant_app().await;
+    let grant =
+        repository_scope_workspace_grant(&runtime, &service, "T1", "preapproval-auth-token").await;
+    let approve =
+        |id| format!("/deployment/code/grants/workspace/{id}/channels/C1/repositories/approve");
+    let body = serde_json::json!({"repositories": ["acme/tools"]});
+    for token in [BOB_TOKEN, CAROL_TOKEN] {
+        let (status, _) = call_json(
+            &router,
+            "POST",
+            &approve(grant.id),
+            token,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve(grant.id),
+        "unrecognized-token",
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve(tidebreak_core::CodeGrantId::new()),
+        ALICE_TOKEN,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (person, _) = runtime
+        .mint_adapter_grant(&service, "slack", "U-person", "T1")
+        .await
+        .unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve(person.id),
+        ALICE_TOKEN,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(runtime
+        .list_channel_repository_confirms(&service, person.id)
+        .await
+        .unwrap()
+        .is_empty());
+    runtime
+        .revoke_adapter_grant_any_owner(grant.id, "test revocation")
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, _) = call_json(&router, "POST", &approve(grant.id), ALICE_TOKEN, Some(body)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(runtime
+        .list_channel_repository_confirms(&service, grant.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn channel_repository_preapproval_rejects_invalid_batches_without_partial_writes() {
+    let (router, runtime, _repo_id, service, _dir) = workspace_grant_app().await;
+    let grant =
+        repository_scope_workspace_grant(&runtime, &service, "T1", "preapproval-atomic-token")
+            .await;
+    let approve = format!(
+        "/deployment/code/grants/workspace/{}/channels/C1/repositories/approve",
+        grant.id
+    );
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &approve,
+        ALICE_TOKEN,
+        Some(serde_json::json!({"repositories":["acme/existing"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let too_many: Vec<String> = (0..101).map(|index| format!("acme/repo-{index}")).collect();
+    for repositories in [
+        serde_json::json!([]),
+        serde_json::json!(too_many),
+        serde_json::json!(["acme/new", "*"]),
+        serde_json::json!(["acme/new", "acme/*"]),
+        serde_json::json!(["acme/new", "not-a-repository"]),
+        serde_json::json!(["acme/new", "acme/name/extra"]),
+        serde_json::json!(["acme/new", "https://other.example/acme/tools"]),
+        serde_json::json!(["acme/new", ""]),
+    ] {
+        let (status, _) = call_json(
+            &router,
+            "POST",
+            &approve,
+            ALICE_TOKEN,
+            Some(serde_json::json!({"repositories":repositories})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let rows = runtime
+            .list_channel_repository_confirms(&service, grant.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "no valid prefix of a refused batch is saved");
+        assert_eq!(rows[0].repository, "acme/existing");
+        assert_eq!(
+            rows[0].state,
+            tidebreak_core::CodeChannelRepositoryState::Confirmed
+        );
+    }
+    for channel in [
+        "%20".to_owned(),
+        "C%20one".to_owned(),
+        "C%2Fother".to_owned(),
+        "C".repeat(129),
+    ] {
+        let uri = format!(
+            "/deployment/code/grants/workspace/{}/channels/{channel}/repositories/approve",
+            grant.id
+        );
+        let (status, _) = call_json(
+            &router,
+            "POST",
+            &uri,
+            ALICE_TOKEN,
+            Some(serde_json::json!({"repositories":["acme/new"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{channel}");
+    }
+    assert_eq!(
+        runtime
+            .list_channel_repository_confirms(&service, grant.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_it() {
     let (router, runtime, repo_id, service, dir) = workspace_grant_app().await;

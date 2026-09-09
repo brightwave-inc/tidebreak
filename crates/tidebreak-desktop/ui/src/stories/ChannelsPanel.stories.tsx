@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 
 import type { ApiClient, CodeGrantSnapshot } from "@/api";
 import { ChannelsPanel } from "@/settings/ChannelsPanel";
@@ -100,4 +101,192 @@ export const LoadFailed: Story = {
 /** Only the theft-revoked grant: the reason is the notification of record. */
 export const RevokedForTokenReuse: Story = {
   args: { client: stubClient([stolen]) },
+};
+
+const workspace: CodeGrantSnapshot = {
+  ...live,
+  id: "6b1f9a34-0000-4000-8000-000000000009",
+  kind: "workspace",
+  external_identity: "T04ACME",
+  display_name: "tidebreak-slack",
+  channels: [
+    {
+      channel_id: "C04ENGINEERING",
+      repository: "acme/service",
+      state: "confirmed",
+      set_by_identity: "U04CASEY",
+      set_by_display: "Casey Nakamura",
+    },
+    {
+      channel_id: "C04ENGINEERING",
+      repository: "acme/web",
+      state: "pending",
+      set_by_identity: "U04SAM",
+      set_by_display: "Sam Okafor",
+    },
+    {
+      channel_id: "C04ENGINEERING",
+      repository: "acme/infrastructure",
+      state: "pending",
+      set_by_identity: "U04SAM",
+      set_by_display: "Sam Okafor",
+    },
+    {
+      channel_id: "C04ENGINEERING",
+      repository: "acme/legacy",
+      state: "superseded",
+      set_by_identity: "U04CASEY",
+      set_by_display: "Casey Nakamura",
+    },
+    {
+      channel_id: "C04DESIGN",
+      repository: "acme/design-system",
+      state: "confirmed",
+      set_by_identity: "U04CASEY",
+      set_by_display: "Casey Nakamura",
+    },
+  ],
+};
+
+function approvalClient({
+  failSave = false,
+  failRefresh = false,
+  initialGrant = workspace,
+}: {
+  failSave?: boolean;
+  failRefresh?: boolean;
+  initialGrant?: CodeGrantSnapshot;
+} = {}): ApiClient {
+  let grants = [structuredClone(initialGrant), live];
+  let saved = false;
+  return {
+    listCodeGrants: async () => {
+      if (saved && failRefresh)
+        throw new Error("The connection was lost while refreshing grants.");
+      return grants;
+    },
+    approveWorkspaceGrantChannelRepositories: async (
+      grantId: string,
+      channelId: string,
+      repositories: string[],
+    ) => {
+      if (failSave) throw new Error("403: administrator access required");
+      saved = true;
+      grants = grants.map((grant) => {
+        if (grant.id !== grantId) return grant;
+        const channels = (grant.channels ?? []).filter(
+          (entry) =>
+            entry.channel_id !== channelId ||
+            !repositories.includes(entry.repository),
+        );
+        return {
+          ...grant,
+          channels: [
+            ...channels,
+            ...repositories.map((repository) => ({
+              channel_id: channelId,
+              repository,
+              state: "confirmed",
+              set_by_identity: "U04CASEY",
+              set_by_display: "Casey Nakamura",
+            })),
+          ],
+        };
+      });
+    },
+  } as unknown as ApiClient;
+}
+
+export const ChannelRepositories: Story = {
+  render: () => <ChannelsPanel client={approvalClient()} />,
+};
+
+export const BeforeFirstTask: Story = {
+  render: () => (
+    <ChannelsPanel
+      client={approvalClient({ initialGrant: { ...workspace, channels: [] } })}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Add channel" }),
+    );
+    await expect(
+      canvas.getByRole("textbox", { name: /Slack channel ID/ }),
+    ).toBeVisible();
+  },
+};
+
+export const ApprovalFailed: Story = {
+  render: () => <ChannelsPanel client={approvalClient({ failSave: true })} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: "Approve all pending repositories",
+      }),
+    );
+    await expect(await canvas.findByRole("alert")).toHaveTextContent(
+      "administrator access required",
+    );
+  },
+};
+
+export const ApprovedButRefreshFailed: Story = {
+  render: () => (
+    <ChannelsPanel client={approvalClient({ failRefresh: true })} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: "Approve all pending repositories",
+      }),
+    );
+    await expect(await canvas.findByRole("alert")).toHaveTextContent(
+      "Repositories were approved, but the list could not refresh.",
+    );
+    await expect(canvas.getByRole("status")).toHaveTextContent(
+      "Repositories approved for C04ENGINEERING.",
+    );
+  },
+};
+
+export const ApprovedRepositories: Story = {
+  render: () => <ChannelsPanel client={approvalClient()} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: "Approve all pending repositories",
+      }),
+    );
+    await expect(await canvas.findByRole("status")).toHaveTextContent(
+      "Repositories approved for C04ENGINEERING.",
+    );
+    await expect(
+      canvas.queryByText("Pending approval"),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const LongRepositories: Story = {
+  args: {
+    client: stubClient([
+      {
+        ...workspace,
+        channels: [
+          {
+            channel_id: "C04ENGINEERING",
+            repository:
+              "acme-platform-engineering/customer-identity-and-shared-access-management-service",
+            state: "confirmed",
+            set_by_identity: "U04CASEY",
+            set_by_display: "Casey Nakamura",
+          },
+        ],
+      },
+    ]),
+  },
 };

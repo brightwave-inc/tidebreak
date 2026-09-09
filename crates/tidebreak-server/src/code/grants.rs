@@ -543,6 +543,55 @@ impl super::runtime::CodeRuntime {
         .await?)
     }
 
+    /// Add exact repositories to one channel's approved scope before a session starts.
+    pub async fn approve_workspace_channel_repositories_as_admin(
+        &self,
+        admin: &OwnerId,
+        grant_id: CodeGrantId,
+        channel_id: &str,
+        repositories: &[String],
+    ) -> Result<bool, ServerError> {
+        let channel_id = bounded_connect_value("channel_id", channel_id, 128)?;
+        if !channel_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(ServerError::bad_request(
+                "channel_id must use letters, digits, hyphens, or underscores",
+            ));
+        }
+        if repositories.is_empty() || repositories.len() > 100 {
+            return Err(ServerError::bad_request(
+                "approve between 1 and 100 exact repositories",
+            ));
+        }
+        // Parse the entire batch before any write. Admission uses the same
+        // canonical names, so aliases cannot approve a different repository.
+        let repositories = repositories
+            .iter()
+            .map(|repository| Self::canonical_external_repository(repository))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let Some(grant) =
+            tidebreak_core::db::code::get_external_grant_all_owners(&self.db, grant_id).await?
+        else {
+            return Ok(false);
+        };
+        if !grant.kind.is_workspace() || grant.revoked_at.is_some() {
+            return Ok(false);
+        }
+        Ok(tidebreak_core::db::code::approve_channel_repositories(
+            &self.db,
+            &grant.owner,
+            grant_id,
+            &channel_id,
+            &repositories,
+            admin,
+        )
+        .await?)
+    }
+
     pub async fn revoke_adapter_grant_any_owner(
         &self,
         grant_id: CodeGrantId,

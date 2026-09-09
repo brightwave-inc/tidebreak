@@ -38,7 +38,10 @@ Children inherit the parent's owner, grant, and forge identity. Machine children
 the parent's permission mode. Children placed in a configured sandbox use Allow under
 the sandbox's confinement policy. Child creation is Sensitive; reads and waits are
 ReadOnly. A revoked grant refuses discovery, creation, and child reads. Workspace grants
-require channel repository confirmation before cloning.
+require an approved channel repository scope before cloning. An administrator can approve
+several repositories together in Settings > Channels before any child starts. A child
+inside that scope needs no further channel confirmation. Requests outside the scope
+remain pending independently until the administrator adds them.
 
 Child creation uses a stable `request_key`. A retry after `repository_preparing`
 observes the same owner's clone job. If a crash commits the child binding before its
