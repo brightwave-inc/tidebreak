@@ -80,6 +80,8 @@ describe("ToolCommandCard expansion", () => {
 
     expect(screen.queryByText("Local")).toBeNull();
     expect(screen.queryByText("Done")).toBeNull();
+    // Quiet success still surfaces a one-line stdout fact on the row.
+    expect(screen.getByText("rendered")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /python3 render.py/ }));
 
@@ -88,7 +90,7 @@ describe("ToolCommandCard expansion", () => {
     expect(screen.getByLabelText("Output")).toHaveTextContent("rendered");
   });
 
-  it("keeps a failed command folded until the reader opens it", async () => {
+  it("opens a failed command with its error excerpt and exact exit on the badge", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
       <ToolCommandCard
@@ -108,16 +110,17 @@ describe("ToolCommandCard expansion", () => {
     );
 
     const row = screen.getByRole("button", { name: /python3 render.py/ });
-    expect(row.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("Exit 101")).toBeNull();
-    expect(screen.queryByText(/module not found/)).toBeNull();
-
-    await user.click(row);
-
     expect(row.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("Exit 101")).toBeTruthy();
+    expect(screen.getAllByText(/module not found/).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Output")).toHaveTextContent(
       "module not found",
+    );
+
+    // Exact command detail stays on the command tab.
+    await user.click(screen.getByRole("tab", { name: "command" }));
+    expect(screen.getByLabelText("Command")).toHaveTextContent(
+      "python3 render.py",
     );
 
     rerender(
@@ -136,6 +139,6 @@ describe("ToolCommandCard expansion", () => {
         }}
       />,
     );
-    expect(screen.getByText("Timed out")).toBeTruthy();
+    expect(screen.getAllByText("Timed out").length).toBeGreaterThan(0);
   });
 });

@@ -15,6 +15,11 @@ type ToolCardShellProps = {
   badge?: ReactNode;
   /** Compact metadata that belongs on the collapsed row. */
   trailing?: ReactNode;
+  /**
+   * Quiet secondary line under the title (error excerpt, short result fact).
+   * Stays visible whether or not the body is expanded.
+   */
+  subtitle?: ReactNode;
   /** Open on mount, which is worth doing only while work is still happening. */
   defaultExpanded?: boolean;
   /** Controlled expansion for hosts that already own reveal state. */
@@ -38,6 +43,11 @@ type ToolCardShellProps = {
  * panels. Provider and outcome metadata live with the expanded detail unless a
  * host supplies genuinely glanceable trailing metadata, such as code mode's
  * duration and status glyph.
+ *
+ * Width is owned by the parent reading column (`.messages-column`). This shell
+ * is always `w-full min-w-0` so a long command cannot stretch the transcript;
+ * inside a journal the icon sits in the column's leading gutter so the title
+ * lines up with prose.
  */
 export function ToolCardShell({
   icon,
@@ -45,6 +55,7 @@ export function ToolCardShell({
   titleClassName,
   badge,
   trailing,
+  subtitle,
   defaultExpanded = false,
   expanded: controlledExpanded,
   onExpandedChange,
@@ -66,7 +77,10 @@ export function ToolCardShell({
 
   return (
     <section
-      className={cn("tool-card-shell w-full min-w-0 [overflow-anchor:none]", className)}
+      className={cn(
+        "tool-card-shell w-full min-w-0 [overflow-anchor:none]",
+        className,
+      )}
       aria-label={label}
       role={announce ? "status" : undefined}
       aria-live={announce ? "polite" : undefined}
@@ -75,7 +89,7 @@ export function ToolCardShell({
       <button
         type="button"
         className={cn(
-          "relative flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md py-1 text-left text-sm hover:bg-muted/50",
+          "relative flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md py-1 text-left text-md hover:bg-muted/50",
           FOCUS_RING_TIGHT,
           HOVER_TINT,
         )}
@@ -83,22 +97,32 @@ export function ToolCardShell({
         aria-controls={bodyId}
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="tool-card-icon text-muted-foreground mt-0.5 shrink-0 [&>svg]:size-3.5" aria-hidden="true">
+        <span
+          className="tool-card-icon text-muted-foreground mt-0.5 shrink-0 [&>svg]:size-3.5"
+          aria-hidden="true"
+        >
           {icon}
         </span>
-        <span className={cn("min-w-0 flex-1", titleClassName)}>
-          {typeof title === "string" ? (
-            <span className="block truncate" title={title}>
-              {title}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className={cn("min-w-0", titleClassName)}>
+            {typeof title === "string" ? (
+              <span className="block truncate" title={title}>
+                {title}
+              </span>
+            ) : (
+              // Rendered directly so a `titleClassName` flex layout reaches the
+              // host's own title children; an inline wrapper here forces a
+              // block-level child (e.g. MiddleTruncate) onto its own line.
+              title
+            )}
+          </span>
+          {subtitle ? (
+            <span className="text-muted-foreground block min-w-0 truncate font-mono text-xs">
+              {subtitle}
             </span>
-          ) : (
-            // Rendered directly so a `titleClassName` flex layout reaches the
-            // host's own title children; an inline wrapper here forces a
-            // block-level child (e.g. MiddleTruncate) onto its own line.
-            title
-          )}
+          ) : null}
         </span>
-        <span className="text-muted-foreground ml-auto flex h-4 shrink-0 items-center gap-1.5 text-xs tabular-nums">
+        <span className="text-muted-foreground ml-auto flex h-5 shrink-0 items-center gap-1.5 text-xs tabular-nums">
           {trailing}
           <ChevronDown
             className={cn(
@@ -110,7 +134,10 @@ export function ToolCardShell({
         </span>
       </button>
       {expanded && (
-        <div id={bodyId} className={cn("mt-1.5 min-w-0", bodyClassName)}>
+        <div
+          id={bodyId}
+          className={cn("mt-1.5 min-w-0 overflow-hidden", bodyClassName)}
+        >
           {badge && (
             <div className="mb-1.5 flex flex-wrap items-center gap-1">
               {badge}

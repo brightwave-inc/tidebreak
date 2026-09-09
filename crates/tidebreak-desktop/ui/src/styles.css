@@ -571,6 +571,12 @@ body {
     scrollbar-gutter: stable;
   }
 
+  /*
+   * One parent-owned reading column: prose, tool rows, outputs, and notices
+   * share this max width. The leading pad is the tool-icon gutter so a boxless
+   * tool title lines up with assistant prose; duration and disclosure stay on
+   * the row's right edge inside the same column.
+   */
   .messages-column {
     width: 100%;
     max-width: 48rem;
@@ -579,11 +585,17 @@ body {
     gap: 0.5rem;
     padding-block: 1.5rem;
     padding-inline-start: 1.5rem;
+    min-width: 0;
   }
 
   .messages-column .tool-card-icon {
     position: absolute;
     inset-inline-start: -1.5rem;
+  }
+
+  .messages-column .tool-card-shell {
+    width: 100%;
+    min-width: 0;
   }
 
   /* The column's base rhythm is the tight intra-exchange gap; a user message opens

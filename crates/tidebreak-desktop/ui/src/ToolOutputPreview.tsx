@@ -1,22 +1,34 @@
 import { useId, useMemo, useState } from "react";
 
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
+import { cn } from "@/lib/utils";
 
 /** How much of a tool's output is worth showing before the reader asks. */
 export const DEFAULT_COLLAPSED_LINES = 8;
+
+/** Bounded running tail: enough to see progress without growing the row. */
+export const RUNNING_COLLAPSED_LINES = 6;
 
 type ToolOutputPreviewProps = {
   /** What the tool printed, verbatim. */
   text: string;
   /** Lines shown before the expander takes over. */
   collapsedLines?: number;
-  startLine?: number;
+  /**
+   * Prefer the end of the stream (live command tail). Ignored once the reader
+   * expands the block — expansion always shows the full text.
+   */
   followTail?: boolean;
+  /**
+   * When not following the tail, start the collapsed window at this line.
+   * Clamped so a short block still shows up to `collapsedLines` lines.
+   */
+  startLine?: number;
   /** What this block is, for the copy control and assistive technology. */
   label?: string;
   /**
    * Plain indented output: no surface, no padding box. The expander reads
-   * "· · · N more lines" instead of "Show N more lines".
+   * "Show all N lines" instead of "Show N more lines".
    */
   bare?: boolean;
   /**
@@ -27,7 +39,7 @@ type ToolOutputPreviewProps = {
 };
 
 /**
- * A tool's output, clamped to the first few lines with the rest one click away.
+ * A tool's output, clamped to a few lines with the rest one click away.
  *
  * Output is the part of a transcript most likely to be enormous and least
  * likely to be read in full, so the default is a glance: enough lines to see
@@ -35,12 +47,15 @@ type ToolOutputPreviewProps = {
  * clipboard whether or not it is expanded. Clamping by line rather than by
  * height keeps the count in the expander truthful — "show 40 more lines" that
  * turns out to be four is worse than no count at all.
+ *
+ * The block is width-bounded (`min-w-0`, horizontal scroll on long lines) so a
+ * single unwrapped command cannot stretch the parent reading column.
  */
 export function ToolOutputPreview({
   text,
   collapsedLines = DEFAULT_COLLAPSED_LINES,
-  startLine = 0,
   followTail = false,
+  startLine = 0,
   label = "Output",
   bare = false,
   onToggle,
@@ -50,9 +65,12 @@ export function ToolOutputPreview({
   // A trailing newline is punctuation, not a line worth offering to expand.
   const lines = useMemo(() => text.replace(/\n+$/, "").split("\n"), [text]);
   const hiddenCount = Math.max(0, lines.length - collapsedLines);
-  const firstLine = followTail
-    ? Math.max(0, lines.length - collapsedLines)
-    : Math.max(0, Math.min(startLine, lines.length - collapsedLines));
+  const firstLine = collapsedWindowStart(
+    lines.length,
+    collapsedLines,
+    followTail,
+    startLine,
+  );
   const body =
     hiddenCount > 0 && !expanded
       ? lines.slice(firstLine, firstLine + collapsedLines).join("\n")
@@ -70,11 +88,12 @@ export function ToolOutputPreview({
           // control beside it uses the same word.
           role="group"
           aria-label={label}
-          className={
+          className={cn(
             bare
-              ? `text-muted-foreground max-h-80 overflow-auto pr-7 font-mono text-sm whitespace-pre [overflow-anchor:none] ${followTail && !expanded ? "h-[6em]" : ""}`
-              : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
-          }
+              ? "text-muted-foreground max-h-80 overflow-auto pr-7 font-mono text-sm whitespace-pre [overflow-anchor:none]"
+              : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap",
+            bare && followTail && !expanded && "h-[6em]",
+          )}
         >
           {body}
         </pre>
@@ -110,4 +129,16 @@ export function ToolOutputPreview({
       )}
     </div>
   );
+}
+
+/** First line index for the collapsed window. Exported for unit tests. */
+export function collapsedWindowStart(
+  lineCount: number,
+  collapsedLines: number,
+  followTail: boolean,
+  startLine: number,
+): number {
+  if (lineCount <= collapsedLines) return 0;
+  if (followTail) return lineCount - collapsedLines;
+  return Math.max(0, Math.min(startLine, lineCount - collapsedLines));
 }
