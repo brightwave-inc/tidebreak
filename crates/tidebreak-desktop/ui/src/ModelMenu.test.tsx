@@ -261,6 +261,14 @@ describe("matchingModels", () => {
     provider: "model_gateway",
     vendor: "anthropic",
   };
+  const gatewayGlm: ModelInfo = {
+    ...MODELS[0],
+    key: "model_gateway::glm-5.2",
+    id: "glm-5.2",
+    display_name: "GLM 5.2",
+    provider: "model_gateway",
+    vendor: null,
+  };
 
   it("matches model, serving-provider, and vendor text across groups", () => {
     const groups = visibleModelGroups([MODELS[1], gatewayClaude], null);
@@ -273,6 +281,30 @@ describe("matchingModels", () => {
     expect(
       matchingModels(groups, "anthropic").map((model) => model.key),
     ).toEqual([gatewayClaude.key]);
+  });
+
+  it("matches a gateway family tab even when the id does not contain the label", () => {
+    const groups = visibleModelGroups([gatewayClaude, gatewayGlm], null);
+    expect(matchingModels(groups, "z.ai").map((model) => model.key)).toEqual([
+      gatewayGlm.key,
+    ]);
+    expect(matchingModels(groups, "glm").map((model) => model.key)).toEqual([
+      gatewayGlm.key,
+    ]);
+  });
+
+  it("matches a gateway row with no curated vendor from its id", () => {
+    const gatewayGpt: ModelInfo = {
+      ...MODELS[1],
+      key: "model_gateway::gpt-5",
+      id: "gpt-5",
+      provider: "model_gateway",
+      vendor: null,
+    };
+    const groups = visibleModelGroups([gatewayGpt, gatewayGlm], null);
+    expect(matchingModels(groups, "openai").map((model) => model.key)).toEqual([
+      gatewayGpt.key,
+    ]);
   });
 });
 

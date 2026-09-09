@@ -144,6 +144,38 @@ const imageAttachment: ImageAttachment = {
   error: null,
 };
 
+/** Just-pasted bytes: local preview in hand, host publish not started yet. */
+const queuedImageAttachment: ImageAttachment = {
+  id: "image-queued",
+  name: "pasted-chart.png",
+  byteLen: 96_000,
+  uploadedBytes: 0,
+  status: "queued",
+  previewUrl:
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  attachmentId: null,
+  mediaType: "image/png",
+  width: null,
+  height: null,
+  error: null,
+};
+
+/** Host publish in flight with partial progress. */
+const uploadingImageAttachment: ImageAttachment = {
+  id: "image-uploading",
+  name: "screenshot.png",
+  byteLen: 320_000,
+  uploadedBytes: 128_000,
+  status: "uploading",
+  previewUrl:
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  attachmentId: null,
+  mediaType: "image/png",
+  width: null,
+  height: null,
+  error: null,
+};
+
 const baseMessages: ChatMessage[] = [
   {
     id: "message-user",
@@ -921,6 +953,24 @@ export const AttachmentsAndDraft: Story = {
         ],
         skills: ["browser"],
         folders: ["folder-research"],
+      },
+    },
+  },
+};
+
+/**
+ * Paste already put bytes in the composer. The chip must read Uploading, not
+ * Waiting to upload — queued and in-flight publish are the same reader-facing
+ * work.
+ */
+export const PastedImageUploading: Story = {
+  args: {
+    scenario: {
+      id: "pasted-image-uploading",
+      messages: baseMessages,
+      draft: "Describe the chart I just pasted.",
+      attachments: {
+        images: [queuedImageAttachment, uploadingImageAttachment],
       },
     },
   },

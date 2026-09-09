@@ -52,6 +52,7 @@ describe("image attachment state machine", () => {
     expect(list[0].status).toBe("queued");
     expect(imageUploadsInFlight(list)).toBe(true);
     expect(readyImageAttachmentIds(list)).toEqual([]);
+    expect(describeImageAttachment(list[0])).toBe("Uploading");
 
     list = withUploadStarted(list, "a");
     expect(list[0].status).toBe("uploading");

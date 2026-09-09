@@ -1338,6 +1338,45 @@ describe("HarnessModelMenu", () => {
       renderToStaticMarkup(<OpenAIIcon className="size-4 shrink-0" />),
     );
   });
+
+  it("searches a gateway catalog by vendor and family tab labels", async () => {
+    const gatewayOptions = [
+      {
+        id: "claude-sonnet-4",
+        label: "Claude Sonnet 4",
+        source: "opencode · model-gateway",
+        vendor: "anthropic" as const,
+      },
+      {
+        id: "glm-5.2",
+        label: "GLM 5.2",
+        source: "opencode · model-gateway",
+        vendor: null,
+      },
+    ];
+    renderComposer(
+      <HarnessModelMenu
+        harness="opencode"
+        options={gatewayOptions}
+        value={gatewayOptions[0].id}
+        onChange={() => {}}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+    );
+    await user.keyboard("z.ai");
+
+    expect(screen.getByRole("searchbox", { name: "Search models" })).toHaveValue(
+      "z.ai",
+    );
+    expect(screen.getByRole("menuitem", { name: /GLM 5.2/ })).toBeTruthy();
+    expect(
+      screen.queryByRole("menuitem", { name: /Claude Sonnet 4/ }),
+    ).toBeNull();
+  });
 });
 
 function pasteOn(target: Element, files: File[]) {

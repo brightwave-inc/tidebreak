@@ -466,6 +466,14 @@ describe("Composer", () => {
     expect(markup).toContain('aria-label="Remove brief.pdf"');
   });
 
+  it("treats a just-pasted image as uploading, not waiting", () => {
+    const markup = composerWithImages({ items: [attached("a", "chart.png")] });
+
+    expect(markup).toContain("chart.png");
+    expect(markup).toContain("Uploading");
+    expect(markup).not.toContain("Waiting to upload");
+  });
+
   it("previews an uploading image from the local file with determinate progress", () => {
     const uploading = withUploadProgress(
       withUploadStarted([attached("a", "chart.png")], "a"),

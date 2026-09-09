@@ -300,10 +300,12 @@ export function imageUploadPercent(attachment: ImageAttachment): number {
 export function describeImageAttachment(attachment: ImageAttachment): string {
   switch (attachment.status) {
     case "queued":
-      return "Waiting to upload";
     case "uploading":
-      // A host publish moves the bytes over IPC in one step and has no progress
-      // to report, so quoting 0% would read as a stall rather than as work.
+      // Queued is the instant before the host publish starts — paste already
+      // put the bytes in hand — so it reads as the same in-flight work.
+      // A host publish moves those bytes over IPC in one step and has no
+      // progress to report, so quoting 0% would read as a stall rather than
+      // as work.
       return attachment.uploadedBytes === 0
         ? "Uploading"
         : `Uploading ${imageUploadPercent(attachment)}%`;

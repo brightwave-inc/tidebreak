@@ -15,7 +15,11 @@ import {
   providerLabel,
 } from "./ModelSelection";
 import { useManagedPolicy } from "./managedPolicy";
-import { familyForModelId, MODEL_ID_FAMILIES } from "./modelFamilies";
+import {
+  familyForModelId,
+  MODEL_ID_FAMILIES,
+  vendorForModelId,
+} from "./modelFamilies";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
 import {
@@ -304,19 +308,27 @@ export function visibleModelGroups(
 
 /** Models visible in cross-provider search, in the same order as browsing. */
 export function matchingModels(
-  groups: readonly { provider: ProviderKind; models: readonly ModelInfo[] }[],
+  groups: readonly Pick<CatalogGroup, "label" | "models">[],
   query: string,
 ): ModelInfo[] {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return [];
   return groups.flatMap((group) =>
     group.models.filter((model) => {
-      const vendor = model.vendor ? providerLabel(model.vendor) : "";
+      const derivedVendor = model.vendor ?? vendorForModelId(model.id);
+      const vendor = derivedVendor ? providerLabel(derivedVendor) : "";
+      const family = familyForModelId(model.id);
       return [
         model.display_name,
         model.id,
         providerLabel(model.provider),
         vendor,
+        // A gateway catalog is split by vendor and family tabs. Search has to
+        // hit those labels too: `glm-5.2` does not contain "Z.ai", and a row
+        // with no curated `vendor` still lives under its family tab.
+        group.label,
+        family?.label ?? "",
+        family?.match ?? "",
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     }),
   );
