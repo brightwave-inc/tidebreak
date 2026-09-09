@@ -763,12 +763,20 @@ impl CodeRuntime {
         let Some(snapshot) = snapshot else {
             return capabilities;
         };
-        let Some(model_efforts) =
-            crate::providers::gateway_reasoning_efforts_for_model(&snapshot, selected)
-        else {
-            return capabilities;
-        };
         let engine_efforts = adapter.reasoning_efforts(probe);
+        let model_efforts =
+            match crate::providers::gateway_reasoning_efforts_for_model(&snapshot, selected) {
+                Some(efforts) => efforts,
+                None if self.harness_llm.is_some()
+                    && crate::providers::gateway_lists_model(&snapshot, selected) =>
+                {
+                    // Hosted pickers use the engine's ladder when the gateway
+                    // leaves effort support unstated. The server's local model
+                    // settings cannot veto a model from the caller's catalog.
+                    engine_efforts.as_slice()
+                }
+                None => return capabilities,
+            };
         capabilities.reasoning_efforts = crate::providers::effective_gateway_reasoning_efforts(
             self.harness_llm.is_some(),
             capabilities.listed_model_reasoning_efforts.as_deref(),
@@ -780,7 +788,7 @@ impl CodeRuntime {
             harness = %adapter.kind(),
             model = selected,
             efforts = ?capabilities.reasoning_efforts,
-            "using the gateway model's reasoning effort ladder"
+            "resolved reasoning efforts for a gateway model"
         );
         capabilities
     }
