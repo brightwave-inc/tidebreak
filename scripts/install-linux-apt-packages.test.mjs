@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -293,7 +294,11 @@ test("keeps an existing Ubuntu deb822 source without adding sources.list", () =>
   );
 });
 
-function runCommandFixture({ plan = {}, extraEnv = {} } = {}) {
+function runCommandFixture({
+  plan = {},
+  extraEnv = {},
+  failOnThirdParty = false,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "tidebreak-apt-commands-"));
   try {
     const bin = join(root, "bin");
@@ -304,6 +309,15 @@ function runCommandFixture({ plan = {}, extraEnv = {} } = {}) {
       join(root, "etc/apt/sources.list"),
       "deb http://archive.ubuntu.com/ubuntu jammy main\n",
     );
+    const thirdPartySources = {
+      "google-chrome.list":
+        "deb [arch=amd64] https://dl.google.com/linux/chrome-stable/deb/ stable main\n",
+      "vendor.sources":
+        "Types: deb\nURIs: https://vendor.example/packages\nSuites: stable\nComponents: main\n",
+    };
+    for (const [name, content] of Object.entries(thirdPartySources)) {
+      writeFileSync(join(root, "etc/apt/sources.list.d", name), content);
+    }
     writeFileSync(log, "[]");
     const stub = [
       "#!" + process.execPath,
@@ -316,11 +330,19 @@ function runCommandFixture({ plan = {}, extraEnv = {} } = {}) {
       'const stage = args.includes("update") ? "update" : args.includes("--download-only") ? "download" : "install";',
       'const attempt = records.filter(row => row.command === "apt-get" && row.stage === stage).length;',
       'const mirrors = fs.readFileSync(process.env.TIDEBREAK_APT_ROOT + "/etc/apt/apt-mirrors.txt", "utf8");',
-      "records.push({ command: mode, args, stage, mirrors });",
+      'const option = (name) => args.find(value => value.startsWith(name + "="))?.slice(name.length + 1);',
+      'const sourceList = option("Dir::Etc::sourcelist") ?? process.env.TIDEBREAK_APT_ROOT + "/etc/apt/sources.list";',
+      'const sourceParts = option("Dir::Etc::sourceparts") ?? process.env.TIDEBREAK_APT_ROOT + "/etc/apt/sources.list.d";',
+      'const sources = fs.readFileSync(sourceList, "utf8");',
+      'const sourcePartsFiles = fs.readdirSync(sourceParts);',
+      "records.push({ command: mode, args, stage, mirrors, sourceList, sourceParts, sources, sourcePartsFiles });",
       "fs.writeFileSync(log, JSON.stringify(records));",
       'if (mode === "timeout") {',
       '  const child = require("node:child_process").spawnSync(args[2], args.slice(3), { stdio: "inherit", env: process.env });',
       "  process.exit(child.status ?? 1);",
+      "}",
+      'if (process.env.TIDEBREAK_APT_FAIL_THIRD_PARTY === "1" && sourcePartsFiles.length) {',
+      '  console.error("Third-party index checksum mismatch"); process.exit(100);',
       "}",
       "const plan = JSON.parse(process.env.TIDEBREAK_APT_COMMAND_PLAN);",
       "process.exit(plan[stage]?.[attempt] ?? 0);",
@@ -340,6 +362,7 @@ function runCommandFixture({ plan = {}, extraEnv = {} } = {}) {
         TIDEBREAK_APT_DRY_RUN: "",
         TIDEBREAK_APT_COMMAND_LOG: log,
         TIDEBREAK_APT_COMMAND_PLAN: JSON.stringify(plan),
+        TIDEBREAK_APT_FAIL_THIRD_PARTY: failOnThirdParty ? "1" : "0",
         ...extraEnv,
       },
     });
@@ -348,11 +371,52 @@ function runCommandFixture({ plan = {}, extraEnv = {} } = {}) {
       ...result,
       commands,
       apt: commands.filter((row) => row.command === "apt-get"),
+      originalThirdPartySources: thirdPartySources,
+      thirdPartySources: Object.fromEntries(
+        Object.keys(thirdPartySources).map((name) => [
+          name,
+          readFileSync(join(root, "etc/apt/sources.list.d", name), "utf8"),
+        ]),
+      ),
+      temporarySourcesRemain: commands.some(
+        (row) =>
+          row.args.some((value) => value.startsWith("Dir::Etc::sourcelist=")) &&
+          (existsSync(row.sourceList) || existsSync(row.sourceParts)),
+      ),
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("installs Ubuntu packages despite a broken unrelated repository", () => {
+  const result = runCommandFixture({ failOnThirdParty: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(
+    result.apt.map((row) => row.stage),
+    ["update", "download", "install"],
+  );
+  assert.deepEqual(result.thirdPartySources, result.originalThirdPartySources);
+  assert.equal(result.temporarySourcesRemain, false);
+  for (const row of result.apt) {
+    assert.ok(row.args.includes(`Dir::Etc::sourcelist=${row.sourceList}`));
+    assert.ok(row.args.includes(`Dir::Etc::sourceparts=${row.sourceParts}`));
+    assert.deepEqual(row.sourcePartsFiles, []);
+    assert.equal(row.sourceList, result.apt[0].sourceList);
+    assert.equal(row.sourceParts, result.apt[0].sourceParts);
+    assert.equal(row.sources, [
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse",
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse",
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse",
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse",
+      "",
+    ].join("\n"));
+    assert.doesNotMatch(
+      row.args.join(" "),
+      /AllowUnauthenticated|AllowInsecure|Trusted|Check-Valid-Until=false/i,
+    );
+  }
+});
 
 test("uses the HTTPS fallback after an index refresh times out", () => {
   const result = runCommandFixture({ plan: { update: [124, 0] } });
@@ -373,6 +437,19 @@ test("uses the HTTPS fallback after an index refresh times out", () => {
     assert.ok(row.args.includes("APT::Update::Error-Mode=any"));
   }
   assert.ok(result.apt.at(-1).args.includes("--no-download"));
+  assert.equal(result.temporarySourcesRemain, false);
+  for (const row of result.apt.slice(1)) {
+    assert.equal(row.sourceList, result.apt[0].sourceList);
+    assert.deepEqual(row.sourcePartsFiles, []);
+    assert.equal(row.sources.trim().split("\n").length, 4);
+    for (const source of row.sources.trim().split("\n")) {
+      assert.match(
+        source,
+        /\[arch=amd64 signed-by=\/usr\/share\/keyrings\/ubuntu-archive-keyring\.gpg\] https:\/\/mirrors\.edge\.kernel\.org\/ubuntu jammy/,
+      );
+    }
+  }
+  assert.deepEqual(result.thirdPartySources, result.originalThirdPartySources);
 });
 
 test("bounds both mirror download phases and preserves the package arguments", () => {
@@ -408,6 +485,8 @@ test("fails after both mirror refreshes fail without installing packages", () =>
     ["update", "update"],
   );
   assert.match(result.stderr, /failed on both HTTPS mirrors/);
+  assert.equal(result.temporarySourcesRemain, false);
+  assert.deepEqual(result.thirdPartySources, result.originalThirdPartySources);
 });
 
 test("does not retry a local installation failure on another mirror", () => {
@@ -419,6 +498,7 @@ test("does not retry a local installation failure on another mirror", () => {
   );
   assert.ok(result.apt.every((row) => !row.mirrors.includes("kernel.org")));
   assert.equal(result.commands.at(-1).command, "apt-get");
+  assert.equal(result.temporarySourcesRemain, false);
 });
 
 test("keeps explicit endpoint overrides outside automatic mirror fallback", () => {
@@ -437,4 +517,41 @@ test("keeps explicit endpoint overrides outside automatic mirror fallback", () =
       (row) => row.mirrors === "https://custom.example/ubuntu\tpriority:1\n",
     ),
   );
+});
+
+test("keeps ARM and explicit overrides on their dedicated signed sources", () => {
+  for (const { extraEnv, arch, archive, security } of [
+    {
+      extraEnv: { TIDEBREAK_APT_ARCH: "arm64" },
+      arch: "arm64",
+      archive: "https://ports.ubuntu.com/ubuntu-ports",
+      security: "https://ports.ubuntu.com/ubuntu-ports",
+    },
+    {
+      extraEnv: {
+        TIDEBREAK_APT_ARCHIVE_URL: "https://custom.example/ubuntu",
+        TIDEBREAK_APT_SECURITY_URL: "https://security.example/ubuntu",
+      },
+      arch: "amd64",
+      archive: "https://custom.example/ubuntu",
+      security: "https://security.example/ubuntu",
+    },
+  ]) {
+    const result = runCommandFixture({ extraEnv, failOnThirdParty: true });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      result.apt.map((row) => row.stage),
+      ["update", "install"],
+    );
+    assert.equal(result.temporarySourcesRemain, false);
+    for (const row of result.apt) {
+      assert.deepEqual(row.sourcePartsFiles, []);
+      assert.ok(row.sources.includes(
+        `[arch=${arch} signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] ${archive} jammy `,
+      ));
+      assert.ok(row.sources.includes(`${security} jammy-security `));
+      assert.equal(row.sourceList, result.apt[0].sourceList);
+    }
+    assert.deepEqual(result.thirdPartySources, result.originalThirdPartySources);
+  }
 });

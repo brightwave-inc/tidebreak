@@ -535,6 +535,13 @@ pub(crate) async fn navigate_browser_for_agent(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
+    crate::browser_independence::require_host(
+        &webview,
+        registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    )?;
     let browser_id = arguments.browser_id.clone();
     let dispatch_browser_id = browser_id.clone();
     let fallback_url = destination.to_string();
@@ -568,7 +575,18 @@ pub(crate) async fn navigate_browser_for_agent(
                         return Err("browser destination is not shared for navigation".to_owned());
                     }
                 }
-                webview.navigate(destination).map_err(browser_error)?;
+                crate::browser_independence::navigate(
+                    &webview,
+                    &dispatch_registry,
+                    capability_id,
+                    &workspace_id,
+                    &dispatch_browser_id,
+                    &dispatch_current_origin,
+                    fence,
+                    &destination,
+                    &dispatch_destination_origin,
+                )
+                .await?;
                 let deadline = tokio::time::Instant::now() + AGENT_NAVIGATION_START_TIMEOUT;
                 loop {
                     let snapshot =
@@ -620,6 +638,7 @@ pub(crate) async fn open_browser_for_agent(
     if !arguments.is_well_formed() {
         return Err("browser open request is not valid".to_owned());
     }
+    crate::browser_independence::require_available()?;
     let renderer_url = app.get_webview("main").and_then(|main| main.url().ok());
     let destination = validated_url(&arguments.url, renderer_url.as_ref())?;
     let destination_origin = BrowserOrigin::from_url(destination.as_str())

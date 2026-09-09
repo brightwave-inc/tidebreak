@@ -378,6 +378,12 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
     }
 
     let inner = strip_prefix(error.as_str());
+    if matches!(
+        inner,
+        crate::browser_independence::SHARED_TAB | crate::browser_independence::UNAVAILABLE
+    ) {
+        return BrowserRuntimeError::Unsupported(error);
+    }
     match inner {
         "browser capability is unavailable" => return BrowserRuntimeError::SessionEnded,
         "browser origin is not shared with this agent"
@@ -640,6 +646,19 @@ mod tests {
             ),
             BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned())
         );
+    }
+
+    #[test]
+    fn independence_refusals_preserve_the_actionable_unsupported_message() {
+        for message in [
+            crate::browser_independence::SHARED_TAB,
+            crate::browser_independence::UNAVAILABLE,
+        ] {
+            assert_eq!(
+                map_native_error(Some("browser-1"), message.to_owned()),
+                BrowserRuntimeError::Unsupported(message.to_owned())
+            );
+        }
     }
 
     #[test]

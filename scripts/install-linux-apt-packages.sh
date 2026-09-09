@@ -2,7 +2,8 @@
 # Use HTTPS Ubuntu archives for Linux CI and release dependencies.
 #
 # Hosted runner mirrors can stall on HTTP requests. Normalize Ubuntu sources
-# to HTTPS endpoints and use a second mirror when downloads stall.
+# to HTTPS endpoints and use a second mirror when downloads stall. Select only
+# Ubuntu sources so unrelated runner repositories cannot block these packages.
 set -euo pipefail
 
 if (($# == 0)); then
@@ -73,6 +74,14 @@ arm64)
   ;;
 esac
 
+# Keep apt source selection local to this invocation. An explicit empty parts
+# directory excludes third-party sources without removing the runner's files.
+install_sources_dir="$(mktemp -d "${TMPDIR:-/tmp}/tidebreak-apt.XXXXXX")"
+trap 'rm -rf -- "$install_sources_dir"' EXIT
+install_sources_list="$install_sources_dir/ubuntu.list"
+install_source_parts="$install_sources_dir/parts"
+mkdir "$install_source_parts"
+
 rewrite_ubuntu_sources() {
   local file="$1"
   [[ -f "$file" ]] || return 0
@@ -140,6 +149,12 @@ configure_sources() {
   if [[ -e "$mirrors_file" || -n "$root" ]]; then
     printf '%s\tpriority:1\n' "$archive_url" | run tee "$mirrors_file" >/dev/null
   fi
+  cat >"$install_sources_list" <<SOURCES
+deb [arch=$arch signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $archive_url $codename main restricted universe multiverse
+deb [arch=$arch signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $archive_url $codename-updates main restricted universe multiverse
+deb [arch=$arch signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $archive_url $codename-backports main restricted universe multiverse
+deb [arch=$arch signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $security_url $codename-security main restricted universe multiverse
+SOURCES
 }
 
 configure_sources
@@ -152,6 +167,8 @@ Acquire::ftp::Timeout "20";
 CONF
 
 apt_opts=(
+  -o "Dir::Etc::sourcelist=$install_sources_list"
+  -o "Dir::Etc::sourceparts=$install_source_parts"
   -o Acquire::Retries=3
   -o Acquire::http::Timeout=20
   -o Acquire::https::Timeout=20

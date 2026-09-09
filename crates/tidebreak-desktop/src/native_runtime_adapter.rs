@@ -196,6 +196,28 @@ impl SessionNativeState {
         Ok(())
     }
 
+    fn record_interrupt(&self, call: &ComputerUseCall) -> NativeRuntimeError {
+        if crate::client_execution::computer_use::acts_on_host(&call.name) {
+            // Input may have partly acted before the helper stopped.
+            self.store(call, unknown_after_interrupt(call));
+            NativeRuntimeError::UnknownOutcome
+        } else {
+            let message = "the operation was cancelled by an interrupt".to_owned();
+            self.store(
+                call,
+                ComputerUseResult {
+                    request_id: call.request_id,
+                    outcome: ComputerUseOutcome::Rejected,
+                    text: message.clone(),
+                    data: serde_json::json!({}),
+                    error_code: Some("interrupted".to_owned()),
+                    images: Vec::new(),
+                },
+            );
+            NativeRuntimeError::Failed(message)
+        }
+    }
+
     /// Whether a brand-new request may still be admitted.
     fn admit_new_request(&self) -> Result<(), NativeRuntimeError> {
         if lock(&self.stored).seen.len() >= MAX_TRACKED_REQUESTS {
@@ -403,11 +425,12 @@ impl NativeRuntime for DesktopNativeRuntime {
             call.arguments.clone(),
             admission,
         );
-        let acting = crate::client_execution::computer_use::acts_on_host(&call.name);
+        let interruptible =
+            crate::client_execution::computer_use::requires_native_admission(&call.name);
         let outcome = await_session_operation(
             &state.computer_use,
             scope.session,
-            acting,
+            interruptible,
             cancelled,
             operation,
         )
@@ -422,19 +445,7 @@ impl NativeRuntime for DesktopNativeRuntime {
                 }
                 Ok(result)
             }
-            Err(()) => {
-                // Interrupted input may have partly acted before the helper
-                // stopped. Retain that uncertainty after draining it.
-                if acting {
-                    let unknown = unknown_after_interrupt(call);
-                    session.store(call, unknown);
-                    Err(NativeRuntimeError::UnknownOutcome)
-                } else {
-                    Err(NativeRuntimeError::Failed(
-                        "the operation was cancelled by an interrupt".to_owned(),
-                    ))
-                }
-            }
+            Err(()) => Err(session.record_interrupt(call)),
         }
     }
 
@@ -498,7 +509,7 @@ impl NativeRuntime for DesktopNativeRuntime {
 async fn await_session_operation<T>(
     computer_use: &crate::client_execution::computer_use::ComputerUseState,
     session: SessionId,
-    acting: bool,
+    interruptible: bool,
     mut cancelled: tokio::sync::watch::Receiver<u64>,
     operation: impl std::future::Future<Output = T>,
 ) -> Result<T, ()> {
@@ -508,7 +519,7 @@ async fn await_session_operation<T>(
         _ = async {
             tokio::select! {
                 _ = cancelled.changed() => {},
-                _ = computer_use.wait_for_halt(), if acting => {},
+                _ = computer_use.wait_for_halt(), if interruptible => {},
             }
         } => {
             // Cancellation signals the helper before waking us. Retain its
@@ -852,6 +863,33 @@ mod tests {
             session.subscribe_at_generation(queued_generation),
             Err(NativeRuntimeError::UnknownOutcome)
         ));
+    }
+
+    #[tokio::test]
+    async fn global_stop_interrupts_waits_without_marking_their_outcome_unknown() {
+        use crate::client_execution::computer_use::{requires_native_admission, ComputerUseState};
+        let computer_use = ComputerUseState::default();
+        let one = call("computer_wait", serde_json::json!({"seconds": 1.0}));
+        let session = SessionNativeState::new();
+        session.reserve_request(&one).unwrap();
+        let (_watch, receiver) = tokio::sync::watch::channel(0);
+        computer_use.stop_all(|| Ok::<_, ()>(())).unwrap();
+        let result = await_session_operation(
+            &computer_use,
+            SessionId::new(),
+            requires_native_admission(&one.name),
+            receiver,
+            async {},
+        )
+        .await;
+        assert!(result.is_err(), "global Stop interrupts a read-only wait");
+        assert!(matches!(
+            session.record_interrupt(&one),
+            NativeRuntimeError::Failed(_)
+        ));
+        let recovered = session.recall(&one).unwrap().unwrap();
+        assert_eq!(recovered.outcome, ComputerUseOutcome::Rejected);
+        assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
     }
 
     #[tokio::test]

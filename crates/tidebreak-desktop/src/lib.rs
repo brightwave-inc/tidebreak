@@ -28,6 +28,7 @@ mod broker;
 mod browser_control;
 mod browser_downloads;
 mod browser_grants;
+mod browser_independence;
 #[cfg(target_os = "macos")]
 mod browser_native_webview;
 mod browser_profile;

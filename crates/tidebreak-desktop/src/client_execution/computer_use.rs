@@ -193,7 +193,8 @@ pub(crate) struct ComputerUseState {
     /// Linearizes Stop with every broker dispatch that can act on the host.
     /// The gate stays held through the broker round-trip so Stop either lands
     /// before dispatch (and prevents it) or after that dispatch has already
-    /// completed. Read-only operations do not take this gate.
+    /// completed. Waits also take this gate so Stop can cancel and drain them.
+    /// Other read-only operations do not take the gate.
     acting_dispatch: tokio::sync::Mutex<()>,
     /// The broker dispatch that actually owns input, plus session stops that
     /// remain set until the user resumes. Cancellation and owner changes use
@@ -211,7 +212,7 @@ struct DispatchState {
     session_input_revisions: HashMap<SessionId, u64>,
 }
 
-/// One request's input generation. Resume never revives an older request.
+/// One control or wait request's generation. Resume never revives an older request.
 #[derive(Clone, Copy)]
 pub(crate) struct NativeInputAdmission {
     allowed: bool,
@@ -401,6 +402,25 @@ impl ComputerUseState {
                 .copied()
                 .unwrap_or(0)
                 == admission.session_revision
+    }
+
+    async fn dispatch_native_admitted<T, F, Fut>(
+        &self,
+        session: SessionId,
+        name: &str,
+        admission: NativeInputAdmission,
+        dispatch: F,
+    ) -> Result<T, StoredResolution>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        if requires_native_admission(name) {
+            self.dispatch_acting_admitted(session, admission, dispatch)
+                .await
+        } else {
+            Ok(dispatch().await)
+        }
     }
 
     async fn dispatch_acting<T, F, Fut>(
@@ -1097,7 +1117,7 @@ async fn execute_operation(
     delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
-    if acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
+    if requires_native_admission(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
         return stopped_resolution();
     }
     let action = match build_action(cu, call) {
@@ -1119,11 +1139,15 @@ async fn execute_operation(
         match action {
             CuAction::Wait(seconds) => {
                 let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
-                tokio::select! {
-                    () = cu.wait_for_halt() => stopped_resolution(),
-                    () = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)) =>
-                        completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
-                }
+                cu.dispatch_native_admitted(call.chat_id, &call.name, admission, || async {
+                    tokio::select! {
+                        () = cu.wait_for_halt() => stopped_resolution(),
+                        () = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)) =>
+                            completed(serde_json::json!({ "status": "ok", "waited_seconds": seconds })),
+                    }
+                })
+                .await
+                .unwrap_or_else(|resolution| resolution)
             }
             CuAction::Broker(request) => {
                 dispatch_broker(app, state, context, call, request, admission, delivery).await
@@ -1440,14 +1464,19 @@ fn consent_capability(call: &ToolCallRecord, request: &OperationRequest) -> Cons
     }
 }
 
-/// Whether this call acts on the host (synthesizes input or moves windows), as
-/// opposed to only reading. Acting ops are what the Stop latch halts, what the
-/// indicator reports, and what the blocklist pre-check guards.
+/// Whether this call synthesizes input or moves windows. This classification
+/// controls the activity indicator, consent capability, and outcome uncertainty.
 pub(crate) fn acts_on_host(name: &str) -> bool {
     tidebreak_core::is_computer_use_control_tool(name)
         || name == COMPUTER_SCROLL_TOOL
         || name == COMPUTER_FOCUS_WINDOW_TOOL
         || name == COMPUTER_RETURN_TO_TIDEBREAK_TOOL
+}
+
+/// Whether Stop must invalidate, cancel, and drain this operation. Waiting is
+/// still observation: sharing the dispatch owner never grants input authority.
+pub(crate) fn requires_native_admission(name: &str) -> bool {
+    acts_on_host(name) || name == COMPUTER_WAIT_TOOL
 }
 
 async fn dispatch_broker(
@@ -1464,9 +1493,9 @@ async fn dispatch_broker(
     let bundle_id = request_bundle_id(&request).map(str::to_owned);
 
     // The broker's blocklist is mirrored here so a blocked app fails closed
-    // without surfacing a consent card for it. Acting dispatches take the Stop
-    // gate below; that gate owns the authoritative final halt check.
-    if acting && !cu.admission_is_current(call.chat_id, admission) {
+    // without surfacing a consent card for it. Control and wait dispatches take
+    // the Stop gate below, which owns the authoritative final halt check.
+    if requires_native_admission(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
         return stopped_resolution();
     }
     if let Some(bundle_id) = bundle_id.as_deref() {
@@ -1494,16 +1523,14 @@ async fn dispatch_broker(
         context: context.execution,
         request: request.clone(),
     };
-    let result = if acting {
-        match cu
-            .dispatch_acting_admitted(call.chat_id, admission, || state.broker.operation(envelope))
-            .await
-        {
-            Ok(result) => result,
-            Err(resolution) => return resolution,
-        }
-    } else {
-        state.broker.operation(envelope).await
+    let result = match cu
+        .dispatch_native_admitted(call.chat_id, &call.name, admission, || {
+            state.broker.operation(envelope)
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(resolution) => return resolution,
     };
     match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
@@ -1606,7 +1633,7 @@ async fn dispatch_consent(
     delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
-    if acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
+    if requires_native_admission(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
         return stopped_resolution();
     }
     let capability = consent_capability(call, &request);
@@ -1630,7 +1657,8 @@ async fn dispatch_consent(
     };
 
     if cu.is_halted()
-        || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+        || (requires_native_admission(&call.name)
+            && !cu.admission_is_current(call.chat_id, admission))
     {
         return stopped_resolution();
     }
@@ -1676,7 +1704,8 @@ async fn dispatch_consent(
     let _ = app.emit("capability-consents-changed", ());
 
     if cu.is_halted()
-        || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+        || (requires_native_admission(&call.name)
+            && !cu.admission_is_current(call.chat_id, admission))
     {
         revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
         return stopped_resolution();
@@ -1692,25 +1721,22 @@ async fn dispatch_consent(
         context: context.execution,
         request,
     };
-    let acting = acts_on_host(&call.name);
-    let result = if acting {
-        match cu
-            .dispatch_acting_admitted(call.chat_id, admission, || state.broker.operation(envelope))
-            .await
-        {
-            Ok(result) => result,
-            Err(resolution) => {
-                revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
-                return resolution;
-            }
+    let result = match cu
+        .dispatch_native_admitted(call.chat_id, &call.name, admission, || {
+            state.broker.operation(envelope)
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(resolution) => {
+            revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
+            return resolution;
         }
-    } else {
-        state.broker.operation(envelope).await
     };
     let resolution = match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
             if cu.is_halted()
-                || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+                || (requires_native_admission(&call.name) && !cu.admission_is_current(call.chat_id, admission))
             {
                 stopped_resolution()
             } else {
@@ -2800,6 +2826,86 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(cu.dispatch_acting(session, || async {}).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stop_then_resume_cannot_revive_a_queued_condition_wait() {
+        let cu = ComputerUseState::default();
+        let session = SessionId::new();
+        let call = session_call_record(
+            session,
+            CallId::new(),
+            COMPUTER_WAIT_TOOL,
+            serde_json::json!({
+                "app_id": "com.example.fixture",
+                "condition": { "kind": "text_present", "text": "Ready" },
+                "condition_timeout_seconds": 10.0,
+            }),
+        );
+        let CuAction::Broker(request) = build_action(&cu, &call).unwrap() else {
+            panic!("a condition wait uses the helper");
+        };
+        assert!(matches!(request, OperationRequest::CuWaitCondition { .. }));
+        assert_eq!(
+            consent_capability(&call, &request),
+            ConsentCapability::ReadAppContent
+        );
+        assert!(!acts_on_host(&call.name));
+        let admission = cu.admit_native_input(session);
+        let held_gate = cu.acting_dispatch.lock().await;
+        cu.stop_all(|| Ok::<_, ()>(())).unwrap();
+        drop(held_gate);
+        cu.resume();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let result = cu
+            .dispatch_native_admitted(session, &call.name, admission, || async {
+                sent.send(request).unwrap();
+            })
+            .await;
+        assert!(result.is_err(), "Resume must not re-admit the queued wait");
+        assert!(
+            received.try_recv().is_err(),
+            "the old wait never reaches the broker"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_condition_wait_signals_and_drains_its_helper() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let session = SessionId::new();
+        let admission = cu.admit_native_input(session);
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let task_cu = cu.clone();
+        let wait = tokio::spawn(async move {
+            task_cu
+                .dispatch_native_admitted(session, COMPUTER_WAIT_TOOL, admission, || async {
+                    started.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut helper_cancelled = false;
+        let owned = cu
+            .cancel_session(session, || -> Result<(), ()> {
+                helper_cancelled = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            owned && helper_cancelled,
+            "the wait owns helper cancellation"
+        );
+        assert!(
+            cu.acting_dispatch.try_lock().is_err(),
+            "Stop drains the live helper"
+        );
+        assert!(!wait.is_finished());
+        release.send(()).unwrap();
+        wait.await.unwrap().unwrap();
+        assert!(!cu.owns_dispatch(session));
+        cu.drain_acting().await;
     }
 
     #[tokio::test]

@@ -464,6 +464,13 @@ pub(crate) async fn execute_browser_upload(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
+    crate::browser_independence::require_host(
+        &webview,
+        &registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    )?;
     let script = browser_upload_script(&target, &file)?;
     let authorization = NativeUploadAuthorization {
         registry: registry.clone(),
@@ -1420,6 +1427,24 @@ pub(crate) async fn browser_native_act(
         ));
     }
 
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    if let Err(message) = crate::browser_independence::require_host(
+        &webview,
+        registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    ) {
+        return Ok(act_result(
+            &arguments,
+            BrowserActStatus::UnsupportedNative,
+            &message,
+        ));
+    }
+
     let action_type = arguments.action.kind().to_owned();
     let target_label =
         (!target.fingerprint.name.is_empty()).then(|| target.fingerprint.name.clone());
@@ -1826,6 +1851,7 @@ async fn evaluate_background_action(
         &authorization.arguments.browser_id,
         &authorization.workspace_id,
     )?;
+    let guarded_webview = webview.clone();
     with_browser_webview(webview, move |view| {
         let mut submission = state
             .lock()
@@ -1841,6 +1867,16 @@ async fn evaluate_background_action(
         }
         let ready = authorization
             .authorize()
+            .and_then(|()| {
+                crate::browser_independence::require_native_host(
+                    &guarded_webview,
+                    view,
+                    &authorization.registry,
+                    authorization.capability_id,
+                    &authorization.workspace_id,
+                    authorization.fence,
+                )
+            })
             .and_then(|()| browser_semantics_content_world());
         let content_world = match ready {
             Ok(world) => world,
@@ -3172,26 +3208,15 @@ fn authorize_independent_native_input(
     if !independent {
         return Ok(());
     }
-    #[cfg(feature = "independent-wk-host")]
-    {
-        crate::agent_browser_host::authorize_input(
-            webview,
-            registry,
-            capability_id,
-            workspace_id,
-            fence.instance_id,
-        )
-        .map_err(NativeInputFailure::Engine)?;
-        crate::agent_browser_host::verify_native_window(view).map_err(NativeInputFailure::Engine)
-    }
-    #[cfg(not(feature = "independent-wk-host"))]
-    {
-        let _ = (webview, view, registry, capability_id, workspace_id, fence);
-        Err(NativeInputFailure::Typed {
-            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
-            message: "Independent native browser input is not enabled.".to_owned(),
-        })
-    }
+    crate::browser_independence::require_native_host(
+        webview,
+        view,
+        registry,
+        capability_id,
+        workspace_id,
+        fence,
+    )
+    .map_err(NativeInputFailure::Engine)
 }
 
 #[cfg(target_os = "macos")]
@@ -4596,6 +4621,7 @@ async fn evaluate_browser_upload(
     }));
     let _cancellation = NativeUploadCancellation(Arc::clone(&state));
     let callback_state = Arc::clone(&state);
+    let guarded_webview = webview.clone();
     with_browser_webview(webview, move |view| unsafe {
         let result_state = Arc::clone(&callback_state);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
@@ -4618,7 +4644,16 @@ async fn evaluate_browser_upload(
             let value: &NSString = &*value.cast();
             let _ = sender.send(Ok(value.to_string()));
         });
-        let result = browser_semantics_content_world().and_then(|content_world| {
+        let result = crate::browser_independence::require_native_host(
+            &guarded_webview,
+            view,
+            &authorization.registry,
+            authorization.capability_id,
+            &authorization.workspace_id,
+            authorization.fence,
+        )
+        .and_then(|()| browser_semantics_content_world())
+        .and_then(|content_world| {
             let script = NSString::from_str(&script);
             submit_native_browser_upload(&callback_state, &authorization, || {
                 view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(

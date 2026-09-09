@@ -31,9 +31,8 @@ serde_json = { workspace = true }
 
 [features]
 # Agent-opened WK tabs use a separate, never-key native host.
-# Keep this opt-in until the desktop acceptance tests qualify the host.
 independent-wk-host = []
-default = ["tidebreak-server/keychain"]
+default = ["tidebreak-server/keychain", "independent-wk-host"]
 
 [dependencies]
 async-trait.workspace = true
@@ -87,5 +86,5 @@ block2 = "=0.6.2"
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityProtocols", "NSApplication", "NSBezierPath", "NSColor", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSPanel", "NSResponder", "NSRunningApplication", "NSScreen", "NSText", "NSView", "NSWindow", "libc", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGWindow"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL", "NSUUID", "NSValue"] }
-objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKWebView", "block2"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL", "NSURLRequest", "NSUUID", "NSValue"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKNavigation", "WKWebView", "block2"] }
