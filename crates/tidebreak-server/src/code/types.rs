@@ -389,6 +389,39 @@ impl From<tidebreak_core::db::code::SessionAccess> for SessionAccessSnapshot {
     }
 }
 
+/// Caller-resolved access for one code session (decision 0086).
+///
+/// The server resolves the caller's role once, through the same store step
+/// every scoped read uses, and answers the exact actions that role may reach.
+/// A non-owner gets no access list here — the list of who else may read the
+/// session is owner-only data — but does get the one safe owner identity and,
+/// for a channel session, the channel binding already on the snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAccessSummary {
+    /// The session the caller may read, with provenance already attached.
+    pub session: SessionSnapshot,
+    /// What the caller may do, as a closed set the renderer switches on.
+    pub allowed_actions: Vec<SessionAllowedAction>,
+    /// Whether this caller owns the session and holds its lifecycle authority.
+    pub owner: bool,
+    /// The owner's durable principal key. Safe to show any reader who already
+    /// sees the session: it is the execution identity, never a credential.
+    pub owner_principal: String,
+}
+
+/// One action a session may permit the caller to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAllowedAction {
+    /// Submit, queue, steer, interrupt, and decide approvals.
+    Contribute,
+    /// Manage access and visibility.
+    ManageAccess,
+    /// Reap, change permission mode/model/settings, and delete.
+    Administer,
+}
+
 #[derive(Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct AddSessionAccessBody {

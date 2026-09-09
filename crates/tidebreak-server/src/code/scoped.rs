@@ -703,6 +703,38 @@ impl ScopedCode {
         Ok(self.session_access(id).await?.session)
     }
 
+    /// Caller-resolved access summary for one session (decision 0086).
+    ///
+    /// One resolution for the whole page: reads, allowed actions, and the
+    /// safe owner identity all come from the same `session_access` step the
+    /// scoped queries use, so the summary can never claim an action the
+    /// server checks would refuse. A session the caller holds no claim on
+    /// answers “not found” exactly like one that never existed.
+    pub async fn session_access_summary(
+        &self,
+        id: SessionId,
+    ) -> Result<super::types::SessionAccessSummary, ServerError> {
+        let access = self.session_access(id).await?;
+        let mut allowed_actions = vec![];
+        if access.owner || access.level == tidebreak_core::SessionAccessLevel::Contribute {
+            allowed_actions.push(super::types::SessionAllowedAction::Contribute);
+        }
+        if access.owner {
+            allowed_actions.push(super::types::SessionAllowedAction::ManageAccess);
+            allowed_actions.push(super::types::SessionAllowedAction::Administer);
+        }
+        let bindings = self.external_bindings_for_sessions(&[id]).await?;
+        let owner_principal = access.session.owner.to_string();
+        let mut snapshot = super::types::SessionSnapshot::from(access.session);
+        snapshot.set_external_origins(bindings);
+        Ok(super::types::SessionAccessSummary {
+            session: snapshot,
+            allowed_actions,
+            owner: access.owner,
+            owner_principal,
+        })
+    }
+
     /// One session's access list. Owner-only (decision 0086).
     pub async fn list_session_access(
         &self,

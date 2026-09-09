@@ -2830,6 +2830,94 @@ export function parseCodeSessionList(
   return sessions;
 }
 
+const SESSION_ALLOWED_ACTIONS = new Set<
+  import("../generated/wire").SessionAllowedAction
+>(["contribute", "manage_access", "administer"]);
+
+const SESSION_ACCESS_LEVELS = new Set<
+  import("../generated/wire").SessionAccessLevel
+>(["view", "contribute"]);
+
+/**
+ * One session access row, as the owner-only list renders it (decision 0086).
+ */
+export function parseCodeSessionAccessRow(
+  value: unknown,
+): import("../api/types").SessionAccessSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<import("../generated/wire").SessionAccessSnapshot>(value, [
+      "session_id",
+      "subject",
+      "level",
+      "granted_by",
+      "created_at",
+    ]) ||
+    !wireId(value.session_id) ||
+    !nonEmptyBounded(value.subject, MAX_WIRE_ID_CHARS) ||
+    !isMember(value.level, SESSION_ACCESS_LEVELS) ||
+    !nonEmptyBounded(value.granted_by, MAX_WIRE_ID_CHARS) ||
+    !timestamp(value.created_at)
+  ) {
+    return null;
+  }
+  return {
+    session_id: value.session_id,
+    subject: value.subject,
+    level: value.level,
+    granted_by: value.granted_by,
+    created_at: value.created_at,
+  };
+}
+
+/** `GET /sessions/{id}/access` — the owner-only access list. */
+export function parseCodeSessionAccessList(
+  value: unknown,
+): import("../api/types").SessionAccessSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const rows: import("../api/types").SessionAccessSnapshot[] = [];
+  for (const item of value) {
+    const parsed = parseCodeSessionAccessRow(item);
+    if (!parsed) return null;
+    rows.push(parsed);
+  }
+  return rows;
+}
+
+/**
+ * `GET /sessions/{id}/access-summary` — the caller-resolved session page
+ * answer (decision 0086).
+ */
+export function parseCodeSessionAccessSummary(
+  value: unknown,
+): import("../api/types").SessionAccessSummary | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<import("../generated/wire").SessionAccessSummary>(value, [
+      "session",
+      "allowed_actions",
+      "owner",
+      "owner_principal",
+    ]) ||
+    typeof value.owner !== "boolean" ||
+    !nonEmptyBounded(value.owner_principal, MAX_WIRE_ID_CHARS) ||
+    !Array.isArray(value.allowed_actions) ||
+    value.allowed_actions.some(
+      (action) => !isMember(action, SESSION_ALLOWED_ACTIONS),
+    )
+  ) {
+    return null;
+  }
+  const session = parseCodeSession(value.session);
+  if (!session) return null;
+  return {
+    session,
+    allowed_actions: value.allowed_actions as import("../api/types").SessionAllowedAction[],
+    owner: value.owner,
+    owner_principal: value.owner_principal,
+  };
+}
+
 /**
  * The conversations a workspace page should offer, oldest first.
  *

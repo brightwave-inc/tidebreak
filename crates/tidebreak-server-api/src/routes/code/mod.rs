@@ -36,7 +36,8 @@ mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use access::{
-    add_session_access, list_session_access, revoke_session_access, set_session_visibility,
+    add_session_access, get_session_access_summary, list_session_access,
+    revoke_session_access, set_session_visibility,
 };
 pub(crate) use analytics::analytics;
 pub(crate) use approvals::{decide_approval, list_approvals};
@@ -109,7 +110,8 @@ pub(crate) use types::{
     CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot,
     CodeWorkspaceTree, CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList,
     MergeCodePrBody, QueuedTurn, ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame,
-    SessionAccessSnapshot, SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody,
+    SessionAccessSnapshot, SessionAccessSummary, SessionDigest, SessionSnapshot,
+    SetCodeWorktreeRootBody,
     SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody, UpdateNotice,
     WorkspaceTitleProposal,
 };

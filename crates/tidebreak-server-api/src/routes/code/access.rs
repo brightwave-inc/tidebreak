@@ -9,6 +9,13 @@ use super::types::{
     AddSessionAccessBody, SessionAccessSnapshot, SessionSnapshot, SetSessionVisibilityBody,
 };
 
+pub async fn get_session_access_summary(
+    code: ScopedCode,
+    Path(id): Path<SessionId>,
+) -> Result<Json<crate::code::types::SessionAccessSummary>, ServerError> {
+    Ok(Json(code.session_access_summary(id).await?))
+}
+
 pub async fn list_session_access(
     code: ScopedCode,
     Path(id): Path<SessionId>,

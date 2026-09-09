@@ -472,6 +472,7 @@ mod tests {
         // The session sharing surface (decision 0086): the list the desktop
         // renders, and the two bodies it sends back.
         generate::collect_from::<crate::routes::code::SessionAccessSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SessionAccessSummary>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::AddSessionAccessBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SetSessionVisibilityBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::TurnSnapshot>(&cfg, &mut out);

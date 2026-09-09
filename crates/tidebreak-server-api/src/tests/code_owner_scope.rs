@@ -754,6 +754,122 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
     );
 }
 
+/// The caller-resolved summary is the single answer the session page needs:
+/// it carries the same resolution every scoped read uses, names the safe
+/// owner identity, and exposes no owner-only access rows to a reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_access_summary_names_role_actions_and_owner_without_leaking_rows() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+
+    // Before any row exists, the summary answers exactly like the session:
+    // a caller with no claim cannot tell it apart from one that never existed.
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{session}/access-summary")
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "an unclaimed caller must not learn the session exists"
+    );
+
+    async fn summary(
+        client: &reqwest::Client,
+        addr: std::net::SocketAddr,
+        token: &str,
+        session: &str,
+    ) -> serde_json::Value {
+        let response = client
+            .get(format!("http://{addr}/sessions/{session}/access-summary"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.json().await.unwrap()
+    }
+
+    let owner = summary(&client, addr, ALICE_TOKEN, &session).await;
+    assert_eq!(owner["owner"], true);
+    assert_eq!(owner["owner_principal"], "user:alice");
+    assert_eq!(
+        owner["allowed_actions"],
+        serde_json::json!(["contribute", "manage_access", "administer"]),
+        "the owner may drive, share, and administer"
+    );
+    assert_eq!(owner["session"]["id"], session);
+    assert_eq!(owner["session"]["visibility"], "private");
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+    let viewer = summary(&client, addr, BOB_TOKEN, &session).await;
+    assert_eq!(viewer["owner"], false);
+    assert_eq!(viewer["owner_principal"], "user:alice");
+    assert_eq!(
+        viewer["allowed_actions"],
+        serde_json::json!([]),
+        "a viewer can read the session but drive none of it"
+    );
+    assert_eq!(viewer["session"]["id"], session);
+    assert_eq!(
+        viewer["session"].get("access"),
+        None,
+        "the summary never carries the owner-only access list"
+    );
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "contribute",
+    )
+    .await;
+    let contributor = summary(&client, addr, BOB_TOKEN, &session).await;
+    assert_eq!(contributor["owner"], false);
+    assert_eq!(contributor["owner_principal"], "user:alice");
+    assert_eq!(
+        contributor["allowed_actions"],
+        serde_json::json!(["contribute"]),
+        "a contributor drives but neither shares nor administers"
+    );
+
+    // Revoking the raise takes the summary's contribute action away again.
+    let revoked = client
+        .delete(format!(
+            "http://{addr}/sessions/{session}/access/principal:user:bob"
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{session}/access-summary")
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "revocation puts the summary back out of reach"
+    );
+}
+
 /// `deployment` visibility opens a session to every authenticated principal
 /// on the machine, and never to a write. `private` closes it again.
 #[tokio::test(flavor = "multi_thread")]

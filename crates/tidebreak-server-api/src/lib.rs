@@ -891,6 +891,10 @@ pub fn app(state: AppState) -> Router {
             "/sessions/{id}/visibility",
             post(routes::code::set_session_visibility),
         )
+        .route(
+            "/sessions/{id}/access-summary",
+            get(routes::code::get_session_access_summary),
+        )
         .route("/updates", get(routes::code::code_updates))
         .route("/approvals", get(routes::code::list_approvals))
         .route(
@@ -1155,6 +1159,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/sessions/{id}/visibility",
             post(routes::code::set_session_visibility),
+        )
+        .route(
+            "/code/sessions/{id}/access-summary",
+            get(routes::code::get_session_access_summary),
         )
         .route("/code/updates", get(routes::code::code_updates))
         .route(

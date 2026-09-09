@@ -4786,12 +4786,45 @@ export type SessionAccessLevel = "view" | "contribute";
 export type SessionAccessSnapshot = { session_id: SessionId, subject: string, level: SessionAccessLevel, granted_by: string, created_at: string, };
 
 /**
+ * Caller-resolved access for one code session (decision 0086).
+ *
+ * The server resolves the caller's role once, through the same store step
+ * every scoped read uses, and answers the exact actions that role may reach.
+ * A non-owner gets no access list here — the list of who else may read the
+ * session is owner-only data — but does get the one safe owner identity and,
+ * for a channel session, the channel binding already on the snapshot.
+ */
+export type SessionAccessSummary = {
+/**
+ * The session the caller may read, with provenance already attached.
+ */
+session: SessionSnapshot,
+/**
+ * What the caller may do, as a closed set the renderer switches on.
+ */
+allowed_actions: Array<SessionAllowedAction>,
+/**
+ * Whether this caller owns the session and holds its lifecycle authority.
+ */
+owner: boolean,
+/**
+ * The owner's durable principal key. Safe to show any reader who already
+ * sees the session: it is the execution identity, never a credential.
+ */
+owner_principal: string, };
+
+/**
  * What a running interactive session is actually occupied with. This is
  * intentionally coarser than a transcript tool name: list surfaces need to
  * distinguish agent generation, a shell, a passive monitor, and delegated
  * work without leaking command text into every digest.
  */
 export type SessionActivity = "agent" | "shell" | "monitor" | "subagents" | "file" | "search" | "tool";
+
+/**
+ * One action a session may permit the caller to take.
+ */
+export type SessionAllowedAction = "contribute" | "manage_access" | "administer";
 
 /**
  * Cheap per-session digest on `/updates`.

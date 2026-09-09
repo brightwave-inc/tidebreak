@@ -96,6 +96,12 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeContentRevision } from "./useLiveContent";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore, useSessionDigest } from "./CodeUpdatesStore";
+import { useCodeSessionAccess } from "./useCodeSessionAccess";
+import {
+  SessionParticipants,
+  SessionShareControl,
+  summaryAllows,
+} from "./sessionAccess";
 import { useBrowserTabs } from "./workspace/useBrowserTabs";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useEditorTabs } from "./workspace/useEditorTabs";
@@ -297,6 +303,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     splitFocused,
   } = useEditorTabs({ layout, setLayout: setWorkspaceLayout });
 
+  const access = useCodeSessionAccess(client, session?.id ?? "");
+  const accessSummary = access.summary;
+  const canManage = summaryAllows(accessSummary, "manage_access");
+  const canAdminister = summaryAllows(accessSummary, "administer");
   const fenced =
     session?.lifecycle === "fenced" || session?.fence_reason !== undefined;
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
@@ -889,6 +899,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 ·
               </span>
               <SessionPermissionIndicator mode={session.permission_mode} />
+              {accessSummary && (
+                <>
+                  <span className="text-border" aria-hidden>
+                    ·
+                  </span>
+                  <SessionParticipants
+                    summary={accessSummary}
+                    session={session}
+                  />
+                </>
+              )}
+              {canManage && accessSummary && (
+                <SessionShareControl access={access} session={session} />
+              )}
             </>
           ) : undefined
         }

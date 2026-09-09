@@ -57,6 +57,13 @@ import { forkTranscriptFile } from "../fork";
 import { submitAcceptedTurn } from "../CodeSessionSend";
 import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
+import { useCodeSessionAccess } from "../useCodeSessionAccess";
+import {
+  ReadOnlyComposerExplanation,
+  SessionParticipants,
+  summaryAllows,
+  UndecidableApproval,
+} from "../sessionAccess";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
@@ -108,6 +115,10 @@ export function CodeSessionPane({
 }) {
   const follow = useTranscriptFollow();
   const store = useRegisteredCodeSession(session.id, client);
+  const access = useCodeSessionAccess(client, session.id);
+  const canContribute = summaryAllows(access.summary, "contribute");
+  const canManage = summaryAllows(access.summary, "manage_access");
+  const canAdminister = summaryAllows(access.summary, "administer");
   const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
   const items = store((state) => state.items);
   const busy = store((state) => state.busy);
@@ -424,6 +435,7 @@ export function CodeSessionPane({
       decision: "approve" | "deny",
       feedback?: string,
     ) => {
+      if (!canContribute) return;
       setDecidingId(approvalId);
       setApprovalError(undefined);
       try {
@@ -440,7 +452,7 @@ export function CodeSessionPane({
         setDecidingId(null);
       }
     },
-    [client],
+    [canContribute, client],
   );
 
   function send(
@@ -578,7 +590,10 @@ export function CodeSessionPane({
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
-          onDecide={decideApproval}
+          onDecide={canContribute ? decideApproval : undefined}
+          onUndecidableApproval={
+            canContribute ? undefined : UndecidableApproval
+          }
           recap={sessionDigest?.recap}
           emptyState={
             subagentCallId
@@ -602,7 +617,21 @@ export function CodeSessionPane({
         </button>
       </div>
       {composerOverride}
-      {lifecycle !== "ended" && !composerOverride && !subagentCallId && (
+      {!canContribute && !subagentCallId && access.summary && (
+        <ReadOnlyComposerExplanation summary={access.summary} />
+      )}
+      {!canContribute && !subagentCallId && !access.summary && (
+        <p
+          className="text-muted-foreground mx-auto max-w-3xl px-2 pt-1 text-xs"
+          role="status"
+        >
+          Loading session access…
+        </p>
+      )}
+      {lifecycle !== "ended" &&
+        !composerOverride &&
+        !subagentCallId &&
+        canContribute && (
         <>
           <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
             <QueueTray

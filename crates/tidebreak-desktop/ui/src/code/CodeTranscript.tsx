@@ -14,6 +14,7 @@ import {
   useId,
   useRef,
   useState,
+  type ReactNode,
   type RefCallback,
 } from "react";
 
@@ -66,6 +67,7 @@ export function CodeTranscript({
   decidingId,
   approvalError,
   onDecide,
+  onUndecidableApproval,
   hydrated = true,
   busy = false,
   streamStalled = false,
@@ -90,6 +92,8 @@ export function CodeTranscript({
     decision: "approve" | "deny",
     feedback?: string,
   ) => void;
+  /** Rendered instead of decision buttons on pending approvals a viewer cannot decide. */
+  onUndecidableApproval?: (approvalId: string) => ReactNode;
   /** False until the durable turn snapshot settles; drives the skeleton. */
   hydrated?: boolean;
   /** A turn is open, so the engine owes the reader something. */
@@ -248,6 +252,7 @@ export function CodeTranscript({
                       : undefined
                   }
                   onDecide={onDecide}
+                  onUndecidableApproval={onUndecidableApproval}
                   onOpenTurnDiff={onOpenTurnDiff}
                   onForkFromTurn={onForkFromTurn}
                   onFileIssue={onFileIssue}
@@ -597,6 +602,7 @@ const TranscriptItem = memo(function TranscriptItem({
   deciding,
   approvalError,
   onDecide,
+  onUndecidableApproval,
   onOpenTurnDiff,
   onForkFromTurn,
   onFileIssue,
@@ -618,6 +624,7 @@ const TranscriptItem = memo(function TranscriptItem({
     decision: "approve" | "deny",
     feedback?: string,
   ) => void;
+  onUndecidableApproval?: (approvalId: string) => ReactNode;
   onOpenTurnDiff?: (turnId: string) => void;
   onForkFromTurn?: (turnId: string) => void;
   onFileIssue?: () => void;
@@ -705,7 +712,11 @@ const TranscriptItem = memo(function TranscriptItem({
         <p className="text-muted-foreground text-sm" role="status">
           Loading approval…
         </p>
-      ) : (
+      ) : approval?.state === "pending" &&
+        !onDecide &&
+        onUndecidableApproval ? (
+        onUndecidableApproval(item.approvalId)
+      ) : approval ? (
         <CodeApprovalCard
           approval={approval}
           deciding={deciding}
@@ -715,7 +726,7 @@ const TranscriptItem = memo(function TranscriptItem({
             onDecide?.(item.approvalId, decision, feedback)
           }
         />
-      );
+      ) : null;
       return (
         <div
           data-code-approval-id={item.approvalId}

@@ -6,11 +6,16 @@ import type {
   PermissionMode,
   QueuedCodeTurn,
   ReasoningEffort,
+  SessionAccessLevel,
+  SessionAccessSummary,
+  SessionVisibility,
 } from "../types";
 import {
   type CodeTurnSubmission,
   parseCodeForkTranscript,
   parseCodeSession,
+  parseCodeSessionAccessList,
+  parseCodeSessionAccessSummary,
   parseCodeSessionList,
   parseCodeTurnList,
   parseCodeTurnSubmission,
@@ -66,6 +71,97 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
         headers: this.headers(),
       });
     }
+
+    /**
+     * The caller-resolved session page answer (decision 0086): the session,
+     * what this principal may do, and the safe owner identity.
+     */
+    async getCodeSessionAccessSummary(
+      sessionId: string,
+    ): Promise<SessionAccessSummary> {
+      return requireParsed(
+        parseCodeSessionAccessSummary(
+          await this.json(
+            `/sessions/${encodeURIComponent(sessionId)}/access-summary`,
+            { headers: this.headers() },
+          ),
+        ),
+        "code session access summary",
+      );
+    }
+
+    /**
+     * Owner-only: the session's access rows. A non-owner is refused as not
+     * found, and the summary already keeps `rows` null for them.
+     */
+    async listCodeSessionAccess(
+      sessionId: string,
+    ): Promise<import("../api/types").SessionAccessSnapshot[]> {
+      const body = await this.json<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/access`,
+        { headers: this.headers() },
+      );
+      return requireParsed(
+        parseCodeSessionAccessList(body),
+        "code session access rows",
+      );
+    }
+
+    /**
+     * Owner-only: add or raise one subject's session access. The owner's
+     * own subject is never listed here.
+     */
+    async addCodeSessionAccess(
+      sessionId: string,
+      subject: string,
+      level: SessionAccessLevel,
+    ): Promise<void> {
+      await this.json<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/access`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ subject, level }),
+        },
+        201,
+      );
+    }
+
+    /** Owner-only: drop one subject's session access row. */
+    async revokeCodeSessionAccess(
+      sessionId: string,
+      subject: string,
+    ): Promise<void> {
+      await this.json<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/access/${encodeURIComponent(subject)}`,
+        { method: "DELETE", headers: this.headers() },
+        204,
+      );
+    }
+
+    /**
+     * Owner-only: set who may discover the session without an access row
+     * (`private` or `deployment`). Returns the refreshed session snapshot.
+     */
+    async setCodeSessionVisibility(
+      sessionId: string,
+      visibility: SessionVisibility,
+    ): Promise<CodeSessionSnapshot> {
+      return requireParsed(
+        parseCodeSession(
+          await this.json(
+            `/sessions/${encodeURIComponent(sessionId)}/visibility`,
+            {
+              method: "POST",
+              headers: this.headers(true),
+              body: JSON.stringify({ visibility }),
+            },
+          ),
+        ),
+        "code session visibility",
+      );
+    }
+
 
     async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
       const body = await this.json<unknown>(

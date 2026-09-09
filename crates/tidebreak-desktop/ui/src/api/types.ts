@@ -178,6 +178,8 @@ import {
   type SessionLifecycle as WireCodeSessionLifecycle,
   type SessionActivity as WireCodeSessionActivity,
   type SessionSnapshot as WireCodeSessionSnapshot,
+  type SessionAccessSummary as WireCodeSessionAccessSummary,
+  type SessionAllowedAction as WireCodeSessionAllowedAction,
   type CodeSubagentStatus as WireCodeSubagentStatus,
   type CodeSubagentSummary as WireCodeSubagentSummary,
   type TurnId as WireCodeTurnId,
@@ -283,6 +285,8 @@ export type {
   RendererRefusal,
   ExecBackend,
   ExecDegradation,
+  SessionAccessSummary,
+  SessionAllowedAction,
 };
 
 /**
