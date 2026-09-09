@@ -45,7 +45,146 @@ struct HelperTests {
         print("PASS testExecutionModeIsExplicitInControlResults")
         suite.testBackgroundScrollClampsAtEachEnd()
         print("PASS testBackgroundScrollClampsAtEachEnd")
-        print("20 helper regression tests passed")
+        try suite.testInputJournalSurvivesUntilRelease()
+        print("PASS testInputJournalSurvivesUntilRelease")
+        try suite.testRecoveryPreservesPhysicalHoldsAndReleasesInReverseOrder()
+        print("PASS testRecoveryPreservesPhysicalHoldsAndReleasesInReverseOrder")
+        try suite.testRecoveryRejectsWrongIdentityOversizedAndPublicJournals()
+        print("PASS testRecoveryRejectsWrongIdentityOversizedAndPublicJournals")
+        try suite.testUpStillReleasesAfterJournalDamage()
+        print("PASS testUpStillReleasesAfterJournalDamage")
+        try suite.testInvocationCancellationRefusesFurtherInput()
+        print("PASS testInvocationCancellationRefusesFurtherInput")
+        try suite.testModifierAndMouseEventsHaveTrackedReleases()
+        print("PASS testModifierAndMouseEventsHaveTrackedReleases")
+        print("26 helper regression tests passed")
+    }
+
+    private func recoveryFixture(_ work: (HelperRequest, URL) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tidebreak-recovery-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let invocation = UUID().uuidString
+        let journal = directory.appendingPathComponent("input.json")
+        let cancel = directory.appendingPathComponent("cancel")
+        let data = try JSONSerialization.data(withJSONObject: [
+            "invocation_id": invocation, "held": [],
+        ])
+        try data.write(to: journal)
+        try Data(invocation.utf8).write(to: cancel)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: journal.path)
+        let requestData = try JSONSerialization.data(withJSONObject: [
+            "op": "drag",
+            "input_invocation_id": invocation, "input_journal_path": journal.path,
+            "input_cancel_path": cancel.path,
+        ])
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        try work(decoder.decode(HelperRequest.self, from: requestData), journal)
+    }
+
+    func testModifierAndMouseEventsHaveTrackedReleases() throws {
+        let source = try requireValue(CGEventSource(stateID: .combinedSessionState))
+        for key: CGKeyCode in [0, 54, 55, 56, 60, 58, 61, 59, 62, 63] {
+            for down in [true, false] {
+                let event = try requireValue(
+                    CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down))
+                let tracked = try requireValue(InputRecovery.heldControl(event))
+                expectEqual(tracked.0, InputRecovery.Held(kind: "key", code: key))
+                expectEqual(tracked.1, down)
+            }
+        }
+        for (eventType, button, down) in [
+            (CGEventType.leftMouseDown, CGMouseButton.left, true),
+            (.leftMouseUp, .left, false), (.rightMouseDown, .right, true),
+            (.rightMouseUp, .right, false),
+        ] {
+            let event = try requireValue(
+                CGEvent(
+                    mouseEventSource: source, mouseType: eventType,
+                    mouseCursorPosition: .zero, mouseButton: button))
+            let tracked = try requireValue(InputRecovery.heldControl(event))
+            expectEqual(tracked.0, InputRecovery.Held(kind: "mouse", code: UInt16(button.rawValue)))
+            expectEqual(tracked.1, down)
+        }
+    }
+
+    func testInputJournalSurvivesUntilRelease() throws {
+        try recoveryFixture { request, _ in
+            let mouse = InputRecovery.Held(kind: "mouse", code: 0)
+            try InputRecovery.track(
+                mouse, down: true, request: request,
+                deliver: {
+                    expectEqual(try! InputRecovery.load(request).held, [mouse])
+                })
+            try InputRecovery.track(
+                mouse, down: false, request: request,
+                deliver: {
+                    expectEqual(try! InputRecovery.load(request).held, [mouse])
+                })
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+        }
+    }
+
+    func testRecoveryPreservesPhysicalHoldsAndReleasesInReverseOrder() throws {
+        try recoveryFixture { request, _ in
+            let command = InputRecovery.Held(kind: "key", code: 55)
+            let key = InputRecovery.Held(kind: "key", code: 0)
+            let mouse = InputRecovery.Held(kind: "mouse", code: 0)
+            for control in [command, key, mouse] {
+                try InputRecovery.track(control, down: true, request: request, deliver: {})
+            }
+            var released: [InputRecovery.Held] = []
+            let result = try InputRecovery.recover(
+                journal: InputRecovery.load(request), request: request,
+                physicallyHeld: { $0 == mouse }, release: { released.append($0) })
+            expectEqual(released, [key, command])
+            expectEqual(result.released, 2)
+            expectEqual(result.preservedPhysicalHolds, 1)
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+        }
+    }
+
+    func testRecoveryRejectsWrongIdentityOversizedAndPublicJournals() throws {
+        try recoveryFixture { request, path in
+            let initial = try Data(contentsOf: path)
+            let wrong = InputRecovery.Journal(invocationId: UUID().uuidString, held: [])
+            try InputRecovery.save(wrong, request: request)
+            expectError(try InputRecovery.load(request))
+            try Data(repeating: 65, count: 16 * 1024 + 1).write(to: path)
+            expectError(try InputRecovery.load(request))
+            try initial.write(to: path)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: path.path)
+            expectError(try InputRecovery.load(request))
+        }
+    }
+
+    func testUpStillReleasesAfterJournalDamage() throws {
+        try recoveryFixture { request, path in
+            let mouse = InputRecovery.Held(kind: "mouse", code: 0)
+            try InputRecovery.track(mouse, down: true, request: request, deliver: {})
+            try Data("broken".utf8).write(to: path)
+            var released = false
+            expectError(
+                try InputRecovery.track(
+                    mouse, down: false, request: request, deliver: { released = true }))
+            expectTrue(released)
+        }
+    }
+
+    func testInvocationCancellationRefusesFurtherInput() throws {
+        try recoveryFixture { request, _ in
+            try InputRecovery.checkCancellation(request)
+            try Data("stopped".utf8).write(to: URL(fileURLWithPath: request.inputCancelPath!))
+            expectError(try InputRecovery.checkCancellation(request)) { error in
+                expectEqual((error as? HelperError)?.code, .yielded)
+            }
+        }
     }
 
     func testScrollDirectionMatchesAPI() {
@@ -141,7 +280,8 @@ struct HelperTests {
                         }
                         events.append("move\(index)")
                     },
-                    release: { events.append("release") }, pause: {})) { error in
+                    release: { events.append("release") }, pause: {})
+            ) { error in
                 expectEqual((error as? HelperError)?.code, .operationFailed)
             }
             expectEqual(events, ["press", "move0", "release"])
@@ -161,7 +301,8 @@ struct HelperTests {
         expectError(
             try Control.waitForActivation(
                 timeout: 0.6, isFrontmost: { false }, check: {},
-                now: { time }, pause: { time += 0.1 })) { error in
+                now: { time }, pause: { time += 0.1 })
+        ) { error in
             expectEqual((error as? HelperError)?.code, .yielded)
         }
         expectAtLeast(time, 0.6)
@@ -176,7 +317,8 @@ struct HelperTests {
                         throw HelperError(code: .yielded, message: "fixture stopped")
                     }
                 },
-                now: { Double(polls) * 0.01 }, pause: { polls += 1 })) { error in
+                now: { Double(polls) * 0.01 }, pause: { polls += 1 })
+        ) { error in
             expectEqual((error as? HelperError)?.code, .yielded)
         }
         expectEqual(polls, 1)

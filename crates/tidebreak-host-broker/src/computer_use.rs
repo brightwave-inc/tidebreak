@@ -13,6 +13,10 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -20,6 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::set_of_marks::Mark;
+
+mod input_recovery;
+use input_recovery::InputRecovery;
 
 /// Hard wall-clock bound on a single helper invocation. The broker handles one
 /// request at a time (its stdio loop is synchronous), so a hung helper would
@@ -30,6 +37,13 @@ use crate::set_of_marks::Mark;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(40);
 /// How often to poll the child for exit while waiting.
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const HELPER_CANCEL_GRACE: Duration = Duration::from_secs(2);
+const HELPER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Keep the desktop response deadline beyond operation cancellation and recovery.
+/// Process startup and protocol overhead need an additional margin at the caller.
+pub const HELPER_MANAGED_TIMEOUT: Duration = Duration::from_secs(
+    HELPER_TIMEOUT.as_secs() + HELPER_CANCEL_GRACE.as_secs() + HELPER_CLEANUP_TIMEOUT.as_secs(),
+);
 /// Cap on retained helper stdout/stderr. The helper already bounds the AX tree,
 /// but never trust it to — a buggy/hostile helper must not OOM the broker.
 /// Overflow is drained-and-discarded (so the child never blocks on a full pipe)
@@ -544,6 +558,7 @@ impl ComputerUseBackend for UnsupportedBackend {
 pub struct HelperBackend {
     helper_path: PathBuf,
     timeout: Duration,
+    input_cleanup_failed: Arc<AtomicBool>,
 }
 
 impl HelperBackend {
@@ -551,6 +566,7 @@ impl HelperBackend {
         Self {
             helper_path,
             timeout: HELPER_TIMEOUT,
+            input_cleanup_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -587,6 +603,7 @@ impl HelperBackend {
         Self {
             helper_path,
             timeout,
+            input_cleanup_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -598,7 +615,58 @@ impl HelperBackend {
         if let Some(path) = std::env::var_os(HELPER_CANCEL_PATH_ENV) {
             attach_input_cancellation(&mut request, Path::new(&path))?;
         }
-        let bytes = serde_json::to_vec(&request).map_err(|e| {
+        if request.get("execution_mode").and_then(Value::as_str) == Some("foreground")
+            && self.input_cleanup_failed.load(Ordering::Acquire)
+        {
+            return Err(BackendError::new(
+                BackendErrorKind::OperationFailed,
+                "Computer control remains stopped because input cleanup failed.",
+            ));
+        }
+        let recovery = InputRecovery::prepare(&mut request)?;
+        let result = self.invoke(&request, self.timeout, recovery.as_ref());
+        if let Some(recovery) = recovery {
+            let cleanup = recovery.pending().and_then(|pending| {
+                if pending {
+                    self.invoke(&recovery.cleanup_request(), HELPER_CLEANUP_TIMEOUT, None)?;
+                    if recovery.pending()? {
+                        return Err(BackendError::new(
+                            BackendErrorKind::OperationFailed,
+                            "The helper did not finish releasing its recorded input.",
+                        ));
+                    }
+                }
+                Ok(pending)
+            });
+            if let Err(error) = cleanup {
+                self.input_cleanup_failed.store(true, Ordering::Release);
+                let journal_directory = recovery.preserve();
+                eprintln!(
+                    "computer-use recovery retained at {}",
+                    journal_directory.display()
+                );
+                return Err(BackendError::new(
+                    BackendErrorKind::OperationFailed,
+                    format!("Computer control stopped after input cleanup failed: {}. Release any held mouse buttons or keys before restarting Tidebreak.", error.message),
+                ));
+            }
+            if matches!(cleanup, Ok(true)) {
+                return Err(BackendError::new(
+                    BackendErrorKind::OperationFailed,
+                    "The helper required input recovery; the operation outcome is uncertain.",
+                ));
+            }
+        }
+        result
+    }
+
+    fn invoke(
+        &self,
+        request: &Value,
+        timeout: Duration,
+        recovery: Option<&InputRecovery>,
+    ) -> Result<Value, BackendError> {
+        let bytes = serde_json::to_vec(request).map_err(|e| {
             BackendError::new(
                 BackendErrorKind::OperationFailed,
                 format!("cannot encode helper request: {e}"),
@@ -616,6 +684,9 @@ impl HelperBackend {
                     format!("cannot spawn computer-use helper: {e}"),
                 )
             })?;
+        if let Some(recovery) = recovery {
+            recovery.worker_started();
+        }
 
         // Drain stdout/stderr in detached threads before writing stdin, so the
         // child can never block on a full output pipe (the AX tree can exceed
@@ -628,16 +699,22 @@ impl HelperBackend {
         // The request is small, so a single blocking write cannot deadlock now
         // that stdout is draining.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&bytes).map_err(|e| {
-                BackendError::new(
+            if let Err(error) = stdin.write_all(&bytes) {
+                let _ = child.kill();
+                if child.wait().is_ok() {
+                    if let Some(recovery) = recovery {
+                        recovery.worker_exited();
+                    }
+                }
+                return Err(BackendError::new(
                     BackendErrorKind::OperationFailed,
-                    format!("cannot write to helper: {e}"),
-                )
-            })?;
+                    format!("cannot write to helper: {error}"),
+                ));
+            }
             // stdin drops here → EOF, so the single-shot helper proceeds.
         }
 
-        let timed_out = self.wait_bounded(&mut child)?;
+        let timed_out = self.wait_bounded(&mut child, timeout, recovery)?;
 
         if timed_out {
             // Do not join the drain threads here: if the helper spawned a child
@@ -647,13 +724,16 @@ impl HelperBackend {
             // timeout regardless.
             return Err(BackendError::new(
                 BackendErrorKind::OperationFailed,
-                format!(
-                    "computer-use helper timed out after {}s",
-                    self.timeout.as_secs()
-                ),
+                format!("computer-use helper timed out after {}s", timeout.as_secs()),
             ));
         }
 
+        if !child.wait().is_ok_and(|status| status.success()) {
+            return Err(BackendError::new(
+                BackendErrorKind::OperationFailed,
+                "The computer-use helper exited before completing its operation.",
+            ));
+        }
         let stdout = stdout_reader.join().unwrap_or_default();
         let stderr = stderr_reader.join().unwrap_or_default();
 
@@ -689,24 +769,61 @@ impl HelperBackend {
     /// Poll the child for exit up to the timeout; on timeout, kill it (and reap
     /// it) so a hung helper cannot wedge the broker. Returns whether the
     /// timeout fired.
-    fn wait_bounded(&self, child: &mut std::process::Child) -> Result<bool, BackendError> {
+    fn wait_bounded(
+        &self,
+        child: &mut std::process::Child,
+        timeout: Duration,
+        recovery: Option<&InputRecovery>,
+    ) -> Result<bool, BackendError> {
         let start = Instant::now();
+        let mut cancelled_at = None;
         loop {
             match child.try_wait() {
-                Ok(Some(_status)) => return Ok(false),
+                Ok(Some(_status)) => {
+                    if let Some(recovery) = recovery {
+                        recovery.worker_exited();
+                    }
+                    return Ok(cancelled_at.is_some());
+                }
                 Ok(None) => {
-                    if start.elapsed() >= self.timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Ok(true);
+                    if start.elapsed() >= timeout {
+                        if cancelled_at.is_none()
+                            && recovery.is_some_and(|state| state.cancel().is_ok())
+                        {
+                            cancelled_at = Some(Instant::now());
+                        }
+                        if cancelled_at.is_none_or(|at| at.elapsed() >= HELPER_CANCEL_GRACE) {
+                            child.kill().map_err(|error| {
+                                BackendError::new(
+                                    BackendErrorKind::OperationFailed,
+                                    format!("cannot stop helper: {error}"),
+                                )
+                            })?;
+                            child.wait().map_err(|error| {
+                                BackendError::new(
+                                    BackendErrorKind::OperationFailed,
+                                    format!("cannot reap helper: {error}"),
+                                )
+                            })?;
+                            if let Some(recovery) = recovery {
+                                recovery.worker_exited();
+                            }
+                            return Ok(true);
+                        }
                     }
                     thread::sleep(HELPER_POLL_INTERVAL);
                 }
                 Err(e) => {
+                    let _ = child.kill();
+                    if child.wait().is_ok() {
+                        if let Some(recovery) = recovery {
+                            recovery.worker_exited();
+                        }
+                    }
                     return Err(BackendError::new(
                         BackendErrorKind::OperationFailed,
                         format!("waiting on helper failed: {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -1356,6 +1473,139 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         FakeHelper { _dir: dir, path }
+    }
+
+    fn recovery_helper(behavior: &str) -> FakeHelper {
+        let script = r#"
+request=$(cat)
+field() { printf '%s' "$request" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+root=$(dirname "$0")
+op=$(field op)
+journal=$(field input_journal_path)
+invocation=$(field input_invocation_id)
+cancel=$(field input_cancel_path)
+empty() { printf '{"invocation_id":"%s","held":[]}' "$invocation" > "$journal"; }
+if [ "$op" = release_recorded_input ]; then
+    original=$(cat "$root/pid")
+    if kill -0 "$original" 2>/dev/null; then exit 9; fi
+    echo cleanup >> "$root/events"
+    if [ BEHAVIOR = cleanup_failure ]; then
+        printf '{"ok":false,"code":"operation_failed","error":"fixture cleanup failed"}'
+    else
+        empty
+        printf '{"ok":true,"result":{"released":1}}'
+    fi
+    exit 0
+fi
+if [ "$op" = list_windows ]; then
+    echo observation >> "$root/events"
+    printf '{"ok":true,"result":[]}'
+    exit 0
+fi
+echo operation >> "$root/events"
+echo $$ > "$root/pid"
+printf '%s' "$journal" > "$root/journal"
+printf '{"invocation_id":"%s","held":[{"kind":"mouse","code":0}]}' "$invocation" > "$journal"
+if [ BEHAVIOR = graceful ]; then
+    while [ "$(cat "$cancel")" != stopped ]; do sleep 0.02; done
+    echo cancelled >> "$root/events"
+    empty
+    printf '{"ok":false,"code":"yielded","error":"cancelled"}'
+    exit 0
+fi
+if [ BEHAVIOR = timeout ]; then
+    while :; do sleep 0.02; done
+fi
+if [ BEHAVIOR = claimed_success ]; then
+    printf '{"ok":true,"result":{"success":true}}'
+    exit 0
+fi
+if [ BEHAVIOR = structured_error ]; then
+    empty
+    printf '{"ok":false,"code":"permission_denied","error":"fixture refused"}'
+    exit 0
+fi
+exit 7
+"#;
+        fake_helper("recovery", &script.replace("BEHAVIOR", behavior))
+    }
+
+    fn foreground_fixture(backend: &HelperBackend) -> Result<Value, BackendError> {
+        backend.run(json!({"op": "drag", "execution_mode": "foreground"}))
+    }
+
+    fn recovery_events(helper: &FakeHelper) -> String {
+        std::fs::read_to_string(helper._dir.path().join("events")).unwrap()
+    }
+
+    #[test]
+    fn timeout_cancels_the_invocation_before_forcing_release() {
+        let helper = recovery_helper("graceful");
+        let backend = HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(75));
+        let error = foreground_fixture(&backend).unwrap_err();
+        assert!(error.message.contains("timed out"));
+        assert_eq!(recovery_events(&helper), "operation\ncancelled\n");
+        assert!(!backend.input_cleanup_failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn killed_and_crashed_helpers_finish_cleanup_before_the_next_invocation() {
+        for behavior in ["timeout", "crash"] {
+            let helper = recovery_helper(behavior);
+            let backend =
+                HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(75));
+            assert!(foreground_fixture(&backend).is_err());
+            assert_eq!(recovery_events(&helper), "operation\ncleanup\n");
+            assert!(foreground_fixture(&backend).is_err());
+            assert_eq!(
+                recovery_events(&helper),
+                "operation\ncleanup\noperation\ncleanup\n"
+            );
+            assert!(!backend.input_cleanup_failed.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_preserves_the_journal_and_stops_foreground_but_allows_observation() {
+        let helper = recovery_helper("cleanup_failure");
+        let backend = HelperBackend::new(helper.path.clone());
+        let error = foreground_fixture(&backend).unwrap_err();
+        assert!(error
+            .message
+            .contains("Release any held mouse buttons or keys"));
+        let path =
+            PathBuf::from(std::fs::read_to_string(helper._dir.path().join("journal")).unwrap());
+        assert!(path.is_file());
+        assert!(foreground_fixture(&backend)
+            .unwrap_err()
+            .message
+            .contains("remains stopped"));
+        assert!(backend.list_windows(None).unwrap().is_empty());
+        assert_eq!(
+            recovery_events(&helper),
+            "operation\ncleanup\nobservation\n"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn claimed_success_with_held_input_becomes_uncertain_after_recovery() {
+        let helper = recovery_helper("claimed_success");
+        let backend = HelperBackend::new(helper.path.clone());
+        let error = foreground_fixture(&backend).unwrap_err();
+        assert!(error.message.contains("outcome is uncertain"));
+        assert_eq!(recovery_events(&helper), "operation\ncleanup\n");
+    }
+
+    #[test]
+    fn a_structured_error_keeps_its_code_after_input_is_released() {
+        let helper = recovery_helper("structured_error");
+        let backend = HelperBackend::new(helper.path.clone());
+        assert_eq!(
+            foreground_fixture(&backend).unwrap_err().kind,
+            BackendErrorKind::PermissionDenied
+        );
+        assert_eq!(recovery_events(&helper), "operation\n");
     }
 
     #[test]

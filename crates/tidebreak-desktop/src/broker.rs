@@ -19,7 +19,7 @@ use tidebreak_host_broker::{
     RequestId, Response, PROTOCOL_VERSION,
 };
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot},
     time::{timeout, timeout_at, Instant},
@@ -28,7 +28,9 @@ use tokio::{
 const SIDECAR_NAME: &str = "tidebreak-host-broker";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 // Leave room for a 30s native condition wait and the helper's bounded shutdown.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+// The helper may cancel, exit, and run its release process before it replies.
+const REQUEST_TIMEOUT: Duration =
+    Duration::from_secs(tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT.as_secs() + 5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_QUEUE_CAPACITY: usize = 32;
 pub(crate) const MUTATION_DISPATCH_WINDOW: Duration = Duration::from_secs(5);
@@ -436,21 +438,12 @@ impl BrokerWorker {
         if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(BrokerClientError::DispatchExpired);
         }
-        let exchange = self
+        let result = self
             .session
             .as_mut()
             .expect("session initialized")
-            .exchange(request);
-        let result = match dispatch_deadline {
-            Some(deadline) => timeout_at(deadline, exchange)
-                .await
-                .map_err(|_| BrokerClientError::DispatchExpired)
-                .and_then(|result| result),
-            None => timeout(REQUEST_TIMEOUT, exchange)
-                .await
-                .map_err(|_| BrokerClientError::Timeout)
-                .and_then(|result| result),
-        };
+            .exchange_before(request, dispatch_deadline)
+            .await;
         if result
             .as_ref()
             .is_err_and(BrokerClientError::poisons_session)
@@ -570,26 +563,16 @@ impl Session {
         &mut self,
         request: SidecarRequest,
     ) -> Result<ExchangeResult, BrokerClientError> {
-        let (expected_channel, expected_id) = match &request {
-            SidecarRequest::Control(envelope) => (Channel::Control, envelope.request_id),
-            SidecarRequest::Operation(envelope) => (Channel::Operation, envelope.request_id),
-        };
-        let mut encoded = serde_json::to_vec(&request).map_err(|_| BrokerClientError::Protocol)?;
-        if encoded.len() > MAX_REQUEST_BYTES {
-            return Err(BrokerClientError::Protocol);
-        }
-        encoded.push(b'\n');
-        let stdin = self.stdin.as_mut().ok_or(BrokerClientError::Closed)?;
-        stdin
-            .write_all(&encoded)
-            .await
-            .map_err(|_| BrokerClientError::Closed)?;
-        stdin.flush().await.map_err(|_| BrokerClientError::Closed)?;
+        self.exchange_before(request, None).await
+    }
 
-        let frame = read_frame(&mut self.stdout).await?;
-        let response: SidecarResponse =
-            serde_json::from_slice(&frame).map_err(|_| BrokerClientError::Protocol)?;
-        decode_response(response, expected_channel, expected_id)
+    async fn exchange_before(
+        &mut self,
+        request: SidecarRequest,
+        dispatch_deadline: Option<Instant>,
+    ) -> Result<ExchangeResult, BrokerClientError> {
+        let stdin = self.stdin.as_mut().ok_or(BrokerClientError::Closed)?;
+        exchange_with_io(request, stdin, &mut self.stdout, dispatch_deadline).await
     }
 
     async fn stop(mut self) {
@@ -599,6 +582,77 @@ impl Session {
         }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+    }
+}
+
+async fn exchange_with_io(
+    request: SidecarRequest,
+    stdin: &mut (impl AsyncWrite + Unpin),
+    stdout: &mut (impl AsyncBufRead + Unpin),
+    dispatch_deadline: Option<Instant>,
+) -> Result<ExchangeResult, BrokerClientError> {
+    if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(BrokerClientError::DispatchExpired);
+    }
+    let confirmed_native_input = matches!(
+        &request,
+        SidecarRequest::Control(ControlEnvelope {
+            request: ControlRequest::CuConfirmControlAction(_),
+            ..
+        })
+    );
+    let (expected_channel, expected_id) = match &request {
+        SidecarRequest::Control(envelope) => (Channel::Control, envelope.request_id),
+        SidecarRequest::Operation(envelope) => (Channel::Operation, envelope.request_id),
+    };
+    let mut encoded = serde_json::to_vec(&request).map_err(|_| BrokerClientError::Protocol)?;
+    if encoded.len() > MAX_REQUEST_BYTES {
+        return Err(BrokerClientError::Protocol);
+    }
+    encoded.push(b'\n');
+    let write = async {
+        stdin
+            .write_all(&encoded)
+            .await
+            .map_err(|_| BrokerClientError::Closed)?;
+        stdin.flush().await.map_err(|_| BrokerClientError::Closed)
+    };
+    let read = async {
+        let frame = read_frame(stdout).await?;
+        let response: SidecarResponse =
+            serde_json::from_slice(&frame).map_err(|_| BrokerClientError::Protocol)?;
+        decode_response(response, expected_channel, expected_id)
+    };
+    if confirmed_native_input {
+        // A confirmed action may leave keys or buttons pressed. Bound admission
+        // separately so the broker stays alive for the helper's full cleanup
+        // window after this single frame has been sent. Never replay the frame.
+        match dispatch_deadline {
+            Some(deadline) => timeout_at(deadline, write)
+                .await
+                .map_err(|_| BrokerClientError::DispatchExpired)?,
+            None => timeout(REQUEST_TIMEOUT, write)
+                .await
+                .map_err(|_| BrokerClientError::Timeout)?,
+        }?;
+        return timeout(REQUEST_TIMEOUT, read)
+            .await
+            .map_err(|_| BrokerClientError::Timeout)
+            .and_then(|result| result);
+    }
+    let exchange = async {
+        write.await?;
+        read.await
+    };
+    match dispatch_deadline {
+        Some(deadline) => timeout_at(deadline, exchange)
+            .await
+            .map_err(|_| BrokerClientError::DispatchExpired)
+            .and_then(|result| result),
+        None => timeout(REQUEST_TIMEOUT, exchange)
+            .await
+            .map_err(|_| BrokerClientError::Timeout)
+            .and_then(|result| result),
     }
 }
 
@@ -809,12 +863,126 @@ impl BrokerClientError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_deadline_allows_helper_cancellation_and_release() {
+        assert!(
+            super::REQUEST_TIMEOUT
+                >= tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                    + std::time::Duration::from_secs(5)
+        );
+    }
+
     use tidebreak_host_broker::{
         sidecar::{SidecarResponse, TransportError, TransportErrorCode},
         ControlResponseEnvelope, ControlResult, HelloResult, Response,
     };
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_control_waits_for_cleanup_after_dispatch_deadline_without_replay() {
+        let request_id = RequestId::new();
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let expected_request = serde_json::to_vec(&request).unwrap();
+        let (mut client_write, mut server_read) = tokio::io::duplex(4096);
+        let (mut server_write, client_read) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut reader = BufReader::new(&mut server_read);
+            assert_eq!(read_frame(&mut reader).await.unwrap(), expected_request);
+            tokio::time::sleep(MUTATION_DISPATCH_WINDOW + Duration::from_secs(1)).await;
+            let response = SidecarResponse::Control(ControlResponseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id,
+                response: Response::Error(tidebreak_host_broker::ErrorResponse {
+                    code: ErrorCode::Internal,
+                    message: "input cleanup completed".into(),
+                    retryable: false,
+                }),
+            });
+            let mut encoded = serde_json::to_vec(&response).unwrap();
+            encoded.push(b'\n');
+            server_write.write_all(&encoded).await.unwrap();
+            let mut extra = Vec::new();
+            reader.read_to_end(&mut extra).await.unwrap();
+            assert!(extra.is_empty(), "confirmed control must never replay");
+        });
+        let started = Instant::now();
+        let result = exchange_with_io(
+            request,
+            &mut client_write,
+            &mut BufReader::new(client_read),
+            Some(started + MUTATION_DISPATCH_WINDOW),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BrokerClientError::Broker { ref message, .. }) if message == "input cleanup completed"),
+            "confirmation must receive the cleanup response, not expire at dispatch deadline"
+        );
+        assert!(Instant::now() > started + MUTATION_DISPATCH_WINDOW);
+        drop(client_write);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_confirmation_is_not_dispatched() {
+        use tokio::io::AsyncReadExt as _;
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let (mut write, mut peer) = tokio::io::duplex(4096);
+        let result = exchange_with_io(
+            request,
+            &mut write,
+            &mut BufReader::new(tokio::io::empty()),
+            Some(Instant::now()),
+        )
+        .await;
+        assert!(matches!(result, Err(BrokerClientError::DispatchExpired)));
+        drop(write);
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty(), "expired confirmation must send no frame");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_control_response_still_has_a_cleanup_bound() {
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let (mut write, _peer) = tokio::io::duplex(4096);
+        let (_server, read) = tokio::io::duplex(4096);
+        let started = Instant::now();
+        let result = exchange_with_io(
+            request,
+            &mut write,
+            &mut BufReader::new(read),
+            Some(started + MUTATION_DISPATCH_WINDOW),
+        )
+        .await;
+        assert!(matches!(result, Err(BrokerClientError::Timeout)));
+        assert_eq!(Instant::now() - started, REQUEST_TIMEOUT);
+    }
 
     #[test]
     fn native_stop_and_resume_replace_the_generation() {

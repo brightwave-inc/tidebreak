@@ -580,10 +580,11 @@ fn map_output(
             let outcome = if output.acts_on_host
                 && matches!(
                     error_code.as_str(),
-                    "computer_unavailable" | "operation_failed"
+                    "computer_unavailable" | "operation_failed" | "control_yielded"
                 ) {
                 // The helper may have changed the target before transport or
-                // post-action verification failed. A failure is not a refusal.
+                // post-action verification failed. A key sequence can also yield
+                // after sending input. A failure is not a refusal.
                 message = "The host could not confirm the computer-use operation. Inspect the target before acting again; do not repeat the action automatically.".into();
                 if let Some(data) = result.as_object_mut() {
                     data.insert("message".into(), serde_json::Value::String(message.clone()));
@@ -918,7 +919,9 @@ mod tests {
             (false, "computer_unavailable", ComputerUseOutcome::Rejected),
             (false, "operation_failed", ComputerUseOutcome::Rejected),
             (true, "requires_foreground", ComputerUseOutcome::Rejected),
-            (true, "control_yielded", ComputerUseOutcome::Rejected),
+            (true, "control_yielded", ComputerUseOutcome::Unknown),
+            (false, "control_yielded", ComputerUseOutcome::Rejected),
+            (true, "stopped_by_user", ComputerUseOutcome::Rejected),
         ] {
             let result = map_output(
                 &one,

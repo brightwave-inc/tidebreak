@@ -137,6 +137,7 @@ enum Control {
 
     /// The broker rotates this generation when control stops or resumes.
     static func ensureNotCancelled(_ request: HelperRequest) throws {
+        try InputRecovery.checkCancellation(request)
         guard request.cancelPath != nil || request.cancelGeneration != nil else { return }
         guard let path = request.cancelPath, let generation = request.cancelGeneration,
             !generation.isEmpty, generation != "stopped",
@@ -371,23 +372,23 @@ enum Control {
         var pressedModifiers = 0
         var keyIsDown = false
         defer {
-            if keyIsDown { post(up, app: app, request: request) }
+            if keyIsDown { try? post(up, app: app, request: request) }
             for modUp in modifierUps.suffix(pressedModifiers) {
-                post(modUp, app: app, request: request)
+                try? post(modUp, app: app, request: request)
             }
         }
         for modDown in modifierDowns {
             try ensureNotCancelled(request)
-            post(modDown, app: app, request: request)
+            try post(modDown, app: app, request: request)
             pressedModifiers += 1
         }
         if !modifiers.isEmpty { usleep(keyPressHoldMicros) }
         try ensureNotCancelled(request)
-        post(down, app: app, request: request)
+        try post(down, app: app, request: request)
         keyIsDown = true
         usleep(keyPressHoldMicros)
         try ensureNotCancelled(request)
-        post(up, app: app, request: request)
+        try post(up, app: app, request: request)
         keyIsDown = false
         return Result(
             executionMode: request.executionMode ?? .background, success: true, usedFallback: false,
@@ -442,11 +443,11 @@ enum Control {
                 code: .operationFailed, message: "could not position the pointer for scrolling")
         }
         try ensureNotCancelled(request)
-        post(move, app: app, request: request)
+        try post(move, app: app, request: request)
         usleep(20_000)
         event.location = point
         try ensureNotCancelled(request)
-        post(event, app: app, request: request)
+        try post(event, app: app, request: request)
         return Result(
             executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
             detail: "scroll dx \(dx) dy \(dy)")
@@ -564,7 +565,7 @@ enum Control {
                 code: .operationFailed, message: "could not synthesize pointer movement")
         }
         try ensureNotCancelled(request)
-        post(move, app: app, request: request)
+        try post(move, app: app, request: request)
         usleep(50_000)
         return Result(
             executionMode: request.executionMode ?? .background, success: true, usedFallback: true,
@@ -621,7 +622,7 @@ enum Control {
         try ensureNotCancelled(request)
         try deliverDrag(
             count: moves.count,
-            press: { post(down, app: app, request: request) },
+            press: { try post(down, app: app, request: request) },
             move: { index in
                 try ensureNotCancelled(request)
                 try ensureNoSystemDialogFrontmost()
@@ -635,13 +636,13 @@ enum Control {
                 }
                 try ensurePointInApp(points[index], app: app, request: request)
                 moves[index].timestamp = DispatchTime.now().uptimeNanoseconds
-                post(moves[index], app: app, request: request)
+                try post(moves[index], app: app, request: request)
                 lastPoint = points[index]
             },
             release: {
                 up.location = lastPoint
                 up.timestamp = DispatchTime.now().uptimeNanoseconds
-                post(up, app: app, request: request)
+                try? post(up, app: app, request: request)
             },
             pause: { Thread.sleep(forTimeInterval: interval) })
         return Result(
@@ -664,10 +665,10 @@ enum Control {
     /// After the press, any failure has an uncertain outcome: releasing may
     /// complete a drop, so it must never be reported as a refusal before input.
     static func deliverDrag(
-        count: Int, press: () -> Void, move: (Int) throws -> Void,
+        count: Int, press: () throws -> Void, move: (Int) throws -> Void,
         release: () -> Void, pause: () -> Void
     ) throws {
-        press()
+        try press()
         defer { release() }
         do {
             for index in 0..<count {
@@ -1223,10 +1224,12 @@ enum Control {
         CGEventSource(stateID: .combinedSessionState)
     }
 
-    private static func post(_ event: CGEvent, app: NSRunningApplication, request: HelperRequest) {
+    private static func post(_ event: CGEvent, app: NSRunningApplication, request: HelperRequest)
+        throws
+    {
         // Every synthesized-input entry point rejects background before it reaches this function.
         precondition(request.executionMode == .foreground)
-        event.post(tap: .cghidEventTap)
+        try InputRecovery.post(event, request: request)
     }
 
     private static func resolveBackgroundPoint(app: NSRunningApplication, request: HelperRequest)
@@ -1437,8 +1440,8 @@ enum Control {
                 down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
                 up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
             }
-            post(down, app: app, request: request)
-            post(up, app: app, request: request)
+            try post(down, app: app, request: request)
+            try post(up, app: app, request: request)
         }
     }
 
@@ -1511,8 +1514,8 @@ enum Control {
                 up.keyboardSetUnicodeString(
                     stringLength: length, unicodeString: buffer.baseAddress!)
             }
-            post(down, app: app, request: request)
-            post(up, app: app, request: request)
+            try post(down, app: app, request: request)
+            try post(up, app: app, request: request)
             usleep(perKeystrokeDelayMicros)
         }
     }

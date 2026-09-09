@@ -16,6 +16,8 @@ import Foundation
 /// The operation the broker is asking the helper to perform. snake_case on the
 /// wire.
 enum HelperOp: String, Decodable {
+    // Broker-only recovery; this operation is never exposed in tool schemas.
+    case releaseRecordedInput = "release_recorded_input"
     case permissions
     case requestPermissions = "request_permissions"
     case listWindows = "list_windows"
@@ -71,6 +73,9 @@ struct HelperRequest: Decodable {
     /// Broker-owned cancellation generation for this operation.
     let cancelPath: String?
     let cancelGeneration: String?
+    let inputJournalPath: String?
+    let inputCancelPath: String?
+    let inputInvocationId: String?
     /// `capture` target discriminator.
     let target: CaptureTargetKind?
     /// macOS bundle id (e.g. "com.apple.Notes") — for app-scoped capture and
@@ -206,6 +211,8 @@ struct CUHelper {
 
         do {
             switch request.op {
+            case .releaseRecordedInput:
+                emit(try InputRecovery.releaseRecorded(request))
             case .permissions:
                 emit(Permissions.status())
             case .requestPermissions:

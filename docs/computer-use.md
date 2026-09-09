@@ -96,6 +96,17 @@ its existing read/capture grants after control stops. Chrome stops its whole
 connection, including observation, and requires a newly approved connection.
 Use **Stop sharing** or revoke the app grant to withdraw observation access.
 
+If a native helper times out, Tidebreak first cancels that invocation and waits
+for its release code. If the helper crashes or must be killed, the broker
+releases only the mouse buttons and keys recorded for that invocation. It
+preserves controls that you physically hold and keeps your pointer at its current
+position. The action's outcome remains unknown. This recovery requires the
+broker to remain running; it does not cover a desktop or system crash.
+
+If input cleanup fails, Tidebreak keeps the private recovery journal and refuses
+further foreground input. Release any held mouse buttons or keys before
+restarting Tidebreak. Native observation remains available.
+
 If a response is lost after an action starts, Tidebreak records an unknown
 outcome. The agent inspects the current state before proposing another action.
 Reusing the original request does not repeat uncertain input.
