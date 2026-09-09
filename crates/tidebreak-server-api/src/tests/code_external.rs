@@ -2789,6 +2789,27 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     let grant_token = completed["token"].as_str().unwrap().to_owned();
     let grant_id = completed["grant"]["id"].as_str().unwrap().to_owned();
 
+    let (status, missing) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &grant_token,
+        Some(serde_json::json!({
+            "external_key":"T1/C-missing/1.1", "repository":"ACME/Unregistered",
+            "channel_id":"C-missing", "set_by":{"identity":"U1", "display":"Casey"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        missing["kind"], "repository_unconfirmed",
+        "an unregistered repository must reach channel consent before cloning"
+    );
+    assert!(runtime
+        .repo_by_origin(&service, "acme/unregistered")
+        .await
+        .is_err());
+
     let (status, body) = call_json(
         &router,
         "POST",

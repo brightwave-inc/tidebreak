@@ -99,6 +99,17 @@ impl CodeRuntime {
         Ok(list_repos(&self.db, owner).await?)
     }
 
+    /// Validate the GitHub name supplied by an adapter before recording consent.
+    pub fn canonical_external_repository(origin: &str) -> Result<String, ServerError> {
+        let Some((owner, name)) = parse_repository_origin(origin) else {
+            return Err(ServerError::bad_request_kind(
+                "repo_origin_invalid",
+                "Name a GitHub repository as owner/name.",
+            ));
+        };
+        Ok(format!("{owner}/{name}").to_ascii_lowercase())
+    }
+
     /// The owner's registered repository whose origin is `owner/name`, for
     /// callers that name repositories the way a forge does. Both parts
     /// compare case-insensitively, as GitHub does; a removed registration

@@ -2394,3 +2394,19 @@ pub mod memory_sweep_run {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod code_session_context {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+    #[sea_orm(table_name = "code_session_context")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        pub channel_id: Option<String>,
+        pub parent_session_id: Option<Uuid>,
+        pub request_key: Option<String>,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

@@ -1921,3 +1921,73 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
 
 #[allow(dead_code)]
 fn _db_type_is_used(_: &DbStore) {}
+
+#[tokio::test]
+async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
+    use tidebreak_core::PermissionMode;
+    let (addr, token, runtime, _ran, _dir) = internal_engine_app(vec![Step::Text(
+        "The first issue affects all three repositories.",
+    )])
+    .await;
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U", "W")
+        .await
+        .unwrap();
+    let bearer = pair.token;
+    let client = reqwest::Client::new();
+    let endpoint = format!("http://{addr}/external/code/sessions");
+    let body =
+        serde_json::json!({"external_key":"W:C:unanchored", "title":"Triage across repositories"});
+    let created = client
+        .post(&endpoint)
+        .bearer_auth(&bearer)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: serde_json::Value = created.json().await.unwrap();
+    let id: SessionId = serde_json::from_value(created["session_id"].clone()).unwrap();
+    let session = runtime.get_session(&owner, id).await.unwrap();
+    assert!(session.workspace_id.is_none());
+    assert_eq!(session.harness_kind, tidebreak_core::HarnessKind::Internal);
+    assert_eq!(
+        session.execution_location,
+        tidebreak_core::ExecutionLocation::Machine
+    );
+    assert_eq!(session.permission_mode, PermissionMode::Ask);
+    assert!(
+        tidebreak_core::db::code::session_bound_to_grant(&runtime.db, &owner, id, grant.id)
+            .await
+            .unwrap()
+    );
+    let repeated: serde_json::Value = client
+        .post(&endpoint)
+        .bearer_auth(&bearer)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repeated["session_id"], created["session_id"]);
+    assert_eq!(repeated["status"], "existing");
+    assert!(tidebreak_core::db::code::list_repos(&runtime.db, &owner)
+        .await
+        .unwrap()
+        .is_empty());
+    let message: serde_json::Value = client.post(format!("{endpoint}/{id}/messages"))
+        .bearer_auth(&bearer).json(&serde_json::json!({
+            "text": "Which issue should I fix first?", "event_id": "Ev-no-repository", "channel_ts": "1.0"
+        })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(message["outcome"], "new_turn");
+    wait_for_turn_statuses(&client, addr, &token, id, &["completed"]).await;
+    let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, id, 0, 200)
+        .await
+        .unwrap();
+    assert!(events.events.iter().any(|event| matches!(&event.event, tidebreak_core::Event::AssistantMessage { text, .. } if text.contains("all three repositories"))));
+}

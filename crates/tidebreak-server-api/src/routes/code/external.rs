@@ -93,8 +93,8 @@ async fn require_bound(
 pub struct ExternalSessionBody {
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
-    /// The repository the sandbox clones, by record id. One of `repo_id`
-    /// and `repository` is required; `repo_id` wins when both are sent.
+    /// An optional repository workspace. With neither selector, create an
+    /// internal-engine conversation. `repo_id` wins when both are sent.
     #[serde(default)]
     pub repo_id: Option<RepoId>,
     /// The repository by its origin, `owner/name`, resolved against the
@@ -164,15 +164,20 @@ pub async fn external_get_or_create(
         .code
         .clone()
         .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
-    let repo_id = match (body.repo_id, body.repository.as_deref()) {
-        (Some(id), _) => id,
-        (None, Some(origin)) => runtime.repo_by_origin(&grant.owner, origin).await?.id,
-        (None, None) => {
-            return Err(ServerError::bad_request_kind(
-                "repo_required",
-                "name the repository by `repo_id` or as `repository: owner/name`",
-            ));
-        }
+    let registered = match body.repo_id {
+        Some(id) => Some(runtime.get_repo(&grant.owner, id).await?),
+        None => None,
+    };
+    let repository = match registered.as_ref() {
+        Some(repo) => match (repo.origin_owner.as_deref(), repo.origin_name.as_deref()) {
+            (Some(owner), Some(name)) => Some(format!("{owner}/{name}")),
+            _ => body.repository.clone(),
+        },
+        None => body
+            .repository
+            .as_deref()
+            .map(tidebreak_server_core::code::runtime::CodeRuntime::canonical_external_repository)
+            .transpose()?,
     };
     if grant.kind.is_workspace() {
         let channel_id = body
@@ -186,63 +191,76 @@ pub async fn external_get_or_create(
                     "a workspace grant names the channel that will run this session",
                 )
             })?;
-        let repo = runtime.get_repo(&grant.owner, repo_id).await?;
-        let repository = match (
-            repo.origin_owner.as_deref(),
-            repo.origin_name.as_deref(),
-            body.repository.as_deref(),
-        ) {
-            (Some(owner), Some(name), _) => format!("{owner}/{name}"),
-            (_, _, Some(origin)) => origin.to_owned(),
-            _ => {
-                return Err(ServerError::bad_request_kind(
-                    "repo_origin_unknown",
-                    "the repository records no origin to confirm",
-                ));
-            }
-        };
-        let existing = tidebreak_core::db::code::get_external_binding(
-            &runtime.db,
-            &grant.owner,
-            &grant.channel_kind,
-            &body.external_key,
-        )
-        .await?;
-        if existing.is_none()
-            && !tidebreak_core::db::code::channel_repository_is_confirmed(
-                &runtime.db,
-                &grant.owner,
-                grant.id,
-                channel_id,
-                &repository,
-            )
-            .await?
-        {
-            let set_by = body.set_by.as_ref().ok_or_else(|| {
+        if body.repo_id.is_some() || repository.is_some() {
+            let repository = repository.as_deref().ok_or_else(|| {
                 ServerError::bad_request_kind(
-                    "set_by_required",
-                    "name who set this channel's repository",
+                    "repo_origin_unknown",
+                    "The repository records no origin to confirm.",
                 )
             })?;
-            tidebreak_core::db::code::ensure_pending_channel_repository(
+            let existing = tidebreak_core::db::code::get_external_binding(
                 &runtime.db,
                 &grant.owner,
-                grant.id,
-                channel_id,
-                &repository,
-                &set_by.identity,
-                &set_by.display,
+                &grant.channel_kind,
+                &body.external_key,
             )
             .await?;
-            return Err(ServerError::conflict_kind(
-                "repository_unconfirmed",
-                "an admin has not confirmed this channel's repository",
-            ));
+            if existing.is_none()
+                && !tidebreak_core::db::code::channel_repository_is_confirmed(
+                    &runtime.db,
+                    &grant.owner,
+                    grant.id,
+                    channel_id,
+                    repository,
+                )
+                .await?
+            {
+                let set_by = body.set_by.as_ref().ok_or_else(|| {
+                    ServerError::bad_request_kind(
+                        "set_by_required",
+                        "name who set this channel's repository",
+                    )
+                })?;
+                tidebreak_core::db::code::ensure_pending_channel_repository(
+                    &runtime.db,
+                    &grant.owner,
+                    grant.id,
+                    channel_id,
+                    repository,
+                    &set_by.identity,
+                    &set_by.display,
+                )
+                .await?;
+                return Err(ServerError::conflict_kind(
+                    "repository_unconfirmed",
+                    "an admin has not confirmed this channel's repository",
+                ));
+            }
         }
     }
     let owner_kind = state
         .principal_authenticator
         .session_owner_kind_for(&grant.owner);
+    let repo_id = match (registered, repository.as_deref()) {
+        (Some(repo), _) => Some(repo.id),
+        (None, None) => None,
+        (None, Some(origin)) => {
+            let attribution = if grant.kind.is_workspace()
+                || owner_kind == Some("service")
+                || body.acts_as == Some(tidebreak_core::ActsAs::Bot)
+            {
+                tidebreak_server_core::obo_gateway::GitForgeAttributionRequest::Installation
+            } else {
+                tidebreak_server_core::obo_gateway::GitForgeAttributionRequest::Person
+            };
+            Some(
+                runtime
+                    .prepare_external_repository(&grant.owner, grant.id, origin, attribution)
+                    .await?
+                    .id,
+            )
+        }
+    };
     let (resolution, identity) = runtime
         .external_get_or_create(
             &grant.owner,
@@ -265,6 +283,22 @@ pub async fn external_get_or_create(
             body.acts_as,
         )
         .await?;
+    let bound_session = match &resolution {
+        ExternalSessionResolution::Created(binding)
+        | ExternalSessionResolution::Existing(binding) => Some(binding.session_id),
+        _ => None,
+    };
+    if let Some(session) = bound_session {
+        tidebreak_core::db::code::set_session_context(
+            &runtime.db,
+            &grant.owner,
+            session,
+            body.channel_id.as_deref(),
+            None,
+            None,
+        )
+        .await?;
+    }
     let response_from =
         |status: &'static str, session_id: SessionId, binding_id| ExternalSessionResponse {
             status,
