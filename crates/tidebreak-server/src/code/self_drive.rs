@@ -405,6 +405,47 @@ impl SessionTool {
         };
         let child = if let Some(grant) = &auth.grant {
             let external_key = format!("child/{}/{}", auth.parent.id, key);
+            // A previous attempt may have committed the binding before its
+            // context row (a crash between the two writes). Resolve the
+            // binding first so a retry repairs the context instead of
+            // creating a second child for the same request key.
+            if let Some(binding) = tidebreak_core::db::code::get_external_binding(
+                &runtime.db,
+                &auth.parent.owner,
+                &grant.channel_kind,
+                &external_key,
+            )
+            .await?
+            {
+                let child = runtime
+                    .get_session(&auth.parent.owner, binding.session_id)
+                    .await?;
+                if child.acts_as() != auth.parent.acts_as() {
+                    return Err(ServerError::conflict_kind(
+                        "child_identity_mismatch",
+                        "This child session's forge identity differs from the parent conversation; start a new child instead.",
+                    ));
+                }
+                let context = tidebreak_core::db::code::session_context(
+                    &runtime.db,
+                    &auth.parent.owner,
+                    child.id,
+                )
+                .await?;
+                if context.is_none() {
+                    tidebreak_core::db::code::set_session_context(
+                        &runtime.db,
+                        &auth.parent.owner,
+                        child.id,
+                        auth.channel.as_deref(),
+                        Some(auth.parent.id),
+                        Some(key),
+                    )
+                    .await?;
+                }
+                send(runtime, &auth, &child, task, key).await?;
+                return snapshot(runtime, &auth.parent.owner, child).await;
+            }
             let (resolution, _) = runtime
                 .external_get_or_create(
                     &auth.parent.owner,
@@ -416,7 +457,7 @@ impl SessionTool {
                     Some(task.chars().take(60).collect()),
                     harness,
                     settings,
-                    None,
+                    Some(auth.parent.permission_mode),
                     Some(auth.parent.acts_as()),
                 )
                 .await?;
@@ -441,25 +482,52 @@ impl SessionTool {
                     None,
                 )
                 .await?;
-            runtime
-                .create_session(
+            // Write the parent link before the worker can attach, so a crash
+            // between creation and attach never leaves a running child that
+            // no parent can reach or deduplicate.
+            let child = runtime
+                .create_session_of_kind_unattached(
                     &auth.parent.owner,
                     auth.parent.owner_kind.as_deref(),
                     workspace.id,
+                    tidebreak_core::SessionKind::Interactive,
                     harness,
                     settings,
+                    None,
                 )
-                .await?
+                .await?;
+            tidebreak_core::db::code::set_session_context(
+                &runtime.db,
+                &auth.parent.owner,
+                child.id,
+                auth.channel.as_deref(),
+                Some(auth.parent.id),
+                Some(key),
+            )
+            .await?;
+            runtime.attach_and_spawn_worker(child.clone()).await?
         };
-        tidebreak_core::db::code::set_session_context(
-            &runtime.db,
-            &auth.parent.owner,
-            child.id,
-            auth.channel.as_deref(),
-            Some(auth.parent.id),
-            Some(key),
-        )
-        .await?;
+        if child.acts_as() != auth.parent.acts_as() {
+            return Err(ServerError::conflict_kind(
+                "child_identity_mismatch",
+                "The child session could not keep the parent conversation's forge identity; start a new child instead.",
+            ));
+        }
+        if auth.grant.is_some() {
+            // Fresh grant-path children: the worker was attached by
+            // `external_get_or_create` after the binding committed. Attach no
+            // turn before this context write; a crash here is repaired by the
+            // binding pre-check above.
+            tidebreak_core::db::code::set_session_context(
+                &runtime.db,
+                &auth.parent.owner,
+                child.id,
+                auth.channel.as_deref(),
+                Some(auth.parent.id),
+                Some(key),
+            )
+            .await?;
+        }
         send(runtime, &auth, &child, task, key).await?;
         snapshot(runtime, &auth.parent.owner, child).await
     }
@@ -561,7 +629,7 @@ async fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::db::code::{insert_repo, insert_session};
+    use tidebreak_core::db::code::{insert_repo, insert_session, set_session_context};
     use tidebreak_core::{CodeRepo, RepoId};
 
     async fn setup() -> (
@@ -589,11 +657,17 @@ mod tests {
             None,
             None,
         );
-        runtime
-            .adapters
-            .register(Arc::new(crate::scripted_harness::ScriptedAdapter::new(
+        // The child-create arc inherits the parent's permission mode (Allow
+        // in the shared fixture), so the scripted adapter must honestly
+        // advertise that it can honor Allow. Without the capability, the
+        // session worker refuses at create time with
+        // `permission_mode_unavailable`; the gate is the point.
+        runtime.adapters.register(Arc::new(
+            crate::scripted_harness::ScriptedAdapter::new(
                 crate::scripted_harness::plain_text_script(),
-            )));
+            )
+            .with_allow_mode(tidebreak_core::CapLevel::Supported),
+        ));
         let runtime = Arc::new(runtime);
         let host = Arc::new(SessionTools::default());
         host.attach(&runtime);
@@ -659,13 +733,23 @@ mod tests {
             host: host.clone(),
             name: "code_session_create",
         };
-        let first_args = json!({"repository":"acme/one","task":"Inspect one","request_key":"one"});
+        let first_args = json!({
+            "repository": "acme/one",
+            "task": "Inspect one",
+            "request_key": "one",
+            "harness": "claude_code"
+        });
         let first = tool.run(&runtime, &ctx, first_args.clone()).await.unwrap();
         let second = tool
             .run(
                 &runtime,
                 &ctx,
-                json!({"repository":"acme/two","task":"Inspect two","request_key":"two"}),
+                json!({
+                    "repository": "acme/two",
+                    "task": "Inspect two",
+                    "request_key": "two",
+                    "harness": "claude_code"
+                }),
             )
             .await
             .unwrap();
@@ -715,6 +799,23 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(denied.kind(), "not_found");
+        let run_turn = SessionTool {
+            host: host.clone(),
+            name: "code_run_turn",
+        };
+        let denied = run_turn
+            .run(
+                &runtime,
+                &foreign,
+                json!({
+                    "session_id": first["session_id"],
+                    "text": "Should not reach the child",
+                    "request_key": "foreign-nudge"
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.kind(), "not_found");
     }
 
     #[tokio::test]
@@ -754,5 +855,99 @@ mod tests {
             denied.kind(),
             "unauthorized" | "parent_unavailable"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_crash_before_context_is_repaired_by_the_next_child_create_retry() {
+        let (_dir, runtime, host, parent) = setup().await;
+        let (grant, _) = runtime
+            .mint_adapter_grant(&parent.owner, "slack", "U", "W")
+            .await
+            .unwrap();
+        tidebreak_core::db::code::bind_external_session(
+            &runtime.db,
+            &parent.owner,
+            grant.id,
+            "slack",
+            "W/C/1",
+            parent.id,
+        )
+        .await
+        .unwrap();
+        set_session_context(&runtime.db, &parent.owner, parent.id, Some("C"), None, None)
+            .await
+            .unwrap();
+        // A prior attempt committed the child binding but crashed before the
+        // context row: the child is not yet reachable as a direct child.
+        let repo = runtime
+            .repo_by_origin(&parent.owner, "acme/one")
+            .await
+            .unwrap();
+        let workspace = runtime
+            .create_workspace(&parent.owner, repo.id, Some("orphan".into()), None, None)
+            .await
+            .unwrap();
+        let settings = NewSessionSettings {
+            permission_mode: parent.permission_mode,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            permission_mode_ceiling: None,
+            acts_as: Some(parent.acts_as()),
+        };
+        let child = runtime
+            .create_session(
+                &parent.owner,
+                parent.owner_kind.as_deref(),
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                settings,
+            )
+            .await
+            .unwrap();
+        tidebreak_core::db::code::bind_external_session(
+            &runtime.db,
+            &parent.owner,
+            grant.id,
+            "slack",
+            &format!("child/{}/one", parent.id),
+            child.id,
+        )
+        .await
+        .unwrap();
+
+        let tool = SessionTool {
+            host: host.clone(),
+            name: "code_session_create",
+        };
+        let result = tool
+            .run(
+                &runtime,
+                &ToolCtx::without_private_scratch(parent.id, None),
+                json!({
+                    "repository": "acme/one",
+                    "task": "Inspect one",
+                    "request_key": "one",
+                    "harness": "claude_code"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["session_id"], child.id.to_string());
+        let context =
+            tidebreak_core::db::code::session_context(&runtime.db, &parent.owner, child.id)
+                .await
+                .unwrap()
+                .expect("the retry repairs the missing context");
+        assert_eq!(context.parent_session_id, Some(parent.id));
+        assert_eq!(context.request_key.as_deref(), Some("one"));
+        assert_eq!(
+            tidebreak_core::db::code::child_sessions(&runtime.db, &parent.owner, parent.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the retry must not create a rival child for the same binding"
+        );
     }
 }

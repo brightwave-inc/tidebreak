@@ -52,7 +52,7 @@ impl CodeRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn create_session_of_kind_unattached(
+    pub(crate) async fn create_session_of_kind_unattached(
         &self,
         owner: &OwnerId,
         owner_kind: Option<&str>,
