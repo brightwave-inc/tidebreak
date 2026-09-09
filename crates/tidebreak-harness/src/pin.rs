@@ -55,7 +55,7 @@ pub const PINS: &[HarnessPin] = &[
     },
     HarnessPin {
         kind: HarnessKind::Codex,
-        version: "0.153.0",
+        version: "0.153.4",
         package: "@openai/codex",
         bin: "codex",
     },
@@ -440,6 +440,15 @@ mod tests {
         ] {
             assert!(pin_for(kind).is_some(), "{kind}");
         }
+    }
+
+    /// Codex 0.153.0 lacks gpt-6-astra model metadata and falls back through
+    /// Model Gateway. 0.153.4 embeds Astra while keeping the same route id.
+    #[test]
+    fn codex_pin_supplies_astra_metadata_line() {
+        let pin = pin_for(HarnessKind::Codex).expect("codex pin");
+        assert_eq!(pin.package, "@openai/codex");
+        assert_eq!(pin.version, "0.153.4");
     }
 
     #[test]
