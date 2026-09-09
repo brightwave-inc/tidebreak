@@ -246,10 +246,11 @@ markers, not as decorative advertising.
   surfaces. `EmptyMedia variant="icon"` draws no container at all, and it is
   the only icon treatment allowed on an empty surface.
 - Live agent, workspace, tool, and plan status uses the `Loader` comet variant
-  in the `live` tone. Indeterminate action progress uses `Spinner`; a busy
-  refresh control swaps to that glyph. Do not put `animate-spin` on `RefreshCw`
-  or `RotateCw`: Lucide's ink box is not the viewBox center, so the glyph
-  orbits.
+  in the `live` tone. Every comet shares one rotation phase, so a tool that
+  starts later stays in step with the workspace mark already spinning.
+  Indeterminate action progress uses `Spinner`; a busy refresh control swaps
+  to that glyph. Do not put `animate-spin` on `RefreshCw` or `RotateCw`:
+  Lucide's ink box is not the viewBox center, so the glyph orbits.
 
 ### Destructive actions
 

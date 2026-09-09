@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { Loader } from "@/components/motion/loader";
@@ -42,6 +42,28 @@ export const CometSizes: Story = {
       ))}
     </div>
   ),
+};
+
+/** Late mounts join the same rotation, they do not start from 12 o'clock. */
+export const SyncedAcrossMounts: Story = {
+  render: function Render() {
+    const [joined, setJoined] = useState(false);
+    useEffect(() => {
+      const id = window.setTimeout(() => setJoined(true), 450);
+      return () => window.clearTimeout(id);
+    }, []);
+    return (
+      <div className="flex items-center gap-6 text-live">
+        <Loader variant="comet" size={24} label="Already spinning" />
+        <Loader variant="comet" size={16} label="Same cycle, smaller" />
+        {joined ? (
+          <Loader variant="comet" size={24} label="Joined later" />
+        ) : (
+          <span className="text-xs text-muted-foreground">joining…</span>
+        )}
+      </div>
+    );
+  },
 };
 
 export const StatusContexts: Story = {
