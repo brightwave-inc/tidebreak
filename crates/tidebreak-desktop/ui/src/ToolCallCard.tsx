@@ -13,9 +13,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
 import { ToolCardShell } from "./ToolCardShell";
-import { ToolOutputPreview } from "./ToolOutputPreview";
-import { toolPreviewHeadline, toolPreviewPresentation } from "./ToolPreview";
+import {
+  RUNNING_COLLAPSED_LINES,
+  ToolOutputPreview,
+} from "./ToolOutputPreview";
+import {
+  toolPreviewHeadline,
+  toolPreviewPresentation,
+  toolResultFact,
+} from "./ToolPreview";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { MiddleTruncate } from "./code/MiddleTruncate";
 
 /**
  * What a first-run sandbox image pull is doing, said where the person is
@@ -304,14 +312,16 @@ const FALLBACK_TOOL: ToolPresentation = {
 /**
  * The card for a command the agent ran.
  *
- * The title is the agent's own sentence about what it is doing, because "Ran a
- * command" is the same sentence whether it listed a directory or rebuilt the
- * workspace, and an argument vector is not a sentence at all to a reader who
- * does not read shell. A call that narrated nothing falls back to the command
- * itself, in monospace. Either way the literal command and its output are in
- * the body, one click away. It opens while the command is still running;
- * a settled card, including a failed one, collapses back to one line once
- * the badge carries the outcome.
+ * The collapsed title is a grounded action plus target: the model's display
+ * summary when it wrote one, otherwise a short command head that middle-
+ * truncates instead of widening the journal. A short factual result (exit
+ * line, first error) sits under the title when it helps; successful rows stay
+ * quiet. The literal command, cwd, and full streams stay one click away and
+ * are unchanged on approval cards.
+ *
+ * Running rows open with a height-bounded tail. Failed rows open so the error
+ * is one click from the badge and already excerpted on the row. Successful
+ * settled rows stay collapsed.
  *
  * Only tools that project a preview get a card. Everything else lives in the
  * activity rail, where a line of text is the whole story the renderer has.
@@ -326,6 +336,11 @@ export function ToolCommandCard({
   const command = toolPreviewPresentation(preview, result);
   const headline = toolPreviewHeadline(preview);
   const running = presentation.tone === "running";
+  const failed =
+    presentation.tone === "failed" ||
+    Boolean(result?.timedOut) ||
+    (typeof result?.exitCode === "number" && result.exitCode !== 0);
+  const fact = toolResultFact(result, { failed });
   // Live, unjournaled state: only a command that is still running can be the
   // one waiting on the image, and a settled card must never claim it is.
   const preparing =
@@ -334,14 +349,24 @@ export function ToolCommandCard({
   // A command that finished silently has nothing to tab between, and a
   // "Command / Output → no output" pair reads as confusing noise.
   const tabbed = running || output !== null;
+  // A failed row keeps its fact on the subtitle even while expanded, so the
+  // eye never loses the reason it opened. Successful facts only appear once.
+  const subtitle =
+    fact && (failed || presentation.tone === "completed") ? fact : null;
 
   return (
-    <div className="flex max-w-prose flex-col gap-1.5">
+    <div className="flex w-full min-w-0 flex-col gap-1.5">
       <ToolCardShell
         label={`${presentation.label}: ${presentation.statusLabel}`}
         icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
-        title={headline.text}
-        titleClassName={headline.literal ? "font-mono" : undefined}
+        title={
+          headline.literal ? (
+            <MiddleTruncate text={headline.text} className="font-mono" />
+          ) : (
+            headline.text
+          )
+        }
+        subtitle={subtitle}
         badge={
           <>
             {result?.backend && (
@@ -363,11 +388,11 @@ export function ToolCommandCard({
         trailing={
           <ToolStatusIcon tone={presentation.tone} className="size-3.5" />
         }
-        defaultExpanded={running}
+        defaultExpanded={running || failed}
       >
         {tabbed ? (
           <Tabs defaultValue="output">
-            <TabsList className="flex w-full items-center justify-start gap-1 px-0">
+            <TabsList className="flex w-full min-w-0 items-center justify-start gap-1 px-0">
               <TabsTrigger value="command" className="py-1 text-xs capitalize">
                 command
               </TabsTrigger>
@@ -375,8 +400,8 @@ export function ToolCommandCard({
                 output
               </TabsTrigger>
             </TabsList>
-            <div className="pt-1">
-              <TabsContent value="command" className="mt-0">
+            <div className="min-w-0 pt-1">
+              <TabsContent value="command" className="mt-0 min-w-0">
                 <ToolOutputPreview
                   text={command.detail}
                   collapsedLines={12}
@@ -384,7 +409,7 @@ export function ToolCommandCard({
                   bare
                 />
               </TabsContent>
-              <TabsContent value="output" className="mt-0">
+              <TabsContent value="output" className="mt-0 min-w-0">
                 {output === null ? (
                   <p className="text-muted-foreground flex items-center gap-1.5 py-1 text-xs">
                     <Loader
@@ -397,7 +422,12 @@ export function ToolCommandCard({
                   </p>
                 ) : null}
                 {output !== null && (
-                  <ToolOutputPreview text={output} collapsedLines={12} bare />
+                  <ToolOutputPreview
+                    text={output}
+                    collapsedLines={running ? RUNNING_COLLAPSED_LINES : 12}
+                    followTail={running || failed}
+                    bare
+                  />
                 )}
               </TabsContent>
             </div>

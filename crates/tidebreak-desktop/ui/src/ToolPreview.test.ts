@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ToolActionPreview } from "./api";
-import { toolPreviewHeadline, toolPreviewPresentation } from "./ToolPreview";
+import {
+  toolPreviewHeadline,
+  toolPreviewPresentation,
+  toolResultFact,
+} from "./ToolPreview";
 
 describe("toolPreviewPresentation", () => {
   it("reads a command back as the argument vector it will run", () => {
@@ -81,11 +85,13 @@ describe("how a call narrates itself", () => {
     expect(literal.detail).not.toContain("Clearing");
   });
 
-  it("leads a settled card with the sentence, and falls back to the command", () => {
+  it("leads a settled card with the sentence, and falls back to a grounded target", () => {
     expect(toolPreviewHeadline(narrated)).toEqual({
       text: "Clearing the stale build directory",
       literal: false,
     });
+    // No model sentence: command head plus the path-like argument, not the
+    // full argv — long flags must not become the collapsed title.
     expect(
       toolPreviewHeadline({
         tool: "exec",
@@ -94,7 +100,63 @@ describe("how a call narrates itself", () => {
         cwd: ".",
         files: [],
       }),
-    ).toEqual({ text: "rm -rf /tmp/build", literal: true });
+    ).toEqual({ text: "rm build", literal: true });
+  });
+});
+
+describe("grounded exec headlines and result facts", () => {
+  it("prefers a path-like argument as the meaningful target", () => {
+    expect(
+      toolPreviewHeadline({
+        tool: "exec",
+        command: "python3",
+        args: ["/workspace/very/long/path/to/scripts/render.py", "--verbose"],
+        cwd: ".",
+        files: [],
+      }),
+    ).toEqual({ text: "python3 render.py", literal: true });
+  });
+
+  it("surfaces a short stderr fact for a failed run without inventing copy", () => {
+    expect(
+      toolResultFact(
+        {
+          tool: "exec",
+          exitCode: 1,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "noise\n",
+          stderr: "Error: Cannot find module 'pptxgenjs'\n    at main\n",
+        },
+        { failed: true },
+      ),
+    ).toBe("Error: Cannot find module 'pptxgenjs'");
+  });
+
+  it("keeps a successful multi-line run quiet", () => {
+    expect(
+      toolResultFact({
+        tool: "exec",
+        exitCode: 0,
+        timedOut: false,
+        outputTruncated: false,
+        stdout: "line one\nline two\n",
+        stderr: "",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a single short successful stdout line as a fact", () => {
+    expect(
+      toolResultFact({
+        tool: "exec",
+        exitCode: 0,
+        timedOut: false,
+        outputTruncated: false,
+        stdout: "Checked 12 files in 41ms. No fixes applied.\n",
+        stderr: "",
+      }),
+    ).toBe("Checked 12 files in 41ms. No fixes applied.");
   });
 });
 
