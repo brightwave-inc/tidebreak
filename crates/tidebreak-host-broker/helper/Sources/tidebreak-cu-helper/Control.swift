@@ -1358,28 +1358,42 @@ enum Control {
     /// that activation: the leading keystrokes land in the previously-frontmost
     /// app (or are dropped) and only the tail reaches the target, which is
     /// exactly the "only a couple characters get typed" symptom. Activate, then
-    /// spin the run loop until the app reports active (bounded) so the whole
-    /// burst lands where intended. Refuse input if the granted app does not
+    /// spin the run loop until the workspace reports the target frontmost.
+    /// Refuse input if the granted app does not
     /// become frontmost before the bound.
     private static func activateAndWait(_ app: NSRunningApplication, request: HelperRequest) throws
     {
         try ensureNotCancelled(request)
         app.activate()
-        let deadline = Date().addingTimeInterval(activationTimeout)
-        while !app.isActive, Date() < deadline {
-            try ensureNotCancelled(request)
-            // Pump briefly so the workspace's activation notification can land
-            // and flip `isActive`, with a sleep floor underneath it: this is a
-            // single-shot CLI with no NSApplication, so the run loop usually has
-            // no input source and `run(before:)` returns immediately — without
-            // the floor the loop would hot-spin a core until activation or the
-            // deadline. ~5ms/iteration keeps it cheap.
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-            usleep(5_000)
+        try waitForActivation(
+            timeout: activationTimeout,
+            isFrontmost: {
+                NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            },
+            check: {
+                try ensureNotCancelled(request)
+                try ensureNoSystemDialogFrontmost()
+            },
+            now: { ProcessInfo.processInfo.systemUptime },
+            pause: {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+                usleep(5_000)
+            })
+    }
+
+    static func waitForActivation(
+        timeout: TimeInterval, isFrontmost: () -> Bool,
+        check: () throws -> Void, now: () -> TimeInterval, pause: () -> Void
+    ) throws {
+        let deadline = now() + timeout
+        // isActive can change before the workspace's frontmost PID. Wait for
+        // the same observation that guards input after approval UI closes.
+        while !isFrontmost(), now() < deadline {
+            try check()
+            pause()
         }
-        try ensureNoSystemDialogFrontmost()
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
-        else {
+        try check()
+        guard isFrontmost() else {
             throw HelperError(code: .yielded, message: "the granted app did not become frontmost")
         }
     }

@@ -3768,7 +3768,7 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             ),
             BackendErrorKind::Yielded => (
                 ErrorCode::Yielded,
-                "a system security surface owns the foreground",
+                "computer control stopped before the operation could finish",
                 false,
             ),
             BackendErrorKind::TargetOutsideApp => (

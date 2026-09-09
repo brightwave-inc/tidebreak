@@ -4989,6 +4989,10 @@ fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
     assert_eq!(response.code, ErrorCode::Yielded);
     assert_ne!(response.code, ErrorCode::Denied);
     assert!(!response.retryable);
+    assert_eq!(
+        response.message,
+        "computer control stopped before the operation could finish"
+    );
 }
 
 #[test]

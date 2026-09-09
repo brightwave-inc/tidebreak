@@ -11,6 +11,10 @@ struct HelperTests {
         print("PASS testDragAlwaysReleasesAfterMoveFailure")
         suite.testPartialDragReportsUncertainOutcome()
         print("PASS testPartialDragReportsUncertainOutcome")
+        try suite.testActivationWaitsForTheFrontmostApp()
+        print("PASS testActivationWaitsForTheFrontmostApp")
+        suite.testActivationWaitIsBoundedAndCancellable()
+        print("PASS testActivationWaitIsBoundedAndCancellable")
         try suite.testSuccessfulDragReleasesExactlyOnce()
         print("PASS testSuccessfulDragReleasesExactlyOnce")
         suite.testDragPointsBoundStepsAndReachExactEndpoint()
@@ -41,7 +45,7 @@ struct HelperTests {
         print("PASS testExecutionModeIsExplicitInControlResults")
         suite.testBackgroundScrollClampsAtEachEnd()
         print("PASS testBackgroundScrollClampsAtEachEnd")
-        print("18 helper regression tests passed")
+        print("20 helper regression tests passed")
     }
 
     func testScrollDirectionMatchesAPI() {
@@ -142,6 +146,40 @@ struct HelperTests {
             }
             expectEqual(events, ["press", "move0", "release"])
         }
+    }
+
+    func testActivationWaitsForTheFrontmostApp() throws {
+        var polls = 0
+        try Control.waitForActivation(
+            timeout: 0.6, isFrontmost: { polls >= 3 }, check: {},
+            now: { Double(polls) * 0.01 }, pause: { polls += 1 })
+        expectEqual(polls, 3)
+    }
+
+    func testActivationWaitIsBoundedAndCancellable() {
+        var time: TimeInterval = 0
+        expectError(
+            try Control.waitForActivation(
+                timeout: 0.6, isFrontmost: { false }, check: {},
+                now: { time }, pause: { time += 0.1 })) { error in
+            expectEqual((error as? HelperError)?.code, .yielded)
+        }
+        expectAtLeast(time, 0.6)
+        expectAtMost(time, 0.7)
+
+        var polls = 0
+        expectError(
+            try Control.waitForActivation(
+                timeout: 0.6, isFrontmost: { false },
+                check: {
+                    if polls == 1 {
+                        throw HelperError(code: .yielded, message: "fixture stopped")
+                    }
+                },
+                now: { Double(polls) * 0.01 }, pause: { polls += 1 })) { error in
+            expectEqual((error as? HelperError)?.code, .yielded)
+        }
+        expectEqual(polls, 1)
     }
 
     func testSuccessfulDragReleasesExactlyOnce() throws {

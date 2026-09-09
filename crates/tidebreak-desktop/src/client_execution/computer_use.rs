@@ -1574,7 +1574,7 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
     match code {
         ErrorCode::Yielded => BrokerFailure::Resolution(unavailable(
             "control_yielded",
-            "A system security surface owns the foreground, so the action was refused. Do not retry; tell the user what you were trying to do.",
+            "Computer control stopped before the operation could finish. Do not retry automatically; tell the user what you were trying to do.",
         )),
         // The blocklist was pre-checked natively, so Denied is a grant miss —
         // every computer-use op names a grantable capability (a display
@@ -3323,8 +3323,15 @@ mod tests {
             retryable: false,
         };
         match map_broker_error(&error) {
-            BrokerFailure::Resolution(StoredResolution::Failed { error_code, .. }) => {
+            BrokerFailure::Resolution(StoredResolution::Failed {
+                error_code, result, ..
+            }) => {
                 assert_eq!(error_code, "control_yielded");
+                assert!(
+                    result.contains("Computer control stopped before the operation could finish.")
+                );
+                assert!(result.contains("Do not retry automatically"));
+                assert!(!result.contains("system security surface"));
             }
             _ => panic!("a yield must never become a consent card"),
         }
