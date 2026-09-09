@@ -28,7 +28,7 @@ type ToolOutputPreviewProps = {
   label?: string;
   /**
    * Plain indented output: no surface, no padding box. The expander reads
-   * "Show all N lines" instead of "Show N more lines".
+   * "· · · N more lines" instead of "Show N more lines".
    */
   bare?: boolean;
   /**
@@ -123,7 +123,7 @@ export function ToolOutputPreview({
           {expanded
             ? "Show less"
             : bare
-              ? `Show all ${lines.length} lines`
+              ? `· · · ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`
               : `Show ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`}
         </button>
       )}

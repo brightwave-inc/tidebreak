@@ -52,7 +52,7 @@ describe("ToolOutputPreview", () => {
     expect(body.textContent).not.toContain("line 8");
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Show all 12 lines" }),
+      screen.getByRole("button", { name: "· · · 8 more lines" }),
     );
     expect(screen.getByLabelText("Output").textContent).toMatch(/^line 1$/m);
   });

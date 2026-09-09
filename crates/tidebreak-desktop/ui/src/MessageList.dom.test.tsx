@@ -742,7 +742,11 @@ describe("command output", () => {
     list({ ...ran, stdout: "two tests passed\n" });
 
     await user.click(screen.getByRole("button", { name: /cargo build/ }));
-    expect(screen.getByText(/two tests passed/)).toBeInTheDocument();
+    // The quiet fact may also sit under the title; the output pane is the
+    // expanded body the reader opened for.
+    expect(screen.getByLabelText("Output")).toHaveTextContent(
+      "two tests passed",
+    );
 
     await user.click(screen.getByRole("tab", { name: "command" }));
     expect(
