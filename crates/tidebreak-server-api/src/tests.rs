@@ -50,6 +50,7 @@ mod code_clone;
 mod code_create;
 mod code_doctor;
 mod code_external;
+mod code_external_model;
 #[cfg(unix)]
 mod code_git;
 mod code_hosted_execution;

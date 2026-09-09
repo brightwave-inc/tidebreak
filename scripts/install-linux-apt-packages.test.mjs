@@ -108,6 +108,11 @@ test("rewrites the Azure Ubuntu mirror to archive.ubuntu.com on amd64", () => {
     result.mirrors,
     "https://archive.ubuntu.com/ubuntu\tpriority:1\n",
   );
+  assert.match(
+    result.conf,
+    /Acquire::CompressionTypes::Order \{ "xz"; "uncompressed"; "gz"; \};/,
+  );
+  assert.match(result.conf, /Acquire::CompressionTypes::uncompressed "\.";/);
   assert.match(result.conf, /Acquire::Retries "3";/);
   assert.match(result.conf, /Acquire::http::Timeout "20";/);
   assert.match(

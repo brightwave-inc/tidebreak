@@ -136,5 +136,5 @@ actions. A locked Mac cannot qualify these checks.
 
 Use an isolated development app and profile when testing Tidebreak itself.
 The controlling Tidebreak app and operating-system authentication surfaces remain
-blocked. See [decision 94](decisions/0094-computer-use-for-coding-harnesses.md)
+blocked. See [decision 95](decisions/0095-computer-use-for-coding-harnesses.md)
 for the architecture and permission contract.

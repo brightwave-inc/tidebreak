@@ -52,6 +52,27 @@ pub trait ProviderResolver: Send + Sync {
         self.resolve().await
     }
 
+    /// Resolve an internal session without replacing its external grant with
+    /// a browser sign-in. Other embedders keep their owner-scoped routing.
+    async fn resolve_for_session(
+        &self,
+        owner: Option<&OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> Arc<dyn ModelProvider> {
+        let _ = session;
+        self.resolve_for(owner).await
+    }
+
+    /// The model catalog carried by this session's credential authority.
+    async fn session_gateway_snapshot(
+        &self,
+        owner: Option<&OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> tidebreak_core::Result<Option<providers::GatewayModelSnapshot>> {
+        let _ = (owner, session);
+        Ok(None)
+    }
+
     /// Whether public model selections must resolve through the host registry.
     ///
     /// Production configured routing returns true. Test/custom embedders that
@@ -69,6 +90,7 @@ pub trait ProviderResolver: Send + Sync {
 /// OpenAI-compatible free-form fallback remains only for legacy stored rows;
 /// new public selections must be registered first. No default provider: empty
 /// config ⇒ no egress.
+#[derive(Clone)]
 pub struct ConfiguredResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
@@ -77,7 +99,8 @@ pub struct ConfiguredResolver {
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
-    cached: Mutex<CachedProviders>,
+    cached: Arc<Mutex<CachedProviders>>,
+    external: Option<Arc<crate::obo_gateway::external::ExternalDelegations>>,
 }
 
 impl ConfiguredResolver {
@@ -104,7 +127,8 @@ impl ConfiguredResolver {
             provisioned_policy,
             os_policy,
             on_behalf_of: None,
-            cached: Mutex::new(HashMap::new()),
+            cached: Arc::new(Mutex::new(HashMap::new())),
+            external: None,
         }
     }
 
@@ -121,6 +145,29 @@ impl ConfiguredResolver {
         self.on_behalf_of = on_behalf_of;
         self
     }
+
+    pub fn with_external_delegations(mut self, db: Arc<tidebreak_core::DbStore>) -> Self {
+        self.external = self.on_behalf_of.as_ref().map(|gateway| {
+            Arc::new(crate::obo_gateway::external::ExternalDelegations::new(
+                gateway.clone(),
+                db,
+            ))
+        });
+        self
+    }
+
+    async fn session_gateway(
+        &self,
+        owner: Option<&OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> tidebreak_core::Result<Option<Arc<crate::obo_gateway::OboGateway>>> {
+        if let (Some(external), Some(owner)) = (&self.external, owner) {
+            if let Some(gateway) = external.for_session(owner, session).await? {
+                return Ok(Some(gateway));
+            }
+        }
+        Ok(self.on_behalf_of.clone())
+    }
 }
 
 /// Backward-compatible alias — earlier slices called this `KeyedResolver`.
@@ -133,6 +180,45 @@ impl ProviderResolver for ConfiguredResolver {
     }
 
     async fn resolve_for(&self, owner: Option<&OwnerId>) -> Arc<dyn ModelProvider> {
+        self.resolve_with_gateway(owner, self.on_behalf_of.as_ref(), true)
+            .await
+    }
+
+    async fn resolve_for_session(
+        &self,
+        owner: Option<&OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> Arc<dyn ModelProvider> {
+        Arc::new(SessionProvider {
+            resolver: self.clone(),
+            owner: owner.cloned(),
+            session,
+        })
+    }
+
+    async fn session_gateway_snapshot(
+        &self,
+        owner: Option<&OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> tidebreak_core::Result<Option<providers::GatewayModelSnapshot>> {
+        match (self.session_gateway(owner, session).await?, owner) {
+            (Some(gateway), Some(owner)) => gateway.snapshot_for(owner).await,
+            _ => Ok(None),
+        }
+    }
+
+    fn enforces_model_registry(&self) -> bool {
+        true
+    }
+}
+
+impl ConfiguredResolver {
+    async fn resolve_with_gateway(
+        &self,
+        owner: Option<&OwnerId>,
+        authority: Option<&Arc<crate::obo_gateway::OboGateway>>,
+        use_cache: bool,
+    ) -> Arc<dyn ModelProvider> {
         // A profile that claims to be managed but whose policy cannot be read
         // fails closed: no egress, rather than quietly reverting to BYOK routes.
         let Ok(policy) =
@@ -148,7 +234,7 @@ impl ProviderResolver for ConfiguredResolver {
         // (decision 62); a snapshot that cannot be resolved right now — the
         // gateway unreachable past the stale grace, or the caller's session
         // dead — yields no gateway route, which also fails closed.
-        let on_behalf_of = match (self.on_behalf_of.as_ref(), owner) {
+        let on_behalf_of = match (authority, owner) {
             (Some(gateway), Some(owner)) => {
                 let snapshot = match gateway.snapshot_for(owner).await {
                     Ok(snapshot) => snapshot,
@@ -183,11 +269,16 @@ impl ProviderResolver for ConfiguredResolver {
         // Reuse this caller's cached provider while their route set is
         // unchanged. The lock is held only across the cheap clone below —
         // never over an await.
-        let key = self
-            .on_behalf_of
-            .is_some()
-            .then(|| owner.cloned())
-            .flatten();
+        if !use_cache {
+            // Token sources carry a grant. An owner-wide cache can otherwise
+            // reuse a browser token or another connection with identical models.
+            return if fingerprint.is_empty() {
+                Arc::new(UnconfiguredProvider)
+            } else {
+                Arc::new(router)
+            };
+        }
+        let key = authority.is_some().then(|| owner.cloned()).flatten();
         let mut cached = self.cached.lock().unwrap();
         if let Some((cached_fp, provider)) = cached.get(&key) {
             if *cached_fp == fingerprint {
@@ -204,8 +295,49 @@ impl ProviderResolver for ConfiguredResolver {
         cached.insert(key, (fingerprint, provider.clone()));
         provider
     }
+}
 
-    fn enforces_model_registry(&self) -> bool {
-        true
+/// Recheck the session's grant before every model request, including the
+/// requests after a tool finishes inside the same turn.
+struct SessionProvider {
+    resolver: ConfiguredResolver,
+    owner: Option<OwnerId>,
+    session: tidebreak_core::SessionId,
+}
+
+#[async_trait]
+impl ModelProvider for SessionProvider {
+    fn id(&self) -> tidebreak_core::ProviderId {
+        tidebreak_core::ProviderId::new("router")
+    }
+
+    async fn stream(
+        &self,
+        request: tidebreak_core::ChatRequest,
+    ) -> tidebreak_core::Result<futures::stream::BoxStream<'static, tidebreak_core::ProviderEvent>>
+    {
+        let gateway = self
+            .resolver
+            .session_gateway(self.owner.as_ref(), self.session)
+            .await?;
+        let provider = self
+            .resolver
+            .resolve_with_gateway(self.owner.as_ref(), gateway.as_ref(), false)
+            .await;
+        // Entitlement refresh can overlap a local revocation.
+        let confirmed = self
+            .resolver
+            .session_gateway(self.owner.as_ref(), self.session)
+            .await?;
+        if !match (&gateway, &confirmed) {
+            (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+            (None, None) => true,
+            _ => false,
+        } {
+            return Err(tidebreak_core::AgentError::SignInRequired(
+                "The external connection changed during model preparation. Retry the turn.".into(),
+            ));
+        }
+        provider.stream(request).await
     }
 }

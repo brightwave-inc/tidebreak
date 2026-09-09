@@ -340,6 +340,22 @@ impl ProviderResolver for DiagnosticProviderResolver {
         self.wrap(self.inner.resolve_for(owner).await)
     }
 
+    async fn resolve_for_session(
+        &self,
+        owner: Option<&tidebreak_core::OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> Arc<dyn ModelProvider> {
+        self.wrap(self.inner.resolve_for_session(owner, session).await)
+    }
+
+    async fn session_gateway_snapshot(
+        &self,
+        owner: Option<&tidebreak_core::OwnerId>,
+        session: tidebreak_core::SessionId,
+    ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
+        self.inner.session_gateway_snapshot(owner, session).await
+    }
+
     fn enforces_model_registry(&self) -> bool {
         self.inner.enforces_model_registry()
     }

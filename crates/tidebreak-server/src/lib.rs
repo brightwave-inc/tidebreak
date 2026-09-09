@@ -1232,7 +1232,8 @@ async fn bind_inner(
             provisioned_policy.clone(),
             os_policy.clone(),
         )
-        .with_on_behalf_of_gateway(on_behalf_of_gateway.clone()),
+        .with_on_behalf_of_gateway(on_behalf_of_gateway.clone())
+        .with_external_delegations(db.clone()),
     );
     // In debug builds only — release profiles compile with `debug_assertions`
     // off, so this is absent from every released binary — a scripted provider
@@ -1328,6 +1329,9 @@ async fn bind_inner(
         foreground_browser_semantic_actions,
         cancellation_acceleration,
     );
+    let session_tools = Arc::new(code::self_drive::SessionTools::default());
+    let mut tools = tools;
+    session_tools.register(&mut tools);
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
     // runtime, so it is injected at assembly rather than patched in after:
@@ -1482,6 +1486,7 @@ async fn bind_inner(
         _ => runtime,
     };
     let code = Arc::new(runtime);
+    session_tools.attach(&code);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());

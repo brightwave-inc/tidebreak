@@ -30,6 +30,8 @@ pnpm lint
 pnpm test
 ```
 
+Shipping to TestFlight: see [`DEPLOYING.md`](DEPLOYING.md).
+
 ## Pairing
 
 1. Enter the gateway public base URL.

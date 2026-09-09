@@ -72,12 +72,17 @@ fn member_catalog_reasoning_efforts_match_generated_engine_ids() {
         "model-gateway-model-gateway/glm-5.3",
         "model-gateway-default/zai-glm-5.3",
     ] {
+        assert!(gateway_lists_model(&snapshot, selection), "{selection}");
         assert_eq!(
             gateway_reasoning_efforts_for_model(&snapshot, selection),
             Some(expected.as_slice()),
             "{selection}"
         );
     }
+    let mut unstated = snapshot;
+    unstated.model_reasoning_efforts.clear();
+    assert!(gateway_lists_model(&unstated, "anthropic/zai-glm-5.3"));
+    assert!(!gateway_lists_model(&unstated, "unlisted"));
 }
 
 #[test]

@@ -160,6 +160,9 @@ SOURCES
 configure_sources
 
 cat <<CONF | run tee "$apt_conf_dir/99tidebreak-ci" >/dev/null
+// Keep xz for Ubuntu; prefer signed plain indexes over stale gzip mirrors.
+Acquire::CompressionTypes::uncompressed ".";
+Acquire::CompressionTypes::Order { "xz"; "uncompressed"; "gz"; };
 Acquire::Retries "3";
 Acquire::http::Timeout "20";
 Acquire::https::Timeout "20";

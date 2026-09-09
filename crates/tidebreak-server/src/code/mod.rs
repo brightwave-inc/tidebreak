@@ -38,6 +38,7 @@ pub mod rewrite;
 pub mod runtime;
 pub mod scoped;
 pub mod scratch;
+pub mod self_drive;
 pub mod session_worker;
 pub mod setup_script;
 pub mod terminal;
