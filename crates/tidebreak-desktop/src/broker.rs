@@ -27,10 +27,12 @@ use tokio::{
 
 const SIDECAR_NAME: &str = "tidebreak-host-broker";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-// Leave room for a 30s native condition wait and the helper's bounded shutdown.
-// The helper may cancel, exit, and run its release process before it replies.
-const REQUEST_TIMEOUT: Duration =
-    Duration::from_secs(tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT.as_secs() + 5);
+// One native broker request can describe a target and then act, or read an
+// Accessibility tree and then capture. Reserve both helper invocations, each
+// including cancellation and release, plus transport and startup overhead.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(
+    tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT.as_secs() * 2 + 5,
+);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_QUEUE_CAPACITY: usize = 32;
 pub(crate) const MUTATION_DISPATCH_WINDOW: Duration = Duration::from_secs(5);
@@ -864,10 +866,10 @@ impl BrokerClientError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn response_deadline_allows_helper_cancellation_and_release() {
+    fn response_deadline_allows_two_helpers_with_cancellation_and_release() {
         assert!(
             super::REQUEST_TIMEOUT
-                >= tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                >= tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT * 2
                     + std::time::Duration::from_secs(5)
         );
     }
@@ -898,7 +900,11 @@ mod tests {
             use tokio::io::AsyncReadExt as _;
             let mut reader = BufReader::new(&mut server_read);
             assert_eq!(read_frame(&mut reader).await.unwrap(), expected_request);
-            tokio::time::sleep(MUTATION_DISPATCH_WINDOW + Duration::from_secs(1)).await;
+            tokio::time::sleep(
+                tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                    + Duration::from_secs(6),
+            )
+            .await;
             let response = SidecarResponse::Control(ControlResponseEnvelope {
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
@@ -929,6 +935,62 @@ mod tests {
         );
         assert!(Instant::now() > started + MUTATION_DISPATCH_WINDOW);
         drop(client_write);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_native_input_waits_for_description_and_cleanup() {
+        let request_id = RequestId::new();
+        let request = SidecarRequest::Operation(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            context: tidebreak_host_broker::ExecutionContext::standalone(uuid::Uuid::new_v4())
+                .unwrap(),
+            request: tidebreak_host_broker::OperationRequest::CuClick {
+                bundle_id: "dev.tidebreak.fixture".into(),
+                target: tidebreak_host_broker::ElementTargetWire {
+                    element_id: Some("0.1".into()),
+                    ..Default::default()
+                },
+                button: None,
+                click_count: None,
+                execution_mode: tidebreak_host_broker::computer_use::ExecutionMode::Background,
+            },
+        });
+        let (mut client_write, server_read) = tokio::io::duplex(4096);
+        let (mut server_write, client_read) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            read_frame(&mut BufReader::new(server_read)).await.unwrap();
+            tokio::time::sleep(
+                tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                    + Duration::from_secs(6),
+            )
+            .await;
+            let response =
+                SidecarResponse::Operation(tidebreak_host_broker::OperationResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    response: Response::Error(tidebreak_host_broker::ErrorResponse {
+                        code: ErrorCode::Internal,
+                        message: "description and input cleanup completed".into(),
+                        retryable: false,
+                    }),
+                });
+            let mut encoded = serde_json::to_vec(&response).unwrap();
+            encoded.push(b'\n');
+            server_write.write_all(&encoded).await.unwrap();
+        });
+        let result = exchange_with_io(
+            request,
+            &mut client_write,
+            &mut BufReader::new(client_read),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BrokerClientError::Broker { ref message, .. }) if message == "description and input cleanup completed"),
+            "the response bound must include both helper invocations"
+        );
         server.await.unwrap();
     }
 
