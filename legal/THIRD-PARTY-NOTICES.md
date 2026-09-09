@@ -27,9 +27,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 851
+- Rust crates: 853
 - Desktop UI production packages: 536
-- Distinct license texts: 590
+- Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -3672,7 +3672,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Brendonovich/swift-rs
 - License text: `LICENSE-APACHE` ([L-caeafacc0eaf](#l-caeafacc0eaf)), `LICENSE-MIT` ([L-7593ea50d2d4](#l-7593ea50d2d4))
 
-### symphonia 0.6.0
+### symphonia 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
@@ -3708,7 +3708,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-format-mkv 0.6.0
+### symphonia-format-mkv 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
@@ -3749,6 +3749,18 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/mystor/synstructure
 - License text: `LICENSE` ([L-3a036676ec8c](#l-3a036676ec8c))
+
+### system-configuration 0.7.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/mullvad/system-configuration-rs
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-eefdbe714980](#l-eefdbe714980))
+
+### system-configuration-sys 0.6.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/mullvad/system-configuration-rs
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-eefdbe714980](#l-eefdbe714980))
 
 ### system-deps 6.2.2
 
@@ -3816,43 +3828,43 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/tauri
 - License text: not distributed with this package
 
-### tauri-plugin-deep-link 2.4.9
+### tauri-plugin-deep-link 2.4.10
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-dialog 2.7.2
+### tauri-plugin-dialog 2.7.3
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-fs 2.5.1
+### tauri-plugin-fs 2.5.2
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-notification 2.3.3
+### tauri-plugin-notification 2.4.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-shell 2.3.5
+### tauri-plugin-shell 2.3.6
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-single-instance 2.4.3
+### tauri-plugin-single-instance 2.4.4
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-b7f455413bfe](#l-b7f455413bfe))
 
-### tauri-plugin-updater 2.10.1
+### tauri-plugin-updater 2.11.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
@@ -4031,7 +4043,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml 1.1.4+spec-1.1.0
+### toml 1.1.5+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
@@ -4097,7 +4109,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tower-rs/tower-http
 - License text: `LICENSE` ([L-edd4b164997f](#l-edd4b164997f))
 
-### tower-http 0.7.0
+### tower-http 0.7.1
 
 - License: `MIT`
 - Repository: https://github.com/tower-rs/tower-http
@@ -4145,7 +4157,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tracing
 - License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
 
-### trash 5.2.6
+### trash 5.2.7
 
 - License: `MIT`
 - Repository: https://github.com/ArturKovacs/trash
@@ -37835,6 +37847,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-eefdbe714980
+
+```
+Copyright (c) 2024 Mullvad VPN AB
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-efbbbcefb4b8

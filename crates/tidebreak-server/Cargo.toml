@@ -45,7 +45,7 @@ axum = { workspace = true }
 # driver features come from `tidebreak-core`.
 sea-orm = { workspace = true }
 tokio = { workspace = true }
-tower-http = { version = "=0.7.0", features = ["cors", "fs", "limit"] }
+tower-http = { version = "=0.7.1", features = ["cors", "fs", "limit"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

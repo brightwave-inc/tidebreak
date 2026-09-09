@@ -54,7 +54,7 @@ serde_json = { version = "=1.0.151", features = ["unbounded_depth"] }
 # engine (and each other) about what the config declares. A substring scan
 # cannot tell a declared provider from a comment, and the filter must
 # forward exactly the env keys the declared providers name.
-toml = "=1.1.4"
+toml = "=1.1.5"
 schemars = { version = "=1.2.2", features = ["uuid1"] }
 # Validates tool-call arguments against the advertised input_schema at
 # dispatch. No resolvers: schemas come from the registry or a mounted MCP
@@ -116,7 +116,7 @@ reqwest = { version = "=0.13.4", default-features = false, features = ["json", "
 oauth2 = { version = "=5.0.0", default-features = false }
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "=0.11.0"
-symphonia = { version = "=0.6.0", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
+symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
 opus-decoder = "=0.1.1"
 base64 = "=0.23.1"
 minisign-verify = "=0.2.5"
@@ -125,7 +125,7 @@ async-stream = "=0.3.6"
 object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
-trash = { version = "=5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
+trash = { version = "=5.2.7", default-features = false, features = ["coinit_apartmentthreaded"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 # Symphonia 0.6.0 cannot demux the WebM a browser MediaRecorder produces: it
