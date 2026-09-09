@@ -50,6 +50,14 @@ struct Authority {
     lender: Option<Arc<dyn GitCredentialLender>>,
 }
 
+impl Authority {
+    /// The conversation's channel, so a just-created child carries its
+    /// creation origin exactly once.
+    fn parent_channel(&self) -> Option<&str> {
+        self.channel.as_deref()
+    }
+}
+
 async fn authority(runtime: &CodeRuntime, parent: SessionId) -> Result<Authority, ServerError> {
     let parent = tidebreak_core::db::code::get_session_all_owners(&runtime.db, parent)
         .await?
@@ -311,14 +319,12 @@ impl SessionTool {
                 let repo = runtime
                     .get_repo(&auth.parent.owner, workspace.repo_id)
                     .await?;
-                if format!(
+                let bound_origin = format!(
                     "{}/{}",
                     repo.origin_owner.unwrap_or_default(),
                     repo.origin_name.unwrap_or_default()
-                )
-                .to_ascii_lowercase()
-                    != origin.to_ascii_lowercase()
-                {
+                );
+                if !bound_origin.eq_ignore_ascii_case(&origin) {
                     return Err(ServerError::conflict_kind(
                         "request_key_reused",
                         "This request_key already names work in a different repository.",
@@ -437,7 +443,7 @@ impl SessionTool {
                         &runtime.db,
                         &auth.parent.owner,
                         child.id,
-                        auth.channel.as_deref(),
+                        auth.parent_channel(),
                         Some(auth.parent.id),
                         Some(key),
                     )
@@ -457,7 +463,7 @@ impl SessionTool {
                     Some(task.chars().take(60).collect()),
                     harness,
                     settings,
-                    Some(auth.parent.permission_mode),
+                    None,
                     Some(auth.parent.acts_as()),
                 )
                 .await?;
@@ -500,7 +506,7 @@ impl SessionTool {
                 &runtime.db,
                 &auth.parent.owner,
                 child.id,
-                auth.channel.as_deref(),
+                auth.parent_channel(),
                 Some(auth.parent.id),
                 Some(key),
             )
@@ -517,12 +523,14 @@ impl SessionTool {
             // Fresh grant-path children: the worker was attached by
             // `external_get_or_create` after the binding committed. Attach no
             // turn before this context write; a crash here is repaired by the
-            // binding pre-check above.
+            // binding pre-check above. The creation channel is fixed once: a
+            // child is only ever created from the conversation that holds it,
+            // so the first write is the origin and later retries must agree.
             tidebreak_core::db::code::set_session_context(
                 &runtime.db,
                 &auth.parent.owner,
                 child.id,
-                auth.channel.as_deref(),
+                auth.parent_channel(),
                 Some(auth.parent.id),
                 Some(key),
             )
@@ -595,19 +603,39 @@ async fn snapshot(
     owner: &OwnerId,
     session: Session,
 ) -> Result<Value, ServerError> {
-    let page = tidebreak_core::db::code::list_events(&runtime.db, owner, session.id, 0, 64).await?;
-    let output: String = page
-        .events
-        .iter()
-        .filter_map(|e| match &e.event {
-            tidebreak_core::Event::AssistantMessage { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-        .chars()
-        .take(12000)
-        .collect();
+    // The parent-level answer, not a 64-event tail that a huge intermediate
+    // assistant message can squeeze out. Subagent messages stay out of the
+    // parent snapshot entirely, and failure reasons are visible.
+    let page =
+        tidebreak_core::db::code::list_events(&runtime.db, owner, session.id, 0, 200).await?;
+    let mut output = String::new();
+    let mut output_truncated = page.truncated;
+    let mut failure: Option<Value> = None;
+    for entry in page.events {
+        match &entry.event {
+            tidebreak_core::Event::AssistantMessage {
+                text,
+                parent_call_id: None,
+            } => {
+                if !output.is_empty() {
+                    output.push_str("\n\n");
+                }
+                let room = 12000_usize.saturating_sub(output.chars().count());
+                let keep = text.chars().take(room).collect::<String>();
+                if keep.chars().count() < text.chars().count() {
+                    output_truncated = true;
+                }
+                output.push_str(&keep);
+            }
+            tidebreak_core::Event::TurnFailed { error, detail } => {
+                failure = Some(json!({
+                    "message": error.message,
+                    "kind": detail.as_ref().map(|info| info.kind.as_str()),
+                }));
+            }
+            _ => {}
+        }
+    }
     let approvals =
         tidebreak_core::db::code::list_approvals(&runtime.db, owner, None, Some(session.id))
             .await?;
@@ -622,7 +650,7 @@ async fn snapshot(
     Ok(
         json!({"session_id":session.id,"workspace_id":session.workspace_id,"location":session.execution_location,
         "status":session.lifecycle,"running":running,"attention":session.attention,"output":output,
-        "output_truncated":page.truncated,"approvals":pending}),
+        "output_truncated":output_truncated,"failure":failure,"approvals":pending}),
     )
 }
 

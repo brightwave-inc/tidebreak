@@ -198,22 +198,19 @@ pub async fn external_get_or_create(
                     "The repository records no origin to confirm.",
                 )
             })?;
-            let existing = tidebreak_core::db::code::get_external_binding(
+            // A get-or-create under a workspace grant pairs the channel
+            // with a repository on every request. It must be confirmed
+            // before any repository lookup or clone, and an existing
+            // conversation binding must never let a changed selector reach
+            // the clone path.
+            if !tidebreak_core::db::code::channel_repository_is_confirmed(
                 &runtime.db,
                 &grant.owner,
-                &grant.channel_kind,
-                &body.external_key,
+                grant.id,
+                channel_id,
+                repository,
             )
-            .await?;
-            if existing.is_none()
-                && !tidebreak_core::db::code::channel_repository_is_confirmed(
-                    &runtime.db,
-                    &grant.owner,
-                    grant.id,
-                    channel_id,
-                    repository,
-                )
-                .await?
+            .await?
             {
                 let set_by = body.set_by.as_ref().ok_or_else(|| {
                     ServerError::bad_request_kind(
