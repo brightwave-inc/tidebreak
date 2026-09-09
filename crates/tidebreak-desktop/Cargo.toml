@@ -72,6 +72,9 @@ tar = "=0.4.46"
 zip.workspace = true
 
 
+[dev-dependencies]
+tauri = { version = "=2.11.5", features = ["test"] }
+
 [target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 tauri-plugin-single-instance = { version = "=2.4.4", features = ["deep-link"] }
 

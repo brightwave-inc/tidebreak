@@ -63,6 +63,7 @@ mod host_authority;
 mod image_attachments;
 mod menu;
 mod native_cursor_overlay;
+mod native_dialogs;
 mod native_runtime_adapter;
 mod node_install;
 mod office_install;
@@ -854,7 +855,7 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(native_dialogs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
