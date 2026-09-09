@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tidebreak_core::{
-    ApprovalClass, CodeExternalGrant, ExternalSessionResolution, HarnessKind, OwnerId, Session,
-    SessionId, SessionLifecycle, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
-    ToolSpec,
+    ApprovalClass, CodeExternalGrant, ExecutionLocation, ExternalSessionResolution, HarnessKind,
+    OwnerId, PermissionMode, Session, SessionId, SessionLifecycle, Tool, ToolCtx,
+    ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec,
 };
 
 #[derive(Default)]
@@ -48,6 +48,14 @@ struct Authority {
     grant: Option<CodeExternalGrant>,
     channel: Option<String>,
     lender: Option<Arc<dyn GitCredentialLender>>,
+}
+
+impl Authority {
+    /// The conversation's channel, so a just-created child carries its
+    /// creation origin exactly once.
+    fn parent_channel(&self) -> Option<&str> {
+        self.channel.as_deref()
+    }
 }
 
 async fn authority(runtime: &CodeRuntime, parent: SessionId) -> Result<Authority, ServerError> {
@@ -311,14 +319,12 @@ impl SessionTool {
                 let repo = runtime
                     .get_repo(&auth.parent.owner, workspace.repo_id)
                     .await?;
-                if format!(
+                let bound_origin = format!(
                     "{}/{}",
                     repo.origin_owner.unwrap_or_default(),
                     repo.origin_name.unwrap_or_default()
-                )
-                .to_ascii_lowercase()
-                    != origin.to_ascii_lowercase()
-                {
+                );
+                if !bound_origin.eq_ignore_ascii_case(&origin) {
                     return Err(ServerError::conflict_kind(
                         "request_key_reused",
                         "This request_key already names work in a different repository.",
@@ -395,8 +401,22 @@ impl SessionTool {
         } else {
             runtime.repo_by_origin(&auth.parent.owner, &origin).await?
         };
+        let child_location = if auth.grant.is_some() {
+            runtime.external_execution_location()
+        } else {
+            ExecutionLocation::Machine
+        };
+        // Sandbox confinement carries the delegated work's boundary. Machine
+        // children keep the parent's mode even when the channel default differs.
+        let (permission_mode, requested_mode) = match child_location {
+            ExecutionLocation::Sandbox => (PermissionMode::Allow, None),
+            ExecutionLocation::Machine => (
+                auth.parent.permission_mode,
+                Some(auth.parent.permission_mode),
+            ),
+        };
         let settings = NewSessionSettings {
-            permission_mode: auth.parent.permission_mode,
+            permission_mode,
             model: None,
             reasoning_effort: None,
             fast_mode: false,
@@ -437,7 +457,7 @@ impl SessionTool {
                         &runtime.db,
                         &auth.parent.owner,
                         child.id,
-                        auth.channel.as_deref(),
+                        auth.parent_channel(),
                         Some(auth.parent.id),
                         Some(key),
                     )
@@ -457,7 +477,7 @@ impl SessionTool {
                     Some(task.chars().take(60).collect()),
                     harness,
                     settings,
-                    Some(auth.parent.permission_mode),
+                    requested_mode,
                     Some(auth.parent.acts_as()),
                 )
                 .await?;
@@ -500,7 +520,7 @@ impl SessionTool {
                 &runtime.db,
                 &auth.parent.owner,
                 child.id,
-                auth.channel.as_deref(),
+                auth.parent_channel(),
                 Some(auth.parent.id),
                 Some(key),
             )
@@ -517,12 +537,14 @@ impl SessionTool {
             // Fresh grant-path children: the worker was attached by
             // `external_get_or_create` after the binding committed. Attach no
             // turn before this context write; a crash here is repaired by the
-            // binding pre-check above.
+            // binding pre-check above. The creation channel is fixed once: a
+            // child is only ever created from the conversation that holds it,
+            // so the first write is the origin and later retries must agree.
             tidebreak_core::db::code::set_session_context(
                 &runtime.db,
                 &auth.parent.owner,
                 child.id,
-                auth.channel.as_deref(),
+                auth.parent_channel(),
                 Some(auth.parent.id),
                 Some(key),
             )
@@ -595,19 +617,51 @@ async fn snapshot(
     owner: &OwnerId,
     session: Session,
 ) -> Result<Value, ServerError> {
-    let page = tidebreak_core::db::code::list_events(&runtime.db, owner, session.id, 0, 64).await?;
-    let output: String = page
-        .events
-        .iter()
-        .filter_map(|e| match &e.event {
-            tidebreak_core::Event::AssistantMessage { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-        .chars()
-        .take(12000)
-        .collect();
+    let session = runtime.get_session(owner, session.id).await?;
+    let page =
+        tidebreak_core::db::code::list_events(&runtime.db, owner, session.id, 0, 200).await?;
+    let mut answer = None;
+    let mut answer_may_be_missing = page.truncated;
+    let mut failure: Option<Value> = None;
+    for entry in &page.events {
+        match &entry.event {
+            tidebreak_core::Event::TurnStarted { .. } => {
+                answer = None;
+                answer_may_be_missing = false;
+                failure = None;
+            }
+            tidebreak_core::Event::AssistantMessage {
+                text,
+                parent_call_id: None,
+            } if !text.trim().is_empty() => {
+                // A final message replaces interim messages. Nested agents
+                // never replace the child session's own answer.
+                answer = Some(text.as_str());
+            }
+            tidebreak_core::Event::TurnFailed { error, detail } => {
+                failure = Some(json!({
+                    "message": error.message,
+                    "kind": detail.as_ref().map(|info| info.kind.as_str()),
+                }));
+            }
+            tidebreak_core::Event::TurnCompleted { .. } => failure = None,
+            _ => {}
+        }
+    }
+    let mut chars = answer.unwrap_or_default().chars();
+    let output = chars.by_ref().take(12000).collect::<String>();
+    let output_truncated = chars.next().is_some() || (answer.is_none() && answer_may_be_missing);
+    if let Some(reason) = session
+        .fence_reason
+        .as_ref()
+        .filter(|_| session.lifecycle == SessionLifecycle::Fenced)
+    {
+        let reason = json!(reason);
+        failure = Some(json!({
+            "kind": reason["type"],
+            "message": reason["detail"].as_str().unwrap_or("The child process is still running without a supervisor."),
+        }));
+    }
     let approvals =
         tidebreak_core::db::code::list_approvals(&runtime.db, owner, None, Some(session.id))
             .await?;
@@ -622,7 +676,7 @@ async fn snapshot(
     Ok(
         json!({"session_id":session.id,"workspace_id":session.workspace_id,"location":session.execution_location,
         "status":session.lifecycle,"running":running,"attention":session.attention,"output":output,
-        "output_truncated":page.truncated,"approvals":pending}),
+        "output_truncated":output_truncated,"failure":failure,"fence_reason":session.fence_reason,"approvals":pending}),
     )
 }
 
@@ -633,6 +687,18 @@ mod tests {
     use tidebreak_core::{CodeRepo, RepoId};
 
     async fn setup() -> (
+        tempfile::TempDir,
+        Arc<CodeRuntime>,
+        Arc<SessionTools>,
+        Session,
+    ) {
+        setup_with_location(false, PermissionMode::Allow).await
+    }
+
+    async fn setup_with_location(
+        sandbox: bool,
+        parent_mode: PermissionMode,
+    ) -> (
         tempfile::TempDir,
         Arc<CodeRuntime>,
         Arc<SessionTools>,
@@ -657,16 +723,30 @@ mod tests {
             None,
             None,
         );
-        // The child-create arc inherits the parent's permission mode (Allow
-        // in the shared fixture), so the scripted adapter must honestly
-        // advertise that it can honor Allow. Without the capability, the
-        // session worker refuses at create time with
-        // `permission_mode_unavailable`; the gate is the point.
+        runtime = runtime.with_external_permission_policy(
+            tidebreak_core::PermissionMode::Allow,
+            tidebreak_core::PermissionMode::Allow,
+        );
+        if sandbox {
+            runtime =
+                runtime.with_remote_sessions(super::super::remote::service::RemoteSessions::new(
+                    Arc::new(IdleSandbox),
+                    super::super::remote::driver::RemoteSpawnSettings {
+                        profile: "test-confined".into(),
+                        engine: Some(HarnessKind::ClaudeCode),
+                        incarnation_cap: 8,
+                        spend_ceiling_microusd: None,
+                        session_spend_ceiling_microusd: None,
+                    },
+                ));
+        }
+        // The mode tests need both supervised Ask and unattended Allow.
         runtime.adapters.register(Arc::new(
             crate::scripted_harness::ScriptedAdapter::new(
                 crate::scripted_harness::plain_text_script(),
             )
-            .with_allow_mode(tidebreak_core::CapLevel::Supported),
+            .with_allow_mode(tidebreak_core::CapLevel::Supported)
+            .with_approvals(tidebreak_core::CapLevel::Supported),
         ));
         let runtime = Arc::new(runtime);
         let host = Arc::new(SessionTools::default());
@@ -674,6 +754,7 @@ mod tests {
         let mut parent = crate::code::remote::fixtures::session_value();
         parent.workspace_id = None;
         parent.harness_kind = HarnessKind::Internal;
+        parent.permission_mode = parent_mode;
         insert_session(&runtime.db, &parent).await.unwrap();
         for name in ["one", "two"] {
             let root = dir.path().join(name);
@@ -949,5 +1030,282 @@ mod tests {
             1,
             "the retry must not create a rival child for the same binding"
         );
+    }
+
+    struct IdleSandbox;
+
+    #[async_trait]
+    impl super::super::remote::SandboxProvisioner for IdleSandbox {
+        async fn spawn(
+            &self,
+            _owner: &OwnerId,
+            session: SessionId,
+            _arguments: &super::super::remote::wire::SpawnArguments,
+        ) -> Result<
+            super::super::remote::wire::SandboxLease,
+            super::super::remote::RemoteSandboxError,
+        > {
+            Ok(super::super::remote::wire::SandboxLease {
+                sandbox_id: session.to_string(),
+                state: super::super::remote::wire::SandboxState::Pending,
+                latest_event_seq: 0,
+                expires_in_seconds: 7200,
+            })
+        }
+
+        async fn status(
+            &self,
+            _owner: &OwnerId,
+            _session: SessionId,
+            _sandbox_id: &str,
+        ) -> Result<
+            super::super::remote::wire::SandboxStatus,
+            super::super::remote::RemoteSandboxError,
+        > {
+            panic!("a new child does not poll sandbox status during creation")
+        }
+
+        async fn events(
+            &self,
+            _owner: &OwnerId,
+            _session: SessionId,
+            _sandbox_id: &str,
+            _cursor: super::super::remote::wire::EventCursor,
+        ) -> Result<
+            super::super::remote::wire::SandboxEvents,
+            super::super::remote::RemoteSandboxError,
+        > {
+            std::future::pending().await
+        }
+
+        async fn send(
+            &self,
+            _owner: &OwnerId,
+            _session: SessionId,
+            _sandbox_id: &str,
+            _message: &super::super::remote::wire::SandboxMessage,
+        ) -> Result<
+            super::super::remote::wire::MessageReceipt,
+            super::super::remote::RemoteSandboxError,
+        > {
+            panic!("the first child turn is supplied during spawn")
+        }
+
+        async fn cancel(
+            &self,
+            _owner: &OwnerId,
+            _session: SessionId,
+            _sandbox_id: &str,
+        ) -> Result<(), super::super::remote::RemoteSandboxError> {
+            Ok(())
+        }
+    }
+
+    async fn append(runtime: &CodeRuntime, session: &Session, events: Vec<tidebreak_core::Event>) {
+        for event in events {
+            tidebreak_core::db::code::append_event(
+                &runtime.db,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                &event,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    fn turn_started() -> tidebreak_core::Event {
+        tidebreak_core::Event::TurnStarted {
+            turn_id: tidebreak_core::TurnId::new(),
+        }
+    }
+
+    fn answer(text: impl Into<String>) -> tidebreak_core::Event {
+        tidebreak_core::Event::AssistantMessage {
+            text: text.into(),
+            parent_call_id: None,
+        }
+    }
+
+    fn turn_completed() -> tidebreak_core::Event {
+        tidebreak_core::Event::TurnCompleted {
+            usage: Default::default(),
+            checkpoint: None,
+            stop_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_snapshot_keeps_the_final_answer_after_long_interim_and_nested_output() {
+        let (_dir, runtime, _host, session) = setup().await;
+        append(
+            &runtime,
+            &session,
+            vec![
+                turn_started(),
+                answer("x".repeat(12001)),
+                answer("The final result"),
+                tidebreak_core::Event::AssistantMessage {
+                    text: "Nested agent result".into(),
+                    parent_call_id: Some("nested-task".into()),
+                },
+                turn_completed(),
+            ],
+        )
+        .await;
+        let view = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert_eq!(view["output"], "The final result");
+        assert_eq!(view["output_truncated"], false);
+        assert!(view["failure"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_child_snapshot_marks_only_truncation_of_the_selected_answer() {
+        let (_dir, runtime, _host, session) = setup().await;
+        append(
+            &runtime,
+            &session,
+            vec![turn_started(), answer("é".repeat(12001)), turn_completed()],
+        )
+        .await;
+        let view = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert_eq!(view["output"].as_str().unwrap().chars().count(), 12000);
+        assert_eq!(view["output_truncated"], true);
+        let events = (0..70)
+            .flat_map(|_| [turn_started(), answer("Older result"), turn_completed()])
+            .chain([
+                turn_started(),
+                answer("Complete later answer"),
+                turn_completed(),
+            ])
+            .collect();
+        append(&runtime, &session, events).await;
+        let view = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert_eq!(view["output"], "Complete later answer");
+        assert_eq!(
+            view["output_truncated"], false,
+            "omitted history does not truncate a complete final answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_snapshot_clears_old_failures_and_reports_the_current_fence() {
+        let (_dir, runtime, _host, mut session) = setup().await;
+        append(
+            &runtime,
+            &session,
+            vec![
+                turn_started(),
+                answer("Incomplete result"),
+                tidebreak_core::Event::TurnFailed {
+                    error: tidebreak_core::BoundedError {
+                        message: "Credential expired".into(),
+                    },
+                    detail: None,
+                },
+            ],
+        )
+        .await;
+        let failed = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert_eq!(failed["failure"]["message"], "Credential expired");
+        let before_fence = session.clone();
+        session.lifecycle = SessionLifecycle::Fenced;
+        session.fence_reason = Some(tidebreak_core::FenceReason::SandboxLost {
+            detail: "Sandbox node disappeared".into(),
+        });
+        tidebreak_core::db::code::save_session(&runtime.db, &session)
+            .await
+            .unwrap();
+        let fenced = snapshot(&runtime, &session.owner, before_fence)
+            .await
+            .unwrap();
+        assert_eq!(fenced["failure"]["message"], "Sandbox node disappeared");
+        assert_eq!(fenced["fence_reason"]["type"], "sandbox_lost");
+        session.lifecycle = SessionLifecycle::Running;
+        session.fence_reason = None;
+        tidebreak_core::db::code::save_session(&runtime.db, &session)
+            .await
+            .unwrap();
+        append(&runtime, &session, vec![turn_started()]).await;
+        let resumed = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert!(resumed["failure"].is_null());
+        assert_eq!(resumed["output"], "");
+        append(
+            &runtime,
+            &session,
+            vec![answer("Recovered result"), turn_completed()],
+        )
+        .await;
+        session.lifecycle = SessionLifecycle::Idle;
+        tidebreak_core::db::code::save_session(&runtime.db, &session)
+            .await
+            .unwrap();
+        let recovered = snapshot(&runtime, &session.owner, session.clone())
+            .await
+            .unwrap();
+        assert_eq!(recovered["output"], "Recovered result");
+        assert!(recovered["failure"].is_null());
+        assert!(recovered["fence_reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn an_ask_parent_keeps_ask_on_the_machine_and_delegates_allow_to_a_confined_sandbox() {
+        for (external, sandbox) in [(false, false), (true, false), (true, true)] {
+            let (_dir, runtime, host, parent) =
+                setup_with_location(sandbox, PermissionMode::Ask).await;
+            if external {
+                let (grant, _) = runtime
+                    .mint_adapter_grant(&parent.owner, "slack", "U", "W")
+                    .await
+                    .unwrap();
+                tidebreak_core::db::code::bind_external_session(
+                    &runtime.db,
+                    &parent.owner,
+                    grant.id,
+                    "slack",
+                    "W/C/1",
+                    parent.id,
+                )
+                .await
+                .unwrap();
+            }
+            let tool = SessionTool {
+                host,
+                name: "code_session_create",
+            };
+            assert_eq!(tool.approval_class(), ApprovalClass::Sensitive);
+            let created = tool.run(&runtime, &ToolCtx::without_private_scratch(parent.id, None), json!({
+                "repository": "acme/one", "task": "Inspect one", "request_key": "mode", "harness": "claude_code",
+            })).await.unwrap();
+            let child_id = serde_json::from_value(created["session_id"].clone()).unwrap();
+            let child = runtime.get_session(&parent.owner, child_id).await.unwrap();
+            assert_eq!(
+                child.permission_mode,
+                if sandbox {
+                    tidebreak_core::PermissionMode::Allow
+                } else {
+                    tidebreak_core::PermissionMode::Ask
+                }
+            );
+            assert_eq!(
+                child.execution_location,
+                if sandbox {
+                    tidebreak_core::ExecutionLocation::Sandbox
+                } else {
+                    tidebreak_core::ExecutionLocation::Machine
+                }
+            );
+        }
     }
 }

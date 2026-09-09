@@ -435,9 +435,8 @@ child sessions or workspaces.
 
 ### Self-drive child sessions
 
-The internal engine also exposes native tools for starting independent (decision [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md))
-workspace sessions under one conversation and driving them, without moving
-the parent conversation into a repository:
+The internal engine exposes native tools that let one conversation start and drive
+independent workspace sessions (decision [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md)):
 
 - `code_repos` — repositories the conversation's personal or bot identity
   can reach, plus the registered local set when no forge lender exists.
@@ -453,25 +452,25 @@ the parent conversation into a repository:
   snapshot.
 - `code_sessions` — list this conversation's direct children.
 
-Children are real sessions: they inherit the parent's owner, grant,
-permission mode, and forge identity, appear in their own workspaces, and
-are only readable through the parent that created them (a stranger parent
-answering the same session id gets `not_found`). Creating a child is
-`Sensitive`; reading and waiting are `ReadOnly`, and an external grant's
-revocation fails discovery, creation, and child reads closed.
+Children inherit the parent's owner, grant, and forge identity. Machine children
+retain the parent's permission mode; configured sandbox children use Allow under
+sandbox confinement. Each child appears in its own workspace. These tools expose
+children only to the parent that created them. Creating a child is `Sensitive`;
+reading and waiting are `ReadOnly`. Revocation refuses discovery, creation, and reads.
+Snapshots include the latest top-level answer, truncation, and failure information.
 
-Deliberately not yet implemented, so the contract is honest rather than
-claimed:
+The following work remains:
 
 - `code_wait` is polling, not the designed durable child wait/resume park;
   a parent waiting on long-running children must call again, and a
   restart does not resume such a wait.
-- Children run on the machine in local workspaces; sandbox child runs,
-  tree-aware spend budgets, and the desktop/web/thread tree rendering are
-  separate slices (#3193, #3194, #3195).
+- Grant-bound children follow the configured external placement. The broader
+  sandbox-child tool contract, tree budgets, and session tree UI remain in
+  #3193, #3194, and #3195.
 - External harnesses do not yet see these tools: the agent-MCP surface,
   mounted at spawn with a session-scoped capability token, is follow-up
-  (#3192, `0074`).
+  (#3192, `0074`). Native and MCP tool names overlap, but their schemas still
+  need alignment.
 
 ## The event vocabulary
 

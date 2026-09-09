@@ -2702,7 +2702,7 @@ async fn call_json(
 
 #[tokio::test]
 async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_it() {
-    let (router, runtime, repo_id, service, _dir) = workspace_grant_app().await;
+    let (router, runtime, repo_id, service, dir) = workspace_grant_app().await;
 
     let (status, _) = call_json(
         &router,
@@ -2882,6 +2882,65 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+
+    // Simulate a crash after committing the source binding but before its
+    // channel context. An attached destination cannot claim the missing origin.
+    let connection = sea_orm::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        dir.path().join("workspace-grant.db").display(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        connection
+            .execute_unprepared("DELETE FROM code_session_context")
+            .await
+            .unwrap()
+            .rows_affected(),
+        1,
+    );
+    connection.close().await.unwrap();
+    for (key, channel, expected_origin) in [
+        ("T1/C2/2.2", "C2", None),
+        ("T1/C1/1.1", "C1", Some("C1")),
+        ("T1/C2/2.2", "C2", Some("C1")),
+    ] {
+        let (status, response) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &grant_token,
+            Some(serde_json::json!({
+                "external_key": key, "channel_id": channel,
+                "repository": "acme/never-confirmed",
+                "acts_as": "person",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["status"], "existing");
+        assert_eq!(response["session_id"], session_id.to_string());
+        assert_eq!(response["acts_as"], "bot");
+        let context = tidebreak_core::db::code::session_context(&runtime.db, &service, session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            context
+                .as_ref()
+                .and_then(|context| context.channel_id.as_deref()),
+            expected_origin,
+            "only the original binding may repair its missing source channel",
+        );
+    }
+    let context = tidebreak_core::db::code::session_context(&runtime.db, &service, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.channel_id.as_deref(), Some("C1"));
+    assert!(runtime
+        .repo_by_origin(&service, "acme/never-confirmed")
+        .await
+        .is_err());
 
     let binding =
         tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &service, session_id)

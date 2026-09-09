@@ -486,8 +486,8 @@ impl GatewayAuthLease {
         external.enroll(owner, handshake, &self.bearer).await
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(principal: Principal, bearer: std::sync::Arc<str>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(principal: Principal, bearer: std::sync::Arc<str>) -> Self {
         Self { principal, bearer }
     }
 

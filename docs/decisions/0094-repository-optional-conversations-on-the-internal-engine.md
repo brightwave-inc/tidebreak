@@ -8,66 +8,68 @@
 
 ## Context
 
-A Slack conversation must start without selecting a repository; Slack itself defaults
-to that behavior. The internal engine can answer, ask, triage, discover accessible
-repositories, and create or drive children in several independent repository workspaces
-under the same parent conversation. Choosing a single installation repository, or only
-preparing one owner checkout, does not satisfy this. Decision 30s "context selects
-behavior" sentence is amended here: no repository no longer selects the old chat-only
-surface, and decision 48 step 5s repository-less session path is the supported floor.
+A Slack conversation must start without selecting a repository. The internal engine
+can answer questions, triage work, discover accessible repositories, and drive child
+sessions in several repository workspaces. This extends decision 30's context-based
+behavior and uses decision 48's session path without a workspace.
 
 ## Decision
 
-`POST /external/code/sessions` accepts neither `repo_id` nor `repository` and creates a
-workspace-less session on the machines internal engine, bound to the same external grant.
-An explicit `repo_id` or `repository` preserves the existing repository-backed path,
-including sandbox placement when configured.
+`POST /external/code/sessions` accepts a request without `repo_id` or `repository`.
+It creates an internal-engine session on the machine and binds the conversation to
+its external grant. An explicit selector keeps the repository-backed path, including
+sandbox placement when configured. A retry resolves its existing binding before
+inspecting repository selectors. Additional channel bindings preserve the original
+session channel.
 
-The internal engine exposes native self-drive tools `code_repos`, `code_session_create`,
-`code_run_turn`, `code_wait`, and `code_sessions`. One conversation chooses repositories,
-starts child sessions in new workspaces, drives them, and reads their results. Tool names
-and argument shapes reuse the `agent-mcp` vocabulary where the surfaces overlap.
+Before creating a conversation without a repository, the server resolves and freezes
+the chat model. On a Gateway host, the original grant's delegation supplies the catalog
+and inference credential. Browser credentials cannot replace that delegation. A missing
+model or revoked grant refuses admission. Each model request checks the grant again,
+and hosted model routes validate the frozen selection before HTTP dispatch.
 
-Children inherit the parents owner, grant, permission mode, and forge identity. Child
-creation is a Sensitive action; reads and waits are ReadOnly. A revoked grant fails
-discovery, creation, and child reads closed. Workspace grants require per-channel
-repository confirmation before cloning, and a clone is owner-scoped and grant-bound.
-A child create uses a stable `request_key`, and a retry after `repository_preparing`
-observes the same owner-scoped clone job. If a crash commits the child binding before its
-context row, the next retry with the same key repairs the context and reuses the child
-instead of creating a duplicate.
+The internal engine exposes `code_repos`, `code_session_create`, `code_run_turn`,
+`code_wait`, and `code_sessions`. A conversation can select repositories, create child
+sessions in independent workspaces, send follow-ups, and read their results. Some names
+also exist in `agent-mcp`, but their schemas are not interchangeable. Schema alignment
+and a session-scoped MCP capability remain in #3192.
 
-`code_wait` is a bounded 20-second polling read, not a durable child wait/resume park.
-Sandbox children, tree-aware spend budgets, the session tree UI, and agent-MCP mounting
-with a session-scoped token are declared follow-up, not completeness.
+Children inherit the parent's owner, grant, and forge identity. Machine children retain
+the parent's permission mode. Children placed in a configured sandbox use Allow under
+the sandbox's confinement policy. Child creation is Sensitive; reads and waits are
+ReadOnly. A revoked grant refuses discovery, creation, and child reads. Workspace grants
+require channel repository confirmation before cloning.
+
+Child creation uses a stable `request_key`. A retry after `repository_preparing`
+observes the same owner's clone job. If a crash commits the child binding before its
+context row, the next retry repairs the context and reuses the child. Snapshots return
+the latest top-level answer, report truncation, and include current failure or fence
+information.
+
+`code_wait` polls for at most 20 seconds. Durable child wait/resume (#3191), the broader
+sandbox-child tool contract (#3193), tree budgets (#3194), and tree UI (#3195) remain.
 
 ## Alternatives considered
 
-- Keep a repository requirement for version one. Rejected: the product and the Slack
-  defaults require a no-repository start, and the internal engine already hosts
-  workspace-less sessions.
-- Start children only from repositories already registered on the machine. Rejected: triage
-  and fan-out need the conversations forge-accessible repository discovery.
-- Let children diverge from the parents permission mode, execution location, or forge
-  identity. Rejected: a child must never broaden posture or identity, and a person grant
-  must not silently fall back to the bot.
+- Require a repository at conversation start. Rejected because questions and triage
+  often precede repository selection.
+- Limit children to registered repositories. Rejected because the conversation needs
+  to discover repositories accessible to its forge identity and prepare them on demand.
+- Let children switch forge identity or broaden machine permissions. Rejected because
+  delegated work must retain the parent's authority. A person connection cannot
+  silently become a bot connection.
 
 ## Consequences
 
-- The "scratch stage" in `docs/slack-sessions.md` is retired and the repository-optional
-  machine contract is documented there and in `docs/code-mode.md`.
-- A conversation with no workspace is still a code session. Its web link is
-  `/c/{session_id}`; a workspace child links through `/code/w/{workspace_id}`.
-- Known limitations are recorded rather than claimed: durable wait/resume, sandbox
-  children, budgets, tree UI, agent-MCP mounting, and an atomic context write (the
-  crash is repaired on retry, not prevented in one transaction).
+A conversation without a workspace remains a code session at `/c/{session_id}`.
+A workspace child links through `/code/w/{workspace_id}`. Work across repositories uses
+several workspaces; each workspace still belongs to one repository. Binding and context
+writes remain separate, with recovery through the same request key.
 
 ## Validation
 
-- `cargo test -p tidebreak-server-core --lib code::self_drive::tests -- --nocapture`:
-  three tests cover two-repository fan-out, wait, and retry; a revoked grant; and
-  crash-before-context repair plus stranger-parent denial.
-- `cargo test -p tidebreak-core --lib db::migration::tests::a_fresh_database_records_the_whole_chain`
-  and the stepwise-upgrade test cover the appended `code_session_context` migration.
-- The API-level no-repository regression could not run in this sandbox because loopback
-  HTTP is blocked (the test client cannot reach its own router); the server crates compile.
+API tests exercise repository-less inference through the configured Gateway resolver,
+frozen model selection, original-grant revocation, empty catalogs, binding retries,
+and attached channels. Child-session tests cover two repositories, permission modes,
+request-key recovery, foreign-parent refusal, final output, and failures. Migration
+tests cover fresh databases and stepwise upgrades for `code_session_context`.

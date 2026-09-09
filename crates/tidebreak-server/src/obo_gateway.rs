@@ -1105,6 +1105,17 @@ impl OboGateway {
         }
     }
 
+    /// Set isolated machine credentials for a fake gateway.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_machine_credentials_for_test(
+        mut self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Self {
+        self.machine_credentials = Some((client_id.to_owned(), client_secret.to_owned()));
+        self
+    }
+
     /// Seed a caller's snapshot directly, for tests that need routes without
     /// a live fake gateway behind them.
     #[cfg(any(test, feature = "test-support"))]
@@ -1695,6 +1706,48 @@ impl BearerTokenSource for OboTokenSource {
     /// caller is never reused for another.
     fn binding_id(&self) -> Option<&str> {
         Some(self.owner.as_str())
+    }
+
+    fn requires_model_route_lease(&self) -> bool {
+        true
+    }
+
+    async fn lease_model_route(
+        &self,
+        route_model: &str,
+    ) -> Result<Option<tidebreak_router::ModelRouteLease>> {
+        let Some(snapshot) = self.inference.snapshot_for(&self.owner).await? else {
+            return Ok(None);
+        };
+        let selection = crate::model_registry::selection_key(
+            crate::providers::ProviderKind::ModelGateway,
+            route_model,
+        );
+        let Some(policy) = crate::providers::gateway_execution_policy(&snapshot, &selection) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            tidebreak_router::ModelRouteLease::with_request_shaping_model(
+                policy.id,
+                policy.request_shaping_model,
+                snapshot,
+            ),
+        ))
+    }
+
+    async fn authorize_model_route(
+        &self,
+        route_model: &str,
+        conversation: Option<SessionId>,
+    ) -> Result<(String, Option<tidebreak_router::ModelRouteLease>)> {
+        if self.lease_model_route(route_model).await?.is_none() {
+            return Ok((String::new(), None));
+        }
+        let token = self.bearer_token_for(conversation).await?;
+        // A token exchange can outlast the cached catalog. Check the same
+        // execution identity again before the adapter dispatches this HTTP leg.
+        let lease = self.lease_model_route(route_model).await?;
+        Ok((token, lease))
     }
 
     async fn bearer_token(&self) -> Result<String> {
@@ -2425,6 +2478,66 @@ mod tests {
         );
         assert_eq!(gateway.catalog_reads.load(Ordering::SeqCst), 1);
         assert_eq!(gateway.served(), 1, "one catalog capability was minted");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_hosted_model_lease_rejects_removed_or_changed_routes_before_minting() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+        let snapshot = obo.snapshot_for(&alice).await.unwrap().unwrap();
+        let policy =
+            crate::providers::gateway_execution_policy(&snapshot, "model_gateway::acme-opus")
+                .unwrap();
+        let source = obo.token_source_for(&alice).unwrap();
+        assert!(source.requires_model_route_lease());
+        let lease = source
+            .lease_model_route(&policy.route_model)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.wire_model(), "acme-opus");
+        assert_eq!(lease.request_shaping_model(), policy.request_shaping_model);
+        let (token, lease) = source
+            .authorize_model_route(&policy.route_model, None)
+            .await
+            .unwrap();
+        assert!(token.ends_with("mg_at_alice"));
+        assert_eq!(lease.unwrap().wire_model(), "acme-opus");
+        let mints = gateway.served();
+
+        let mut changed = snapshot.clone();
+        changed.model_protocols.insert(
+            "acme-opus".into(),
+            crate::providers::GatewayModelProtocol::OpenaiResponses,
+        );
+        obo.seed_snapshot_for_test(&alice, changed).await;
+        let (token, lease) = source
+            .authorize_model_route(&policy.route_model, None)
+            .await
+            .unwrap();
+        assert!(token.is_empty());
+        assert!(
+            lease.is_none(),
+            "a frozen selection cannot follow a protocol change"
+        );
+        assert_eq!(gateway.served(), mints);
+
+        let mut removed = snapshot;
+        removed.models.clear();
+        obo.seed_snapshot_for_test(&alice, removed).await;
+        let (token, lease) = source
+            .authorize_model_route(&policy.route_model, None)
+            .await
+            .unwrap();
+        assert!(token.is_empty());
+        assert!(
+            lease.is_none(),
+            "a removed route must not mint a credential"
+        );
+        assert_eq!(gateway.served(), mints);
         server.abort();
     }
 

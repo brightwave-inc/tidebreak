@@ -12,8 +12,8 @@ the native self-drive tools registered in the foreground tool set. The
 adapter-side default that omits the selector, and the durable retry of
 `repository_preparing`, land with the gateway's Slack work
 (brightwave-inc/model-gateway#1980). Machine-side behavior here is the
-floor; Slack adapter wiring, real Slack E2E, sandbox placement for children,
-durable child wait/resume, and the thread/web tree remain follow-up. The machine contract is recorded in [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
+floor; Slack adapter wiring, live Slack acceptance, durable child wait/resume,
+and the thread/web tree remain follow-up. The machine contract is recorded in [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
 
 A person talks to Tidebreak in Slack — in the agent's own chat (Slack's
 primary and split view for AI agents) or in a channel thread. Tidebreak
@@ -29,8 +29,8 @@ is custom chrome. No repository is required to start. A conversation
 with no repository runs on the machine's internal engine; a task that
 names repositories starts child sessions in independent workspaces under
 the same conversation, and the conversation can wait on those children
-and read their results. Sandbox provisioning and the full Slack adapter
-surface remain later work, recorded below.
+and read their results. Grant-bound children follow the configured external
+placement. Remaining adapter and orchestration work is recorded below.
 
 ## What is true today
 
@@ -806,12 +806,12 @@ choose repositories with `code_repos`, start independent child sessions in
 new workspaces with `code_session_create` (each with a stable
 `request_key`), send follow-ups with `code_run_turn`, list children with
 `code_sessions`, and poll for results with `code_wait`. Children inherit
-the parent's owner, grant, permission mode, and forge identity; a revoked
-grant refuses discovery, creation, and child reads; workspace-grant
-channel repository confirmation runs before clone and on every creation
-retry.
+the parent's owner, grant, and forge identity. Machine children keep the parent's
+permission mode; configured sandbox children use Allow under sandbox confinement.
+A revoked grant refuses discovery, creation, and child reads. Workspace grants
+require channel repository confirmation before cloning.
 
-What remains, stated honestly:
+The following work remains:
 
 - The Slack adapter side defaults to the no-repository form and defers
   `repository_preparing` retries in the gateway's Slack code
@@ -821,14 +821,12 @@ What remains, stated honestly:
   durable child wait park. A parent whose children run longer must call
   the tool again, and a process restart does not resume a parked parent
   wait for these child sessions yet.
-- Child sessions currently run on the machine (external placement is not
-  wired for children); sandbox children (`spawn_sandbox_run`), tree-aware
-  spend budgets, and the thread/web session tree are separate epic
-  slices (#3193, #3194, #3195).
+- Grant-bound children use the configured machine or sandbox placement. The
+  broader sandbox-child tool contract (`spawn_sandbox_run`), tree budgets,
+  and session tree UI remain in #3193, #3194, and #3195.
 - `agent-mcp` mounting inside external harness sessions, a session-scoped
   capability token, and the child UI are not implemented; the native
-  tools share the agent-mcp vocabulary where the names overlap so the
-  later MCP surface can reuse it.
+  tools and `agent-mcp` share some names but still need compatible schemas.
 - A conversation with no workspace is still a code session: its web link
   is the session page (`/c/{session_id}`); a workspace child links through
   its workspace (`/code/w/{workspace_id}`).
@@ -841,7 +839,7 @@ What remains, stated honestly:
   on the reply-during-run signal.
 - Slack Code channels as a session surface: one code channel per
   session, `AttentionState` feeding the native status.
-- Durable child wait/resume, sandbox children, and the thread/web tree,
+- Durable child wait/resume, the broader sandbox-child tools, and the thread/web tree,
   as specified in the preceding section.
 - Collaborator steer, and an owner relay affordance ("forward this to
   the session") as its cheaper predecessor.

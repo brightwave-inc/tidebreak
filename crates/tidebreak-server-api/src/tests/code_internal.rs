@@ -1925,29 +1925,28 @@ fn _db_type_is_used(_: &DbStore) {}
 #[tokio::test]
 async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
     use tidebreak_core::PermissionMode;
-    let (addr, token, runtime, _ran, _dir) = internal_engine_app(vec![Step::Text(
-        "The first issue affects all three repositories.",
-    )])
-    .await;
+    let (router, _token, runtime, _ran, _dir, _provider, _state) =
+        internal_engine_app_capturing(vec![Step::Text(
+            "The first issue affects all three repositories.",
+        )])
+        .await;
     let owner = OwnerId::local();
     let (grant, pair) = runtime
         .mint_adapter_grant(&owner, "slack", "U", "W")
         .await
         .unwrap();
     let bearer = pair.token;
-    let client = reqwest::Client::new();
-    let endpoint = format!("http://{addr}/external/code/sessions");
     let body =
         serde_json::json!({"external_key":"W:C:unanchored", "title":"Triage across repositories"});
-    let created = client
-        .post(&endpoint)
-        .bearer_auth(&bearer)
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let created: serde_json::Value = created.json().await.unwrap();
+    let (status, created) = call_router_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &bearer,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
     let id: SessionId = serde_json::from_value(created["session_id"].clone()).unwrap();
     let session = runtime.get_session(&owner, id).await.unwrap();
     assert!(session.workspace_id.is_none());
@@ -1962,32 +1961,139 @@ async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
             .await
             .unwrap()
     );
-    let repeated: serde_json::Value = client
-        .post(&endpoint)
-        .bearer_auth(&bearer)
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (status, repeated) = call_router_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &bearer,
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(repeated["session_id"], created["session_id"]);
     assert_eq!(repeated["status"], "existing");
+    let (_, foreign) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-other", "W")
+        .await
+        .unwrap();
+    for changed in [
+        serde_json::json!({"external_key": "W:C:unanchored", "repository": "acme/unregistered", "acts_as": "bot"}),
+        serde_json::json!({"external_key": "W:C:unanchored", "repo_id": uuid::Uuid::new_v4()}),
+    ] {
+        let (status, repeated) = call_router_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &bearer,
+            Some(changed.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["session_id"], created["session_id"]);
+        assert_eq!(repeated["acts_as"], created["acts_as"]);
+        let (status, refused) = call_router_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &foreign.token,
+            Some(changed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    }
+    assert_eq!(
+        runtime.get_session(&owner, id).await.unwrap().workspace_id,
+        None
+    );
     assert!(tidebreak_core::db::code::list_repos(&runtime.db, &owner)
         .await
         .unwrap()
         .is_empty());
-    let message: serde_json::Value = client.post(format!("{endpoint}/{id}/messages"))
-        .bearer_auth(&bearer).json(&serde_json::json!({
+    let message_uri = format!("/external/code/sessions/{id}/messages");
+    let (status, message) = call_router_json(
+        &router,
+        "POST",
+        &message_uri,
+        &bearer,
+        Some(serde_json::json!({
             "text": "Which issue should I fix first?", "event_id": "Ev-no-repository", "channel_ts": "1.0"
-        })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(message["outcome"], "new_turn");
-    wait_for_turn_statuses(&client, addr, &token, id, &["completed"]).await;
+    wait_for_turn_completion(&runtime, &owner, id).await;
     let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, id, 0, 200)
         .await
         .unwrap();
-    assert!(events.events.iter().any(|event| matches!(&event.event, tidebreak_core::Event::AssistantMessage { text, .. } if text.contains("all three repositories"))));
+    let assistant: Vec<_> = events
+        .events
+        .iter()
+        .filter_map(|event| match &event.event {
+            tidebreak_core::Event::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        assistant
+            .iter()
+            .any(|text| text.contains("all three repositories")),
+        "the internal conversation did not run its first turn through the code event surface: {events:?}"
+    );
+}
+
+/// One router call with a JSON body, authored without binding a loopback
+/// socket so the same regression runs in sandboxes whose TCP loopback is
+/// carved out.
+async fn call_router_json(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    bearer: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    let request = match body {
+        Some(value) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(value.to_string())),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+/// The internal turn lane is durable: read the row until the newest turn is
+/// terminal, so no live-HTTP polling is needed to see the model answer.
+async fn wait_for_turn_completion(runtime: &CodeRuntime, owner: &OwnerId, session: SessionId) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(turn) = tidebreak_core::db::code::latest_turn(&runtime.db, owner, session)
+            .await
+            .unwrap()
+        {
+            if !turn.status.is_open() {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the no-repository turn did not complete; turns={:?}",
+            tidebreak_core::db::code::list_turns(&runtime.db, owner, session)
+                .await
+                .unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

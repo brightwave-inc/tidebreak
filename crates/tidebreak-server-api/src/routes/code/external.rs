@@ -151,6 +151,116 @@ pub struct ExternalSessionResponse {
     pub connect_url: Option<String>,
 }
 
+/// Freeze the chat default against the connection that admitted this session.
+/// Browser credentials never select or authorize an external conversation's model.
+pub(crate) async fn resolve_external_model(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+) -> Result<String, ServerError> {
+    use crate::model_roles::{self, ModelRole};
+    let (selected, explicit) =
+        match model_roles::read_selection(&*state.store, ModelRole::Chat).await? {
+            Some(model) => (model, true),
+            None => (state.agent_config.model.clone(), false),
+        };
+    let runtime = state
+        .code
+        .as_ref()
+        .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
+    let snapshot = match runtime
+        .harness_llm()
+        .and_then(|relay| relay.external_delegations().cloned())
+    {
+        Some(external) => {
+            let gateway = external.for_grant(&grant.owner, grant.id).await.map_err(|error| {
+                match error {
+                    tidebreak_core::AgentError::SignInRequired(_)
+                    | tidebreak_core::AgentError::InvalidTarget(_) => ServerError::conflict_kind(
+                        "external_reconnect_required",
+                        "Your Slack connection needs approval again. Send `reconnect` to Tidebreak, then approve the connection.",
+                    ),
+                    error => ServerError::from(error),
+                }
+            })?;
+            Some(gateway.snapshot_for(&grant.owner).await?.ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "model_provider_unavailable",
+                    "this Slack connection has no available model catalog; reconnect it from Slack",
+                )
+            })?)
+        }
+        None => None,
+    };
+    if !state.resolver.enforces_model_registry() && snapshot.is_none() {
+        return Ok(selected);
+    }
+    let managed = state.managed_policy()?;
+    let executable = if managed.managed || snapshot.is_some() {
+        model_roles::effective_chat_policy(
+            &*state.store,
+            &*state.secrets,
+            &managed,
+            &selected,
+            explicit,
+            snapshot.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            ServerError::conflict_kind(
+            "model_provider_unavailable",
+            "this Slack connection has no available default model; choose an entitled chat model",
+        )
+        })?
+        .execution_key()
+    } else {
+        selected
+    };
+    super::super::providers_models::validate_execution_selection(
+        state,
+        &executable,
+        true,
+        snapshot.as_ref(),
+    )
+    .await
+}
+
+/// Recover a source-context write only through the original conversation.
+/// An attached destination must never become the session's origin.
+async fn repair_original_context(
+    runtime: &crate::code::runtime::CodeRuntime,
+    grant: &CodeExternalGrant,
+    binding: &tidebreak_core::CodeExternalBinding,
+    channel: Option<&str>,
+) -> Result<(), ServerError> {
+    if tidebreak_core::db::code::session_context(&runtime.db, &grant.owner, binding.session_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let bindings = tidebreak_core::db::code::list_bindings_for_session(
+        &runtime.db,
+        &grant.owner,
+        binding.session_id,
+    )
+    .await?;
+    if bindings
+        .first()
+        .is_some_and(|original| original.id == binding.id)
+    {
+        tidebreak_core::db::code::set_session_context(
+            &runtime.db,
+            &grant.owner,
+            binding.session_id,
+            channel,
+            None,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// `POST /external/code/sessions` — idempotent get-or-create for one
 /// conversation. An ended session answers `ended` rather than
 /// resurrecting; a conversation bound under another grant answers "not
@@ -164,6 +274,58 @@ pub async fn external_get_or_create(
         .code
         .clone()
         .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
+    if grant.channel_kind.trim().is_empty() || body.external_key.trim().is_empty() {
+        return Err(ServerError::conflict_kind(
+            "binding_key_invalid",
+            "a binding needs a channel kind and a conversation key",
+        ));
+    }
+    if grant.kind.is_workspace()
+        && body
+            .channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return Err(ServerError::bad_request_kind(
+            "channel_id_required",
+            "a workspace grant names the channel that will run this session",
+        ));
+    }
+    // Resolve the durable conversation before inspecting mutable selectors.
+    // A retry cannot clone a different repository or change its original channel.
+    if let Some(binding) = tidebreak_core::db::code::get_external_binding(
+        &runtime.db,
+        &grant.owner,
+        &grant.channel_kind,
+        &body.external_key,
+    )
+    .await?
+    {
+        if binding.grant_id != grant.id {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        let session = runtime
+            .get_session(&grant.owner, binding.session_id)
+            .await?;
+        let ended = session.lifecycle == tidebreak_core::SessionLifecycle::Ended;
+        if !ended {
+            repair_original_context(&runtime, &grant, &binding, body.channel_id.as_deref()).await?;
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(ExternalSessionResponse {
+                status: if ended { "ended" } else { "existing" },
+                session_id: binding.session_id,
+                binding_id: (!ended).then_some(binding.id),
+                acts_as: session.acts_as(),
+                acting_login: None,
+                app_name: None,
+                connect_url: None,
+            }),
+        ));
+    }
     let registered = match body.repo_id {
         Some(id) => Some(runtime.get_repo(&grant.owner, id).await?),
         None => None,
@@ -198,22 +360,15 @@ pub async fn external_get_or_create(
                     "The repository records no origin to confirm.",
                 )
             })?;
-            let existing = tidebreak_core::db::code::get_external_binding(
+            // New workspace conversations need consent before cloning.
+            if !tidebreak_core::db::code::channel_repository_is_confirmed(
                 &runtime.db,
                 &grant.owner,
-                &grant.channel_kind,
-                &body.external_key,
+                grant.id,
+                channel_id,
+                repository,
             )
-            .await?;
-            if existing.is_none()
-                && !tidebreak_core::db::code::channel_repository_is_confirmed(
-                    &runtime.db,
-                    &grant.owner,
-                    grant.id,
-                    channel_id,
-                    repository,
-                )
-                .await?
+            .await?
             {
                 let set_by = body.set_by.as_ref().ok_or_else(|| {
                     ServerError::bad_request_kind(
@@ -261,6 +416,11 @@ pub async fn external_get_or_create(
             )
         }
     };
+    let model = if repo_id.is_none() {
+        Some(resolve_external_model(&state, &grant).await?)
+    } else {
+        None
+    };
     let (resolution, identity) = runtime
         .external_get_or_create(
             &grant.owner,
@@ -273,7 +433,7 @@ pub async fn external_get_or_create(
             body.harness.unwrap_or(HarnessKind::ClaudeCode),
             NewSessionSettings {
                 permission_mode: PermissionMode::Allow,
-                model: None,
+                model,
                 reasoning_effort: None,
                 fast_mode: false,
                 permission_mode_ceiling: None,
@@ -283,21 +443,10 @@ pub async fn external_get_or_create(
             body.acts_as,
         )
         .await?;
-    let bound_session = match &resolution {
-        ExternalSessionResolution::Created(binding)
-        | ExternalSessionResolution::Existing(binding) => Some(binding.session_id),
-        _ => None,
-    };
-    if let Some(session) = bound_session {
-        tidebreak_core::db::code::set_session_context(
-            &runtime.db,
-            &grant.owner,
-            session,
-            body.channel_id.as_deref(),
-            None,
-            None,
-        )
-        .await?;
+    if let ExternalSessionResolution::Created(binding)
+    | ExternalSessionResolution::Existing(binding) = &resolution
+    {
+        repair_original_context(&runtime, &grant, binding, body.channel_id.as_deref()).await?;
     }
     let response_from =
         |status: &'static str, session_id: SessionId, binding_id| ExternalSessionResponse {
