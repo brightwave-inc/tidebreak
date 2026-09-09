@@ -262,10 +262,15 @@ impl ChatTitler {
         let Some(material) = user_message_digest(&self.store.list_messages(chat_id).await?) else {
             return Ok(None);
         };
-        // The title runs as the chat's owner: on a hosted machine that is
-        // the caller whose credential can actually drive it (decision 62).
+        // The title runs under the conversation's credential authority: an
+        // external grant stays on its delegated token, and a browser-owned
+        // chat stays on the caller's sign-in (decision 62). Owner-only
+        // resolution would replace a grant with the browser session.
         let owner = self.store.chat_owner(chat_id).await.unwrap_or_default();
-        let provider = self.resolver.resolve_for(owner.as_ref()).await;
+        let provider = self
+            .resolver
+            .resolve_for_session(owner.as_ref(), chat_id)
+            .await;
         let title = derive_text_with_retries::<TitleProposal>(
             provider.as_ref(),
             utility,

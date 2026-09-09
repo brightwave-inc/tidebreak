@@ -1518,7 +1518,8 @@ async fn a_gateway_model_matching_a_curated_id_inherits_its_capabilities() {
         vec![crate::model_registry::InputModality::Text]
     );
     assert!(!unmatched.supports_reasoning);
-    assert!(!unmatched.supports_structured_output);
+    // Gateway protocols enforce structured output without a curated map.
+    assert!(unmatched.supports_structured_output);
 }
 
 /// The background loop's first attempt is immediate — the boot case it

@@ -68,10 +68,12 @@ pub async fn propose_for_creation(
     owner: &OwnerId,
     message: &str,
 ) -> Result<Option<String>> {
-    Ok(match propose_from_message(state, owner, message).await? {
-        ProposalOutcome::Proposed(title) => Some(title),
-        ProposalOutcome::Declined | ProposalOutcome::NotApplicable => None,
-    })
+    Ok(
+        match propose_from_message(state, owner, None, message).await? {
+            ProposalOutcome::Proposed(title) => Some(title),
+            ProposalOutcome::Declined | ProposalOutcome::NotApplicable => None,
+        },
+    )
 }
 
 /// Derive a title for the workspace behind `session_id` in the background,
@@ -135,7 +137,7 @@ async fn derive_workspace_title(
     if workspace.title != placeholder || workspace.status != CodeWorkspaceStatus::Active {
         return Ok(Outcome::NotApplicable);
     }
-    let title = match propose_from_message(state, owner, message).await? {
+    let title = match propose_from_message(state, owner, Some(session_id), message).await? {
         ProposalOutcome::Proposed(title) => title,
         ProposalOutcome::Declined => return Ok(Outcome::Declined),
         ProposalOutcome::NotApplicable => return Ok(Outcome::NotApplicable),
@@ -153,6 +155,7 @@ async fn derive_workspace_title(
 async fn propose_from_message(
     state: &AppState,
     owner: &OwnerId,
+    session_id: Option<SessionId>,
     message: &str,
 ) -> Result<ProposalOutcome> {
     if !state.resolver.enforces_model_registry() {
@@ -164,8 +167,35 @@ async fn propose_from_message(
     }
     // Resolved per call, like every consumer of the utility role: `None` means
     // this install has no model for background work. On a hosted machine both
-    // the role and the provider resolve as the workspace's owner (decision 62).
-    let caller_gateway = state.caller_gateway_snapshot(owner).await.ok().flatten();
+    // the role and the provider resolve under the conversation's credential
+    // authority (decision 62) — a live session keeps its external grant, and a
+    // pre-create naming call uses the owner's sign-in.
+    let caller_gateway = match session_id {
+        Some(session_id) => match state
+            .resolver
+            .session_gateway_snapshot(Some(owner), session_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "could not read session gateway entitlements for workspace naming"
+                );
+                None
+            }
+        },
+        None => match state.caller_gateway_snapshot(owner).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "could not read caller gateway entitlements for workspace naming"
+                );
+                None
+            }
+        },
+    };
     let Some(utility) = crate::model_roles::resolve_utility_model(
         &*state.store,
         &*state.secrets,
@@ -175,9 +205,22 @@ async fn propose_from_message(
     )
     .await?
     else {
+        if caller_gateway.is_some() {
+            tracing::warn!(
+                "no utility model in the caller's gateway entitlements; leaving the workspace on its generated name"
+            );
+        }
         return Ok(ProposalOutcome::NotApplicable);
     };
-    let provider = state.resolver.resolve_for(Some(owner)).await;
+    let provider = match session_id {
+        Some(session_id) => {
+            state
+                .resolver
+                .resolve_for_session(Some(owner), session_id)
+                .await
+        }
+        None => state.resolver.resolve_for(Some(owner)).await,
+    };
     let title = derive_text_with_retries::<TitleProposal>(
         provider.as_ref(),
         &utility,
