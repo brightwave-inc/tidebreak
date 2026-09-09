@@ -13,7 +13,7 @@ adapter-side default that omits the selector, and the durable retry of
 `repository_preparing`, land with the gateway's Slack work
 (brightwave-inc/model-gateway#1980). Machine-side behavior here is the
 floor; Slack adapter wiring, real Slack E2E, sandbox placement for children,
-durable child wait/resume, and the thread/web tree remain follow-up.
+durable child wait/resume, and the thread/web tree remain follow-up. The machine contract is recorded in [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
 
 A person talks to Tidebreak in Slack — in the agent's own chat (Slack's
 primary and split view for AI agents) or in a channel thread. Tidebreak
