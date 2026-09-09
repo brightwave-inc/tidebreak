@@ -22,6 +22,7 @@
     "expo-router": "55.0.18",
     "expo-secure-store": "55.0.18",
     "expo-status-bar": "55.0.6",
+    "expo-updates": "55.0.30",
     "expo-web-browser": "55.0.20",
     "js-sha256": "1.0.0",
     "nativewind": "4.2.1",
