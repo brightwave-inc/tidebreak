@@ -15,6 +15,10 @@ const SCHEME: Record<AppVariant, string> = {
   development: "tidebreak-dev",
 };
 
+// Printed by `eas init`; see mobile/DEPLOYING.md. eas-cli cannot write into a
+// dynamic (TS) config, so the id is pasted here by hand.
+const EAS_PROJECT_ID = "TODO_RUN_EAS_INIT";
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name:
@@ -24,18 +28,44 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         ? "Tidebreak Staging"
         : "Tidebreak Dev",
   slug: "tidebreak-mobile",
-  version: "0.0.0",
+  owner: "brightwave",
+  version: "0.1.0",
   orientation: "portrait",
   scheme: SCHEME[VARIANT],
   userInterfaceStyle: "automatic",
+  icon: "./assets/icon.png",
+  // OTA updates (EAS Update). The fingerprint policy hashes every
+  // native-relevant input, so an OTA only ever applies to binaries whose
+  // native hash matches — JS-only changes ship over the air, native changes
+  // force a store build. Keep this config deterministic: a value that changes
+  // between runs breaks fingerprint routing.
+  runtimeVersion: { policy: "fingerprint" },
+  updates: {
+    url: `https://u.expo.dev/${EAS_PROJECT_ID}`,
+    requestHeaders: {
+      "expo-channel-name":
+        VARIANT === "production"
+          ? "production"
+          : VARIANT === "staging"
+            ? "staging"
+            : "development",
+    },
+  },
   ios: {
     supportsTablet: true,
+    appleTeamId: "CUURNS78Y4",
     bundleIdentifier:
       VARIANT === "production"
         ? "inc.brightwave.tidebreak"
         : VARIANT === "staging"
           ? "inc.brightwave.tidebreak.staging"
           : "inc.brightwave.tidebreak.dev",
+    infoPlist: {
+      // Pre-answers export compliance; the app uses only HTTPS-exempt
+      // encryption. Without this every TestFlight build waits on the
+      // questionnaire.
+      ITSAppUsesNonExemptEncryption: false,
+    },
   },
   android: {
     package:
@@ -64,5 +94,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   extra: {
     appVariant: VARIANT,
     oauthRedirectUri: `${SCHEME[VARIANT]}://callback`,
+    eas: {
+      projectId: EAS_PROJECT_ID,
+    },
   },
 });
