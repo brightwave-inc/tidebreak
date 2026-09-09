@@ -387,6 +387,7 @@ impl GrokSession {
         }
         {
             let mut state = self.acp.lock().await;
+            state.stopped |= *self.acp_stop.borrow();
             if state.stopped {
                 return Ok(TurnOutcome::Incomplete {
                     detail: "Grok ACP was stopped during startup".into(),
@@ -447,6 +448,7 @@ impl GrokSession {
         let request = async {
             {
                 let mut state = self.acp.lock().await;
+                state.stopped |= *self.acp_stop.borrow();
                 if state.stopped {
                     return Err(HarnessError::Other("Grok ACP was stopped".into()));
                 }
@@ -547,6 +549,7 @@ impl GrokSession {
             return Ok(());
         };
         let mut state = self.acp.lock().await;
+        state.stopped |= *self.acp_stop.borrow();
         let unique = state.seen.insert(id.to_string());
         let permission = unique.then(|| parse_permission(&value, &state)).flatten();
         let Some(permission) = permission else {
@@ -607,6 +610,7 @@ impl GrokSession {
             ));
         }
         let mut state = self.acp.lock().await;
+        state.stopped |= *self.acp_stop.borrow();
         let permission = state
             .pending
             .remove(&approval.call_id)
@@ -655,25 +659,26 @@ impl GrokSession {
     async fn cancel_acp_waiters(&self) {
         let mut state = self.acp.lock().await;
         state.active = false;
-        let pending = std::mem::take(&mut state.pending);
-        for permission in pending.values() {
-            if state
-                .write(&permission_reply(&permission.rpc_id, None))
-                .await
-                .is_err()
-            {
-                break;
+        state.stopped |= *self.acp_stop.borrow();
+        let mut writable = true;
+        while let Some((key, rpc_id)) = state
+            .pending
+            .iter()
+            .next()
+            .map(|(key, permission)| (key.clone(), permission.rpc_id.clone()))
+        {
+            if writable && state.write(&permission_reply(&rpc_id, None)).await.is_err() {
+                writable = false;
             }
-        }
-        drop(state);
-        for (key, _) in pending {
             self.spec
                 .sink
                 .emit(HarnessEvent::ApprovalResolved {
-                    harness_ref: HarnessApprovalRef::engine(key),
+                    harness_ref: HarnessApprovalRef::engine(key.clone()),
                     decision: ApprovalDecision::Deny { feedback: None },
                 })
                 .await;
+            // If Stop times out during a write, turn cleanup still owns this denial.
+            state.pending.remove(&key);
         }
     }
 
@@ -685,18 +690,21 @@ impl GrokSession {
         // Wake setup before taking the write lock: the child may have stopped
         // reading stdin, so an in-flight request can hold that lock.
         self.acp_stop.send_replace(true);
-        {
-            let mut state = self.acp.lock().await;
-            state.stopped = true;
-            if let Some(session_id) = state.session_id.clone() {
-                let _ = state.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session_id}})).await;
+        let cancel = async {
+            {
+                let mut state = self.acp.lock().await;
+                state.stopped = true;
+                if let Some(session_id) = state.session_id.clone() {
+                    let _ = state.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session_id}})).await;
+                }
             }
-        }
-        self.cancel_acp_waiters().await;
-        if self.child.lock().await.is_none() {
-            return Ok(true);
-        }
-        Ok(timeout(INTERRUPT_GRACE, done).await.is_ok())
+            self.cancel_acp_waiters().await;
+            if self.child.lock().await.is_some() {
+                done.await;
+            }
+        };
+        // The grace period covers lock acquisition, writes, and the reply.
+        Ok(timeout(INTERRUPT_GRACE, cancel).await.is_ok())
     }
 }
 

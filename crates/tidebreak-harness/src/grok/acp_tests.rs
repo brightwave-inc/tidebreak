@@ -167,12 +167,20 @@ for line in sys.stdin:
  elif method in ('session/new','session/load'):
   if method=='session/load':emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'OLD_REPLAY'}}}})
   emit({'jsonrpc':'2.0','id':v['id'],'result':{'sessionId':'fixture-session'}})
+  if os.path.exists(os.environ['ACP_RECORD']+'.blockprompt'):
+   open(os.environ['ACP_RECORD']+'.waiting','w').close()
+   while True:signal.pause()
  elif method=='session/set_model':emit({'jsonrpc':'2.0','id':v['id'],'result':{'_meta':{'model':{'Ok':v['params']['modelId']}}}})
  elif method=='session/set_mode':emit({'jsonrpc':'2.0','id':v['id'],'result':{}})
  elif method=='session/prompt':
+  blocked_permission=any(os.path.exists(os.environ['ACP_RECORD']+suffix) for suffix in ('.blockpermission','.blockwaiter'))
+  if blocked_permission:permission['id']='x'*131072
   for frame in pre:emit(frame)
   emit(permission)
   if os.environ.get('ACP_DUPLICATE')=='1':emit(permission)
+  if blocked_permission:
+   open(os.environ['ACP_RECORD']+'.waiting','w').close()
+   while True:signal.pause()
  elif method=='session/cancel':emit({'jsonrpc':'2.0','id':3,'result':{'stopReason':'cancelled'}})
  elif v.get('id')==0 and 'result' in v:
   outcome=v['result']['outcome'];accepted=outcome.get('optionId')=='allow-once'
@@ -687,4 +695,174 @@ async fn acp_stop_cancels_a_setup_write_before_taking_its_lock() {
         "Stop waited for the setup write: {:?}",
         stopped_at.elapsed()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_stop_bounds_prompt_and_permission_writes_after_startup() {
+    for stage in ["blockprompt", "blockpermission", "blockwaiter"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, sink) = session(dir.path(), PermissionMode::Auto, false);
+        std::fs::write(dir.path().join(format!("record.{stage}")), "").unwrap();
+        let mut input = turn();
+        if stage == "blockprompt" {
+            input.text = "x".repeat(1024 * 1024);
+        }
+        let running = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(input).await }
+        });
+        let approval = if stage == "blockprompt" {
+            None
+        } else {
+            Some(wait_approval(&sink).await)
+        };
+        let deciding = if stage == "blockpermission" {
+            Some(tokio::spawn({
+                let session = session.clone();
+                let approval = approval.clone().unwrap();
+                async move { session.decide(approval, ApprovalDecision::Approve).await }
+            }))
+        } else {
+            None
+        };
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if dir.path().join("record.waiting").exists()
+                    && (stage == "blockwaiter" || session.acp.try_lock().is_err())
+                    && sink
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|event| matches!(event, HarnessEvent::TurnStarted))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Grok never blocked {stage} after startup"));
+        let stopped_at = tokio::time::Instant::now();
+        timeout(Duration::from_secs(20), session.interrupt())
+            .await
+            .unwrap_or_else(|_| panic!("Stop hung behind {stage}"))
+            .unwrap();
+        let outcome = timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(outcome, Ok(TurnOutcome::Clean)));
+        if let Some(deciding) = deciding {
+            assert!(timeout(Duration::from_secs(3), deciding)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err());
+        }
+        assert!(
+            session.child.lock().await.is_none(),
+            "{stage}: child remains"
+        );
+        assert!(session.child_pid().is_none(), "{stage}: PID remains");
+        {
+            let state = session.acp.lock().await;
+            assert!(state.pending.is_empty());
+            assert!(state.stopped);
+            assert!(!state.active);
+        }
+        assert!(!sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| { matches!(event, HarnessEvent::TurnCompleted { .. }) }));
+        if stage == "blockwaiter" {
+            assert!(sink.events.lock().unwrap().iter().any(|event| {
+                matches!(event, HarnessEvent::ApprovalResolved {
+                    harness_ref,
+                    decision: ApprovalDecision::Deny { .. },
+                } if Some(harness_ref) == approval.as_ref())
+            }));
+        }
+        eprintln!("Stop during {stage}: {:?}", stopped_at.elapsed());
+        assert!(
+            stopped_at.elapsed() < INTERRUPT_GRACE * 2 + Duration::from_millis(500),
+            "Stop waited for {stage}: {:?}",
+            stopped_at.elapsed()
+        );
+        std::fs::remove_file(dir.path().join(format!("record.{stage}"))).unwrap();
+        sink.events.lock().unwrap().clear();
+        let next = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(turn()).await }
+        });
+        let approval = wait_approval(&sink).await;
+        session
+            .decide(approval, ApprovalDecision::Deny { feedback: None })
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(3), next)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            TurnOutcome::Clean
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_queued_approval_observes_stop_before_interrupt_gets_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, sink) = session(dir.path(), PermissionMode::Auto, false);
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move { session.run_turn(turn()).await }
+    });
+    let approval = wait_approval(&sink).await;
+    let state = session.acp.lock().await;
+    let mut deciding = Box::pin(session.decide(approval.clone(), ApprovalDecision::Approve));
+    assert!(timeout(Duration::from_millis(10), &mut deciding)
+        .await
+        .is_err());
+    let mut interrupting = Box::pin(session.interrupt());
+    assert!(timeout(Duration::from_millis(10), &mut interrupting)
+        .await
+        .is_err());
+    assert!(*session.acp_stop.borrow());
+    assert!(!state.stopped);
+    drop(state);
+    let (decision, stopped) = timeout(Duration::from_secs(3), async {
+        tokio::join!(deciding, interrupting)
+    })
+    .await
+    .unwrap();
+    stopped.unwrap();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decision,
+        Err(HarnessError::ApprovalBindingMismatch(_))
+    ));
+    assert!(!dir.path().join("executed").exists());
+    assert!(session.acp.lock().await.pending.is_empty());
+    assert!(sink.events.lock().unwrap().iter().any(|event| {
+        matches!(event, HarnessEvent::ApprovalResolved {
+            harness_ref,
+            decision: ApprovalDecision::Deny { .. },
+        } if harness_ref == &approval)
+    }));
+    assert!(!sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| { matches!(event, HarnessEvent::TurnCompleted { .. }) }));
 }
