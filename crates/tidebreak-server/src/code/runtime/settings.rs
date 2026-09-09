@@ -768,6 +768,7 @@ impl CodeRuntime {
             match crate::providers::gateway_reasoning_efforts_for_model(&snapshot, selected) {
                 Some(efforts) => efforts,
                 None if self.harness_llm.is_some()
+                    && !engine_efforts.is_empty()
                     && crate::providers::gateway_lists_model(&snapshot, selected) =>
                 {
                     // Hosted pickers use the engine's ladder when the gateway
