@@ -463,6 +463,19 @@ under `https://downloads.brightwave.io/tidebreak/staging/`; the publish step
 refuses any other prefix and will not advance `latest.json` if `main` has
 already moved on.
 
+Staging installs follow `latest.json` only, so hosted history is unused once a
+newer build is current. After each successful publish, and on a weekly
+schedule, `scripts/prune-staging-releases.sh` deletes every recognized
+`tidebreak/staging/releases/v0.0.0-staging.N/` prefix except the live feed
+version and the two newest other builds (keep count 3). Unknown keys,
+`latest.json`, `manifest.json`, and production prefixes are never planned for
+deletion. Before each recursive delete the script re-reads
+`tidebreak/staging/latest.json` and refuses if the prefix is live, so a
+concurrent publish that advances the feed cannot lose the new current build.
+Manual **Prune staging desktop releases** defaults to dry-run; the schedule and
+post-publish paths delete for real. Signed staging GitHub Actions artifacts
+expire after one day.
+
 Create a GitHub environment named `desktop-staging`. Copy the Apple signing
 secrets from `desktop-production`. Do **not** copy
 `TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: a
@@ -474,8 +487,25 @@ environment's `TAURI_SIGNING_PRIVATE_KEY` and
 password. Point `AWS_RELEASE_ROLE_ARN` at a
 role whose GitHub OIDC subject is
 `repo:brightwave-inc/tidebreak:environment:desktop-staging` and whose S3
-write access is only `tidebreak/staging/*`. A role that can also write
+access is only under `tidebreak/staging/`. A role that can also write
 `tidebreak/latest.json` would make a publish-guard bug a production incident.
+
+IAM for that role is configured outside this repository. Publish already needs
+object read/write under the staging prefix. Prune additionally needs:
+
+- `s3:ListBucket` on the downloads bucket, conditioned on
+  `tidebreak/staging/` (delimiter listing of release prefixes and object
+  listing under a prefix about to be removed)
+- `s3:GetObject` on `tidebreak/staging/*` (read `latest.json`; head/get
+  objects while deciding what to remove)
+- `s3:DeleteObject` on `tidebreak/staging/releases/*` only — not on
+  `tidebreak/staging/latest.json` or `tidebreak/staging/manifest.json`
+
+Do not grant `tidebreak/latest.json`, `tidebreak/manifest.json`, or
+`tidebreak/releases/*`. If the bucket has versioning enabled,
+`aws s3 rm --recursive` only removes the current version (or writes a delete
+marker). Prior versions remain and still cost storage until a bucket lifecycle
+rule expires them; that lifecycle is also out of repo.
 
 Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first
