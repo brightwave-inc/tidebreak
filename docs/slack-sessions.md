@@ -5,6 +5,16 @@ record. Where a later record disagrees, the record wins. This revision
 follows an adversarial review pass; the largest changes are recorded in
 "Bets and exit criteria" and "Open questions".
 
+Since this revision, repository-less conversations are no longer deferred:
+`POST /external/code/sessions` accepts no repository selector and creates
+an internal-engine session on the machine, with a nullable workspace and
+the native self-drive tools registered in the foreground tool set. The
+adapter-side default that omits the selector, and the durable retry of
+`repository_preparing`, land with the gateway's Slack work
+(brightwave-inc/model-gateway#1980). Machine-side behavior here is the
+floor; Slack adapter wiring, real Slack E2E, sandbox placement for children,
+durable child wait/resume, and the thread/web tree remain follow-up.
+
 A person talks to Tidebreak in Slack — in the agent's own chat (Slack's
 primary and split view for AI agents) or in a channel thread. Tidebreak
 runs a session for that conversation on that person's hosted machine.
@@ -15,10 +25,12 @@ appears in the desktop inbox.
 Version one ships both surfaces: the agent DM and channel threads.
 Getting the agent into a conversation uses Slack's own affordances —
 "Add agent", the channel's Agents & apps tab, @mention — and none of it
-is custom chrome. Version one requires a repository. Repository-less
-scratch sessions are a designed later stage: they carry the only schema
-migration in this design, so they wait for evidence (see "Bets and exit
-criteria" and "Stage: scratch workspaces").
+is custom chrome. No repository is required to start. A conversation
+with no repository runs on the machine's internal engine; a task that
+names repositories starts child sessions in independent workspaces under
+the same conversation, and the conversation can wait on those children
+and read their results. Sandbox provisioning and the full Slack adapter
+surface remain later work, recorded below.
 
 ## What is true today
 
@@ -36,21 +48,23 @@ criteria" and "Stage: scratch workspaces").
   per harness by a capability probe, guarded by `expected_turn_id`, and
   lands only at a tool boundary even where supported. This design keeps
   that contract; it does not invent steer-by-default.
-- A code workspace assumes one repository throughout: `repo_id`,
-  `worktree_path`, `branch_name`, and `base_ref` are all `NOT NULL`,
-  branch names derive from the repository's branch prefix, and roughly
-  eight `get_repo(workspace.repo_id)` sites in the runtime plus the PR
-  delivery sweep, triggers, orphan reclaim, and the generated wire types
-  depend on it. Making the repository optional is a cross-cutting
-  refactor, not a one-column migration. That is why scratch is a later
-  stage.
+- A code session may bind no workspace: `code_session.workspace_id` is
+  nullable, `repo_id`/`worktree_path`/`branch_name`/`base_ref` on a
+  workspace remain non-null, and the runtime refuses workspace-bound
+  operations on a workspace-less session. Multiple repository workspaces
+  hang off one conversation as children, and the internal engine can
+  discover, create, drive, and wait on them with the native self-drive
+  tools. A workspace still assumes exactly one repository; multi-
+  repository workspaces are deferred.
 - `tidebreak-supervised-agent` clones each declared repository in order
   and runs in the first clone. WIP refs are
   `mg-wip/<sandbox-id>-i<incarnation>` for the first clone,
   `-r<position>`-suffixed for later ones. An empty repository list is a
   research run: no clone, no WIP push, and the deliverable leaves as a
   `task_output` event body (224 KiB cap) emitted only at supervisor stop —
-  not per turn. The scratch stage depends on changing that.
+  not per turn. Repository-less internal sessions stream their assistant
+  text per turn through the normal code event surface, independently of
+  the supervised sandbox agent.
 - Hosted git borrows a short-lived GitHub credential per operation. The
   credential is the person's user access token; it cannot be narrowed to
   one repository. Its ceiling is the GitHub App installation intersected
@@ -781,33 +795,43 @@ fenced reap button works and is refused for non-owners.
 The provenance banner, the thread link, and desktop-submitted-turn
 attribution in the thread.
 
-## Stage: scratch workspaces (deferred, designed)
+## Repository-less sessions on the machine's engine
 
-Repository-less sessions return when usage asks for them. What they
-cost, recorded so the gate is honest:
+No repository is required to start, and the scratch stage above is
+retired. `POST /external/code/sessions` accepts neither `repo_id` nor
+`repository` and creates a workspace-less internal-engine session on the
+machine, with no sandbox and no clone. An explicit selector preserves the
+existing repository-backed path exactly. The same conversation can then
+choose repositories with `code_repos`, start independent child sessions in
+new workspaces with `code_session_create` (each with a stable
+`request_key`), send follow-ups with `code_run_turn`, list children with
+`code_sessions`, and poll for results with `code_wait`. Children inherit
+the parent's owner, grant, permission mode, and forge identity; a revoked
+grant refuses discovery, creation, and child reads; workspace-grant
+channel repository confirmation runs before clone and on every creation
+retry.
 
-- The optional-repository refactor: `repo_id`, `worktree_path`,
-  `branch_name`, `base_ref` become nullable (a table rebuild in SQLite,
-  in both dialects' fixtures), a partial unique index, and a defined
-  NULL behavior for every consumer — release, restore, retry, the PR
-  delivery sweep, triggers, orphan reclaim (which must not sweep
-  remote/scratch rows), and the wire types the desktop consumes.
-- Supervised-agent changes beyond stage 1's assistant record: emit the
-  `task_output` body at every successful turn boundary, not only at
-  supervisor stop — otherwise a multi-turn scratch thread has no
-  per-turn artifact and loses unemitted output when an incarnation dies.
-- Resume is journal-primed and says so in product copy: a preamble
-  built from prior turn inputs and retained outputs under an explicit
-  byte budget that states what it dropped. An incarnation killed before
-  flushing loses its unemitted output; the preamble names the gap.
-  Transcript-level resume for scratch is out of scope, permanently.
-- A decision record: scratch amends 0030's "context selects behavior"
-  sentence (no repository no longer selects chat) and changes what
-  [`0048`](decisions/0048-one-interaction-model.md) step 5 must merge.
-  That belongs in `docs/decisions/`, not only here.
-- Expectation copy: a scratch session is a task runner, not a chatbot;
-  the first status says so, because every Slack bot the user knows
-  answers in seconds and this one provisions a sandbox.
+What remains, stated honestly:
+
+- The Slack adapter side defaults to the no-repository form and defers
+  `repository_preparing` retries in the gateway's Slack code
+  (brightwave-inc/model-gateway#1980); this repository supplies the
+  machine contract it calls.
+- `code_wait` is a bounded 20-second polling read, not the designed
+  durable child wait park. A parent whose children run longer must call
+  the tool again, and a process restart does not resume a parked parent
+  wait for these child sessions yet.
+- Child sessions currently run on the machine (external placement is not
+  wired for children); sandbox children (`spawn_sandbox_run`), tree-aware
+  spend budgets, and the thread/web session tree are separate epic
+  slices (#3193, #3194, #3195).
+- `agent-mcp` mounting inside external harness sessions, a session-scoped
+  capability token, and the child UI are not implemented; the native
+  tools share the agent-mcp vocabulary where the names overlap so the
+  later MCP surface can reuse it.
+- A conversation with no workspace is still a code session: its web link
+  is the session page (`/c/{session_id}`); a workspace child links through
+  its workspace (`/code/w/{workspace_id}`).
 
 ## Later
 
@@ -817,7 +841,8 @@ cost, recorded so the gate is honest:
   on the reply-during-run signal.
 - Slack Code channels as a session surface: one code channel per
   session, `AttentionState` feeding the native status.
-- Scratch workspaces, as specified in the preceding section.
+- Durable child wait/resume, sandbox children, and the thread/web tree,
+  as specified in the preceding section.
 - Collaborator steer, and an owner relay affordance ("forward this to
   the session") as its cheaper predecessor.
 - A Slack-only allowlist narrower than the GitHub App.
@@ -829,7 +854,10 @@ cost, recorded so the gate is honest:
 - Slack as a connected-app catalog Tidebreak publishes (refused in
   [`deferred.md`](deferred.md); the adapter consumes Slack, it does not
   broker Slack for others).
-- Driving repository-less threads as chat sessions.
+- Driving repository-less threads through chat's separate surfaces rather
+  than through the code-shaped session model. Repository-less threads are
+  sessions on the internal engine, with their own workspace-less web
+  link; the user-facing collapse of chat and code surfaces is deferred.
 - Streaming tool activity or reasoning into Slack. The assistant record
   streams; the engine's interior does not.
 - Reusing `tidebreak-sandbox-protocol`.

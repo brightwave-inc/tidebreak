@@ -433,6 +433,46 @@ the session worker resumes the same turn with their results. The wait survives
 a session worker restart. These bounded background runs do not create separate
 child sessions or workspaces.
 
+### Self-drive child sessions
+
+The internal engine also exposes native tools for starting independent
+workspace sessions under one conversation and driving them, without moving
+the parent conversation into a repository:
+
+- `code_repos` — repositories the conversation's personal or bot identity
+  can reach, plus the registered local set when no forge lender exists.
+- `code_session_create` — start a child session in a new workspace on the
+  named `owner/name` repository, with a stable `request_key` reused on
+  retries. Workspace-grant conversations require per-channel repository
+  confirmation before cloning, and a retry after `repository_preparing`
+  observes the same owner-scoped clone job rather than starting another.
+- `code_run_turn` — a follow-up to one of this conversation's children,
+  with the same request-key reuse rule.
+- `code_wait` — poll a bounded list of children (at most 20 seconds,
+  results in requested order) and return their pending approvals with the
+  snapshot.
+- `code_sessions` — list this conversation's direct children.
+
+Children are real sessions: they inherit the parent's owner, grant,
+permission mode, and forge identity, appear in their own workspaces, and
+are only readable through the parent that created them (a stranger parent
+answering the same session id gets `not_found`). Creating a child is
+`Sensitive`; reading and waiting are `ReadOnly`, and an external grant's
+revocation fails discovery, creation, and child reads closed.
+
+Deliberately not yet implemented, so the contract is honest rather than
+claimed:
+
+- `code_wait` is polling, not the designed durable child wait/resume park;
+  a parent waiting on long-running children must call again, and a
+  restart does not resume such a wait.
+- Children run on the machine in local workspaces; sandbox child runs,
+  tree-aware spend budgets, and the desktop/web/thread tree rendering are
+  separate slices (#3193, #3194, #3195).
+- External harnesses do not yet see these tools: the agent-MCP surface,
+  mounted at spawn with a session-scoped capability token, is follow-up
+  (#3192, `0074`).
+
 ## The event vocabulary
 
 `CodeEvent` (journal payload; internally tagged, `#[non_exhaustive]`,
