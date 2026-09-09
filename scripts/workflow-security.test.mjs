@@ -874,6 +874,7 @@ test("production secrets remain isolated to the release workflow", () => {
     .filter(([, source]) => source.includes("secrets."))
     .map(([name]) => name);
   const allowedSecretConsumers = new Set([
+    "build-mobile.yml",
     "publish-e2b-template.yml",
     "publish-whisper-helper.yml",
     "release-draft.yml",
@@ -1038,6 +1039,40 @@ test("production secrets remain isolated to the release workflow", () => {
     /\.github\/e2b-cli\/node_modules\/\.bin\/e2b --version/,
   );
   assert.doesNotMatch(publishJob, /npm install|@latest/);
+
+  // The mobile deploy is the one secret consumer reachable from a pull
+  // request, and deliberately so: the routing dry-run that comments on a
+  // mobile PR must ask EAS for the last finished build's runtimeVersion,
+  // which needs auth. Three properties keep that narrow, and each is
+  // asserted here rather than left to review. The trigger is `pull_request`,
+  // never `pull_request_target`, so a fork's run is handed an empty token
+  // instead of the real one. The credential is scoped to Expo alone — it
+  // must not reach the signing secrets. And every step that actually ships
+  // (OTA publish, binary build + store submission) is guarded off for
+  // pull_request events, so a PR run can only ever read.
+  const mobile = workflows["build-mobile.yml"];
+  if (mobile) {
+    assert.doesNotMatch(mobile, /^\s*pull_request_target:/m);
+    assert.deepEqual(
+      [...new Set(mobile.match(/secrets\.[A-Z0-9_]+/g))],
+      ["secrets.EXPO_TOKEN"],
+    );
+    assert.match(
+      mobile,
+      /^permissions:\n  contents: read\n  pull-requests: write$/m,
+    );
+    for (const name of ["Publish OTA", "Build binary and auto-submit"]) {
+      const step = mobile.match(
+        new RegExp(`- name: ${name}\\n[\\s\\S]*?(?=\\n\\s+- name:|$)`),
+      )?.[0];
+      assert.ok(step, `missing deploy step: ${name}`);
+      assert.match(
+        step,
+        /github\.event_name != 'pull_request'/,
+        `${name} must never run from a pull request`,
+      );
+    }
+  }
 });
 
 test("desktop voice delegates whisper.cpp to the verified helper", () => {
