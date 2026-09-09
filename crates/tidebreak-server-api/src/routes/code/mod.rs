@@ -24,6 +24,7 @@ mod git;
 mod grants;
 mod harnesses;
 mod llm;
+mod native;
 mod repos;
 mod session_events;
 mod sessions;
@@ -43,7 +44,8 @@ pub(crate) use access::{
 pub(crate) use analytics::analytics;
 pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{
-    browser_act, browser_list, browser_navigate, browser_screenshot, browser_snapshot, browser_wait,
+    browser_act, browser_activate, browser_close, browser_diagnostics, browser_list,
+    browser_navigate, browser_open, browser_screenshot, browser_snapshot, browser_wait,
 };
 pub(crate) use delivery::{
     act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,
@@ -76,6 +78,7 @@ pub(crate) use llm::{
     harness_git_credential, harness_llm_anthropic_messages, harness_llm_openai_models,
     harness_llm_openai_responses, MAX_GIT_CREDENTIAL_BODY_BYTES, MAX_HARNESS_LLM_BODY_BYTES,
 };
+pub(crate) use native::{native_execute, native_result};
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_github_repositories,
     list_repos, patch_repo, repo_sources, start_clone,
@@ -124,9 +127,10 @@ pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_remote_workspace, create_workspace, get_workspace,
-    get_workspace_blob, get_workspace_diff, get_worktree_root, list_workspace_files,
-    list_workspace_tree, list_workspaces, patch_workspace, propose_workspace_title,
-    restore_workspace, retry_workspace_setup, search_workspace, set_worktree_root,
+    get_workspace_blob, get_workspace_diff, get_workspace_file, get_worktree_root,
+    list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace,
+    propose_workspace_title, restore_workspace, retry_workspace_setup, search_workspace,
+    set_worktree_root,
 };
 
 // App-token handlers do not reach `AppState.code` directly. They extract a

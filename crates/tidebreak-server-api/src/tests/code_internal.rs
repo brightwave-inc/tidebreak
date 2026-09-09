@@ -1919,6 +1919,253 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
     assert_eq!(data.bytes(), pixels.as_slice());
 }
 
+/// Return real PNG pixels through the same tool-output path as each computer-use surface.
+struct InternalScreenshotTool {
+    name: &'static str,
+    image: tidebreak_core::ImageRef,
+    data: tidebreak_core::ImageData,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for InternalScreenshotTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.into(),
+            description: "Capture the app for the transport test".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolCtx,
+        _args: serde_json::Value,
+    ) -> tidebreak_core::Result<ToolOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::text("Captured the app").with_images([(self.image, self.data.clone())]))
+    }
+}
+
+fn screenshot_internal_app(
+    dir: &std::path::Path,
+    db: Arc<DbStore>,
+    provider: Arc<ScriptedProvider>,
+    tools: ToolRegistry,
+) -> (axum::Router, Arc<str>, Arc<CodeRuntime>) {
+    let mut state = AppState::new(
+        Config::desktop(dir),
+        db.clone(),
+        Arc::new(FixedResolver(provider)),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "scripted".into(),
+            image_input: true,
+            ..AgentConfig::default()
+        },
+    );
+    let mut runtime = CodeRuntime::with_registry(db, dir.to_path_buf(), AdapterRegistry::new());
+    runtime.adapters.register(Arc::new(InternalAdapter::new(
+        state.clone(),
+        runtime.db.clone(),
+        runtime.bus.clone(),
+        tidebreak_core::AgentRunExecutionLocation::InProcess,
+    )));
+    state.events.mirror_into(runtime.bus.clone());
+    let runtime = Arc::new(runtime);
+    state.code = Some(runtime.clone());
+    (app(state.clone()), state.token, runtime)
+}
+
+fn assert_screenshot_request(
+    request: &ChatRequest,
+    image: tidebreak_core::ImageRef,
+    pixels: &[u8],
+) {
+    let blocks = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .collect::<Vec<_>>();
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { content, is_error: false, .. }
+                if content.starts_with("Captured the app")
+        )),
+        "the request retains the executed screenshot tool's successful result: {blocks:?}"
+    );
+    let images = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { image } => Some(*image),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(images, vec![image], "the screenshot remains an image block");
+    let data = request
+        .images
+        .get(image.blob_id)
+        .expect("hydrated screenshot");
+    assert_eq!(data.media_type(), tidebreak_core::ImageMediaType::Png);
+    assert_eq!(
+        data.bytes(),
+        pixels,
+        "the provider receives the exact PNG bytes"
+    );
+}
+
+#[tokio::test]
+async fn internal_browser_screenshot_hydrates_pixels_after_execution_and_recovery() {
+    assert_internal_screenshot_hydrates_pixels(tidebreak_core::BROWSER_SCREENSHOT_TOOL).await;
+}
+
+#[tokio::test]
+async fn internal_native_screenshot_hydrates_pixels_after_execution_and_recovery() {
+    assert_internal_screenshot_hydrates_pixels(tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL).await;
+}
+
+#[tokio::test]
+async fn internal_chrome_screenshot_hydrates_pixels_after_execution_and_recovery() {
+    assert_internal_screenshot_hydrates_pixels(tidebreak_core::CHROME_SCREENSHOT_TOOL).await;
+}
+
+async fn assert_internal_screenshot_hydrates_pixels(name: &'static str) {
+    let colors = vec![
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128,
+    ];
+    let raster = image::RgbImage::from_raw(3, 2, colors.clone()).unwrap();
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    raster
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let pixels = encoded.into_inner();
+    assert_eq!(
+        image::load_from_memory_with_format(&pixels, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgb8()
+            .into_raw(),
+        colors,
+        "the fixture decodes to six colored pixels, not only a PNG signature",
+    );
+    let image = tidebreak_core::ImageRef {
+        blob_id: tidebreak_core::DocumentBlob::from_bytes(&pixels).id,
+        media_type: tidebreak_core::ImageMediaType::Png,
+        width: 3,
+        height: 2,
+        byte_len: pixels.len() as u64,
+    };
+
+    let (dir, store) = temp_db_store("internal-screenshot.db").await;
+    let db = Arc::new(store);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tools = ToolRegistry::new().with(Box::new(InternalScreenshotTool {
+        name,
+        image,
+        data: tidebreak_core::ImageData::new(image.media_type, pixels.clone()),
+        calls: calls.clone(),
+    }));
+    let provider = Arc::new(ScriptedProvider {
+        steps: Mutex::new(vec![
+            Step::Tool {
+                name,
+                input: serde_json::json!({}),
+            },
+            Step::Text("The capture contains six colors"),
+            Step::Text("The stored capture still contains six colors"),
+        ]),
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
+    });
+    let (router, token, runtime) =
+        screenshot_internal_app(dir.path(), db.clone(), provider.clone(), tools);
+    let bearer = format!("Bearer {token}");
+    let session_id = create_internal_session(&router, &bearer, "allow").await;
+    for message in ["Capture the app", "Read the capture again"] {
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            submit_internal_turn(&router, &bearer, session_id, message),
+        )
+        .await
+        .expect("the internal screenshot turn completes")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");
+        let body: serde_json::Value = super::json_body(response).await;
+        assert_eq!(body["status"], "completed", "{name}: {body}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "{name} executes once");
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "{name}");
+        assert!(requests[0].tools.iter().any(|tool| tool.name == name));
+        assert!(!requests[0].images.contains(image.blob_id));
+        assert_screenshot_request(&requests[1], image, &pixels);
+        assert_screenshot_request(&requests[2], image, &pixels);
+    }
+    let tool_calls = db.list_tool_calls(session_id).await.unwrap();
+    assert_eq!(tool_calls.len(), 1, "{name}");
+    assert_eq!(
+        tool_calls[0].result_preview,
+        Some(tidebreak_core::ToolResultPreview::Images {
+            images: vec![image]
+        }),
+        "{name} persists the screenshot reference for recovery",
+    );
+    drop(router);
+    drop(runtime);
+    drop(provider);
+
+    // The fresh runtime has no screenshot tool or captured request cache.
+    // Its next request must rebuild the image from persisted result/blob data.
+    let recovered_provider = Arc::new(ScriptedProvider {
+        steps: Mutex::new(vec![Step::Text(
+            "The recovered capture contains six colors",
+        )]),
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
+    });
+    let (recovered_router, recovered_token, recovered_runtime) = screenshot_internal_app(
+        dir.path(),
+        db,
+        recovered_provider.clone(),
+        ToolRegistry::new(),
+    );
+    recovered_runtime.recover().await.unwrap();
+    assert!(
+        recovered_runtime.has_worker(session_id),
+        "{name} resumes its Code worker"
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(20),
+        submit_internal_turn(
+            &recovered_router,
+            &format!("Bearer {recovered_token}"),
+            session_id,
+            "Read the capture after recovery",
+        ),
+    )
+    .await
+    .expect("the recovered screenshot turn completes")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");
+    let body: serde_json::Value = super::json_body(response).await;
+    assert_eq!(body["status"], "completed", "{name}: {body}");
+    let requests = recovered_provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "{name}");
+    assert!(!requests[0].tools.iter().any(|tool| tool.name == name));
+    assert_screenshot_request(&requests[0], image, &pixels);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "{name} must not recapture during recovery"
+    );
+}
+
 #[allow(dead_code)]
 fn _db_type_is_used(_: &DbStore) {}
 

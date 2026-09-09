@@ -158,7 +158,7 @@ mod tests {
     async fn serve_replies_to_requests_and_skips_notifications_and_blanks() {
         // Initialize, acknowledge the lifecycle notification, then list tools.
         let input = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
             "\n\n",
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
             "\n",
@@ -174,6 +174,11 @@ mod tests {
         let out = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
+        let initialized: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            initialized["result"]["protocolVersion"],
+            crate::PROTOCOL_VERSION
+        );
         let response: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(response["id"], 2);
         assert!(response["result"]["tools"].is_array());

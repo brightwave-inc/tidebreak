@@ -471,7 +471,19 @@ impl CodeRuntime {
         }
         // Interrupt stops only the active turn. The worker and logical code
         // session continue, so its browser capfile and native capability must
-        // remain live for later turns.
+        // remain live for later turns. Pending native computer-use input is
+        // cancelled, though: an interrupt releases the session's exclusive
+        // desktop input ownership immediately (decision 94).
+        if let (Some(runtime), Some(workspace)) = (self.native_runtime(), session.workspace_id) {
+            let scope = crate::code::native_runtime::NativeRuntimeScope {
+                owner: session.owner.clone(),
+                workspace,
+                session: id,
+            };
+            if let Err(error) = runtime.cancel_session(&scope).await {
+                tracing::warn!("could not cancel native computer use on interrupt: {error}");
+            }
+        }
         if self.workers.lock().expect("code workers").contains_key(&id) {
             let handle = self.require_worker(id)?;
             let (reply, rx) = oneshot::channel();

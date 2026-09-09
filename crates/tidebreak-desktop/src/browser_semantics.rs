@@ -6,7 +6,7 @@
 //! its ref; navigation or a replaced target returns `stale_target` without an
 //! action.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -40,6 +40,7 @@ const NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS: u64 = 2;
 const MAX_NATIVE_SELECT_STEPS: usize = 512;
 const MAX_NATIVE_SCROLL_STEPS: usize = 24;
 const NATIVE_ACTION_VERIFY_DELAY_MILLIS: u64 = 25;
+const BROWSER_GHOST_VISIBLE_MILLIS: u64 = 1_200;
 
 #[cfg(target_os = "macos")]
 thread_local! {
@@ -100,6 +101,8 @@ struct RawSemanticNode {
     sensitive: bool,
     consequential: bool,
     actions: Vec<String>,
+    #[serde(default)]
+    action_execution_modes: BTreeMap<String, Vec<tidebreak_core::BrowserExecutionMode>>,
     bounds: BrowserElementBounds,
     selector: Option<String>,
     frame_path: Vec<String>,
@@ -154,6 +157,8 @@ struct NativeActionResolution {
     target_focused: bool,
     #[serde(default)]
     target_dom_focused: bool,
+    #[serde(default)]
+    input_dispatched: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,14 +177,6 @@ pub(crate) struct BrowserUploadFile {
     pub(crate) media_type: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) binding: BrowserConfirmationBinding,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawScreenshotPrivacyScan {
-    sensitive_fields: usize,
-    uninspectable_regions: usize,
-    changed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +314,7 @@ async fn capture_semantic_snapshot(
             checked: node.checked,
             sensitive: node.sensitive,
             actions: node.actions,
+            action_execution_modes: node.action_execution_modes,
             bounds: node.bounds,
         });
     }
@@ -353,17 +351,23 @@ async fn native_consequential_action_choice(
     origin: &BrowserOrigin,
     action_type: &str,
     target_label: Option<&str>,
+    foreground: bool,
 ) -> Result<bool, String> {
     let origin = crate::native_security_label(origin.as_str());
     let action = crate::native_security_label(action_type);
     let target = target_label
         .map(crate::native_security_label)
         .unwrap_or_else(|| "an unlabeled target".to_owned());
+    let focus_disclosure = if foreground {
+        "\n\nThis action takes keyboard focus inside Tidebreak and can interrupt your typing. It uses native browser input for this action only. Your system pointer stays where you leave it."
+    } else {
+        ""
+    };
     let (sender, receiver) = oneshot::channel();
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow the agent to {action} on {origin}?\n\nTarget: {target}\n\nThe target label came from the page and is untrusted. Confirm only if this is the external effect you expect."
+            "Allow the agent to {action} on {origin}?\n\nTarget: {target}{focus_disclosure}\n\nThe target label came from the page and is untrusted. Confirm only if this is the external effect you expect."
         ))
         .title("Confirm browser action")
         .kind(MessageDialogKind::Warning)
@@ -460,6 +464,13 @@ pub(crate) async fn execute_browser_upload(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
+    crate::browser_independence::require_host(
+        &webview,
+        &registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    )?;
     let script = browser_upload_script(&target, &file)?;
     let authorization = NativeUploadAuthorization {
         registry: registry.clone(),
@@ -854,10 +865,7 @@ pub(crate) async fn browser_screenshot(
         .as_ref()
         .is_some_and(|engine| engine.capabilities.screenshot)
     {
-        return Err(
-            "browser screenshot requires human takeover because this engine cannot prove closed-shadow privacy"
-                .to_owned(),
-        );
+        return Err("browser screenshots are not available on this platform yet".to_owned());
     }
     let origin = host_snapshot
         .url
@@ -873,7 +881,9 @@ pub(crate) async fn browser_screenshot(
             capability_id,
             &browser_id,
             &origin,
-            BrowserGrantCapability::BrowserObserveOrigin,
+            // Decision 94: capture requires the grant taken under the
+            // disclosure that visible pixels reach the selected model.
+            BrowserGrantCapability::BrowserCaptureVisibleTab,
             "screenshot",
             None,
             BrowserDispatchEffect::Observe,
@@ -929,37 +939,13 @@ async fn capture_screenshot(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    let privacy_watch = format!("__tidebreak_screenshot_privacy_{}", Uuid::new_v4().simple());
-    let initial_privacy: RawScreenshotPrivacyScan =
-        evaluate_json(&webview, &screenshot_privacy_script(&privacy_watch, false)?).await?;
-    if initial_privacy.sensitive_fields > 0 || initial_privacy.uninspectable_regions > 0 {
-        let _ = evaluate_json::<RawScreenshotPrivacyScan>(
-            &webview,
-            &screenshot_privacy_script(&privacy_watch, true)?,
-        )
-        .await;
-        return Err(screenshot_human_takeover_message(&initial_privacy));
-    }
-
-    let image_result =
-        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await;
-    let final_privacy: RawScreenshotPrivacyScan = evaluate_json(
-        &webview,
-        &screenshot_privacy_script(&privacy_watch, true)?,
-    )
-    .await
-    .map_err(|error| {
-        format!(
-            "browser screenshot requires human takeover because the privacy scan could not be completed: {error}"
-        )
-    })?;
-    if final_privacy.sensitive_fields > 0
-        || final_privacy.uninspectable_regions > 0
-        || final_privacy.changed
-    {
-        return Err(screenshot_human_takeover_message(&final_privacy));
-    }
-    let image_base64 = image_result?;
+    // Decision 94: the capture grant's disclosure covers everything visible
+    // in the tab, so capture proceeds without a redaction pre-scan. The
+    // document-epoch fence above and the atomic completion below still refuse
+    // a page that changed underneath the snapshot.
+    let _: String = evaluate_json(&webview, &browser_ghost_clear_script(None)).await?;
+    let image_base64 =
+        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
 
     // One atomic completion: recheck capability, workspace, visibility,
     // halt, controller, grant, instance, document epoch, and stored
@@ -985,15 +971,81 @@ async fn capture_screenshot(
     })
 }
 
-fn screenshot_human_takeover_message(scan: &RawScreenshotPrivacyScan) -> String {
-    if scan.uninspectable_regions > 0 {
-        return "browser screenshot requires human takeover because cross-origin or closed-shadow content cannot be checked for sensitive fields".to_owned();
+#[cfg(target_os = "macos")]
+unsafe fn snapshot_to_png_base64(
+    snapshot: *mut objc2::runtime::AnyObject,
+    error: *mut objc2_foundation::NSError,
+) -> Result<String, String> {
+    use std::ffi::c_void;
+
+    use objc2::msg_send;
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_core_graphics::CGImage;
+    use objc2_foundation::NSRect;
+    use tidebreak_core::browser::MAX_BROWSER_SCREENSHOT_PNG_BYTES;
+
+    if !error.is_null() {
+        let msg = (&*error).localizedDescription().to_string();
+        return Err(format!("screenshot failed: {msg}"));
     }
-    if scan.sensitive_fields > 0 {
-        return "browser screenshot requires human takeover because the page contains a password, file, or verification-code field".to_owned();
+    if snapshot.is_null() {
+        return Err("screenshot produced no image".to_owned());
     }
-    "browser screenshot requires human takeover because the page changed during privacy-safe capture"
-        .to_owned()
+
+    // WebKit snapshots can use NSCGImageSnapshotRep, which the array PNG
+    // encoder cannot serialize. Ask NSImage for its raster representation
+    // before creating an NSBitmapImageRep. AppKit owns the borrowed CGImage
+    // through the current autorelease pool; the bitmap retains its contents.
+    let cg_image: *const CGImage = msg_send![
+        snapshot,
+        CGImageForProposedRect: std::ptr::null_mut::<NSRect>(),
+        context: std::ptr::null::<AnyObject>(),
+        hints: std::ptr::null::<AnyObject>()
+    ];
+    if cg_image.is_null() {
+        return Err("screenshot image could not produce a bitmap".to_owned());
+    }
+
+    let bitmap_class = AnyClass::get(c"NSBitmapImageRep")
+        .ok_or_else(|| "AppKit NSBitmapImageRep is unavailable".to_owned())?;
+    let bitmap: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+    let bitmap: Option<Retained<AnyObject>> = msg_send![bitmap, initWithCGImage: cg_image];
+    let bitmap = bitmap.ok_or_else(|| "screenshot bitmap was unavailable".to_owned())?;
+    let dictionary_class = AnyClass::get(c"NSDictionary")
+        .ok_or_else(|| "Foundation NSDictionary is unavailable".to_owned())?;
+
+    // AppKit declares the PNG properties parameter nonnull, so pass an
+    // empty dictionary rather than nil.
+    let empty_properties: *mut AnyObject = msg_send![dictionary_class, dictionary];
+    if empty_properties.is_null() {
+        return Err("screenshot PNG properties were unavailable".to_owned());
+    }
+
+    // NSBitmapImageFileTypePNG = 4
+    let png_type: usize = 4;
+    let png_data: *mut AnyObject = msg_send![
+        &*bitmap,
+        representationUsingType: png_type,
+        properties: empty_properties
+    ];
+    if png_data.is_null() {
+        return Err("screenshot PNG conversion failed".to_owned());
+    }
+
+    let bytes_ptr: *const c_void = msg_send![png_data, bytes];
+    let byte_len: usize = msg_send![png_data, length];
+    if bytes_ptr.is_null() || byte_len == 0 {
+        return Err("screenshot PNG data is empty".to_owned());
+    }
+    if byte_len > MAX_BROWSER_SCREENSHOT_PNG_BYTES {
+        return Err(format!(
+            "screenshot PNG of {byte_len} bytes exceeds the encoded-image ceiling"
+        ));
+    }
+    let buf = std::slice::from_raw_parts(bytes_ptr.cast::<u8>(), byte_len);
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    Ok(BASE64.encode(buf))
 }
 
 #[cfg(target_os = "macos")]
@@ -1002,7 +1054,6 @@ async fn capture_browser_image(
     max_width: Option<u64>,
     max_height: Option<u64>,
 ) -> Result<String, String> {
-    use std::ffi::c_void;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1013,9 +1064,7 @@ async fn capture_browser_image(
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::NSError;
     use objc2_web_kit::WKWebView;
-    use tidebreak_core::browser::{
-        MAX_BROWSER_SCREENSHOT_DIMENSION, MAX_BROWSER_SCREENSHOT_PNG_BYTES,
-    };
+    use tidebreak_core::browser::MAX_BROWSER_SCREENSHOT_DIMENSION;
     use tokio::{sync::oneshot, time::timeout};
 
     const SCREENSHOT_TIMEOUT_SECONDS: u64 = 30;
@@ -1057,68 +1106,6 @@ async fn capture_browser_image(
     unsafe impl Encode for CGRect {
         const ENCODING: Encoding =
             Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
-    }
-
-    // Convert an NSImage snapshot to PNG base64 via NSBitmapImageRep.
-    unsafe fn snapshot_to_png_base64(
-        snapshot: *mut AnyObject,
-        error: *mut NSError,
-    ) -> Result<String, String> {
-        if !error.is_null() {
-            let msg = (&*error).localizedDescription().to_string();
-            return Err(format!("screenshot failed: {msg}"));
-        }
-        if snapshot.is_null() {
-            return Err("screenshot produced no image".to_owned());
-        }
-
-        // [snapshot representations] → NSArray<NSImageRep>
-        let representations: *mut AnyObject = msg_send![snapshot, representations];
-        if representations.is_null() {
-            return Err("screenshot has no image representations".to_owned());
-        }
-        let representation_count: usize = msg_send![representations, count];
-        if representation_count == 0 {
-            return Err("screenshot image has zero representations".to_owned());
-        }
-
-        let bitmap_class = AnyClass::get(c"NSBitmapImageRep")
-            .ok_or_else(|| "AppKit NSBitmapImageRep is unavailable".to_owned())?;
-        let dictionary_class = AnyClass::get(c"NSDictionary")
-            .ok_or_else(|| "Foundation NSDictionary is unavailable".to_owned())?;
-
-        // AppKit declares the PNG properties parameter nonnull, so pass an
-        // empty dictionary rather than nil.
-        let empty_properties: *mut AnyObject = msg_send![dictionary_class, dictionary];
-        if empty_properties.is_null() {
-            return Err("screenshot PNG properties were unavailable".to_owned());
-        }
-
-        // NSBitmapImageFileTypePNG = 4
-        let png_type: usize = 4;
-        let png_data: *mut AnyObject = msg_send![
-            bitmap_class,
-            representationOfImageRepsInArray: representations,
-            usingType: png_type,
-            properties: empty_properties
-        ];
-        if png_data.is_null() {
-            return Err("screenshot PNG conversion failed".to_owned());
-        }
-
-        let bytes_ptr: *const c_void = msg_send![png_data, bytes];
-        let byte_len: usize = msg_send![png_data, length];
-        if bytes_ptr.is_null() || byte_len == 0 {
-            return Err("screenshot PNG data is empty".to_owned());
-        }
-        if byte_len > MAX_BROWSER_SCREENSHOT_PNG_BYTES {
-            return Err(format!(
-                "screenshot PNG of {byte_len} bytes exceeds the encoded-image ceiling"
-            ));
-        }
-        let buf = std::slice::from_raw_parts(bytes_ptr.cast::<u8>(), byte_len);
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        Ok(BASE64.encode(buf))
     }
 
     /// Build a `WKSnapshotConfiguration` cropping the capture when the view
@@ -1203,12 +1190,162 @@ async fn capture_browser_image(
     Err("screenshot capture is not available on this platform yet".to_owned())
 }
 
+/// Remove the page decoration without activating the tab or sending input.
+/// Lifecycle handlers call this after Stop, revoke, hide, and takeover.
+pub(crate) fn clear_browser_ghost_cursor(app: &AppHandle, browser_id: &str) -> Result<(), String> {
+    let label = browser_label(browser_id)?;
+    let Some(webview) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    clear_webview_ghost_cursor(&webview, None)
+}
+
+fn clear_webview_ghost_cursor(webview: &Webview, ghost_id: Option<&str>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = browser_ghost_clear_script(ghost_id);
+        with_browser_webview(webview, move |view| {
+            let _ = evaluate_browser_decoration(view, &script);
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (webview, ghost_id);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn evaluate_browser_decoration(
+    view: &objc2_web_kit::WKWebView,
+    script: &str,
+) -> Result<(), String> {
+    let content_world = browser_semantics_content_world()?;
+    let script = objc2_foundation::NSString::from_str(script);
+    unsafe {
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            None,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn schedule_browser_ghost_cleanup(
+    webview: Webview,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: String,
+    workspace_id: String,
+    fence: BrowserObservationFence,
+    ghost_id: String,
+) {
+    let Ok(mut halt) = registry.subscribe_halt(&browser_id, &workspace_id) else {
+        let _ = clear_webview_ghost_cursor(&webview, Some(&ghost_id));
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(BROWSER_GHOST_VISIBLE_MILLIS);
+        loop {
+            if *halt.borrow_and_update()
+                || !registry
+                    .observation_fence(capability_id, &browser_id)
+                    .is_ok_and(|live| {
+                        live.instance_id == fence.instance_id
+                            && live.document_epoch == fence.document_epoch
+                    })
+                || tokio::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            tokio::select! {
+                _ = halt.changed() => break,
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+        let _ = clear_webview_ghost_cursor(&webview, Some(&ghost_id));
+    });
+}
+
+fn native_action_ghost_point(
+    resolution: &NativeActionResolution,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+) -> Option<tidebreak_core::BrowserPoint> {
+    use tidebreak_core::BrowserAction;
+    match action {
+        BrowserAction::Click { at }
+        | BrowserAction::Hover { at }
+        | BrowserAction::RightClick { at }
+        | BrowserAction::DoubleClick { at } => native_css_point(resolution, *at).ok(),
+        BrowserAction::Drag { to, .. } => native_css_point(resolution, Some(*to)).ok(),
+        BrowserAction::Scroll { .. } | BrowserAction::Check { .. } => {
+            native_css_point(resolution, None).ok()
+        }
+        BrowserAction::Fill { .. } if matches!(phase, NativeActionDispatchPhase::Initial) => {
+            native_css_point(resolution, None).ok()
+        }
+        BrowserAction::ScrollIntoView => Some(tidebreak_core::BrowserPoint {
+            x: resolution.scroll_x?,
+            y: resolution.scroll_y?,
+        }),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn browser_ghost_script(
+    ghost_id: &str,
+    document_epoch: u64,
+    snapshot_id: &str,
+    url: &str,
+    point: tidebreak_core::BrowserPoint,
+    viewport_width: f64,
+    viewport_height: f64,
+    action: &str,
+) -> Result<String, String> {
+    if !point.x.is_finite()
+        || !point.y.is_finite()
+        || point.x < 0.0
+        || point.y < 0.0
+        || !viewport_width.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_width <= point.x
+        || viewport_height <= point.y
+    {
+        return Err("browser cursor position is outside its viewport".to_owned());
+    }
+    let payload = serde_json::json!({
+        "id": ghost_id, "documentEpoch": document_epoch,
+        "snapshotMarker": marker_for_snapshot(snapshot_id), "url": url,
+        "point": point, "viewportWidth": viewport_width, "viewportHeight": viewport_height,
+        "action": action, "visibleMillis": BROWSER_GHOST_VISIBLE_MILLIS,
+    });
+    Ok(BROWSER_GHOST_CURSOR_SCRIPT.replace("__PAYLOAD__", &payload.to_string()))
+}
+
+fn browser_ghost_clear_script(ghost_id: Option<&str>) -> String {
+    BROWSER_GHOST_CURSOR_SCRIPT.replace(
+        "__PAYLOAD__",
+        &serde_json::json!({
+            "clear": true, "id": ghost_id,
+        })
+        .to_string(),
+    )
+}
+
 // ── Native semantic act ───────────────────────────────────────────
 
 pub(crate) async fn browser_native_act(
     app: &AppHandle,
     registry: &BrowserRegistry,
     capability_id: Uuid,
+    session_id: tidebreak_core::SessionId,
     arguments: tidebreak_core::BrowserActArgs,
 ) -> Result<tidebreak_core::BrowserActResult, String> {
     use tidebreak_core::BrowserActStatus;
@@ -1219,6 +1356,24 @@ pub(crate) async fn browser_native_act(
     if let Some(value) = arguments.action.value() {
         if value.chars().count() > MAX_ACTION_VALUE_CHARS {
             return Err("browser action value is too long".to_owned());
+        }
+    }
+
+    if let Some(message) = independent_browser_action_refusal(&arguments) {
+        return Ok(act_result(
+            &arguments,
+            BrowserActStatus::UnsupportedNative,
+            message,
+        ));
+    }
+
+    if let tidebreak_core::BrowserAction::KeyChord { key, modifiers } = &arguments.action {
+        if !native_key_chord_stays_in_page(key, modifiers) {
+            return Ok(act_result(
+                &arguments,
+                BrowserActStatus::UnsupportedNative,
+                "This shortcut can leave the page. Use a page editing or navigation shortcut.",
+            ));
         }
     }
 
@@ -1272,20 +1427,45 @@ pub(crate) async fn browser_native_act(
         ));
     }
 
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    if let Err(message) = crate::browser_independence::require_host(
+        &webview,
+        registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    ) {
+        return Ok(act_result(
+            &arguments,
+            BrowserActStatus::UnsupportedNative,
+            &message,
+        ));
+    }
+
     let action_type = arguments.action.kind().to_owned();
     let target_label =
         (!target.fingerprint.name.is_empty()).then(|| target.fingerprint.name.clone());
     let consequential =
         native_action_requires_confirmation(&origin, target.consequential, &arguments.action);
-    let confirmation_id = if consequential {
+    let foreground = arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Foreground;
+    let confirmation_id = if consequential || foreground {
         let _ = registry.set_agent_action(
             capability_id,
             &arguments.browser_id,
             Some("Waiting for native confirmation"),
             false,
         );
-        if !native_consequential_action_choice(app, &origin, &action_type, target_label.as_deref())
-            .await?
+        if !native_consequential_action_choice(
+            app,
+            &origin,
+            &action_type,
+            target_label.as_deref(),
+            foreground,
+        )
+        .await?
         {
             let _ = registry.set_agent_action(capability_id, &arguments.browser_id, None, false);
             return Ok(act_result(
@@ -1294,15 +1474,19 @@ pub(crate) async fn browser_native_act(
                 "The user declined this consequential browser action. Do not retry it without direction.",
             ));
         }
-        Some(registry.record_native_confirmation(
-            capability_id,
-            &arguments.browser_id,
-            &origin,
-            BrowserGrantCapability::BrowserControlOrigin,
-            &action_type,
-            target_label.as_deref(),
-            None,
-        )?)
+        consequential
+            .then(|| {
+                registry.record_native_confirmation(
+                    capability_id,
+                    &arguments.browser_id,
+                    &origin,
+                    BrowserGrantCapability::BrowserControlOrigin,
+                    &action_type,
+                    target_label.as_deref(),
+                    None,
+                )
+            })
+            .transpose()?
     } else {
         None
     };
@@ -1315,6 +1499,12 @@ pub(crate) async fn browser_native_act(
     let dispatch_registry = registry.clone();
     let browser_id = arguments.browser_id.clone();
     let dispatch_origin = origin.clone();
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let independent_native = qualified_independent_host_action(
+        &arguments.action,
+        &target.fingerprint.tag,
+        target.fingerprint.input_type.as_deref(),
+    );
     registry
         .dispatch_agent(
             capability_id,
@@ -1326,19 +1516,434 @@ pub(crate) async fn browser_native_act(
             effect,
             confirmation_id,
             move || async move {
-                execute_native_action(
-                    app,
-                    dispatch_registry,
-                    capability_id,
-                    workspace_id,
-                    dispatch_origin,
-                    fence,
-                    arguments,
-                )
-                .await
+                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background
+                    && independent_native
+                {
+                    let label = browser_label(&arguments.browser_id)?;
+                    if let Some(webview) = app.get_webview(&label) {
+                        if crate::agent_browser_host::has_host(&webview)? {
+                            return execute_native_action(
+                                app,
+                                dispatch_registry,
+                                capability_id,
+                                workspace_id,
+                                dispatch_origin,
+                                fence,
+                                arguments,
+                            )
+                            .await
+                            .map(|mut result| {
+                                result.input_method = tidebreak_core::BrowserInputMethod::Native;
+                                result
+                            });
+                        }
+                    }
+                }
+                if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background {
+                    execute_background_action(
+                        app,
+                        dispatch_registry,
+                        capability_id,
+                        workspace_id,
+                        dispatch_origin,
+                        fence,
+                        arguments,
+                    )
+                    .await
+                } else {
+                    let host = app.state::<crate::host_access::HostAccess>();
+                    host.computer_use
+                        .dispatch_foreground_browser(session_id, || {
+                            execute_native_action(
+                                app.clone(),
+                                dispatch_registry,
+                                capability_id,
+                                workspace_id,
+                                dispatch_origin,
+                                fence,
+                                arguments,
+                            )
+                        })
+                        .await
+                }
             },
         )
         .await
+}
+
+// Keep legacy wire values readable, but reject them before target lookup,
+// approval, or dispatch. No browser action may acquire native focus.
+fn independent_browser_action_refusal(
+    arguments: &tidebreak_core::BrowserActArgs,
+) -> Option<&'static str> {
+    if arguments.execution_mode != tidebreak_core::BrowserExecutionMode::Background {
+        return Some("Browser actions preserve your pointer and keyboard focus. Foreground input is unavailable.");
+    }
+    if !background_action_supported(&arguments.action) {
+        return Some("This action cannot preserve your keyboard focus. No input was sent.");
+    }
+    None
+}
+
+fn background_action_ghost_point(
+    resolution: &NativeActionResolution,
+    action: &tidebreak_core::BrowserAction,
+) -> Option<tidebreak_core::BrowserPoint> {
+    match action {
+        tidebreak_core::BrowserAction::Click { at }
+        | tidebreak_core::BrowserAction::Hover { at }
+        | tidebreak_core::BrowserAction::RightClick { at }
+        | tidebreak_core::BrowserAction::DoubleClick { at } => {
+            native_css_point(resolution, *at).ok()
+        }
+        tidebreak_core::BrowserAction::Drag { to, .. } => {
+            native_css_point(resolution, Some(*to)).ok()
+        }
+        _ => None,
+    }
+}
+
+fn browser_input_method(
+    mode: tidebreak_core::BrowserExecutionMode,
+) -> tidebreak_core::BrowserInputMethod {
+    match mode {
+        tidebreak_core::BrowserExecutionMode::Background => tidebreak_core::BrowserInputMethod::Dom,
+        tidebreak_core::BrowserExecutionMode::Foreground => {
+            tidebreak_core::BrowserInputMethod::Native
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+fn qualified_independent_host_action(
+    action: &tidebreak_core::BrowserAction,
+    tag: &str,
+    input_type: Option<&str>,
+) -> bool {
+    match action {
+        tidebreak_core::BrowserAction::Fill { .. } => {
+            tag == "textarea"
+                || (tag == "input" && matches!(input_type, Some("text" | "search" | "url" | "tel")))
+        }
+        _ => false,
+    }
+}
+
+fn background_action_supported(action: &tidebreak_core::BrowserAction) -> bool {
+    matches!(
+        action,
+        tidebreak_core::BrowserAction::Click { .. }
+            | tidebreak_core::BrowserAction::Check { .. }
+            | tidebreak_core::BrowserAction::Fill { .. }
+            | tidebreak_core::BrowserAction::Select { .. }
+            | tidebreak_core::BrowserAction::Hover { .. }
+            | tidebreak_core::BrowserAction::Scroll { .. }
+            | tidebreak_core::BrowserAction::ScrollIntoView
+            | tidebreak_core::BrowserAction::Press { .. }
+            | tidebreak_core::BrowserAction::KeyChord { .. }
+            | tidebreak_core::BrowserAction::RightClick { .. }
+            | tidebreak_core::BrowserAction::DoubleClick { .. }
+            | tidebreak_core::BrowserAction::Drag { .. }
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_background_action(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: String,
+    origin: BrowserOrigin,
+    fence: BrowserObservationFence,
+    arguments: tidebreak_core::BrowserActArgs,
+) -> Result<tidebreak_core::BrowserActResult, String> {
+    let target = match registry.semantic_target(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+        &arguments.target_ref,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(act_result(
+                &arguments,
+                act_status_from_target_error(error),
+                target_error_message(error),
+            ))
+        }
+    };
+    if target.sensitive {
+        return Ok(act_result(
+            &arguments,
+            tidebreak_core::BrowserActStatus::HumanTakeoverRequired,
+            "Password, file, and verification-code fields require human takeover.",
+        ));
+    }
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    let script = action_resolution_script(
+        &target,
+        &arguments.action,
+        NativeActionDispatchPhase::Initial,
+        true,
+    )?;
+    let authorization = BackgroundActionAuthorization {
+        registry: registry.clone(),
+        capability_id,
+        workspace_id: workspace_id.clone(),
+        origin,
+        fence,
+        arguments: arguments.clone(),
+        target,
+    };
+    let raw = match evaluate_background_action(&webview, script, authorization).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            registry.invalidate_semantic_snapshot(
+                &arguments.browser_id,
+                &workspace_id,
+                &arguments.snapshot_id,
+            );
+            let mut result = act_result(&arguments, tidebreak_core::BrowserActStatus::EngineFailure,
+                &format!("Background browser input did not return a confirmed result: {error}. Inspect the page before another action."));
+            result.requires_resnapshot = true;
+            return Ok(result);
+        }
+    };
+    let performed = raw.input_dispatched || raw.status == NativeActionResolutionStatus::Ready;
+    let status = if matches!(
+        raw.status,
+        NativeActionResolutionStatus::UnsupportedNative
+            | NativeActionResolutionStatus::PendingNativeInput
+    ) {
+        tidebreak_core::BrowserActStatus::UnsupportedNative
+    } else {
+        native_resolution_status(raw.status)
+    };
+    if performed {
+        registry.invalidate_semantic_snapshot(
+            &arguments.browser_id,
+            &workspace_id,
+            &arguments.snapshot_id,
+        );
+        #[cfg(target_os = "macos")]
+        if let Some(point) = background_action_ghost_point(&raw, &arguments.action) {
+            let ghost_id = Uuid::new_v4().to_string();
+            if let Ok(script) = browser_ghost_script(
+                &ghost_id,
+                arguments.document_epoch,
+                &arguments.snapshot_id,
+                &raw.url,
+                point,
+                raw.viewport_width.unwrap_or_default(),
+                raw.viewport_height.unwrap_or_default(),
+                arguments.action.kind(),
+            ) {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = with_browser_webview(&webview, move |view| {
+                        let _ = evaluate_browser_decoration(view, &script);
+                    });
+                    schedule_browser_ghost_cleanup(
+                        webview.clone(),
+                        registry.clone(),
+                        capability_id,
+                        arguments.browser_id.clone(),
+                        workspace_id,
+                        fence,
+                        ghost_id,
+                    );
+                }
+            }
+        }
+    }
+    let mut result = act_result(&arguments, status, &raw.message);
+    result.requires_resnapshot =
+        performed || status == tidebreak_core::BrowserActStatus::StaleTarget;
+    result.url = Some(raw.url);
+    result.title = Some(raw.title);
+    Ok(result)
+}
+
+struct BackgroundActionAuthorization {
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: String,
+    origin: BrowserOrigin,
+    fence: BrowserObservationFence,
+    arguments: tidebreak_core::BrowserActArgs,
+    target: BrowserTargetRecord,
+}
+
+impl BackgroundActionAuthorization {
+    fn authorize(&self) -> Result<(), String> {
+        self.registry.authorize_native_action_phase(
+            self.capability_id,
+            &self.arguments.browser_id,
+            &self.workspace_id,
+            &self.origin,
+            self.fence,
+        )?;
+        let target = self
+            .registry
+            .semantic_target(
+                &self.arguments.browser_id,
+                &self.workspace_id,
+                &self.arguments.snapshot_id,
+                self.arguments.document_epoch,
+                &self.arguments.target_ref,
+            )
+            .map_err(|error| target_error_message(error).to_owned())?;
+        if target != self.target || target.sensitive {
+            return Err("browser target changed before background input".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct BackgroundActionCallbackState {
+    sender: Option<oneshot::Sender<Result<NativeActionResolution, String>>>,
+    deadline: tokio::time::Instant,
+    cancelled: bool,
+}
+
+#[cfg(target_os = "macos")]
+struct BackgroundActionCancellation(
+    std::sync::Arc<std::sync::Mutex<BackgroundActionCallbackState>>,
+);
+
+#[cfg(target_os = "macos")]
+impl Drop for BackgroundActionCancellation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.cancelled = true;
+            state.sender.take();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_background_action(
+    webview: &Webview,
+    script: String,
+    authorization: BackgroundActionAuthorization,
+) -> Result<NativeActionResolution, String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use std::sync::{Arc, Mutex};
+    let (sender, receiver) = oneshot::channel();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS);
+    let state = Arc::new(Mutex::new(BackgroundActionCallbackState {
+        sender: Some(sender),
+        deadline,
+        cancelled: false,
+    }));
+    let _cancellation = BackgroundActionCancellation(Arc::clone(&state));
+    let callback_state = Arc::clone(&state);
+    let mut halt = authorization.registry.subscribe_halt(
+        &authorization.arguments.browser_id,
+        &authorization.workspace_id,
+    )?;
+    let guarded_webview = webview.clone();
+    with_browser_webview(webview, move |view| {
+        let mut submission = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if submission.cancelled
+            || tokio::time::Instant::now() >= submission.deadline
+            || submission
+                .sender
+                .as_ref()
+                .is_none_or(oneshot::Sender::is_closed)
+        {
+            return;
+        }
+        let ready = authorization
+            .authorize()
+            .and_then(|()| {
+                crate::browser_independence::require_native_host(
+                    &guarded_webview,
+                    view,
+                    &authorization.registry,
+                    authorization.capability_id,
+                    &authorization.workspace_id,
+                    authorization.fence,
+                )
+            })
+            .and_then(|()| browser_semantics_content_world());
+        let content_world = match ready {
+            Ok(world) => world,
+            Err(error) => {
+                if let Some(sender) = submission.sender.take() {
+                    let _ = sender.send(Err(error));
+                }
+                return;
+            }
+        };
+        #[cfg(feature = "independent-wk-host")]
+        let dialog_view = objc2::Message::retain(view);
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let mut state = callback_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.cancelled {
+                return;
+            }
+            #[cfg(feature = "independent-wk-host")]
+            if let Err(message) = crate::agent_browser_dialogs::take_blocked(&dialog_view) {
+                if let Some(sender) = state.sender.take() {
+                    let _ = sender.send(Err(message));
+                }
+                return;
+            }
+            let result = if !error.is_null() {
+                Err(unsafe { (&*error).localizedDescription().to_string() })
+            } else if value.is_null() {
+                Err("browser returned no result".to_owned())
+            } else {
+                let value: &NSString = unsafe { &*value.cast() };
+                authorization.authorize().and_then(|()| {
+                    serde_json::from_str(&value.to_string())
+                        .map_err(|error| format!("invalid browser response: {error}"))
+                })
+            };
+            if let Some(sender) = state.sender.take() {
+                let _ = sender.send(result);
+            }
+        });
+        let script = NSString::from_str(&script);
+        // Authorization and the cancellation fence remain locked until WebKit
+        // accepts this one script. Resolution and mutation run in one JS task.
+        unsafe {
+            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &script,
+                None,
+                &content_world,
+                Some(&handler),
+            );
+        }
+    })?;
+    tokio::select! {
+        result = receiver => result.map_err(|_| "background browser input was interrupted".to_owned())?,
+        _ = halt.changed() => Err("browser control was stopped during background input".to_owned()),
+        () = tokio::time::sleep_until(deadline) => Err("background browser input timed out".to_owned()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn evaluate_background_action(
+    _webview: &Webview,
+    _script: String,
+    _authorization: BackgroundActionAuthorization,
+) -> Result<NativeActionResolution, String> {
+    Err("background browser input is not available on this platform yet".to_owned())
 }
 
 fn native_action_requires_confirmation(
@@ -1353,12 +1958,17 @@ fn native_action_requires_confirmation(
     }
     match action {
         BrowserAction::Select { .. } => true,
-        BrowserAction::Click | BrowserAction::Check { .. } | BrowserAction::Press { .. } => {
-            target_consequential
-        }
+        BrowserAction::Click { .. }
+        | BrowserAction::Check { .. }
+        | BrowserAction::Press { .. }
+        | BrowserAction::KeyChord { .. }
+        | BrowserAction::RightClick { .. }
+        | BrowserAction::DoubleClick { .. }
+        | BrowserAction::Drag { .. } => target_consequential,
         BrowserAction::Focus
-        | BrowserAction::Hover
+        | BrowserAction::Hover { .. }
         | BrowserAction::Fill { .. }
+        | BrowserAction::Scroll { .. }
         | BrowserAction::ScrollIntoView => false,
     }
 }
@@ -1402,7 +2012,8 @@ async fn execute_native_action(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
-    let resolution_script = native_action_resolution_script(&target, &arguments.action)?;
+    let resolution_script =
+        native_script_for_arguments(&target, &arguments, NativeActionDispatchPhase::Initial)?;
     let (resolution, dispatch_error) = match resolve_and_dispatch_native_action(
         &webview,
         registry.clone(),
@@ -1428,14 +2039,32 @@ async fn execute_native_action(
                 target_error_message(error),
             ));
         }
-        Err(failure) => return Ok(native_failure_result(arguments, failure, None, false)),
+        Err(failure) => {
+            let requires_resnapshot =
+                arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
+            if requires_resnapshot {
+                registry.invalidate_semantic_snapshot(
+                    &arguments.browser_id,
+                    &workspace_id,
+                    &arguments.snapshot_id,
+                );
+            }
+            return Ok(native_failure_result(
+                arguments,
+                failure,
+                None,
+                requires_resnapshot,
+            ));
+        }
     };
 
     let resolution = *resolution;
     let status = native_resolution_status(resolution.status);
     let performed = resolution.status == NativeActionResolutionStatus::Ready;
     if let Some(failure) = dispatch_error {
-        let requires_resnapshot = failure.requires_resnapshot();
+        let requires_resnapshot = failure.requires_resnapshot()
+            || resolution.input_dispatched
+            || arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
         if requires_resnapshot {
             registry.invalidate_semantic_snapshot(
                 &arguments.browser_id,
@@ -1450,12 +2079,14 @@ async fn execute_native_action(
             requires_resnapshot,
         ));
     }
-    if performed {
+    if performed || resolution.input_dispatched {
         registry.invalidate_semantic_snapshot(
             &arguments.browser_id,
             &workspace_id,
             &arguments.snapshot_id,
         );
+    }
+    if performed {
         if let Err(failure) = wait_for_native_action_processing(
             &webview,
             &arguments.action,
@@ -1498,13 +2129,17 @@ async fn execute_native_action(
         document_epoch: arguments.document_epoch,
         target_ref: arguments.target_ref,
         action: arguments.action.kind().to_owned(),
+        execution_mode: arguments.execution_mode,
+        input_method: browser_input_method(arguments.execution_mode),
         status,
         message: if performed {
             "Action completed. Take a new snapshot before the next action.".to_owned()
         } else {
             resolution.message
         },
-        requires_resnapshot: performed || status == BrowserActStatus::StaleTarget,
+        requires_resnapshot: performed
+            || resolution.input_dispatched
+            || status == BrowserActStatus::StaleTarget,
         url: Some(resolution.url),
         title: Some(resolution.title),
     })
@@ -1714,6 +2349,8 @@ fn native_failure_result(
         document_epoch: arguments.document_epoch,
         target_ref: arguments.target_ref,
         action: arguments.action.kind().to_owned(),
+        execution_mode: arguments.execution_mode,
+        input_method: browser_input_method(arguments.execution_mode),
         status: failure.status(),
         message: failure.message(),
         requires_resnapshot,
@@ -1777,7 +2414,46 @@ async fn resolve_and_dispatch_native_action(
     let document_epoch = arguments.document_epoch;
     let target_ref = arguments.target_ref.clone();
     let action = arguments.action.clone();
+    let ghost_webview = webview.clone();
+    let independent = arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
     with_browser_webview(webview, move |view| unsafe {
+        // Independent fill prepares DOM focus. Do not submit that mutation after
+        // cancellation, even if this main-thread callback waited in the queue.
+        let Ok(queued_state) = callback_state.lock() else {
+            return;
+        };
+        if queued_state.cancelled || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        drop(queued_state);
+        let preflight = registry
+            .authorize_native_action_phase(
+                capability_id,
+                &browser_id,
+                &workspace_id,
+                &origin,
+                fence,
+            )
+            .map_err(NativeInputFailure::Engine)
+            .and_then(|()| {
+                authorize_independent_native_input(
+                    independent,
+                    &ghost_webview,
+                    view,
+                    &registry,
+                    capability_id,
+                    &workspace_id,
+                    fence,
+                )
+            });
+        if let Err(error) = preflight {
+            if let Ok(mut state) = callback_state.lock() {
+                if let Some(sender) = state.sender.take() {
+                    let _ = sender.send(Err(error));
+                }
+            }
+            return;
+        }
         let retained_view = view.retain();
         let content_world = match browser_semantics_content_world() {
             Ok(content_world) => content_world,
@@ -1790,6 +2466,7 @@ async fn resolve_and_dispatch_native_action(
                 return;
             }
         };
+        let submission_state = Arc::clone(&callback_state);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
             let Ok(mut state) = callback_state.lock() else {
                 return;
@@ -1829,6 +2506,15 @@ async fn resolve_and_dispatch_native_action(
                         fence,
                     )
                     .map_err(NativeInputFailure::Engine)?;
+                authorize_independent_native_input(
+                    independent,
+                    &ghost_webview,
+                    &retained_view,
+                    &registry,
+                    capability_id,
+                    &workspace_id,
+                    fence,
+                )?;
                 if resolution.status == NativeActionResolutionStatus::NoOp
                     && matches!(action, tidebreak_core::BrowserAction::Focus)
                 {
@@ -1869,7 +2555,41 @@ async fn resolve_and_dispatch_native_action(
                         if tokio::time::Instant::now() >= deadline {
                             return Err(native_input_deadline_failure(phase, phase_deadline));
                         }
-                        dispatch_native_action(&retained_view, &resolution, &action, phase)
+                        dispatch_native_action(
+                            &retained_view,
+                            &resolution,
+                            &action,
+                            phase,
+                            independent,
+                        )?;
+                        if let Some(point) = native_action_ghost_point(&resolution, &action, phase)
+                        {
+                            let ghost_id = Uuid::new_v4().to_string();
+                            if let Ok(script) = browser_ghost_script(
+                                &ghost_id,
+                                document_epoch,
+                                &snapshot_id,
+                                &resolution.url,
+                                point,
+                                resolution.viewport_width.unwrap_or_default(),
+                                resolution.viewport_height.unwrap_or_default(),
+                                action.kind(),
+                            ) {
+                                // Decoration follows confirmed dispatch. A failed decoration
+                                // must never make a completed input look safe to replay.
+                                let _ = evaluate_browser_decoration(&retained_view, &script);
+                                schedule_browser_ghost_cleanup(
+                                    ghost_webview.clone(),
+                                    registry.clone(),
+                                    capability_id,
+                                    browser_id.clone(),
+                                    workspace_id.clone(),
+                                    fence,
+                                    ghost_id,
+                                );
+                            }
+                        }
+                        Ok(())
                     })
                     .err();
                 Ok(NativeActionDispatchOutcome::Resolved {
@@ -1882,6 +2602,13 @@ async fn resolve_and_dispatch_native_action(
             }
         });
         let script = NSString::from_str(&script);
+        let Ok(submission) = submission_state.lock() else {
+            return;
+        };
+        if submission.cancelled || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        // Preserve the cancellation fence until WebKit accepts the focus script.
         view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
             &script,
             None,
@@ -1942,11 +2669,16 @@ fn native_pending_event_kind(
             | NativeActionDispatchPhase::FillInsert => NativePendingEventKind::Presentation,
             _ => NativePendingEventKind::None,
         },
-        tidebreak_core::BrowserAction::Click
+        tidebreak_core::BrowserAction::Click { .. }
         | tidebreak_core::BrowserAction::Check { .. }
-        | tidebreak_core::BrowserAction::Hover
+        | tidebreak_core::BrowserAction::Hover { .. }
+        | tidebreak_core::BrowserAction::RightClick { .. }
+        | tidebreak_core::BrowserAction::DoubleClick { .. }
+        | tidebreak_core::BrowserAction::Drag { .. }
+        | tidebreak_core::BrowserAction::Scroll { .. }
         | tidebreak_core::BrowserAction::ScrollIntoView => NativePendingEventKind::Mouse,
         tidebreak_core::BrowserAction::Press { .. }
+        | tidebreak_core::BrowserAction::KeyChord { .. }
         | tidebreak_core::BrowserAction::Select { .. } => NativePendingEventKind::Presentation,
         tidebreak_core::BrowserAction::Focus => match phase {
             NativeActionDispatchPhase::Initial => NativePendingEventKind::Presentation,
@@ -1984,6 +2716,43 @@ unsafe fn ensure_native_event_processing_supported(
 }
 
 #[cfg(target_os = "macos")]
+type PendingNativeProcessing =
+    std::sync::Mutex<Option<oneshot::Sender<Result<(), NativeInputFailure>>>>;
+
+#[cfg(target_os = "macos")]
+struct NativeProcessingCancellation(std::sync::Arc<PendingNativeProcessing>);
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeProcessingCancellation {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn finish_native_processing(
+    pending: &PendingNativeProcessing,
+    deadline: tokio::time::Instant,
+    finish: impl FnOnce() -> Result<(), NativeInputFailure>,
+) {
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(sender) = pending.take() else {
+        return;
+    };
+    if sender.is_closed() || tokio::time::Instant::now() >= deadline {
+        return;
+    }
+    // Hold the cancellation fence while consuming a dialog report. A callback
+    // from a timed-out action must not steal the next action's report.
+    let _ = sender.send(finish());
+}
+
+#[cfg(target_os = "macos")]
 async fn wait_for_native_action_processing(
     webview: &Webview,
     action: &tidebreak_core::BrowserAction,
@@ -2002,6 +2771,9 @@ async fn wait_for_native_action_processing(
 
     let (sender, receiver) = oneshot::channel::<Result<(), NativeInputFailure>>();
     let sender = Arc::new(Mutex::new(Some(sender)));
+    let _cancellation = NativeProcessingCancellation(Arc::clone(&sender));
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS);
     let callback_sender = Arc::clone(&sender);
     with_browser_webview(webview, move |view| unsafe {
         let supported = match kind {
@@ -2031,14 +2803,18 @@ async fn wait_for_native_action_processing(
             }
             return;
         }
+        #[cfg(feature = "independent-wk-host")]
+        let dialog_view = objc2::Message::retain(view);
         let handler = RcBlock::new(move || {
-            if let Some(sender) = callback_sender
-                .lock()
-                .ok()
-                .and_then(|mut sender| sender.take())
-            {
-                let _ = sender.send(Ok(()));
-            }
+            finish_native_processing(&callback_sender, deadline, || {
+                #[cfg(feature = "independent-wk-host")]
+                {
+                    crate::agent_browser_dialogs::take_blocked(&dialog_view)
+                        .map_err(NativeInputFailure::Engine)
+                }
+                #[cfg(not(feature = "independent-wk-host"))]
+                Ok(())
+            });
         });
         match kind {
             NativePendingEventKind::Presentation => {
@@ -2164,18 +2940,20 @@ async fn finish_native_action(
     initial_resolution: &NativeActionResolution,
     target: &BrowserTargetRecord,
 ) -> Result<(), NativeInputFailure> {
-    let resolution_script = native_action_resolution_script(target, &arguments.action)
-        .map_err(NativeInputFailure::Engine)?;
+    let resolution_script =
+        native_script_for_arguments(target, arguments, NativeActionDispatchPhase::Initial)
+            .map_err(NativeInputFailure::Engine)?;
     match &arguments.action {
-        tidebreak_core::BrowserAction::Focus | tidebreak_core::BrowserAction::Press { .. } => {
+        tidebreak_core::BrowserAction::Focus
+        | tidebreak_core::BrowserAction::Press { .. }
+        | tidebreak_core::BrowserAction::KeyChord { .. } => {
             let phase = if matches!(arguments.action, tidebreak_core::BrowserAction::Focus) {
                 NativeActionDispatchPhase::FocusVerify
             } else {
                 NativeActionDispatchPhase::PressKey
             };
-            let script =
-                native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                    .map_err(NativeInputFailure::Engine)?;
+            let script = native_script_for_arguments(target, arguments, phase)
+                .map_err(NativeInputFailure::Engine)?;
             let resolution = wait_for_native_action_phase(
                 phase,
                 std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -2210,9 +2988,8 @@ async fn finish_native_action(
                 NativeActionDispatchPhase::FillInsert,
                 NativeActionDispatchPhase::FillVerify,
             ] {
-                let script =
-                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                        .map_err(NativeInputFailure::Engine)?;
+                let script = native_script_for_arguments(target, arguments, phase)
+                    .map_err(NativeInputFailure::Engine)?;
                 let resolution = wait_for_native_action_phase(
                     phase,
                     std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -2246,9 +3023,9 @@ async fn finish_native_action(
             ))
         }
         tidebreak_core::BrowserAction::Select { .. } => {
-            let resolution_script = native_action_resolution_script_for_phase(
+            let resolution_script = native_script_for_arguments(
                 target,
-                &arguments.action,
+                arguments,
                 NativeActionDispatchPhase::SelectInitialStep,
             )
             .map_err(NativeInputFailure::Engine)?;
@@ -2298,9 +3075,8 @@ async fn finish_native_action(
                     previous_selected_index: selected_index,
                     previous_distance: distance,
                 };
-                let script =
-                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                        .map_err(NativeInputFailure::Engine)?;
+                let script = native_script_for_arguments(target, arguments, phase)
+                    .map_err(NativeInputFailure::Engine)?;
                 let resolution = wait_for_native_action_phase(
                     phase,
                     std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -2472,28 +3248,144 @@ async fn finish_native_action(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn dispatch_native_action(
+#[allow(clippy::too_many_arguments)]
+fn authorize_independent_native_input(
+    independent: bool,
+    webview: &Webview,
+    view: &objc2_web_kit::WKWebView,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: &str,
+    fence: BrowserObservationFence,
+) -> Result<(), NativeInputFailure> {
+    if !independent {
+        return Ok(());
+    }
+    crate::browser_independence::require_native_host(
+        webview,
+        view,
+        registry,
+        capability_id,
+        workspace_id,
+        fence,
+    )
+    .map_err(NativeInputFailure::Engine)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn dispatch_independent_host_action(
     view: &objc2_web_kit::WKWebView,
     resolution: &NativeActionResolution,
     action: &tidebreak_core::BrowserAction,
     phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
+    #[cfg(not(feature = "independent-wk-host"))]
+    {
+        let _ = (view, resolution, action, phase);
+        Err(NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "Independent native browser input is not enabled.".to_owned(),
+        })
+    }
+    #[cfg(feature = "independent-wk-host")]
+    {
+        use objc2::{msg_send, sel};
+        use objc2_foundation::{NSNotFound, NSRange, NSString};
+
+        crate::agent_browser_host::verify_native_window(view)
+            .map_err(NativeInputFailure::Engine)?;
+        match action {
+            tidebreak_core::BrowserAction::Fill { value } => {
+                if !resolution.target_dom_focused {
+                    return Err(NativeInputFailure::Typed {
+                        status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                        message: "The field lost focus in the agent browser. No text was inserted."
+                            .to_owned(),
+                    });
+                }
+                match phase {
+                    NativeActionDispatchPhase::Initial
+                    | NativeActionDispatchPhase::FillSelectAll => Ok(()),
+                    NativeActionDispatchPhase::FillInsert => {
+                        let supported: bool =
+                            msg_send![view, respondsToSelector: sel!(insertText:replacementRange:)];
+                        if !supported {
+                            return Err(NativeInputFailure::Typed {
+                                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                                message: "The agent browser does not support text insertion."
+                                    .to_owned(),
+                            });
+                        }
+                        let text = NSString::from_str(value);
+                        let _: () = msg_send![view, insertText: &*text, replacementRange: NSRange::new(NSNotFound as usize, 0)];
+                        Ok(())
+                    }
+                    _ => Err(NativeInputFailure::Engine(
+                        "browser fill reached an invalid native input phase".to_owned(),
+                    )),
+                }
+            }
+            _ => Err(NativeInputFailure::Typed {
+                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                message: "This action has not qualified for independent native browser input."
+                    .to_owned(),
+            }),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn dispatch_native_action(
+    view: &objc2_web_kit::WKWebView,
+    resolution: &NativeActionResolution,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+    independent: bool,
+) -> Result<(), NativeInputFailure> {
     use objc2_app_kit::NSView;
 
+    if independent {
+        return dispatch_independent_host_action(view, resolution, action, phase);
+    }
     let native_view: &NSView = &*(view as *const _ as *const NSView);
     let window = native_view
         .window()
         .ok_or_else(|| NativeInputFailure::Engine("browser window is not available".to_owned()))?;
     ensure_active_browser_window(&window)?;
-    let window_point =
-        native_window_point(native_view, resolution).map_err(NativeInputFailure::Engine)?;
+    let pointer_offset = match action {
+        tidebreak_core::BrowserAction::Click { at }
+        | tidebreak_core::BrowserAction::Hover { at }
+        | tidebreak_core::BrowserAction::RightClick { at }
+        | tidebreak_core::BrowserAction::DoubleClick { at } => *at,
+        tidebreak_core::BrowserAction::Drag { from, .. } => *from,
+        _ => None,
+    };
+    let window_point = native_window_point(native_view, resolution, pointer_offset)
+        .map_err(NativeInputFailure::Engine)?;
     let screen_point = window.convertPointToScreen(window_point);
 
     match action {
-        tidebreak_core::BrowserAction::Click | tidebreak_core::BrowserAction::Check { .. } => {
+        tidebreak_core::BrowserAction::Click { .. }
+        | tidebreak_core::BrowserAction::Check { .. } => {
             send_native_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
         }
-        tidebreak_core::BrowserAction::Hover => {
+        tidebreak_core::BrowserAction::RightClick { .. } => {
+            send_native_right_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::DoubleClick { .. } => {
+            send_native_double_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Drag { to, .. } => {
+            let end_point = native_window_point(native_view, resolution, Some(*to))
+                .map_err(NativeInputFailure::Engine)?;
+            send_native_drag(&window, window_point, end_point)
+                .map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Scroll { delta_x, delta_y } => {
+            send_native_wheel_at(view, &window, resolution, *delta_x as f64, *delta_y as f64)
+                .map_err(NativeInputFailure::Engine)?;
+        }
+        tidebreak_core::BrowserAction::Hover { .. } => {
             send_native_hover(view, &window, window_point).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Focus => {
@@ -2526,6 +3418,15 @@ unsafe fn dispatch_native_action(
             } else {
                 native_browser_responder(view, &window)?;
                 send_native_key(&window, window_point, key).map_err(NativeInputFailure::Engine)?;
+            }
+        }
+        tidebreak_core::BrowserAction::KeyChord { key, modifiers } => {
+            if matches!(phase, NativeActionDispatchPhase::Initial) {
+                acquire_native_target_focus(view, &window, screen_point, resolution)?;
+            } else {
+                native_browser_responder(view, &window)?;
+                send_native_key_chord(&window, window_point, key, modifiers)
+                    .map_err(NativeInputFailure::Engine)?;
             }
         }
         tidebreak_core::BrowserAction::Select { .. } => {
@@ -2651,11 +3552,10 @@ unsafe fn ensure_active_browser_window(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn native_window_point(
-    view: &objc2_app_kit::NSView,
+fn native_css_point(
     resolution: &NativeActionResolution,
-) -> Result<objc2_foundation::NSPoint, String> {
+    offset: Option<tidebreak_core::BrowserPoint>,
+) -> Result<tidebreak_core::BrowserPoint, String> {
     let x = resolution
         .x
         .ok_or_else(|| "browser target has no horizontal position".to_owned())?;
@@ -2668,6 +3568,34 @@ fn native_window_point(
     let height = resolution
         .height
         .ok_or_else(|| "browser target has no height".to_owned())?;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err("browser target bounds are not valid".to_owned());
+    }
+    // Match the resolver's hit test and keep points inside adjacent edges.
+    let (x, y) = match offset {
+        Some(offset) if offset.is_well_formed() => (
+            x + offset.x.clamp(0.0, width - 0.5_f64.min(width / 2.0)),
+            y + offset.y.clamp(0.0, height - 0.5_f64.min(height / 2.0)),
+        ),
+        Some(_) => return Err("browser native input coordinates are not valid".to_owned()),
+        None => (x + width / 2.0, y + height / 2.0),
+    };
+    Ok(tidebreak_core::BrowserPoint { x, y })
+}
+
+#[cfg(target_os = "macos")]
+fn native_window_point(
+    view: &objc2_app_kit::NSView,
+    resolution: &NativeActionResolution,
+    offset: Option<tidebreak_core::BrowserPoint>,
+) -> Result<objc2_foundation::NSPoint, String> {
+    let point = native_css_point(resolution, offset)?;
     let viewport_width = resolution
         .viewport_width
         .filter(|value| *value > 0.0)
@@ -2676,13 +3604,7 @@ fn native_window_point(
         .viewport_height
         .filter(|value| *value > 0.0)
         .ok_or_else(|| "browser viewport has no height".to_owned())?;
-    native_window_point_for_css(
-        view,
-        x + width / 2.0,
-        y + height / 2.0,
-        viewport_width,
-        viewport_height,
-    )
+    native_window_point_for_css(view, point.x, point.y, viewport_width, viewport_height)
 }
 
 #[cfg(target_os = "macos")]
@@ -2746,6 +3668,126 @@ fn send_native_click(
     )
     .ok_or_else(|| "could not create native mouse-up input".to_owned())?;
     window.sendEvent(&down);
+    window.sendEvent(&up);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_right_click(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    let timestamp = native_event_timestamp();
+    for (event_type, pressure) in [
+        (NSEventType::RightMouseDown, 1.0),
+        (NSEventType::RightMouseUp, 0.0),
+    ] {
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            event_type,
+            point,
+            NSEventModifierFlags::empty(),
+            timestamp,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            pressure,
+        )
+        .ok_or_else(|| "could not create native right-click input".to_owned())?;
+        window.sendEvent(&event);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_double_click(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    let timestamp = native_event_timestamp();
+    for click_count in [1_isize, 2] {
+        for (event_type, pressure) in [
+            (NSEventType::LeftMouseDown, 1.0),
+            (NSEventType::LeftMouseUp, 0.0),
+        ] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                point,
+                NSEventModifierFlags::empty(),
+                timestamp,
+                window.windowNumber(),
+                None,
+                0,
+                click_count,
+                pressure,
+            )
+            .ok_or_else(|| "could not create native double-click input".to_owned())?;
+            window.sendEvent(&event);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_drag(
+    window: &objc2_app_kit::NSWindow,
+    from: objc2_foundation::NSPoint,
+    to: objc2_foundation::NSPoint,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+
+    const DRAG_STEPS: usize = 8;
+
+    let timestamp = native_event_timestamp();
+    let down = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseDown,
+        from,
+        NSEventModifierFlags::empty(),
+        timestamp,
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    )
+    .ok_or_else(|| "could not create native drag-start input".to_owned())?;
+    window.sendEvent(&down);
+    for step in 1..=DRAG_STEPS {
+        let progress = step as f64 / DRAG_STEPS as f64;
+        let point = objc2_foundation::NSPoint::new(
+            from.x + (to.x - from.x) * progress,
+            from.y + (to.y - from.y) * progress,
+        );
+        let dragged = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDragged,
+            point,
+            NSEventModifierFlags::empty(),
+            native_event_timestamp(),
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        )
+        .ok_or_else(|| "could not create native drag-move input".to_owned())?;
+        window.sendEvent(&dragged);
+    }
+    let up = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseUp,
+        to,
+        NSEventModifierFlags::empty(),
+        native_event_timestamp(),
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        0.0,
+    )
+    .ok_or_else(|| "could not create native drag-end input".to_owned())?;
     window.sendEvent(&up);
     Ok(())
 }
@@ -2926,7 +3968,8 @@ fn native_event_timestamp() -> f64 {
 #[cfg(target_os = "macos")]
 fn native_key(key: &str) -> Result<(u16, String), String> {
     use objc2_app_kit::{
-        NSDeleteFunctionKey, NSDownArrowFunctionKey, NSLeftArrowFunctionKey,
+        NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEndFunctionKey, NSHomeFunctionKey,
+        NSLeftArrowFunctionKey, NSPageDownFunctionKey, NSPageUpFunctionKey,
         NSRightArrowFunctionKey, NSUpArrowFunctionKey,
     };
 
@@ -2941,9 +3984,170 @@ fn native_key(key: &str) -> Result<(u16, String), String> {
         "ArrowRight" => (0x7c, native_function_character(NSRightArrowFunctionKey)?),
         "Backspace" => (0x33, '\u{8}'.to_string()),
         "Delete" => (0x75, native_function_character(NSDeleteFunctionKey)?),
+        "Home" => (0x73, native_function_character(NSHomeFunctionKey)?),
+        "End" => (0x77, native_function_character(NSEndFunctionKey)?),
+        "PageUp" => (0x74, native_function_character(NSPageUpFunctionKey)?),
+        "PageDown" => (0x79, native_function_character(NSPageDownFunctionKey)?),
+        single if tidebreak_core::valid_browser_chord_key(single) => {
+            let character = single
+                .chars()
+                .next()
+                .ok_or_else(|| "browser key is empty".to_owned())?;
+            (native_character_key_code(character), single.to_owned())
+        }
         _ => return Err("browser key is not supported by the native adapter".to_owned()),
     };
     Ok(mapping)
+}
+
+/// US-ANSI virtual key codes for the printable characters a chord may anchor.
+/// Unknown characters use code 0; WebKit consumes the event's characters, so
+/// the exact virtual code only refines page-visible `keyCode` values.
+#[cfg(target_os = "macos")]
+fn native_character_key_code(character: char) -> u16 {
+    match character.to_ascii_lowercase() {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0b,
+        'q' => 0x0c,
+        'w' => 0x0d,
+        'e' => 0x0e,
+        'r' => 0x0f,
+        'y' => 0x10,
+        't' => 0x11,
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '=' => 0x18,
+        '9' => 0x19,
+        '7' => 0x1a,
+        '-' => 0x1b,
+        '8' => 0x1c,
+        '0' => 0x1d,
+        ']' => 0x1e,
+        'o' => 0x1f,
+        'u' => 0x20,
+        '[' => 0x21,
+        'i' => 0x22,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        '\'' => 0x27,
+        'k' => 0x28,
+        ';' => 0x29,
+        '\\' => 0x2a,
+        ',' => 0x2b,
+        '/' => 0x2c,
+        'n' => 0x2d,
+        'm' => 0x2e,
+        '.' => 0x2f,
+        '`' => 0x32,
+        _ => 0x00,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_modifier_flags(
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> objc2_app_kit::NSEventModifierFlags {
+    use objc2_app_kit::NSEventModifierFlags;
+    use tidebreak_core::BrowserModifier;
+
+    let mut flags = NSEventModifierFlags::empty();
+    for modifier in modifiers {
+        flags |= match modifier {
+            BrowserModifier::Shift => NSEventModifierFlags::Shift,
+            BrowserModifier::Control => NSEventModifierFlags::Control,
+            BrowserModifier::Alt => NSEventModifierFlags::Option,
+            BrowserModifier::Meta => NSEventModifierFlags::Command,
+        };
+    }
+    flags
+}
+
+/// Allow editing and selection shortcuts without invoking browser or OS UI.
+fn native_key_chord_stays_in_page(
+    key: &str,
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> bool {
+    use tidebreak_core::BrowserModifier;
+
+    if modifiers.is_empty() {
+        return false;
+    }
+    let meta = modifiers.contains(&BrowserModifier::Meta);
+    let control = modifiers.contains(&BrowserModifier::Control);
+    let alt = modifiers.contains(&BrowserModifier::Alt);
+    if meta {
+        return !control
+            && !alt
+            && matches!(
+                key,
+                "a" | "c"
+                    | "v"
+                    | "x"
+                    | "z"
+                    | "ArrowLeft"
+                    | "ArrowRight"
+                    | "ArrowUp"
+                    | "ArrowDown"
+                    | "Backspace"
+                    | "Delete"
+            );
+    }
+    if control || alt {
+        return !(control && alt)
+            && matches!(key, "ArrowLeft" | "ArrowRight" | "Backspace" | "Delete");
+    }
+    modifiers == [BrowserModifier::Shift]
+        && (tidebreak_core::valid_browser_press_key(key)
+            || tidebreak_core::valid_browser_chord_key(key))
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_key_chord(
+    window: &objc2_app_kit::NSWindow,
+    point: objc2_foundation::NSPoint,
+    key: &str,
+    modifiers: &[tidebreak_core::BrowserModifier],
+) -> Result<(), String> {
+    use objc2_app_kit::{NSEvent, NSEventType};
+
+    if !native_key_chord_stays_in_page(key, modifiers) {
+        return Err("browser shortcut can leave the page".to_owned());
+    }
+    let (key_code, character) = native_key(key)?;
+    let flags = native_modifier_flags(modifiers);
+    let characters = objc2_foundation::NSString::from_str(&character);
+    let timestamp = native_event_timestamp();
+    for event_type in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            event_type,
+            point,
+            flags,
+            timestamp,
+            window.windowNumber(),
+            None,
+            &characters,
+            &characters,
+            false,
+            key_code,
+        )
+        .ok_or_else(|| format!("could not create native {key} chord input"))?;
+        window.sendEvent(&event);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3058,6 +4262,33 @@ fn send_native_scroll(
     Ok(())
 }
 
+/// Send one bounded model-requested wheel step at the re-resolved target,
+/// reusing the same phased CGEvent path as scroll-into-view but with the
+/// model's explicit CSS-pixel deltas instead of a computed centering plan.
+#[cfg(target_os = "macos")]
+fn send_native_wheel_at(
+    view: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+    resolution: &NativeActionResolution,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<(), String> {
+    let x = resolution
+        .x
+        .ok_or_else(|| "browser scroll target has no horizontal position".to_owned())?;
+    let y = resolution
+        .y
+        .ok_or_else(|| "browser scroll target has no vertical position".to_owned())?;
+    let width = resolution.width.unwrap_or_default();
+    let height = resolution.height.unwrap_or_default();
+    let mut planned = resolution.clone();
+    planned.scroll_x = Some(x + width / 2.0);
+    planned.scroll_y = Some(y + height / 2.0);
+    planned.scroll_delta_x = Some(delta_x);
+    planned.scroll_delta_y = Some(delta_y);
+    send_native_scroll(view, window, &planned)
+}
+
 #[cfg(target_os = "macos")]
 fn native_scroll_delta_for_css(
     delta_x: f64,
@@ -3106,6 +4337,8 @@ fn act_result(
         document_epoch: request.document_epoch,
         target_ref: request.target_ref.clone(),
         action: request.action.kind().to_owned(),
+        execution_mode: request.execution_mode,
+        input_method: browser_input_method(request.execution_mode),
         status,
         message: message.to_owned(),
         requires_resnapshot: matches!(status, tidebreak_core::BrowserActStatus::StaleTarget),
@@ -3140,12 +4373,77 @@ fn native_action_resolution_script(
     native_action_resolution_script_for_phase(target, action, NativeActionDispatchPhase::Initial)
 }
 
+/// Element-relative points the resolution script hit-tests instead of the
+/// element centre. Empty means "use the centre".
+fn action_hit_points(action: &tidebreak_core::BrowserAction) -> Vec<serde_json::Value> {
+    use tidebreak_core::BrowserAction;
+
+    let point =
+        |point: &tidebreak_core::BrowserPoint| serde_json::json!({ "x": point.x, "y": point.y });
+    match action {
+        BrowserAction::Click { at: Some(at) }
+        | BrowserAction::Hover { at: Some(at) }
+        | BrowserAction::RightClick { at: Some(at) }
+        | BrowserAction::DoubleClick { at: Some(at) } => vec![point(at)],
+        BrowserAction::Drag { from, to } => {
+            // Null asks the resolver to validate the live center before
+            // native input uses it as the default drag start.
+            vec![
+                from.as_ref().map_or(serde_json::Value::Null, point),
+                point(to),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn native_action_resolution_script_for_phase(
     target: &BrowserTargetRecord,
     action: &tidebreak_core::BrowserAction,
     phase: NativeActionDispatchPhase,
 ) -> Result<String, String> {
+    action_resolution_script(target, action, phase, false)
+}
+
+fn native_script_for_arguments(
+    target: &BrowserTargetRecord,
+    arguments: &tidebreak_core::BrowserActArgs,
+    phase: NativeActionDispatchPhase,
+) -> Result<String, String> {
+    action_resolution_script_for_input(
+        target,
+        &arguments.action,
+        phase,
+        if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background {
+            "independent_native"
+        } else {
+            "native"
+        },
+    )
+}
+
+fn action_resolution_script(
+    target: &BrowserTargetRecord,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+    background: bool,
+) -> Result<String, String> {
+    action_resolution_script_for_input(
+        target,
+        action,
+        phase,
+        if background { "dom" } else { "native" },
+    )
+}
+
+fn action_resolution_script_for_input(
+    target: &BrowserTargetRecord,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+    input_method: &str,
+) -> Result<String, String> {
     let payload = serde_json::json!({
+        "inputMethod": input_method,
         "previousSelectedIndex": match phase {
             NativeActionDispatchPhase::SelectFollowUp { previous_selected_index, .. } => Some(previous_selected_index),
             _ => None,
@@ -3174,9 +4472,19 @@ fn native_action_resolution_script_for_phase(
             "sensitive": target.fingerprint.sensitive,
         },
         "action": match action {
-            tidebreak_core::BrowserAction::Click => serde_json::json!({ "type": "click" }),
+            tidebreak_core::BrowserAction::Click { .. } => serde_json::json!({ "type": "click" }),
             tidebreak_core::BrowserAction::Focus => serde_json::json!({ "type": "focus" }),
-            tidebreak_core::BrowserAction::Hover => serde_json::json!({ "type": "hover" }),
+            tidebreak_core::BrowserAction::Hover { .. } => serde_json::json!({ "type": "hover" }),
+            tidebreak_core::BrowserAction::RightClick { .. } => {
+                serde_json::json!({ "type": "right_click" })
+            }
+            tidebreak_core::BrowserAction::DoubleClick { .. } => {
+                serde_json::json!({ "type": "double_click" })
+            }
+            tidebreak_core::BrowserAction::Drag { .. } => serde_json::json!({ "type": "drag" }),
+            tidebreak_core::BrowserAction::Scroll { delta_x, delta_y } => {
+                serde_json::json!({ "type": "scroll", "deltaX": delta_x, "deltaY": delta_y })
+            }
             tidebreak_core::BrowserAction::Fill { value } => {
                 serde_json::json!({ "type": "fill", "value": value })
             }
@@ -3189,13 +4497,26 @@ fn native_action_resolution_script_for_phase(
             tidebreak_core::BrowserAction::Press { key } => {
                 serde_json::json!({ "type": "press", "key": key })
             }
+            tidebreak_core::BrowserAction::KeyChord { key, modifiers } => {
+                serde_json::json!({ "type": "key_chord", "key": key, "modifiers": modifiers })
+            }
             tidebreak_core::BrowserAction::ScrollIntoView => {
                 serde_json::json!({ "type": "scroll_into_view" })
             }
         },
+        // Element-relative points the page must hit-test instead of the
+        // element centre, so canvas-style coordinates are validated where the
+        // input will actually land.
+        "points": action_hit_points(action),
     });
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
-    Ok(NATIVE_ACTION_RESOLUTION_SCRIPT
+    let script = if input_method == "dom" {
+        NATIVE_ACTION_RESOLUTION_SCRIPT
+            .replace("/*__RESOLVED_ACTION__*/", BACKGROUND_DOM_ACTION_SCRIPT)
+    } else {
+        NATIVE_ACTION_RESOLUTION_SCRIPT.to_owned()
+    };
+    Ok(script
         .replace("__TARGET_IDENTITY_STORE__", TARGET_IDENTITY_STORE_SCRIPT)
         .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
         .replace("__PAYLOAD__", &payload))
@@ -3241,14 +4562,6 @@ fn wait_text_script(text: &str) -> Result<String, String> {
 
 fn inspect_overlay_script() -> String {
     INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
-}
-
-fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, String> {
-    let watch_key = serde_json::to_string(watch_key).map_err(|error| error.to_string())?;
-    Ok(SCREENSHOT_PRIVACY_SCRIPT
-        .replace("__WATCH_KEY__", &watch_key)
-        .replace("__FINISH__", if finish { "true" } else { "false" })
-        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY))
 }
 
 struct NativeUploadAuthorization {
@@ -3361,6 +4674,7 @@ async fn evaluate_browser_upload(
     }));
     let _cancellation = NativeUploadCancellation(Arc::clone(&state));
     let callback_state = Arc::clone(&state);
+    let guarded_webview = webview.clone();
     with_browser_webview(webview, move |view| unsafe {
         let result_state = Arc::clone(&callback_state);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
@@ -3383,7 +4697,16 @@ async fn evaluate_browser_upload(
             let value: &NSString = &*value.cast();
             let _ = sender.send(Ok(value.to_string()));
         });
-        let result = browser_semantics_content_world().and_then(|content_world| {
+        let result = crate::browser_independence::require_native_host(
+            &guarded_webview,
+            view,
+            &authorization.registry,
+            authorization.capability_id,
+            &authorization.workspace_id,
+            authorization.fence,
+        )
+        .and_then(|()| browser_semantics_content_world())
+        .and_then(|content_world| {
             let script = NSString::from_str(&script);
             submit_native_browser_upload(&callback_state, &authorization, || {
                 view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
@@ -3646,6 +4969,74 @@ const SENSITIVE_FIELD_POLICY: &str = r##"
   };
 "##;
 
+const BROWSER_GHOST_CURSOR_SCRIPT: &str = r#"
+(() => {
+  const payload = __PAYLOAD__;
+  const key = Symbol.for("io.brightwave.tidebreak.browser.ghost-cursor");
+  const prior = globalThis[key];
+  if (payload.clear) {
+    if (prior && (!payload.id || prior.id === payload.id)) prior.clear();
+    return JSON.stringify("cleared");
+  }
+  if (globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] !== payload.snapshotMarker
+    || payload.url !== String(location.href)
+    || payload.viewportWidth !== window.innerWidth
+    || payload.viewportHeight !== window.innerHeight) return JSON.stringify("stale");
+  prior?.clear();
+  if (!document.documentElement) return JSON.stringify("unavailable");
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  host.setAttribute("data-tidebreak-ghost-cursor", "");
+  host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483647!important;contain:strict!important;user-select:none!important;";
+  const shadow = host.attachShadow({ mode: "closed" });
+  const svgNamespace = "http://www.w3.org/2000/svg";
+  const cursor = document.createElementNS(svgNamespace, "svg");
+  cursor.setAttribute("viewBox", "0 0 24 24");
+  cursor.setAttribute("width", "24");
+  cursor.setAttribute("height", "24");
+  cursor.style.cssText = "position:absolute;overflow:visible;pointer-events:none;";
+  cursor.style.left = `${payload.point.x - 4}px`;
+  cursor.style.top = `${payload.point.y - 3}px`;
+  const ring = document.createElementNS(svgNamespace, "circle");
+  ring.setAttribute("cx", "4");
+  ring.setAttribute("cy", "3");
+  ring.setAttribute("r", "8");
+  ring.setAttribute("fill", "none");
+  ring.setAttribute("stroke", "oklch(0.6 0.125 195)");
+  ring.setAttribute("stroke-width", "1.5");
+  ring.setAttribute("opacity", "0.55");
+  cursor.appendChild(ring);
+  const outline = document.createElementNS(svgNamespace, "path");
+  // Lucide mouse-pointer-2 geometry with an outer edge that stays legible on any page.
+  outline.setAttribute("d", "m4 3 7.07 17 2.51-7.39L21 10.07z");
+  outline.setAttribute("fill", "oklch(0.6 0.125 195)");
+  outline.setAttribute("stroke", "oklch(0.985 0.002 240)");
+  outline.setAttribute("stroke-width", "2");
+  outline.setAttribute("stroke-linejoin", "round");
+  cursor.appendChild(outline);
+  shadow.appendChild(cursor);
+  document.documentElement.appendChild(host);
+  const state = { id: payload.id, host, timer: null, frame: null, clear: null };
+  state.clear = () => {
+    clearTimeout(state.timer);
+    if (state.frame !== null) cancelAnimationFrame(state.frame);
+    host.remove();
+    if (globalThis[key] === state) delete globalThis[key];
+  };
+  globalThis[key] = state;
+  const checkDocument = () => {
+    if (globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] !== payload.snapshotMarker
+      || String(location.href) !== payload.url
+      || window.innerWidth !== payload.viewportWidth
+      || window.innerHeight !== payload.viewportHeight) { state.clear(); return; }
+    state.frame = requestAnimationFrame(checkDocument);
+  };
+  state.frame = requestAnimationFrame(checkDocument);
+  state.timer = setTimeout(state.clear, payload.visibleMillis);
+  return JSON.stringify("shown");
+})()
+"#;
+
 const TARGET_IDENTITY_STORE_SCRIPT: &str = r#"
   const tidebreakTargetIdentityStore = (() => {
     const key = Symbol.for("io.brightwave.tidebreak.browser.target-identities");
@@ -3738,6 +5129,8 @@ const SNAPSHOT_SCRIPT: &str = r#"
 (() => {
   const MAX_NODES = __MAX_NODES__;
   const MARKER = "__MARKER__";
+  globalThis[Symbol.for("io.brightwave.tidebreak.browser.ghost-cursor")]?.clear();
+  globalThis[Symbol.for("io.brightwave.tidebreak.browser.observed-document")] = MARKER;
   const TEXT_LIMIT = 240;
   const nodes = [];
   const frames = [];
@@ -3746,7 +5139,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
   __TARGET_IDENTITY_STORE__
 
   const INTERACTIVE_SELECTOR = [
-    "a[href]", "button", "input:not([type='hidden'])", "textarea", "select",
+    "a[href]", "button", "canvas", "input:not([type='hidden'])", "textarea", "select",
     "[contenteditable]:not([contenteditable='false'])", "[role='textbox']",
     "[role='button']", "[role='link']",
     "[role='checkbox']", "[role='radio']", "[role='tab']",
@@ -3830,11 +5223,13 @@ const SNAPSHOT_SCRIPT: &str = r#"
       && rect.width > 0
       && rect.height > 0;
   };
+  const isNativePopupSelect = (element) => element.localName === "select" && !element.multiple && element.size <= 1;
   const actionsFor = (element, role, sensitive) => {
-    const nativePopupSelect = element.localName === "select" && !element.multiple && element.size <= 1;
-    if (sensitive || nativePopupSelect) return ["human_takeover"];
+    if (sensitive) return ["human_takeover"];
+    if (isNativePopupSelect(element)) return ["select", "human_takeover"];
     const actions = ["focus", "hover", "scroll_into_view"];
-    if (["button", "link", "checkbox", "radio", "tab"].includes(role)) actions.unshift("click");
+    if (["button", "link", "checkbox", "radio", "tab", "canvas"].includes(role)) actions.unshift("click");
+    actions.push("right_click", "double_click", "drag", "scroll", "key_chord");
     if (role === "textbox") actions.unshift("fill");
     if (role === "combobox") actions.unshift("select");
     if (role === "checkbox" || role === "radio") actions.unshift("check");
@@ -3892,6 +5287,9 @@ const SNAPSHOT_SCRIPT: &str = r#"
         sensitive,
         consequential,
         actions: interactive ? actionsFor(element, role, sensitive) : [],
+        actionExecutionModes: interactive && !sensitive && isNativePopupSelect(element)
+          ? { select: ["background"] }
+          : {},
         bounds: {
           x: Number((offsetX + rect.x).toFixed(2)),
           y: Number((offsetY + rect.y).toFixed(2)),
@@ -4248,114 +5646,118 @@ const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
 })()
 "#;
 
-const SCREENSHOT_PRIVACY_SCRIPT: &str = r#"
-(() => {
-  const WATCH_KEY = __WATCH_KEY__;
-  const FINISH = __FINISH__;
-  const clean = (value, limit = 240) => String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, limit);
-  __SENSITIVE_FIELD_POLICY__
-
-  const hashText = (seed, value) => {
-    let hash = seed >>> 0;
-    for (const character of String(value || "")) {
-      hash ^= character.codePointAt(0);
-      hash = Math.imul(hash, 16777619) >>> 0;
-    }
-    return hash;
-  };
-
-  const scanRoot = (root, doc, win, observers, state) => {
-    if (!FINISH) {
-      const observer = new win.MutationObserver(() => { state.changed = true; });
-      observer.observe(root, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-      });
-      observers.push(observer);
-    }
-
-    let sensitiveFields = 0;
-    let uninspectableRegions = 0;
-    let signature = 2166136261;
-    for (const element of root.querySelectorAll("input, textarea, [contenteditable]:not([contenteditable='false']), [role='textbox']")) {
-      signature = hashText(signature, element.localName);
-      signature = hashText(signature, element.getAttribute("type"));
-      signature = hashText(signature, element.getAttribute("name"));
-      signature = hashText(signature, element.id);
-      signature = hashText(signature, "value" in element ? element.value : element.textContent);
-      if (tidebreakIsSensitiveField(element, doc)) sensitiveFields += 1;
-    }
-    for (const element of root.querySelectorAll("*")) {
-      if (element.shadowRoot) {
-        const child = scanRoot(element.shadowRoot, doc, win, observers, state);
-        sensitiveFields += child.sensitiveFields;
-        uninspectableRegions += child.uninspectableRegions;
-        signature = hashText(signature, child.signature);
-      } else if (element.localName?.includes("-")) {
-        uninspectableRegions += 1;
-      }
-    }
-    for (const frame of root.querySelectorAll("iframe")) {
-      if (!FINISH) {
-        const markFrameChanged = () => { state.changed = true; };
-        frame.addEventListener("load", markFrameChanged, true);
-        state.listeners.push([frame, "load", markFrameChanged]);
-      }
-      try {
-        const childDoc = frame.contentDocument;
-        const childWin = frame.contentWindow;
-        if (!childDoc || !childWin) throw new Error("frame unavailable");
-        if (!FINISH) {
-          const markFrameChanged = () => { state.changed = true; };
-          childWin.addEventListener("pagehide", markFrameChanged, true);
-          state.listeners.push([childWin, "pagehide", markFrameChanged]);
-        }
-        const child = scanRoot(childDoc, childDoc, childWin, observers, state);
-        sensitiveFields += child.sensitiveFields;
-        uninspectableRegions += child.uninspectableRegions;
-        signature = hashText(signature, child.signature);
-      } catch (_) {
-        uninspectableRegions += 1;
-      }
-    }
-    return { sensitiveFields, uninspectableRegions, signature };
-  };
-
-  let state = window[WATCH_KEY];
-  if (!FINISH) {
-    if (state) {
-      for (const observer of state.observers || []) observer.disconnect();
-    }
-    state = { changed: false, observers: [], listeners: [], signature: null };
-    window[WATCH_KEY] = state;
-  } else if (!state) {
-    return JSON.stringify({ sensitiveFields: 0, uninspectableRegions: 0, changed: true });
-  }
-
-  const result = scanRoot(document, document, window, state.observers, state);
-  if (!FINISH) {
-    state.signature = result.signature;
-  } else if (state.signature !== result.signature) {
-    state.changed = true;
-  }
-  if (FINISH) {
-    for (const observer of state.observers) observer.disconnect();
-    for (const [target, event, listener] of state.listeners || []) {
-      target.removeEventListener(event, listener, true);
-    }
-    delete window[WATCH_KEY];
-  }
-  return JSON.stringify({
-    sensitiveFields: result.sensitiveFields,
-    uninspectableRegions: result.uninspectableRegions,
-    changed: Boolean(state.changed),
+// This bounded branch runs only after the same private target, origin,
+// geometry, visibility, and field checks used by native actions succeed.
+const BACKGROUND_DOM_ACTION_SCRIPT: &str = r#"
+  if (payload.inputMethod !== "dom") return result("unsupported_native", "Background input was not selected.");
+  const inputEvent = (type) => new view.Event(type, { bubbles: true, composed: true });
+  const point = requestedPoints[0] || { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  const mouseEvent = (type, bubbles = true) => new view.MouseEvent(type, {
+    bubbles, composed: true, cancelable: true, view, clientX: point.x, clientY: point.y,
   });
-})()
+  const complete = (message) => result("ready", message, {
+    x: offsetX + rect.x, y: offsetY + rect.y, width: rect.width, height: rect.height,
+    viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+    inputDispatched: true,
+  });
+  if (action.type === "click") {
+    element.dispatchEvent(mouseEvent("click"));
+    return complete("Synthetic DOM click dispatched. Inspect the page to confirm its effect.");
+  }
+  if (action.type === "press" || action.type === "key_chord") {
+    const modifiers = new Set(action.modifiers || []);
+    const options = {
+      key: action.key, bubbles: true, composed: true, cancelable: true,
+      shiftKey: modifiers.has("shift"), ctrlKey: modifiers.has("control"),
+      altKey: modifiers.has("alt"), metaKey: modifiers.has("meta"),
+    };
+    element.dispatchEvent(new view.KeyboardEvent("keydown", options));
+    element.dispatchEvent(new view.KeyboardEvent("keyup", options));
+    return complete("Synthetic DOM key events dispatched to the target. Browser default editing, tab navigation, and shortcuts are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "right_click" || action.type === "double_click") {
+    const options = {
+      bubbles: true, composed: true, cancelable: true, view,
+      clientX: point.x, clientY: point.y,
+      button: action.type === "right_click" ? 2 : 0,
+      detail: action.type === "double_click" ? 2 : 1,
+    };
+    element.dispatchEvent(new view.MouseEvent(action.type === "right_click" ? "contextmenu" : "dblclick", options));
+    return complete("Synthetic DOM mouse event dispatched. Native menus and default selection are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "drag") {
+    if (typeof view.PointerEvent !== "function") {
+      return result("unsupported_native", "This page cannot receive independent pointer events. No input was sent.");
+    }
+    const destination = requestedPoints[1];
+    if (!destination) return result("invalid_value", "The drag has no destination. No input was sent.");
+    const pointer = (type, at, buttons) => new view.PointerEvent(type, {
+      bubbles: true, composed: true, cancelable: true, view,
+      clientX: at.x, clientY: at.y, button: type === "pointermove" ? -1 : 0,
+      buttons, pointerId: 2147483001, pointerType: "mouse", isPrimary: false,
+      pressure: buttons ? 0.5 : 0,
+    });
+    element.dispatchEvent(pointer("pointerdown", point, 1));
+    try {
+      for (let step = 1; step <= 8; step += 1) {
+        element.dispatchEvent(pointer("pointermove", {
+          x: point.x + (destination.x - point.x) * step / 8,
+          y: point.y + (destination.y - point.y) * step / 8,
+        }, 1));
+      }
+    } finally {
+      element.dispatchEvent(pointer("pointerup", destination, 0));
+    }
+    return complete("Synthetic DOM pointer drag dispatched inside the target. Native drag-and-drop and trusted pointer behavior are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "check") {
+    const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "checked")?.set;
+    if (!setter) return result("unsupported_native", "This checkbox does not support background input.");
+    setter.call(element, Boolean(action.checked));
+    element.dispatchEvent(inputEvent("input"));
+    element.dispatchEvent(inputEvent("change"));
+    if (Boolean(element.checked) !== Boolean(action.checked)) {
+      return result("invalid_value", "The page did not retain the requested checked state. Inspect it before another action.", { inputDispatched: true });
+    }
+    return complete("Checked state set with synthetic DOM input. Inspect the page to confirm its effect.");
+  }
+  if (action.type === "fill" || action.type === "select") {
+    const prototype = action.type === "select" ? view.HTMLSelectElement.prototype
+      : element instanceof view.HTMLTextAreaElement ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (!setter) return result("unsupported_native", "This field does not support background input.");
+    setter.call(element, action.value);
+    element.dispatchEvent(inputEvent("input"));
+    element.dispatchEvent(inputEvent("change"));
+    if (String(element.value) !== action.value) {
+      return result("invalid_value", "The page did not retain the requested field value. Inspect it before another action.", { inputDispatched: true });
+    }
+    return complete("Field value set with synthetic DOM input. Inspect the page to confirm its effect.");
+  }
+  if (action.type === "hover") {
+    element.dispatchEvent(mouseEvent("mouseover"));
+    element.dispatchEvent(mouseEvent("mouseenter", false));
+    element.dispatchEvent(mouseEvent("mousemove"));
+    return complete("Synthetic DOM hover events dispatched. CSS hover and trusted pointer behavior are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "scroll_into_view") {
+    element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    return complete("Page scrolled through the DOM without taking keyboard focus.");
+  }
+  if (action.type === "scroll") {
+    let scroller = element;
+    while (scroller && scroller !== doc.documentElement) {
+      const style = view.getComputedStyle(scroller);
+      if ((action.deltaY && scrollsAxis(style.overflowY) && scroller.scrollHeight > scroller.clientHeight)
+        || (action.deltaX && scrollsAxis(style.overflowX) && scroller.scrollWidth > scroller.clientWidth)) break;
+      scroller = scroller.parentElement;
+    }
+    (scroller || doc.scrollingElement || doc.documentElement).scrollBy({
+      left: action.deltaX, top: action.deltaY, behavior: "instant",
+    });
+    return complete("Page scrolled through the DOM without taking keyboard focus.");
+  }
+  return result("unsupported_native", "This action cannot run without taking native focus. No input was sent.");
 "#;
 
 const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
@@ -4540,8 +5942,8 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
   const action = payload.action;
   const targetDomFocused = doc.activeElement === element
     && frameChain.every((entry) => entry.doc.activeElement === entry.frame);
-  const targetFocused = targetDomFocused && doc.hasFocus()
-    && frameChain.every((entry) => entry.doc.hasFocus());
+  const targetFocused = targetDomFocused && (payload.inputMethod === "independent_native"
+    || (doc.hasFocus() && frameChain.every((entry) => entry.doc.hasFocus())));
   let pendingFillInput = null;
   if (["verify", "required"].includes(payload.focusStage) && !targetFocused) {
     pendingFillInput = "Waiting for the target to receive native keyboard focus.";
@@ -4549,7 +5951,9 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
   if (action.type === "fill") {
     const textInput = element instanceof view.HTMLInputElement
       && ["text", "search", "url", "tel"].includes(fresh.inputType);
-    const fillable = textInput || element instanceof view.HTMLTextAreaElement;
+    const fillable = payload.inputMethod === "dom"
+      ? (element instanceof view.HTMLInputElement && ["text", "search", "url", "tel", "email", "number"].includes(fresh.inputType)) || element instanceof view.HTMLTextAreaElement
+      : textInput || element instanceof view.HTMLTextAreaElement;
     if (!fillable) {
       return result("unsupported_native", "Native fill supports ordinary text inputs and textareas.");
     }
@@ -4583,7 +5987,7 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     if (element.value === action.value) {
       return result("no_op", "The requested option is already selected.");
     }
-    if (!element.multiple && element.size <= 1) {
+    if (payload.inputMethod !== "dom" && !element.multiple && element.size <= 1) {
       return result(
         "unsupported_native",
         "This select opens a native popup. Take over the browser to choose an option. No input was sent.",
@@ -4709,7 +6113,7 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     };
   };
 
-  if (action.type === "scroll_into_view") {
+  if (action.type === "scroll_into_view" && payload.inputMethod !== "dom") {
     const contexts = [{
       doc,
       subject: element,
@@ -4746,35 +6150,69 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     }
   }
 
-  const localX = rect.left + rect.width / 2;
-  const localY = rect.top + rect.height / 2;
-  if (localX < 0 || localY < 0 || localX >= view.innerWidth || localY >= view.innerHeight) {
-    return result("target_obscured", "The target is outside the visible viewport.");
-  }
-  const hit = doc.elementFromPoint(localX, localY);
-  if (!hit || (hit !== element && !element.contains(hit))) {
-    return result("target_obscured", "Another element is covering the target.");
-  }
-  const topX = offsetX + localX;
-  const topY = offsetY + localY;
-  for (const entry of frameChain) {
-    const parentView = entry.doc.defaultView;
-    if (!parentView) return result("stale_target", "The target frame is unavailable.");
-    const parentX = topX - entry.offsetX;
-    const parentY = topY - entry.offsetY;
-    if (
-      parentX < 0
-      || parentY < 0
-      || parentX >= parentView.innerWidth
-      || parentY >= parentView.innerHeight
-    ) {
-      return result("target_obscured", "The target frame is outside the visible viewport.");
+  const requestedPoints = Array.isArray(payload.points) && payload.points.length
+    ? payload.points.map((point) => point ? ({
+      x: rect.left + Math.min(Math.max(Number(point.x) || 0, 0), rect.width - Math.min(0.5, rect.width / 2)),
+      y: rect.top + Math.min(Math.max(Number(point.y) || 0, 0), rect.height - Math.min(0.5, rect.height / 2)),
+    }) : ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }))
+    : [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }];
+  for (const requested of action.type === "scroll_into_view" && payload.inputMethod === "dom" ? [] : requestedPoints) {
+    const localX = requested.x;
+    const localY = requested.y;
+    if (localX < 0 || localY < 0 || localX >= view.innerWidth || localY >= view.innerHeight) {
+      return result("target_obscured", "The target is outside the visible viewport.");
     }
-    const parentHit = entry.doc.elementFromPoint(parentX, parentY);
-    if (!parentHit || (parentHit !== entry.frame && !entry.frame.contains(parentHit))) {
-      return result("target_obscured", "Another element is covering the target frame.");
+    const hit = doc.elementFromPoint(localX, localY);
+    if (!hit || (hit !== element && !element.contains(hit))) {
+      return result("target_obscured", "Another element is covering the target.");
+    }
+    const topX = offsetX + localX;
+    const topY = offsetY + localY;
+    for (const entry of frameChain) {
+      const parentView = entry.doc.defaultView;
+      if (!parentView) return result("stale_target", "The target frame is unavailable.");
+      const parentX = topX - entry.offsetX;
+      const parentY = topY - entry.offsetY;
+      if (
+        parentX < 0
+        || parentY < 0
+        || parentX >= parentView.innerWidth
+        || parentY >= parentView.innerHeight
+      ) {
+        return result("target_obscured", "The target frame is outside the visible viewport.");
+      }
+      const parentHit = entry.doc.elementFromPoint(parentX, parentY);
+      if (!parentHit || (parentHit !== entry.frame && !entry.frame.contains(parentHit))) {
+        return result("target_obscured", "Another element is covering the target frame.");
+      }
     }
   }
+
+  if (payload.inputMethod === "independent_native" && action.type !== "fill") {
+    return result("unsupported_native", "Independent native input supports text insertion only. Use DOM pointer actions or managed Chrome for browser drag behavior.");
+  }
+
+  if (payload.inputMethod === "independent_native" && action.type === "fill"
+      && payload.fillStage === "focus") {
+    // The host proves this document lives in an agent-owned never-key window
+    // before submitting this script. Never run this preparation on a shared tab.
+    element.focus({ preventScroll: true });
+    if (!element.isConnected || doc.querySelector(payload.selector) !== element) {
+      return result("stale_target", "The target changed during page focus preparation.", { inputDispatched: true });
+    }
+    element.setSelectionRange(0, String(element.value || "").length);
+    const preparedFocus = doc.activeElement === element
+      && frameChain.every((entry) => entry.doc.activeElement === entry.frame);
+    return result("ready", "The agent-owned field is prepared for text input.", {
+      x: offsetX + rect.x, y: offsetY + rect.y, width: rect.width, height: rect.height,
+      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      targetFocused: preparedFocus,
+      targetDomFocused: preparedFocus,
+      inputDispatched: true,
+    });
+  }
+
+  /*__RESOLVED_ACTION__*/
 
   if (action.type === "scroll_into_view") {
     return result("no_op", "The target is visible after native scrolling.");
@@ -4940,10 +6378,7 @@ pub(crate) async fn browser_inject_inspect_overlay(
         .as_ref()
         .is_some_and(|engine| engine.capabilities.screenshot)
     {
-        return Err(
-            "browser inspect requires human takeover because this engine cannot prove closed-shadow privacy"
-                .to_owned(),
-        );
+        return Err("browser inspect is not available on this platform yet".to_owned());
     }
     let label = crate::code_browser::browser_label(browser_id)?;
     let webview = app
@@ -4970,8 +6405,452 @@ pub(crate) async fn browser_remove_inspect_overlay(
     Ok(())
 }
 
+// ── Page diagnostics ──────────────────────────────────────────────
+
+/// Page-world hook installed at document start in every managed browser
+/// webview. It records console calls, uncaught errors, unhandled rejections,
+/// and instrumented fetch/XHR activity in a bounded ring buffer that
+/// `browser_diagnostics` drains. It runs in the page's own JavaScript world
+/// on purpose: everything it stores is untrusted page data by contract, and
+/// the page could always tamper with its own console anyway.
+pub(crate) const BROWSER_DIAGNOSTICS_INIT_SCRIPT: &str = r#"
+(() => {
+  if (window.__tidebreakDiagnostics) return;
+  const store = { entries: [], next: 1, dropped: 0, networkCaptured: false };
+  try {
+    Object.defineProperty(window, "__tidebreakDiagnostics", {
+      value: store,
+      writable: false,
+      configurable: false,
+    });
+  } catch (_) {
+    return;
+  }
+  const MAX_ENTRIES = 500;
+  const MAX_TEXT = 1024;
+  const MAX_URL = 2048;
+  const push = (channel, level, text, url, status) => {
+    if (store.entries.length >= MAX_ENTRIES) {
+      store.entries.shift();
+      store.dropped += 1;
+    }
+    store.entries.push({
+      sequence: store.next++,
+      channel,
+      level,
+      text: String(text || "").slice(0, MAX_TEXT),
+      url: url ? String(url).slice(0, MAX_URL) : null,
+      status: typeof status === "number" && status > 0 ? status : null,
+    });
+  };
+  const describe = (parts) => parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      try {
+        return JSON.stringify(part);
+      } catch (_) {
+        return String(part);
+      }
+    })
+    .join(" ");
+  for (const level of ["debug", "log", "info", "warn", "error"]) {
+    const original = console[level];
+    if (typeof original !== "function") continue;
+    console[level] = function (...parts) {
+      try {
+        push("console", level, describe(parts));
+      } catch (_) {}
+      return original.apply(this, parts);
+    };
+  }
+  window.addEventListener("error", (event) => {
+    push("page_error", "error", event.message || "uncaught error", event.filename || null);
+  }, true);
+  window.addEventListener("unhandledrejection", (event) => {
+    let reason = "";
+    try {
+      reason = String(event.reason);
+    } catch (_) {}
+    push("page_error", "error", "unhandled promise rejection: " + reason);
+  });
+  try {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const method = String((init && init.method) || (input && input.method) || "GET");
+      const promise = originalFetch(input, init);
+      promise.then(
+        (response) => {
+          push("network", response.ok ? "info" : "warn", method + " " + url, url, response.status);
+        },
+        (error) => {
+          push("network", "error", method + " " + url + " failed: " + String(error), url);
+        },
+      );
+      return promise;
+    };
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__tidebreakRequest = { method: String(method), url: String(url) };
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function (...parts) {
+      const request = this.__tidebreakRequest;
+      if (request) {
+        this.addEventListener("loadend", () => {
+          push(
+            "network",
+            this.status === 0 || this.status >= 400 ? "warn" : "info",
+            request.method + " " + request.url,
+            request.url,
+            this.status || null,
+          );
+        });
+      }
+      return originalSend.apply(this, parts);
+    };
+    store.networkCaptured = true;
+  } catch (_) {
+    store.networkCaptured = false;
+  }
+})();
+"#;
+
+const DIAGNOSTICS_DRAIN_SCRIPT: &str = r#"
+(() => {
+  const AFTER = __AFTER_SEQUENCE__;
+  const MAX = __MAX_ENTRIES__;
+  const store = window.__tidebreakDiagnostics;
+  if (!store || !Array.isArray(store.entries)) {
+    return JSON.stringify({
+      installed: false,
+      networkCaptured: false,
+      truncated: false,
+      entries: [],
+    });
+  }
+  const matching = store.entries.filter((entry) => Number(entry.sequence) > AFTER);
+  const entries = matching.slice(0, MAX);
+  return JSON.stringify({
+    installed: true,
+    networkCaptured: Boolean(store.networkCaptured),
+    truncated: Number(store.dropped) > 0 || matching.length > entries.length,
+    entries,
+  });
+})()
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDiagnosticsDrain {
+    installed: bool,
+    #[serde(default)]
+    network_captured: bool,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    entries: Vec<RawDiagnosticsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDiagnosticsEntry {
+    sequence: u64,
+    channel: String,
+    level: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    status: Option<u16>,
+}
+
+fn diagnostics_drain_script(arguments: &tidebreak_core::BrowserDiagnosticsArgs) -> String {
+    DIAGNOSTICS_DRAIN_SCRIPT
+        .replace(
+            "__AFTER_SEQUENCE__",
+            &arguments.after_sequence.unwrap_or(0).to_string(),
+        )
+        .replace(
+            "__MAX_ENTRIES__",
+            &arguments.bounded_max_entries().to_string(),
+        )
+}
+
+/// Re-validate every raw page-supplied field against the bounded contract.
+/// Entries with unknown channels are dropped rather than guessed.
+fn sanitize_diagnostics_entries(
+    raw: Vec<RawDiagnosticsEntry>,
+) -> Vec<tidebreak_core::BrowserDiagnosticsEntry> {
+    use tidebreak_core::{BrowserDiagnosticsChannel, BrowserLogLevel};
+
+    let clean = |value: String, limit: usize| -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_control() || *character == '\n')
+            .take(limit)
+            .collect()
+    };
+    raw.into_iter()
+        .filter_map(|entry| {
+            let channel = match entry.channel.as_str() {
+                "console" => BrowserDiagnosticsChannel::Console,
+                "page_error" => BrowserDiagnosticsChannel::PageError,
+                "network" => BrowserDiagnosticsChannel::Network,
+                _ => return None,
+            };
+            let level = match entry.level.as_str() {
+                "debug" => BrowserLogLevel::Debug,
+                "info" => BrowserLogLevel::Info,
+                "warn" => BrowserLogLevel::Warn,
+                "error" => BrowserLogLevel::Error,
+                _ => BrowserLogLevel::Log,
+            };
+            Some(tidebreak_core::BrowserDiagnosticsEntry {
+                sequence: entry.sequence,
+                channel,
+                level,
+                text: clean(
+                    entry.text,
+                    tidebreak_core::MAX_BROWSER_DIAGNOSTICS_TEXT_CHARS,
+                ),
+                url: entry.url.map(|url| clean(url, 2_048)),
+                status: entry.status,
+            })
+        })
+        .collect()
+}
+
+/// Read bounded page diagnostics from one authorized, agent-controlled tab.
+pub(crate) async fn browser_diagnostics(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserDiagnosticsArgs,
+) -> Result<tidebreak_core::BrowserDiagnosticsResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser diagnostics request is not valid".to_owned());
+    }
+    let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    if !host_snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.developer_diagnostics)
+    {
+        return Err("browser diagnostics are not available on this platform yet".to_owned());
+    }
+    let origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let browser_id = arguments.browser_id.clone();
+    let app = app.clone();
+    let dispatch_registry = registry.clone();
+    registry
+        .dispatch_agent(
+            capability_id,
+            &browser_id,
+            &origin,
+            BrowserGrantCapability::BrowserDiagnoseOrigin,
+            "diagnostics",
+            None,
+            BrowserDispatchEffect::Observe,
+            None,
+            move || async move {
+                read_page_diagnostics(app, dispatch_registry, capability_id, arguments).await
+            },
+        )
+        .await
+}
+
+async fn read_page_diagnostics(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserDiagnosticsArgs,
+) -> Result<tidebreak_core::BrowserDiagnosticsResult, String> {
+    let label = browser_label(&arguments.browser_id)?;
+    let start_fence = registry
+        .observation_fence(capability_id, &arguments.browser_id)
+        .map_err(|error| format!("diagnostics authorization lapsed: {error}"))?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    let raw: RawDiagnosticsDrain =
+        evaluate_json_page_world(&webview, &diagnostics_drain_script(&arguments)).await?;
+    let end_fence = registry
+        .observation_fence(capability_id, &arguments.browser_id)
+        .map_err(|error| format!("diagnostics authorization lapsed: {error}"))?;
+    if end_fence != start_fence {
+        return Err("browser document changed while diagnostics were being read".to_owned());
+    }
+    Ok(tidebreak_core::BrowserDiagnosticsResult {
+        browser_id: arguments.browser_id,
+        document_epoch: end_fence.document_epoch,
+        content_trust: tidebreak_core::BrowserContentTrust::UntrustedPage,
+        entries: sanitize_diagnostics_entries(raw.entries),
+        truncated: raw.truncated,
+        // `installed == false` means the hook never ran in this document, so
+        // no network activity could have been observed either.
+        network_captured: raw.installed && raw.network_captured,
+    })
+}
+
+/// Evaluate in WebKit's page world, where the diagnostics ring buffer lives.
+/// Only the diagnostics reader may use this: every other semantic script
+/// stays isolated in the Tidebreak content world.
+#[cfg(target_os = "macos")]
+async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
+    webview: &Webview,
+    script: &str,
+) -> Result<T, String> {
+    use std::sync::Mutex;
+
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use tokio::{sync::oneshot, time::timeout};
+
+    let (sender, receiver) = oneshot::channel();
+    let sender = Mutex::new(Some(sender));
+    let script = script.to_owned();
+    with_browser_webview(webview, move |view| unsafe {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                let _ = sender.send(Err("browser JavaScript requires the main thread".to_owned()));
+            }
+            return;
+        };
+        let content_world = objc2_web_kit::WKContentWorld::pageWorld(mtm);
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) else {
+                return;
+            };
+            if !error.is_null() {
+                let message = (&*error).localizedDescription().to_string();
+                let _ = sender.send(Err(format!("browser JavaScript failed: {message}")));
+                return;
+            }
+            if value.is_null() {
+                let _ = sender.send(Err("browser JavaScript returned no value".to_owned()));
+                return;
+            }
+            let value: &NSString = &*value.cast();
+            let _ = sender.send(Ok(value.to_string()));
+        });
+        let script = NSString::from_str(&script);
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            Some(&handler),
+        );
+    })?;
+
+    let raw = timeout(
+        std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS),
+        receiver,
+    )
+    .await
+    .map_err(|_| "browser JavaScript timed out".to_owned())?
+    .map_err(|_| "browser JavaScript was interrupted".to_owned())??;
+    serde_json::from_str(&raw).map_err(|error| format!("invalid browser response: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn evaluate_json_page_world<T: serde::de::DeserializeOwned>(
+    _webview: &Webview,
+    _script: &str,
+) -> Result<T, String> {
+    Err("browser diagnostics are not available on this platform yet".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canceled_processing_callback_cannot_consume_the_next_dialog() {
+        use std::sync::{Arc, Mutex};
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let pending = Arc::new(Mutex::new(Some(sender)));
+        drop(super::NativeProcessingCancellation(Arc::clone(&pending)));
+        super::finish_native_processing(
+            &pending,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            || panic!("canceled processing consumed a dialog"),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expired_processing_callback_preserves_dialog_report() {
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let pending = std::sync::Mutex::new(Some(sender));
+        super::finish_native_processing(&pending, tokio::time::Instant::now(), || {
+            panic!("expired processing consumed a dialog")
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn screenshot_encodes_cg_image_snapshot_representation() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use objc2::msg_send;
+        use objc2::rc::{autoreleasepool, Allocated, Retained};
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_core_graphics::CGImage;
+        use objc2_foundation::{NSData, NSSize};
+
+        autoreleasepool(|_| unsafe {
+            // A 3 × 2 RGBA fixture with every pixel set to [23, 91, 177, 255].
+            let source = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEUlEQVR4nGMQj974H4YZkDkAnUwMzcnnybYAAAAASUVORK5CYII=").unwrap();
+            let data = NSData::with_bytes(&source);
+            let bitmap_class = AnyClass::get(c"NSBitmapImageRep").unwrap();
+            let bitmap: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+            let bitmap: Retained<AnyObject> = msg_send![bitmap, initWithData: &*data];
+            let cg_image: *const CGImage = msg_send![&*bitmap, CGImage];
+            assert!(!cg_image.is_null());
+
+            // NSImage wraps this CGImage in a snapshot representation, which
+            // is not an NSBitmapImageRep and cannot use the array PNG encoder.
+            let image_class = AnyClass::get(c"NSImage").unwrap();
+            let image: Allocated<AnyObject> = msg_send![image_class, alloc];
+            let image: Retained<AnyObject> = msg_send![
+                image,
+                initWithCGImage: cg_image,
+                size: NSSize::new(3.0, 2.0)
+            ];
+            let encoded = super::snapshot_to_png_base64(
+                Retained::as_ptr(&image).cast_mut(),
+                std::ptr::null_mut(),
+            )
+            .unwrap();
+            let png = BASE64.decode(encoded).unwrap();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            let data = NSData::with_bytes(&png);
+            let decoded: Allocated<AnyObject> = msg_send![bitmap_class, alloc];
+            let decoded: Retained<AnyObject> = msg_send![decoded, initWithData: &*data];
+            let width: isize = msg_send![&*decoded, pixelsWide];
+            let height: isize = msg_send![&*decoded, pixelsHigh];
+            let samples: isize = msg_send![&*decoded, samplesPerPixel];
+            assert_eq!((width, height), (3, 2));
+            assert!((3..=4).contains(&samples));
+            for y in 0..height {
+                for x in 0..width {
+                    let mut pixel = [0usize; 4];
+                    let _: () = msg_send![&*decoded, getPixel: pixel.as_mut_ptr(), atX: x, y: y];
+                    assert_eq!(&pixel[..3], &[23, 91, 177]);
+                    if samples == 4 {
+                        assert_eq!(pixel[3], 255);
+                    }
+                }
+            }
+        });
+    }
+
     use super::*;
 
     static SOURCE: &str = include_str!("browser_semantics.rs");
@@ -4996,6 +6875,307 @@ mod tests {
             scroll_delta_y: None,
             target_focused: false,
             target_dom_focused: false,
+            input_dispatched: false,
+        }
+    }
+
+    #[test]
+    fn background_support_and_result_methods_do_not_silently_select_native_input() {
+        use tidebreak_core::{BrowserAction, BrowserExecutionMode, BrowserInputMethod};
+        assert_eq!(
+            browser_input_method(BrowserExecutionMode::Background),
+            BrowserInputMethod::Dom
+        );
+        assert_eq!(
+            browser_input_method(BrowserExecutionMode::Foreground),
+            BrowserInputMethod::Native
+        );
+        assert!(!background_action_supported(&BrowserAction::Focus));
+        for action in [
+            BrowserAction::Press {
+                key: "Enter".to_owned(),
+            },
+            BrowserAction::KeyChord {
+                key: "a".to_owned(),
+                modifiers: vec![tidebreak_core::BrowserModifier::Meta],
+            },
+            BrowserAction::Drag {
+                from: None,
+                to: tidebreak_core::BrowserPoint { x: 1.0, y: 1.0 },
+            },
+            BrowserAction::DoubleClick { at: None },
+            BrowserAction::RightClick { at: None },
+            BrowserAction::Click { at: None },
+            BrowserAction::Hover { at: None },
+            BrowserAction::Fill {
+                value: "text".to_owned(),
+            },
+            BrowserAction::Select {
+                value: "value".to_owned(),
+            },
+            BrowserAction::Check { checked: true },
+            BrowserAction::Scroll {
+                delta_x: 0,
+                delta_y: 100,
+            },
+            BrowserAction::ScrollIntoView,
+        ] {
+            assert!(background_action_supported(&action));
+        }
+    }
+
+    #[test]
+    fn independent_browser_input_refuses_foreground_before_dispatch() {
+        let mut arguments = tidebreak_core::BrowserActArgs {
+            browser_id: "browser-1".to_owned(),
+            snapshot_id: "snapshot-1".to_owned(),
+            document_epoch: 1,
+            target_ref: "@e1".to_owned(),
+            action: tidebreak_core::BrowserAction::Click { at: None },
+            execution_mode: tidebreak_core::BrowserExecutionMode::Foreground,
+        };
+        assert!(independent_browser_action_refusal(&arguments)
+            .unwrap()
+            .contains("Foreground input is unavailable"));
+        arguments.execution_mode = tidebreak_core::BrowserExecutionMode::Background;
+        assert!(independent_browser_action_refusal(&arguments).is_none());
+        arguments.action = tidebreak_core::BrowserAction::Focus;
+        assert!(independent_browser_action_refusal(&arguments)
+            .unwrap()
+            .contains("No input was sent"));
+    }
+
+    #[test]
+    fn native_resolution_never_contains_the_background_mutation_branch() {
+        let mut fixture = queued_upload_fixture();
+        fixture.authorization.target.sensitive = false;
+        let script = native_action_resolution_script(
+            &fixture.authorization.target,
+            &tidebreak_core::BrowserAction::Click { at: None },
+        )
+        .unwrap();
+        assert!(!script.contains("Synthetic DOM click dispatched"));
+        assert!(!script.contains("setter.call(element"));
+        let background = action_resolution_script(
+            &fixture.authorization.target,
+            &tidebreak_core::BrowserAction::Click { at: None },
+            NativeActionDispatchPhase::Initial,
+            true,
+        )
+        .unwrap();
+        assert!(background.contains("Synthetic DOM click dispatched"));
+        assert!(!background.contains("__RESOLVED_ACTION__"));
+    }
+
+    #[tokio::test]
+    async fn background_authorization_rechecks_stop_identity_and_sensitivity() {
+        for changed in ["live", "stop", "revoke", "target", "snapshot", "hidden"] {
+            let fixture = queued_upload_fixture();
+            let mut target = fixture.authorization.target.clone();
+            target.sensitive = false;
+            target.fingerprint.sensitive = false;
+            target.fingerprint.input_type = Some("text".to_owned());
+            let source = fixture.authorization;
+            source
+                .registry
+                .record_semantic_snapshot(
+                    "browser-1",
+                    "workspace-1",
+                    0,
+                    "snapshot-1".to_owned(),
+                    HashMap::from([("@e1".to_owned(), target.clone())]),
+                )
+                .unwrap();
+            let authorization = BackgroundActionAuthorization {
+                registry: source.registry.clone(),
+                capability_id: source.capability_id,
+                workspace_id: source.workspace_id.clone(),
+                origin: source.origin,
+                fence: source.fence,
+                target: target.clone(),
+                arguments: tidebreak_core::BrowserActArgs {
+                    browser_id: "browser-1".to_owned(),
+                    snapshot_id: "snapshot-1".to_owned(),
+                    document_epoch: 0,
+                    target_ref: "@e1".to_owned(),
+                    action: tidebreak_core::BrowserAction::Fill {
+                        value: "text".to_owned(),
+                    },
+                    execution_mode: tidebreak_core::BrowserExecutionMode::Background,
+                },
+            };
+            match changed {
+                "stop" => {
+                    source
+                        .registry
+                        .stop_agent_control("browser-1", "workspace-1")
+                        .await
+                        .unwrap();
+                }
+                "revoke" => source
+                    .registry
+                    .revoke_agent_capability(source.capability_id),
+                "hidden" => {
+                    source
+                        .registry
+                        .set_visible("browser-1", "workspace-1", false)
+                        .unwrap();
+                }
+                "target" | "snapshot" => {
+                    if changed == "target" {
+                        target.sensitive = true;
+                    }
+                    source
+                        .registry
+                        .record_semantic_snapshot(
+                            "browser-1",
+                            "workspace-1",
+                            0,
+                            if changed == "snapshot" {
+                                "snapshot-2"
+                            } else {
+                                "snapshot-1"
+                            }
+                            .to_owned(),
+                            HashMap::from([("@e1".to_owned(), target)]),
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            assert_eq!(
+                authorization.authorize().is_ok(),
+                changed == "live",
+                "{changed}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghost_uses_the_executed_pointer_position_and_omits_keyboard_phases() {
+        use tidebreak_core::{BrowserAction, BrowserPoint};
+        let resolution = native_resolution();
+        let point = BrowserPoint { x: 100.0, y: 30.0 };
+        let expected = Some(BrowserPoint { x: 109.5, y: 49.5 });
+        assert_eq!(
+            native_action_ghost_point(
+                &resolution,
+                &BrowserAction::Click { at: Some(point) },
+                NativeActionDispatchPhase::Initial
+            ),
+            expected
+        );
+        assert_eq!(
+            native_action_ghost_point(
+                &resolution,
+                &BrowserAction::Drag {
+                    from: None,
+                    to: point
+                },
+                NativeActionDispatchPhase::Initial
+            ),
+            expected
+        );
+        assert!(native_action_ghost_point(
+            &resolution,
+            &BrowserAction::Press {
+                key: "Enter".to_owned()
+            },
+            NativeActionDispatchPhase::PressKey
+        )
+        .is_none());
+        assert!(native_action_ghost_point(
+            &resolution,
+            &BrowserAction::Fill {
+                value: "text".to_owned()
+            },
+            NativeActionDispatchPhase::FillInsert
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn ghost_rejects_nonfinite_or_offscreen_coordinates() {
+        for point in [
+            tidebreak_core::BrowserPoint {
+                x: f64::NAN,
+                y: 1.0,
+            },
+            tidebreak_core::BrowserPoint { x: 800.0, y: 1.0 },
+            tidebreak_core::BrowserPoint { x: 1.0, y: -1.0 },
+        ] {
+            assert!(browser_ghost_script(
+                "action",
+                0,
+                "snapshot",
+                "https://example.com/",
+                point,
+                800.0,
+                600.0,
+                "click"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn drag_hit_tests_both_the_default_start_and_requested_end() {
+        let end = tidebreak_core::BrowserPoint { x: 80.0, y: 20.0 };
+        assert_eq!(
+            action_hit_points(&tidebreak_core::BrowserAction::Drag {
+                from: None,
+                to: end
+            }),
+            vec![
+                serde_json::Value::Null,
+                serde_json::json!({"x": 80.0, "y": 20.0})
+            ]
+        );
+        let start = tidebreak_core::BrowserPoint { x: 5.0, y: 8.0 };
+        assert_eq!(
+            action_hit_points(&tidebreak_core::BrowserAction::Drag {
+                from: Some(start),
+                to: end
+            }),
+            vec![
+                serde_json::json!({"x": 5.0, "y": 8.0}),
+                serde_json::json!({"x": 80.0, "y": 20.0})
+            ]
+        );
+    }
+
+    #[test]
+    fn key_chords_cannot_open_browser_or_system_controls() {
+        use tidebreak_core::BrowserModifier::{Alt, Control, Meta, Shift};
+        for (key, modifiers) in [
+            ("q", vec![Meta]),
+            ("w", vec![Meta]),
+            ("l", vec![Meta]),
+            ("p", vec![Meta]),
+            (" ", vec![Meta]),
+            ("Tab", vec![Meta]),
+            ("Tab", vec![Control]),
+            ("Escape", vec![Meta, Alt]),
+            ("ArrowLeft", vec![Control, Alt]),
+        ] {
+            assert!(
+                !native_key_chord_stays_in_page(key, &modifiers),
+                "{key}: {modifiers:?}"
+            );
+        }
+        for (key, modifiers) in [
+            ("a", vec![Meta]),
+            ("c", vec![Meta]),
+            ("v", vec![Meta]),
+            ("z", vec![Meta, Shift]),
+            ("ArrowLeft", vec![Alt, Shift]),
+            ("Tab", vec![Shift]),
+            ("ArrowDown", vec![Shift]),
+        ] {
+            assert!(
+                native_key_chord_stays_in_page(key, &modifiers),
+                "{key}: {modifiers:?}"
+            );
         }
     }
 
@@ -5109,9 +7289,11 @@ mod tests {
             sensitive: false,
             consequential: false,
         };
-        let action =
-            native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Hover)
-                .unwrap();
+        let action = native_action_resolution_script(
+            &target,
+            &tidebreak_core::BrowserAction::Hover { at: None },
+        )
+        .unwrap();
         assert!(action.contains("tidebreakTargetIdentityStore.get(element)"));
         assert!(!action.contains("element[payload.marker]"));
     }
@@ -5134,9 +7316,11 @@ mod tests {
             sensitive: false,
             consequential: false,
         };
-        let script =
-            native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Hover)
-                .unwrap();
+        let script = native_action_resolution_script(
+            &target,
+            &tidebreak_core::BrowserAction::Hover { at: None },
+        )
+        .unwrap();
         assert!(script.contains(r#""action":{"type":"hover"}"#));
     }
 
@@ -5147,7 +7331,7 @@ mod tests {
         let select = tidebreak_core::BrowserAction::Select {
             value: "publish".to_owned(),
         };
-        let click = tidebreak_core::BrowserAction::Click;
+        let click = tidebreak_core::BrowserAction::Click { at: None };
 
         assert!(native_action_requires_confirmation(
             &external, false, &select
@@ -5177,6 +7361,47 @@ mod tests {
         let callback = state.lock().unwrap();
         assert!(callback.cancelled);
         assert!(callback.sender.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn global_stop_disarms_wk_callback_before_releasing_shared_input() {
+        use crate::client_execution::computer_use::ComputerUseState;
+        use std::sync::{Arc, Mutex};
+        let computer_use = Arc::new(ComputerUseState::default());
+        let session = tidebreak_core::SessionId::new();
+        let (sender, mut receiver) = oneshot::channel();
+        let callback = Arc::new(Mutex::new(NativeInputCallbackState {
+            sender: Some(sender),
+            cancelled: false,
+        }));
+        let (entered, entered_rx) = oneshot::channel();
+        let action_cu = computer_use.clone();
+        let action_callback = callback.clone();
+        let action = tokio::spawn(async move {
+            action_cu
+                .dispatch_foreground_browser(session, || async move {
+                    let _cancellation = NativeInputCancellation(action_callback);
+                    entered.send(()).unwrap();
+                    std::future::pending::<Result<(), String>>().await
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        assert!(computer_use.owns_dispatch(session));
+        computer_use.stop_all(|| Ok::<_, ()>(())).unwrap();
+        assert_eq!(
+            action.await.unwrap().unwrap_err(),
+            "browser control was stopped by the user"
+        );
+        computer_use.drain_acting().await;
+        assert!(!computer_use.owns_dispatch(session));
+        assert!(callback.lock().unwrap().cancelled);
+        assert!(callback.lock().unwrap().sender.is_none());
         assert!(matches!(
             receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
@@ -5707,6 +7932,47 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[test]
+    fn independent_host_promotes_only_qualified_actions() {
+        use tidebreak_core::BrowserAction;
+        let fill = BrowserAction::Fill {
+            value: "text".to_owned(),
+        };
+        assert!(qualified_independent_host_action(
+            &fill,
+            "input",
+            Some("text")
+        ));
+        assert!(qualified_independent_host_action(&fill, "textarea", None));
+        assert!(!qualified_independent_host_action(
+            &fill,
+            "input",
+            Some("number")
+        ));
+        let drag = BrowserAction::Drag {
+            from: None,
+            to: tidebreak_core::BrowserPoint { x: 20.0, y: 20.0 },
+        };
+        assert!(!qualified_independent_host_action(&drag, "canvas", None));
+        for tag in ["a", "img", "div", "input"] {
+            assert!(!qualified_independent_host_action(&drag, tag, None));
+        }
+        for action in [
+            BrowserAction::Press {
+                key: "Tab".to_owned(),
+            },
+            BrowserAction::KeyChord {
+                key: "a".to_owned(),
+                modifiers: vec![tidebreak_core::BrowserModifier::Meta],
+            },
+            BrowserAction::Hover { at: None },
+            BrowserAction::Focus,
+        ] {
+            assert!(!qualified_independent_host_action(&action, "canvas", None));
+        }
+    }
+
     #[test]
     fn fill_requires_fresh_focus_before_selection_and_insertion() {
         for phase in [
@@ -5905,7 +8171,6 @@ mod tests {
     fn every_browser_surface_uses_the_shared_sensitive_field_policy() {
         let snapshot = snapshot_script(25, "__marker");
         let inspect = inspect_overlay_script();
-        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
         let target = BrowserTargetRecord {
             frame_path: vec![],
             selector: "input:nth-of-type(1)".to_owned(),
@@ -5926,7 +8191,7 @@ mod tests {
             native_action_resolution_script(&target, &tidebreak_core::BrowserAction::Focus)
                 .unwrap();
 
-        for script in [snapshot, inspect, screenshot, action] {
+        for script in [snapshot, inspect, action] {
             assert!(script.contains("const tidebreakIsSensitiveField"));
             assert!(script.contains("aria-describedby"));
             assert!(script.contains("inputmode"));
@@ -5970,13 +8235,12 @@ mod tests {
         assert!(script.contains("const value = !interactive || sensitive"));
         assert!(script.contains("text: sensitive ? null : (text || null)"));
         assert!(script.contains("interactive && !sensitive && element.href"));
-        assert!(script.contains("if (sensitive || nativePopupSelect) return [\"human_takeover\"]"));
+        assert!(script.contains("if (sensitive) return [\"human_takeover\"]"));
     }
 
     #[test]
-    fn actions_and_screenshots_fail_closed_for_sensitive_or_uninspectable_fields() {
+    fn native_actions_fail_closed_for_sensitive_or_uninspectable_fields() {
         let inspect = inspect_overlay_script();
-        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
         assert!(inspect.contains("attachShadow({ mode: \"closed\" })"));
         assert!(inspect.contains("window.requestAnimationFrame(() =>"));
         assert!(inspect.contains("new observed.win.MutationObserver(() => schedule())"));
@@ -5994,13 +8258,6 @@ mod tests {
         assert!(inspect.contains("target.removeEventListener(type, schedule, true)"));
         assert!(inspect.contains("addMask(entries, frameRect"));
         assert!(inspect.contains("Sensitive content · human takeover"));
-        assert!(screenshot.contains("tidebreakIsSensitiveField(element, doc)"));
-        assert!(screenshot.contains("if (tidebreakIsSensitiveField(element, doc))"));
-        assert!(screenshot.contains("uninspectableRegions += 1"));
-        assert!(screenshot.contains("state.changed = true"));
-        assert!(!screenshot.contains("attributeFilter"));
-        assert!(screenshot.contains("state.listeners.push([frame, \"load\""));
-        assert!(screenshot.contains("state.listeners.push([childWin, \"pagehide\""));
 
         let target = BrowserTargetRecord {
             frame_path: vec![],

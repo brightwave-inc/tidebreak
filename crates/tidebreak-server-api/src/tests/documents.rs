@@ -1638,10 +1638,11 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
         "no computer-use guidance without the tools: {prompt}"
     );
 
-    // Enabled: every contract registers as a validated client tool the server
+    // Enabled: supported contracts register as validated client tools the server
     // parks for the desktop to claim; the server itself never executes one.
     let (tools, _) = agent_deps_for_test(dir.path(), true, false, false).await;
-    for name in tidebreak_core::COMPUTER_USE_TOOLS {
+    let supported = tidebreak_core::computer_use_tool_specs();
+    for name in supported.iter().map(|spec| spec.name.as_str()) {
         assert_eq!(
             tools.execution(name),
             Some(ToolCallExecution::Client),
@@ -1652,7 +1653,18 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
             "{name} has no server-side executor"
         );
     }
-    for name in tidebreak_core::COMPUTER_USE_CONTROL_TOOLS {
+    for name in [
+        tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL,
+        tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+    ] {
+        assert_eq!(tools.registered_class(name), None, "{name} is retired");
+        assert_eq!(tools.execution(name), None, "{name} must not be executable");
+    }
+    for name in supported
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .filter(|name| tidebreak_core::is_computer_use_control_tool(name))
+    {
         assert_eq!(
             tools.registered_class(name),
             Some(ApprovalClass::Sensitive),
@@ -1664,14 +1676,11 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
             "{name} must consent as app control"
         );
     }
-    // The pure reads and capture are ReadOnly; scroll and focus are acting
-    // tools (they synthesize input and move windows) and are covered by the
-    // control-tool loop above.
+    // Reads and capture are ReadOnly. Supported input tools remain Sensitive.
     for name in [
         tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
         tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
         tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
-        tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
         tidebreak_core::COMPUTER_WAIT_TOOL,
     ] {
         assert_eq!(

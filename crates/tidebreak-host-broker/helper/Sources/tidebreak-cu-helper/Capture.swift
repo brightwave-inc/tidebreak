@@ -8,11 +8,26 @@ import ScreenCaptureKit
 /// the broker never receives raw image bytes over stdout. It stages the file
 /// and hands the host a reference; the host attaches it as multimodal input.
 enum Capture {
+    struct CoordinateFrame: Encodable {
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+
+        init(_ frame: CGRect) {
+            x = frame.minX
+            y = frame.minY
+            width = frame.width
+            height = frame.height
+        }
+    }
+
     struct Result: Encodable {
         let width: Int
         let height: Int
         let path: String
         let mediaType: String
+        let coordinateFrame: CoordinateFrame
     }
 
     static func run(_ request: HelperRequest) async throws -> Result {
@@ -35,33 +50,53 @@ enum Capture {
         }
 
         let content = try await SCShareableContent.current
-        let (filter, size, display) = try buildFilter(target, request: request, content: content)
+        let (filter, size, coordinateFrame) = try buildFilter(
+            target, request: request, content: content)
 
-        let config = SCStreamConfiguration()
-        config.width = size.width
-        config.height = size.height
-        // Capture the full pixel buffer; keep the cursor out of analytical
-        // screenshots.
-        config.showsCursor = false
-
+        let config = configuration(
+            width: size.width, height: size.height,
+            coordinateFrame: coordinateFrame,
+            displayScoped: target == .display || (target == .app && request.windowId == nil))
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter, configuration: config)
-
+        let scaled = try downscaleForBudget(image, maxDimension: request.maxDimension)
         try writePNG(
             image,
             marks: request.marks ?? [],
-            displayFrame: display.map(\.frame),
-            screenFrame: display.flatMap(screenFrame),
-            to: outPath)
+            coordinateFrame: coordinateFrame,
+            to: outPath,
+            scaledImage: scaled)
         return Result(
-            width: image.width, height: image.height, path: outPath, mediaType: "image/png")
+            width: scaled.map(\.width) ?? image.width,
+            height: scaled.map(\.height) ?? image.height,
+            path: outPath, mediaType: "image/png", coordinateFrame: CoordinateFrame(coordinateFrame)
+        )
+    }
+
+    static func configuration(
+        width: Int, height: Int, coordinateFrame: CGRect,
+        displayScoped: Bool
+    ) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+        if displayScoped {
+            // Without explicit rectangles, ScreenCaptureKit can zoom the app's
+            // windows to fill the image and invalidate global coordinate mapping.
+            config.sourceRect = CGRect(origin: .zero, size: coordinateFrame.size)
+            config.destinationRect = CGRect(x: 0, y: 0, width: width, height: height)
+            config.preservesAspectRatio = false
+        }
+        return config
     }
 
     /// Resolve the requested target into an `SCContentFilter` and the pixel
     /// size to capture at.
     private static func buildFilter(
         _ target: CaptureTargetKind, request: HelperRequest, content: SCShareableContent
-    ) throws -> (SCContentFilter, (width: Int, height: Int), SCDisplay?) {
+    ) throws -> (SCContentFilter, (width: Int, height: Int), CGRect) {
         switch target {
         case .display:
             let display = display(for: request.displayId, in: content)
@@ -69,18 +104,32 @@ enum Capture {
                 throw HelperError(code: .notFound, message: "no display available")
             }
             let filter = SCContentFilter(display: display, excludingWindows: [])
-            return (filter, (display.width, display.height), display)
+            return (filter, (display.width, display.height), display.frame)
 
         case .window:
+            guard let bundleId = request.bundleId else {
+                throw HelperError(
+                    code: .invalidRequest, message: "window capture requires bundle_id")
+            }
             guard let windowId = request.windowId else {
-                throw HelperError(code: .invalidRequest, message: "window capture requires window_id")
+                throw HelperError(
+                    code: .invalidRequest, message: "window capture requires window_id")
             }
             guard let window = content.windows.first(where: { $0.windowID == windowId }) else {
                 throw HelperError(code: .notFound, message: "window \(windowId) not found")
             }
+            guard
+                let app = content.applications.first(where: {
+                    $0.bundleIdentifier == bundleId
+                }),
+                window.owningApplication?.processID == app.processID
+            else {
+                throw HelperError(
+                    code: .notFound, message: "window \(windowId) is not owned by the granted app")
+            }
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let frame = window.frame
-            return (filter, (Int(frame.width), Int(frame.height)), nil)
+            return (filter, (Int(frame.width), Int(frame.height)), frame)
 
         case .app:
             guard let bundleId = request.bundleId else {
@@ -90,6 +139,22 @@ enum Capture {
             else {
                 throw HelperError(code: .notFound, message: "app \(bundleId) is not running")
             }
+            // A selected window wins: capture exactly that window rather than
+            // every window of the app, and require it to be app-owned.
+            if let windowId = request.windowId {
+                guard
+                    let window = content.windows.first(where: {
+                        $0.windowID == windowId && $0.owningApplication?.processID == app.processID
+                    })
+                else {
+                    throw HelperError(
+                        code: .notFound,
+                        message: "window \(windowId) is not owned by \(bundleId)")
+                }
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let frame = window.frame
+                return (filter, (Int(frame.width), Int(frame.height)), frame)
+            }
             // Pick the display the app's windows actually live on, not blindly
             // the first: a display-scoped filter includes only windows that
             // intersect it, so an app on a secondary display captured against
@@ -97,7 +162,11 @@ enum Capture {
             // otherwise use the display intersecting the app's windows,
             // falling back to the first.
             let display = try { () throws -> SCDisplay in
-                if let requested = self.display(for: request.displayId, in: content) {
+                if let displayId = request.displayId {
+                    guard let requested = self.display(for: displayId, in: content) else {
+                        throw HelperError(
+                            code: .notFound, message: "display \(displayId) not found")
+                    }
                     return requested
                 }
                 if let appDisplay = self.display(containing: app, in: content) {
@@ -110,11 +179,12 @@ enum Capture {
             }()
             let filter = SCContentFilter(
                 display: display, including: [app], exceptingWindows: [])
-            return (filter, (display.width, display.height), display)
+            return (filter, (display.width, display.height), display.frame)
         }
     }
 
-    private static func display(for displayId: UInt32?, in content: SCShareableContent) -> SCDisplay?
+    private static func display(for displayId: UInt32?, in content: SCShareableContent)
+        -> SCDisplay?
     {
         if let displayId {
             return content.displays.first { $0.displayID == displayId }
@@ -137,24 +207,16 @@ enum Capture {
         }
     }
 
-    private static func screenFrame(for display: SCDisplay) -> CGRect? {
-        NSScreen.screens.first { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
-                as? NSNumber
-            else { return false }
-            return number.uint32Value == display.displayID
-        }?.frame
-    }
-
     private static func writePNG(
-        _ image: CGImage, marks: [CaptureMark], displayFrame: CGRect?, screenFrame: CGRect?,
-        to path: String
+        _ image: CGImage, marks: [CaptureMark], coordinateFrame: CGRect,
+        to path: String, scaledImage: CGImage?
     ) throws {
-        let rep = NSBitmapImageRep(cgImage: image)
+        let outputImage = scaledImage ?? image
+        let rep = NSBitmapImageRep(cgImage: outputImage)
         if !marks.isEmpty {
             drawMarks(
-                marks, on: rep, imageWidth: image.width, imageHeight: image.height,
-                displayFrame: displayFrame, screenFrame: screenFrame)
+                marks, on: rep, imageWidth: outputImage.width, imageHeight: outputImage.height,
+                coordinateFrame: coordinateFrame)
         }
         guard let data = rep.representation(using: .png, properties: [:]) else {
             throw HelperError(code: .operationFailed, message: "could not encode PNG")
@@ -169,7 +231,7 @@ enum Capture {
 
     private static func drawMarks(
         _ marks: [CaptureMark], on rep: NSBitmapImageRep, imageWidth: Int, imageHeight: Int,
-        displayFrame: CGRect?, screenFrame: CGRect?
+        coordinateFrame: CGRect
     ) {
         guard let graphics = NSGraphicsContext(bitmapImageRep: rep) else { return }
         let previous = NSGraphicsContext.current
@@ -187,24 +249,12 @@ enum Capture {
         context.translateBy(x: 0, y: CGFloat(imageHeight))
         context.scaleBy(x: 1, y: -1)
 
-        // The capture region's origin in the AX (top-left) space. The
-        // SCDisplay frame is already in that global top-left space — the same
-        // space the AX mark frames use — so prefer it. The NSScreen frame is
-        // the fallback for size (Retina scale) only: its y-axis is the Cocoa
-        // bottom-left space and must not be subtracted from a top-left AX y.
-        let originX = displayFrame?.minX ?? screenFrame?.minX ?? 0
-        let originY = displayFrame?.minY ?? 0
-        let referenceSize = screenFrame ?? displayFrame
-            ?? CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
-        let scaleX = Double(imageWidth) / max(Double(referenceSize.width), 1.0)
-        let scaleY = Double(imageHeight) / max(Double(referenceSize.height), 1.0)
-
         for mark in marks {
-            let rect = CGRect(
-                x: (mark.frame.x - Double(originX)) * scaleX,
-                y: (mark.frame.y - Double(originY)) * scaleY,
-                width: mark.frame.width * scaleX,
-                height: mark.frame.height * scaleY)
+            let rect = pixelRect(
+                for: CGRect(
+                    x: mark.frame.x, y: mark.frame.y, width: mark.frame.width,
+                    height: mark.frame.height),
+                coordinateFrame: coordinateFrame, width: imageWidth, height: imageHeight)
             guard rect.width > 0, rect.height > 0 else { continue }
             guard rect.intersects(CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)) else {
                 continue
@@ -219,6 +269,19 @@ enum Capture {
         }
     }
 
+    /// Map global top-left logical points into the encoded screenshot pixels.
+    static func pixelRect(for rect: CGRect, coordinateFrame: CGRect, width: Int, height: Int)
+        -> CGRect
+    {
+        let scaleX = CGFloat(width) / max(coordinateFrame.width, 1)
+        let scaleY = CGFloat(height) / max(coordinateFrame.height, 1)
+        return CGRect(
+            x: (rect.minX - coordinateFrame.minX) * scaleX,
+            y: (rect.minY - coordinateFrame.minY) * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY)
+    }
+
     private static func drawTargetOutline(_ rect: CGRect, in context: CGContext) {
         context.setStrokeColor(CGColor(red: 0.05, green: 0.35, blue: 1.0, alpha: 0.9))
         context.setLineWidth(2)
@@ -229,7 +292,8 @@ enum Capture {
     }
 
     private static func drawBadge(
-        number: Int, center: CGPoint, imageWidth: CGFloat, imageHeight: CGFloat, in context: CGContext
+        number: Int, center: CGPoint, imageWidth: CGFloat, imageHeight: CGFloat,
+        in context: CGContext
     ) {
         let digits = Array(String(max(number, 0)))
         let digitWidth: CGFloat = 7
@@ -237,7 +301,8 @@ enum Capture {
         let digitSpacing: CGFloat = 2
         let paddingX: CGFloat = 5
         let badgeHeight: CGFloat = 21
-        let digitsWidth = CGFloat(digits.count) * digitWidth
+        let digitsWidth =
+            CGFloat(digits.count) * digitWidth
             + CGFloat(max(digits.count - 1, 0)) * digitSpacing
         let badgeWidth = max(22, digitsWidth + paddingX * 2)
         let x = clamp(center.x - badgeWidth / 2, min: 3, max: imageWidth - badgeWidth - 3)
@@ -267,7 +332,8 @@ enum Capture {
     }
 
     private static func drawDigit(
-        _ digit: Character, at origin: CGPoint, width: CGFloat, height: CGFloat, in context: CGContext
+        _ digit: Character, at origin: CGPoint, width: CGFloat, height: CGFloat,
+        in context: CGContext
     ) {
         let segmentsByDigit: [Character: [Int]] = [
             "0": [0, 1, 2, 3, 4, 5],
@@ -302,5 +368,36 @@ enum Capture {
         -> CGFloat
     {
         Swift.max(minValue, Swift.min(value, maxValue))
+    }
+
+    /// Downscale to a bounded long edge, preserving aspect ratio, before the
+    /// PNG is encoded — this is what keeps captures inside the transport
+    /// budget by default. Coordinates in the resulting image are a uniform
+    /// scale of the original pixel space: mark frames and hit targets are
+    /// mapped by the same factor, with the factor reported where applicable.
+    static func downscaleForBudget(
+        _ image: CGImage, maxDimension: Int?
+    ) throws -> CGImage? {
+        let cap = min(max(maxDimension ?? 1440, 1), 4096)
+        let longest = max(image.width, image.height)
+        guard longest > cap else { return nil }
+        let scale = Double(cap) / Double(longest)
+        let width = max(1, Int((Double(image.width) * scale).rounded()))
+        let height = max(1, Int((Double(image.height) * scale).rounded()))
+        guard width > 0, height > 0,
+            let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else {
+            throw HelperError(code: .operationFailed, message: "could not downscale capture")
+        }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let scaled = context.makeImage() else {
+            throw HelperError(
+                code: .operationFailed, message: "could not encode downscaled capture")
+        }
+        return scaled
     }
 }

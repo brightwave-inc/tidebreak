@@ -1,0 +1,149 @@
+# Computer use in Code mode
+
+Tidebreak gives local coding sessions access to its in-app browser, native macOS
+apps, and Google Chrome. Codex, Claude Code, and OpenCode use bundled MCP
+servers. Grok uses the bundled CLI and reads screenshot files. On the qualified
+Grok 1.0.13 release, the ACP transport handles approvals, cancellation, and
+session resume. The internal engine calls the same host services through
+session-scoped tools.
+
+The desktop owns permissions and input. A harness receives a private capability
+for its session; it cannot choose another session, an arbitrary Chrome debugger
+endpoint, or a broader grant. A headless server without an attached desktop does
+not provide access to your computer.
+
+## Start a browser task
+
+1. Open your app or website in Tidebreak's browser beside your code.
+2. Choose **Share with agent** and review the origin and screenshot disclosure.
+3. Ask your coding agent to inspect the page, reproduce a problem, edit the code,
+   and repeat the flow after rebuilding.
+
+Your session opens independent tabs for a shared origin, even while you use
+Settings or another page. A first visit to an unshared origin needs sharing
+through the desktop. The agent can close tabs it opened. Its previews appear as
+inactive tabs and preserve your selected editor, input focus, and selection.
+
+Browser actions use a separate native host that cannot become the key window.
+DOM actions and trusted text insertion leave your hardware pointer and editor
+focus unchanged. A temporary ghost cursor shows the observed action position.
+Shared tabs in the main window refuse agent changes; the agent opens an
+independent tab instead. Sites that need unsupported trusted keyboard or pointer
+input can use managed Chrome. Page dialogs and file pickers are canceled before
+they open native UI. The agent receives an error and can use `browser_upload`
+for an approved upload.
+
+## Use native macOS apps
+
+Native capture and control require macOS 14 or later, the packaged helper,
+Accessibility permission, and Screen Recording permission where applicable.
+To check them, open **Settings → Permissions → Computer use on this Mac**.
+The panel identifies the running app and shows each permission separately.
+Choose **Request macOS permissions** or open the corresponding System Settings
+pane, then enable the permission for that app. If macOS asks you to quit and
+reopen the app, do that before retrying.
+
+Tidebreak asks for app access through a native dialog. Read and screenshot access
+do not authorize control. A whole-display screenshot needs its own grant.
+The disclosure explains that screenshots and visible content can reach your
+selected model and provider.
+
+Native control uses accessibility actions and process-targeted input. A separate
+teal cursor shows the agent's action position. Tidebreak never moves your
+hardware pointer or activates the target app. If an action cannot run
+independently, it returns `independent_input_unavailable`; legacy clients may see
+`requires_foreground`. Neither response authorizes foreground control. Native
+tracking-area hover and system drag-and-drop still need app-specific validation.
+An app can raise its own windows after an action, so arbitrary app behavior
+cannot guarantee that your focus stays unchanged.
+
+Choose **Always allow this app** to save the exact app grant across local tasks
+in the same profile. Review or revoke it in Settings. This does not extend
+website, folder, whole-display, or sensitive-action access.
+
+To click a numbered screenshot target, the agent uses the badge from the most
+recent annotated capture of that app. Reading a narrower accessibility tree does
+not renumber that capture. Changed elements fail validation before input.
+
+## Use Google Chrome
+
+The agent requests `chrome_connect` with one of two modes:
+
+- `managed` starts Chrome in the background with a temporary isolated profile.
+  Use it to test local apps without your signed-in browser state.
+- `existing` requests access to your existing Chrome profile. Tidebreak explains
+  the wider tab scope, and Chrome must allow remote debugging. The host discovers
+  the endpoint; the agent cannot supply one.
+
+Chrome uses the debugging protocol for page input and screenshots. New tabs open
+in the background. During an action, page-level focus emulation lets hidden pages
+receive input. The page can observe focus and visibility changes, but Tidebreak
+does not activate the browser. Tidebreak waits for restoration before returning
+a normal result. Stop and disconnect also clear the emulation. If setup or cleanup
+fails, the operation refuses further input instead of bringing the tab forward.
+
+Input supports nested, scaled, and rotated frames. Perspective-transformed frames
+return an unsupported-geometry result before input. `chrome_activate_tab`
+refuses because it changes your selected tab. Disconnecting a managed browser
+closes it and removes its temporary profile. Disconnecting an existing browser leaves it open.
+
+## Stop and recover
+
+The native/Chrome activity indicator distinguishes a pending request from a
+completed action. Choose **Stop** to cancel input. Native actions share one
+input owner so sessions cannot interleave an app event sequence. A stopped
+operation drains before ownership changes. Queued actions and condition waits
+cannot resume after Stop without a fresh admission.
+
+The browser's agent **Stop** halts every tab owned by that coding session. Opening
+a replacement tab or rotating a capability does not clear Stop. To resume, share
+a retained tab again through the desktop. If every owned tab has been closed,
+start a new coding session. Other sessions keep their own access.
+
+The native/Chrome indicator's **Resume** needs native approval. Native observation remains available under
+its existing read/capture grants after control stops. Chrome stops its whole
+connection, including observation, and requires a newly approved connection.
+Use **Stop sharing** or revoke the app grant to withdraw observation access.
+
+If a native helper times out, Tidebreak first cancels that invocation and waits
+for its release code. If the helper crashes or must be killed, the broker
+releases only the mouse buttons and keys recorded for that invocation. It
+preserves controls that you physically hold and keeps your pointer at its current
+position. The action's outcome remains unknown. This recovery requires the
+broker to remain running; it does not cover a desktop or system crash.
+
+If input cleanup fails, Tidebreak keeps the private recovery journal and refuses
+further native input. Release any held mouse buttons or keys before
+restarting Tidebreak. Native observation remains available.
+
+If a response is lost after an action starts, Tidebreak records an unknown
+outcome. The agent inspects the current state before proposing another action.
+Reusing the original request does not repeat uncertain input.
+
+## Development qualification
+
+Run focused checks for the layers you change:
+
+```sh
+cargo test -p tidebreak-desktop --lib computer_use
+cargo test -p tidebreak-desktop --lib browser
+cargo test -p tidebreak-server-core --lib code::chrome
+cargo test -p tidebreak-server-core --lib engine::internal::
+cargo test -p tidebreak-cli --bin tidebreak browser::tests
+cargo test -p tidebreak-cli --bin tidebreak computer_use::tests
+cargo test -p tidebreak-harness --lib grok::
+```
+
+Mock transport tests do not establish native input behavior. Before releasing a
+computer-use change, test the packaged desktop with a real issued session and
+normal native grants. Observe the hardware pointer, foreground app, editor DOM
+node, and selection while the agent opens tabs, clicks, fills and clears text,
+selects, scrolls, captures, and stops. Verify that actual screenshot bytes reach
+the next model request through each supported harness. Repeat a code change,
+rebuild, and the UI flow. Record the tested source revision and any unsupported
+actions. A locked Mac cannot qualify these checks.
+
+Use an isolated development app and profile when testing Tidebreak itself.
+The controlling Tidebreak app and operating-system authentication surfaces remain
+blocked. See [decision 95](decisions/0095-computer-use-for-coding-harnesses.md)
+for the architecture and permission contract.

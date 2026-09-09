@@ -115,6 +115,10 @@ export function toolPreviewPresentation(
  * action is never lost: it is one click away in the card's own body, and it is
  * still the only thing an approval card shows.
  *
+ * When the model left no sentence, the headline is still grounded in the
+ * action: a short verb plus the most meaningful target (path, URL, query, or
+ * command head) so a long argv cannot become the whole transcript width.
+ *
  * `literal` is what tells a caller to set a monospace face: prose in monospace
  * reads as something a shell would run, which it is not.
  */
@@ -126,7 +130,108 @@ export function toolPreviewHeadline(preview: ToolActionPreview): {
   if (typeof summary === "string" && summary.length > 0) {
     return { text: summary, literal: false };
   }
+  if (preview.tool === "exec") {
+    return {
+      text: groundedExecHeadline(preview.command, preview.args),
+      literal: true,
+    };
+  }
   return { text: toolPreviewPresentation(preview).headline, literal: true };
+}
+
+/**
+ * A short factual line drawn from the command's own streams — never a second
+ * model call. Prefer stderr for failures, a single quiet stdout line for a
+ * clean finish, and nothing when the streams are noise.
+ */
+export function toolResultFact(
+  result: ExecResultPreview | null,
+  options: { failed?: boolean } = {},
+): string | null {
+  if (!result) return null;
+  if (result.timedOut) return "Timed out";
+  if (result.exitCode === null) return "Stopped by a signal";
+
+  const failed =
+    options.failed === true ||
+    (typeof result.exitCode === "number" && result.exitCode !== 0);
+
+  if (failed) {
+    const fromStderr = firstMeaningfulLine(result.stderr);
+    if (fromStderr) return clipFact(fromStderr);
+    const fromStdout = firstMeaningfulLine(result.stdout);
+    if (fromStdout) return clipFact(fromStdout);
+    if (typeof result.exitCode === "number") {
+      return `Exit ${result.exitCode}`;
+    }
+    return null;
+  }
+
+  // A successful run stays quiet unless stdout is already one short fact.
+  const line = firstMeaningfulLine(result.stdout);
+  if (!line) return null;
+  if (result.stdout.replace(/\n+$/, "").includes("\n")) return null;
+  if (line.length > FACT_MAX) return null;
+  return line;
+}
+
+/** Cap on a collapsed-row fact so it cannot become a second transcript. */
+const FACT_MAX = 120;
+
+/**
+ * Grounded exec title when the model left no summary: command name plus the
+ * most informative argument (usually a path or script), not the full argv.
+ */
+export function groundedExecHeadline(
+  command: string,
+  args: readonly string[],
+): string {
+  const base = commandBaseName(command);
+  const target = meaningfulExecTarget(args);
+  if (!target) return base;
+  return `${base} ${target}`;
+}
+
+function meaningfulExecTarget(args: readonly string[]): string | null {
+  // Walk from the end: the last path-like token is usually the file or package
+  // under review; flags and short options stay out of the collapsed title.
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const arg = args[index];
+    if (!arg || arg.startsWith("-")) continue;
+    if (arg.includes("/") || arg.includes("\\") || /\.\w{1,8}$/.test(arg)) {
+      return commandBaseName(arg);
+    }
+  }
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const arg = args[index];
+    if (!arg || arg.startsWith("-")) continue;
+    return arg.length > 48 ? `${arg.slice(0, 45)}…` : arg;
+  }
+  return null;
+}
+
+function commandBaseName(value: string): string {
+  const trimmed = value.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed || value;
+}
+
+function firstMeaningfulLine(text: string): string | null {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Stream section headers and shell prompts are structure, not a fact.
+    if (line === "$ stdout" || line === "$ stderr") continue;
+    if (line.startsWith("$ ")) continue;
+    if (line.startsWith("# ")) continue;
+    return line;
+  }
+  return null;
+}
+
+function clipFact(line: string): string {
+  if (line.length <= FACT_MAX) return line;
+  return `${line.slice(0, FACT_MAX - 1)}…`;
 }
 
 /**

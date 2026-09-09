@@ -130,3 +130,18 @@ fails the mode should be demoted behind an explicit setting.
 - The Grok fixture manifest records the 2026-08-17 re-probe: default
   headless executed a write tool unprompted; `--permission-mode plan` wrote
   again.
+
+## Grok 1.0.13 update, September 8, 2026
+
+The captured `grok agent --no-leader stdio` protocol now provides the native
+`session/request_permission` round-trip this decision requires. Tidebreak
+uses ACP on that exact pin and keeps the print adapter for older versions.
+Auto and Ask display the engine's approval request. Allow answers that
+request with its `allow_once` option; it does not save a Grok grant.
+
+The adapter correlates the session, active tool, input, and one-use choices
+before accepting a decision. Stop cancels the ACP session, clears pending
+approvals, and retains process-tree termination as a fallback. The capture
+verifies approval, denial, cancellation, and loading a saved session after
+the child restarts. Plan remains unsupported. Later versions need a new
+capture before Tidebreak advertises a verified Auto posture.

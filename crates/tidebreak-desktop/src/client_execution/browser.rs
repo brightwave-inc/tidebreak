@@ -622,6 +622,7 @@ async fn execute_operation(
                 app,
                 registry,
                 capability_id,
+                call.chat_id,
                 arguments.clone(),
             )
             .await
@@ -698,6 +699,19 @@ async fn execute_browser_upload_operation(
         return Err("browser upload request is not valid".to_owned());
     }
     let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+    let label = crate::code_browser::browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    crate::browser_independence::require_host(
+        &webview,
+        registry,
+        capability_id,
+        &host_snapshot.workspace_id,
+        fence,
+    )?;
+
     let _action_cleanup = BrowserActionCleanup(Some(|| {
         if let Ok(snapshot) =
             registry.set_agent_action(capability_id, &host_snapshot.browser_id, None, false)
@@ -1157,6 +1171,12 @@ fn invalid_request() -> StoredResolution {
 
 fn map_native_error(browser_id: Option<&str>, error: String) -> StoredResolution {
     let inner = strip_native_error_prefix(&error);
+    if matches!(
+        inner,
+        crate::browser_independence::SHARED_TAB | crate::browser_independence::UNAVAILABLE
+    ) {
+        return unavailable("browser_unsupported", inner);
+    }
     if inner == "browser control was stopped by the user" {
         return unavailable(
             "stopped_by_user",
@@ -1787,6 +1807,23 @@ mod tests {
         assert!(!result.contains("cGl4ZWxz"));
         assert!(!result.contains("imageBase64"));
         assert_eq!(images, Some(vec![image]));
+    }
+
+    #[test]
+    fn independence_refusals_preserve_the_actionable_unsupported_message() {
+        for message in [
+            crate::browser_independence::SHARED_TAB,
+            crate::browser_independence::UNAVAILABLE,
+        ] {
+            let StoredResolution::Failed {
+                result, error_code, ..
+            } = map_native_error(Some("browser-1"), message.to_owned())
+            else {
+                panic!("independent host refusal must fail");
+            };
+            assert_eq!(error_code, "browser_unsupported");
+            assert!(result.contains(message));
+        }
     }
 
     #[test]

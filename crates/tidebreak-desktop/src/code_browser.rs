@@ -13,8 +13,9 @@ use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tidebreak_core::{
-    BrowserGrantCapability, BrowserNavigateArgs, BrowserNavigateResult, BrowserOrigin,
-    BrowserOriginScope, OwnerId,
+    BrowserActivateArgs, BrowserCloseArgs, BrowserGrantCapability, BrowserLifecycleResult,
+    BrowserLifecycleStatus, BrowserNavigateArgs, BrowserNavigateResult, BrowserOpenArgs,
+    BrowserOpenResult, BrowserOrigin, BrowserOriginScope, OwnerId,
 };
 use tokio::sync::oneshot;
 use url::Url;
@@ -47,6 +48,9 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+/// How long an agent-requested open waits for its loaded native executor.
+const AGENT_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const AGENT_LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 /// How often the host reads the view's URL while the tab is showing, on the
 /// platforms without a native URL observer. macOS pushes every change through
 /// `browser_url_observer` and never polls.
@@ -138,11 +142,11 @@ enum CodeBrowserAction {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-struct CodeBrowserBounds {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub(crate) struct CodeBrowserBounds {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -204,6 +208,15 @@ pub(crate) fn code_browser_import_legacy_state(
 }
 
 #[tauri::command]
+pub(crate) fn code_browser_agent_tabs(
+    registry: tauri::State<'_, BrowserRegistry>,
+    workspace_id: String,
+) -> Result<Vec<BrowserSnapshot>, String> {
+    validated_workspace_id(&workspace_id)?;
+    Ok(registry.independent_tabs(&workspace_id))
+}
+
+#[tauri::command]
 pub(crate) async fn code_browser_command(
     app: AppHandle,
     registry: tauri::State<'_, BrowserRegistry>,
@@ -229,6 +242,12 @@ pub(crate) async fn code_browser_command(
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 set_bounds(&webview, bounds)?;
+                if !visible {
+                    let _ = crate::browser_semantics::clear_browser_ghost_cursor(
+                        &app,
+                        &request.browser_id,
+                    );
+                }
                 set_visible(&webview, visible)?;
                 registry.set_visible(&request.browser_id, &request.workspace_id, visible)?;
                 return registry.snapshot(&request.browser_id, &request.workspace_id);
@@ -384,6 +403,7 @@ pub(crate) async fn code_browser_command(
             }
             let snapshot =
                 registry.revoke_browser_access(&request.browser_id, &request.workspace_id)?;
+            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             emit_access_event(&app, "agent_access_changed", &snapshot, None);
             Ok(snapshot)
         }
@@ -392,20 +412,34 @@ pub(crate) async fn code_browser_command(
                 registry.remove(&request.browser_id, &request.workspace_id)?;
                 return Err("browser session is not open".to_owned());
             }
-            let snapshot = registry
-                .stop_agent_control(&request.browser_id, &request.workspace_id)
-                .await?;
-            emit_controller_event(&app, &snapshot);
-            Ok(snapshot)
+            registry
+                .stop_agent_control_with(&request.browser_id, &request.workspace_id, |snapshot| {
+                    let _ = crate::browser_semantics::clear_browser_ghost_cursor(
+                        &app,
+                        &snapshot.browser_id,
+                    );
+                    emit_controller_event(&app, snapshot);
+                })
+                .await
         }
         CodeBrowserAction::TakeHumanControl => {
             if existing.is_none() {
                 registry.remove(&request.browser_id, &request.workspace_id)?;
                 return Err("browser session is not open".to_owned());
             }
+            registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
+            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            if let Some(webview) = existing.as_ref() {
+                crate::agent_browser_host::begin_human_takeover(webview, &request.workspace_id)?;
+            }
             let snapshot = registry
                 .take_human_control(&request.browser_id, &request.workspace_id)
                 .await?;
+            let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
+            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            if let Some(webview) = existing.as_ref() {
+                crate::agent_browser_host::take_human_control(webview)?;
+            }
             emit_controller_event(&app, &snapshot);
             Ok(snapshot)
         }
@@ -427,10 +461,18 @@ pub(crate) async fn code_browser_command(
                     | CodeBrowserAction::Back
                     | CodeBrowserAction::Forward
             ) {
+                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                crate::agent_browser_host::begin_human_takeover(&webview, &request.workspace_id)?;
                 let snapshot = registry
                     .take_human_control(&request.browser_id, &request.workspace_id)
                     .await?;
+                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                crate::agent_browser_host::take_human_control(&webview)?;
                 emit_controller_event(&app, &snapshot);
+            }
+            if !matches!(&action, CodeBrowserAction::SetVisible { visible: true }) {
+                let _ =
+                    crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
             }
             run_action(&app, &request.browser_id, &webview, action)?;
             if let Some(visible) = visible {
@@ -500,6 +542,13 @@ pub(crate) async fn navigate_browser_for_agent(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
+    crate::browser_independence::require_host(
+        &webview,
+        registry,
+        capability_id,
+        &workspace_id,
+        fence,
+    )?;
     let browser_id = arguments.browser_id.clone();
     let dispatch_browser_id = browser_id.clone();
     let fallback_url = destination.to_string();
@@ -533,7 +582,18 @@ pub(crate) async fn navigate_browser_for_agent(
                         return Err("browser destination is not shared for navigation".to_owned());
                     }
                 }
-                webview.navigate(destination).map_err(browser_error)?;
+                crate::browser_independence::navigate(
+                    &webview,
+                    &dispatch_registry,
+                    capability_id,
+                    &workspace_id,
+                    &dispatch_browser_id,
+                    &dispatch_current_origin,
+                    fence,
+                    &destination,
+                    &dispatch_destination_origin,
+                )
+                .await?;
                 let deadline = tokio::time::Instant::now() + AGENT_NAVIGATION_START_TIMEOUT;
                 loop {
                     let snapshot =
@@ -566,6 +626,271 @@ pub(crate) async fn navigate_browser_for_agent(
             },
         )
         .await
+}
+
+// ── Agent lifecycle ───────────────────────────────────────────────
+
+/// Create an independent native tab before asking the renderer to adopt its preview.
+/// Opening does not select a page or change the human's editor layout.
+pub(crate) async fn open_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserOpenArgs,
+) -> Result<BrowserOpenResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser open request is not valid".to_owned());
+    }
+    crate::browser_independence::require_available()?;
+    let renderer_url = app.get_webview("main").and_then(|main| main.url().ok());
+    let destination = validated_url(&arguments.url, renderer_url.as_ref())?;
+    let destination_origin = BrowserOrigin::from_url(destination.as_str())
+        .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
+    let workspace_id =
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), &destination_origin)?;
+    let browser_id = format!("agent-{}", Uuid::new_v4().simple());
+    browser_label(&browser_id)?;
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let open_lease = crate::agent_browser_host::reserve_open(
+        app,
+        registry,
+        &browser_id,
+        &workspace_id,
+        capability_id,
+    )?;
+
+    let label = browser_label(&browser_id)?;
+    let profiles = app.state::<BrowserProfileStore>().inner().clone();
+    let downloads = app.state::<BrowserDownloadStore>().inner().clone();
+    {
+        // The same lock serializes renderer adoption and native creation.
+        let _lifecycle = profiles.lock_lifecycle().await;
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), &destination_origin)?;
+        let profile = profiles.get_or_create(&OwnerId::local())?;
+        create_browser(
+            app,
+            registry,
+            &profiles,
+            &downloads,
+            profile,
+            &workspace_id,
+            &browser_id,
+            &label,
+            destination.as_str(),
+            None,
+            CodeBrowserBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1024.0,
+                height: 768.0,
+            },
+            false,
+        )?;
+    }
+    emit_agent_lifecycle_event(
+        app,
+        &workspace_id,
+        &browser_id,
+        "agent_open_requested",
+        Some(destination.to_string()),
+    );
+
+    let snapshot = wait_for_agent_browser_ready(
+        registry,
+        capability_id,
+        &browser_id,
+        &destination_origin,
+        AGENT_OPEN_TIMEOUT,
+        || app.get_webview(&label).is_some(),
+    )
+    .await?;
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    open_lease.finish();
+    emit_controller_event(app, &snapshot);
+    Ok(BrowserOpenResult {
+        browser_id,
+        url: snapshot.url.unwrap_or_else(|| destination.to_string()),
+        load_state: BrowserLoadState::Ready,
+        document_epoch: snapshot.document_epoch.unwrap_or(0),
+        visible: snapshot.visible.unwrap_or(false),
+    })
+}
+
+/// Wait for a loaded executor without depending on a renderer or visible preview.
+/// Dropping the future cancels the open lease and cannot acquire control later.
+async fn wait_for_agent_browser_ready(
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: &str,
+    destination_origin: &BrowserOrigin,
+    timeout: std::time::Duration,
+    executor_ready: impl Fn() -> bool,
+) -> Result<BrowserSnapshot, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut instance_id = None;
+    loop {
+        registry.authorize_agent_open(capability_id, &OwnerId::local(), destination_origin)?;
+        if let Some((instance, snapshot)) =
+            registry.agent_open_state(capability_id, browser_id, instance_id)?
+        {
+            instance_id = Some(instance);
+            if (snapshot.visible == Some(true) || snapshot.independent_input == Some(true))
+                && snapshot.load_state == Some(BrowserLoadState::Ready)
+                && snapshot.document_epoch.is_some_and(|epoch| epoch > 0)
+                && executor_ready()
+            {
+                // Reauthorize acquisition after the native lookup. Never turn
+                // a denied takeover into a successful open response.
+                match registry.begin_opened_agent_control(capability_id, browser_id, instance) {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(error)
+                        if error == "browser page is still loading"
+                            || error == "browser is hidden" => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("browser tab did not become ready before the deadline".to_owned());
+        }
+        tokio::time::sleep(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+    }
+}
+
+/// Close one tab the same agent capability opened. Human-owned tabs and tabs
+/// reclaimed by takeover return a typed refusal instead of closing.
+pub(crate) async fn close_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserCloseArgs,
+) -> Result<BrowserLifecycleResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser close request is not valid".to_owned());
+    }
+    let label = browser_label(&arguments.browser_id)?;
+    let workspace_id = match registry.authorize_agent_close(capability_id, &arguments.browser_id) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) if error == "browser session is not registered" => {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::UnknownBrowser,
+                "This browser id names no live tab.",
+            ));
+        }
+        Err(error) if error == "browser tab was not opened by this agent" => {
+            return Ok(lifecycle_result(
+                &arguments.browser_id,
+                BrowserLifecycleStatus::Refused,
+                "Only tabs this agent opened can be closed. The user keeps this tab.",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+
+    let downloads = app.state::<BrowserDownloadStore>();
+    downloads.cancel_browser(&arguments.browser_id)?;
+    let owner_id = OwnerId::local();
+    registry.ensure_recovery_binding(&owner_id, &arguments.browser_id, &workspace_id)?;
+    if let Some(webview) = app.get_webview(&label) {
+        close_browser_webview(&webview)?;
+    }
+    registry.remove(&arguments.browser_id, &workspace_id)?;
+    registry.forget_recovery(&owner_id, &arguments.browser_id, &workspace_id)?;
+    emit_agent_lifecycle_event(
+        app,
+        &workspace_id,
+        &arguments.browser_id,
+        "agent_closed_tab",
+        None,
+    );
+    Ok(lifecycle_result(
+        &arguments.browser_id,
+        BrowserLifecycleStatus::Ok,
+        "The tab is closed. Its browser id, snapshots, and refs are no longer valid.",
+    ))
+}
+
+/// Keep a live independent executor usable without selecting its preview.
+pub(crate) async fn activate_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserActivateArgs,
+) -> Result<BrowserLifecycleResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser activate request is not valid".to_owned());
+    }
+    let label = browser_label(&arguments.browser_id)?;
+    let (workspace_id, available) =
+        match registry.authorize_agent_activation(capability_id, &arguments.browser_id) {
+            Ok(authorized) => authorized,
+            Err(error) if error == "browser session is not registered" => {
+                return Ok(lifecycle_result(
+                    &arguments.browser_id,
+                    BrowserLifecycleStatus::UnknownBrowser,
+                    "This browser id names no live tab.",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+    let snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+    if snapshot.independent_input != Some(true) {
+        return Err(crate::browser_independence::SHARED_TAB.to_owned());
+    }
+    registry.authorize_agent_close(capability_id, &arguments.browser_id)?;
+    if !available || app.get_webview(&label).is_none() {
+        return Ok(lifecycle_result(
+            &arguments.browser_id,
+            BrowserLifecycleStatus::EngineFailure,
+            "The independent browser is unavailable. Open a new tab with browser_open.",
+        ));
+    }
+    Ok(lifecycle_result(
+        &arguments.browser_id,
+        BrowserLifecycleStatus::Ok,
+        "The independent browser is available. Your selected tab and keyboard focus stay unchanged.",
+    ))
+}
+
+fn lifecycle_result(
+    browser_id: &str,
+    status: BrowserLifecycleStatus,
+    message: &str,
+) -> BrowserLifecycleResult {
+    BrowserLifecycleResult {
+        browser_id: browser_id.to_owned(),
+        status,
+        message: message.to_owned(),
+    }
+}
+
+pub(crate) fn emit_agent_lifecycle_event(
+    app: &AppHandle,
+    workspace_id: &str,
+    browser_id: &str,
+    kind: &'static str,
+    url: Option<String>,
+) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: workspace_id.to_owned(),
+            browser_id: browser_id.to_owned(),
+            kind,
+            url,
+            title: None,
+            message: None,
+            load_state: None,
+            document_epoch: None,
+            controller: None,
+            agent_access: None,
+            origin: None,
+        },
+    );
 }
 
 fn missing_browser_snapshot(
@@ -624,6 +949,38 @@ fn create_browser(
         },
     )?;
 
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let agent_host = {
+        let origin = BrowserOrigin::from_url(target.as_str())
+            .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
+        match crate::agent_browser_host::create_if_reserved(
+            app,
+            registry,
+            browser_id,
+            workspace_id,
+            instance_id,
+            &window,
+            safe_bounds,
+            &origin,
+        ) {
+            Ok(host) => host,
+            Err(error) => {
+                registry.remove_instance(browser_id, workspace_id, instance_id);
+                return Err(error);
+            }
+        }
+    };
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let window = agent_host.as_ref().unwrap_or(&window).clone();
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let child_origin = if agent_host.is_some() {
+        LogicalPosition::new(0.0, 0.0)
+    } else {
+        LogicalPosition::new(safe_bounds.x, safe_bounds.y)
+    };
+    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    let child_origin = LogicalPosition::new(safe_bounds.x, safe_bounds.y);
+
     let navigation_main = main.clone();
     let navigation_browser = browser_id.to_owned();
     let navigation_workspace = workspace_id.to_owned();
@@ -651,11 +1008,26 @@ fn create_browser(
     let download_registry = registry.clone();
     let download_store = downloads.clone();
 
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let guarded_initial_load = agent_host.is_some();
+    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    let guarded_initial_load = false;
+    let initial_target = initial_browser_url(&target, guarded_initial_load);
+    let initial_navigation_pending =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(guarded_initial_load));
+    let navigation_pending = std::sync::Arc::clone(&initial_navigation_pending);
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_target)).focused(false);
     #[cfg(target_os = "macos")]
     let builder = builder.data_store_identifier(profile.data_store_identifier());
+    // Installed at document start in the page world so browser_diagnostics
+    // can drain console, error, and instrumented network activity later.
+    let builder =
+        builder.initialization_script(crate::browser_semantics::BROWSER_DIAGNOSTICS_INIT_SCRIPT);
     let builder = builder
         .on_navigation(move |url| {
+            if guarded_initial_load && url.as_str() == "about:blank" {
+                return take_initial_navigation(&navigation_pending);
+            }
             let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {
                 emit_event(
                     &navigation_main,
@@ -736,6 +1108,9 @@ fn create_browser(
             NewWindowResponse::Deny
         })
         .on_page_load(move |webview, payload| {
+            if guarded_initial_load && payload.url().as_str() == "about:blank" {
+                return;
+            }
             let snapshot = match payload.event() {
                 PageLoadEvent::Started => load_registry.page_started(
                     &load_browser,
@@ -887,11 +1262,13 @@ fn create_browser(
 
     let webview = match window.add_child(
         builder,
-        LogicalPosition::new(safe_bounds.x, safe_bounds.y),
+        child_origin,
         LogicalSize::new(safe_bounds.width, safe_bounds.height),
     ) {
         Ok(webview) => webview,
         Err(error) => {
+            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            crate::agent_browser_host::close_empty_host(app, &window);
             registry.remove_instance(browser_id, workspace_id, instance_id);
             return Err(browser_error(error));
         }
@@ -912,22 +1289,100 @@ fn create_browser(
         registry.remove_instance(browser_id, workspace_id, instance_id);
         return Err(error);
     }
-    if !visible {
-        if let Err(error) = webview.hide() {
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if guarded_initial_load {
+        let dialog_main = main.clone();
+        let dialog_browser = browser_id.to_owned();
+        let dialog_workspace = workspace_id.to_owned();
+        let guarded_webview = webview.clone();
+        let guarded_registry = registry.clone();
+        if let Err(error) = crate::agent_browser_dialogs::with_guarded_view(&webview, move |view| {
+            crate::agent_browser_host::authorize_initial_load(
+                &guarded_webview,
+                &guarded_registry,
+                &target,
+            )?;
+            crate::agent_browser_host::verify_native_window(view)?;
+            crate::agent_browser_dialogs::install(view, move |message| {
+                // Reuse the existing browser notice surface. The message is
+                // fixed host text and never copies the page's dialog content.
+                emit_event(
+                    &dialog_main,
+                    CodeBrowserEvent {
+                        workspace_id: dialog_workspace.clone(),
+                        browser_id: dialog_browser.clone(),
+                        kind: "navigation_blocked",
+                        url: None,
+                        title: None,
+                        message: Some(message.to_owned()),
+                        load_state: None,
+                        document_epoch: None,
+                        controller: None,
+                        agent_access: None,
+                        origin: None,
+                    },
+                );
+            })?;
+            let url = objc2_foundation::NSURL::URLWithString(
+                &objc2_foundation::NSString::from_str(target.as_str()),
+            )
+            .ok_or_else(|| "browser destination URL is not valid".to_owned())?;
+            let request = objc2_foundation::NSURLRequest::requestWithURL(&url);
+            // End the inert exception before the real page can navigate.
+            initial_navigation_pending.store(false, std::sync::atomic::Ordering::Release);
+            // Install the native guard and load in one main-thread callback.
+            unsafe { view.loadRequest(&request) }
+                .ok_or_else(|| "browser navigation could not start".to_owned())?;
+            Ok(())
+        }) {
             let _ = close_browser_webview(&webview);
             registry.remove_instance(browser_id, workspace_id, instance_id);
-            return Err(browser_error(error));
+            return Err(error);
+        }
+    }
+    if let Err(error) = set_visible(&webview, visible) {
+        let _ = close_browser_webview(&webview);
+        registry.remove_instance(browser_id, workspace_id, instance_id);
+        return Err(error);
+    }
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if agent_host.is_some() {
+        if let Err(error) =
+            registry.mark_independent_host_ready(browser_id, workspace_id, instance_id)
+        {
+            let _ = close_browser_webview(&webview);
+            registry.remove_instance(browser_id, workspace_id, instance_id);
+            return Err(error);
         }
     }
     registry.snapshot(browser_id, workspace_id)
 }
 
+/// Agent hosts start without page content so no dialog can run before the
+/// per-view native guard is installed. Human tabs retain their normal load.
+fn initial_browser_url(target: &Url, independent: bool) -> Url {
+    if independent {
+        Url::parse("about:blank").expect("the inert browser URL is valid")
+    } else {
+        target.clone()
+    }
+}
+
+fn take_initial_navigation(pending: &std::sync::atomic::AtomicBool) -> bool {
+    pending.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 /// Close a managed browser view, detaching the native URL observer first so
 /// nothing keeps watching a view that is going away.
-fn close_browser_webview(webview: &Webview) -> Result<(), String> {
+pub(crate) fn close_browser_webview(webview: &Webview) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = stop_observing_browser_url(webview);
-    webview.close().map_err(browser_error)
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let host_window = webview.window();
+    webview.close().map_err(browser_error)?;
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    crate::agent_browser_host::close_empty_host(webview.app_handle(), &host_window);
+    Ok(())
 }
 
 /// Build the handler the native URL observer calls on the main thread. It
@@ -1083,8 +1538,34 @@ async fn share_browser_with_agent(
     browser_id: &str,
     workspace_id: &str,
 ) -> Result<(BrowserSnapshot, Option<String>), String> {
-    if let Some(resumed) = registry.resume_shared_browser(browser_id, workspace_id)? {
-        return Ok(resumed);
+    if let Some((snapshot, pending_navigation)) =
+        registry.resume_shared_browser(browser_id, workspace_id)?
+    {
+        emit_workspace_browser_controllers(app, registry, workspace_id);
+        // Consent persisted before the screenshot disclosure lacks capture.
+        // Re-sharing is the explicit moment to offer the upgraded disclosure;
+        // declining keeps the original observation/control consent working.
+        let needs_capture_disclosure = snapshot
+            .agent_access
+            .as_ref()
+            .is_some_and(|access| access.shared && !access.can_capture_screens);
+        if !needs_capture_disclosure {
+            return Ok((snapshot, pending_navigation));
+        }
+        let origin = registry.share_target_origin(browser_id, workspace_id)?;
+        if native_capture_disclosure_choice(app, &origin).await? {
+            let snapshot = registry.extend_browser_access(
+                browser_id,
+                workspace_id,
+                &origin,
+                &[
+                    BrowserGrantCapability::BrowserCaptureVisibleTab,
+                    BrowserGrantCapability::BrowserDiagnoseOrigin,
+                ],
+            )?;
+            return Ok((snapshot, pending_navigation));
+        }
+        return Ok((snapshot, pending_navigation));
     }
     let origin = registry.share_target_origin(browser_id, workspace_id)?;
     let scope = if origin.is_loopback() {
@@ -1107,10 +1588,49 @@ async fn share_browser_with_agent(
         &[
             BrowserGrantCapability::BrowserControlOrigin,
             BrowserGrantCapability::BrowserTransferFiles,
+            BrowserGrantCapability::BrowserCaptureVisibleTab,
+            BrowserGrantCapability::BrowserDiagnoseOrigin,
         ],
     )?;
+    emit_workspace_browser_controllers(app, registry, workspace_id);
     let pending_navigation = registry.take_pending_navigation(browser_id, workspace_id)?;
     Ok((snapshot, pending_navigation))
+}
+
+/// The shared sentence that discloses exactly where captured pixels and
+/// diagnostics go. Decision 94 requires this disclosure before any grant may
+/// include screenshot access.
+const CAPTURE_DISCLOSURE: &str = "Screenshots show everything visible in the tab and are sent to the agent's selected model and provider; automatic redaction is not guaranteed. Console, page-error, and in-page network diagnostics for this site are shared the same way.";
+
+/// Offer the screenshot/diagnostics disclosure to a workspace whose existing
+/// grant predates it. Approval extends the covering grant; declining changes
+/// nothing.
+async fn native_capture_disclosure_choice(
+    app: &AppHandle,
+    origin: &BrowserOrigin,
+) -> Result<bool, String> {
+    let origin = crate::native_security_label(origin.as_str());
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Agents in this workspace can already inspect and navigate {origin}. Also allow screenshots and page diagnostics?\n\n{CAPTURE_DISCLOSURE}\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing."
+        ))
+        .title("Allow screenshots for agents?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow screenshots".to_owned(),
+            "Keep text-only sharing".to_owned(),
+        ));
+    if let Some(window) = app.get_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native browser permission prompt closed unexpectedly".to_owned())
 }
 
 async fn native_public_share_choice(
@@ -1122,7 +1642,7 @@ async fn native_public_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin}?\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing, including after app restarts. Page content is untrusted. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe."
+            "Allow agents in this workspace to inspect, navigate, and screenshot {origin}?\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing, including after app restarts. Page content is untrusted. {CAPTURE_DISCLOSURE} Password and verification-code fields stay out of text snapshots and still require human takeover for input. Every file upload requires another confirmation."
         ))
         .title("Share this site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -1150,7 +1670,7 @@ async fn native_loopback_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nTidebreak remembers your selected scope for this workspace until you choose Stop sharing, including after app restarts. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
+            "Allow agents in this workspace to inspect, navigate, and screenshot {origin_label}?\n\nTidebreak remembers your selected scope for this workspace until you choose Stop sharing, including after app restarts. {CAPTURE_DISCLOSURE} Password and verification-code fields stay out of text snapshots and still require human takeover for input. Every file upload requires another confirmation. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
         ))
         .title("Share a local site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -1613,6 +2133,10 @@ fn run_action(
 
 fn set_bounds(webview: &Webview, bounds: CodeBrowserBounds) -> Result<(), String> {
     let bounds = validated_bounds(bounds)?;
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if crate::agent_browser_host::set_bounds(webview, bounds)? {
+        return Ok(());
+    }
     webview
         .set_bounds(Rect {
             position: LogicalPosition::new(bounds.x, bounds.y).into(),
@@ -1622,6 +2146,10 @@ fn set_bounds(webview: &Webview, bounds: CodeBrowserBounds) -> Result<(), String
 }
 
 fn set_visible(webview: &Webview, visible: bool) -> Result<(), String> {
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    if crate::agent_browser_host::set_visible(webview, visible)? {
+        return Ok(());
+    }
     if visible {
         webview.show().map_err(browser_error)
     } else {
@@ -1783,6 +2311,19 @@ fn emit_navigation_paused_event(app: &AppHandle, snapshot: BrowserSnapshot, orig
     );
 }
 
+/// Share can resume every tab that the same stopped session controls.
+fn emit_workspace_browser_controllers(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    workspace_id: &str,
+) {
+    for browser in registry.list_for_workspace(workspace_id) {
+        if let Ok(snapshot) = registry.snapshot(&browser.browser_id, workspace_id) {
+            emit_controller_event(app, &snapshot);
+        }
+    }
+}
+
 pub(crate) fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {
     let Some(main) = app.get_webview("main") else {
         return;
@@ -1844,7 +2385,345 @@ fn browser_error(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inert_navigation_exception_can_only_be_used_once() {
+        let pending = std::sync::atomic::AtomicBool::new(true);
+        assert!(super::take_initial_navigation(&pending));
+        assert!(!super::take_initial_navigation(&pending));
+    }
+
+    #[test]
+    fn independent_browser_starts_inert_before_page_dialogs_can_run() {
+        let target = url::Url::parse("https://example.com/dialogs").unwrap();
+        assert_eq!(
+            super::initial_browser_url(&target, true).as_str(),
+            "about:blank"
+        );
+        assert_eq!(super::initial_browser_url(&target, false), target);
+    }
+
     use super::*;
+
+    fn opening_browser_registry() -> (BrowserRegistry, Uuid, BrowserOrigin) {
+        let registry = BrowserRegistry::default();
+        let origin = BrowserOrigin::from_url("https://example.com/fixture").unwrap();
+        registry
+            .register("grant-tab", "workspace-1", origin.as_str().to_owned(), true)
+            .unwrap();
+        registry
+            .grant_browser_access(
+                "grant-tab",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        let capability = registry.issue_agent_capability("workspace-1", "Code agent");
+        (registry, capability, origin)
+    }
+
+    fn register_opening_browser(registry: &BrowserRegistry, visible: bool) -> u64 {
+        registry
+            .register(
+                "opening-tab",
+                "workspace-1",
+                "https://example.com/fixture".to_owned(),
+                visible,
+            )
+            .unwrap()
+    }
+
+    fn finish_opening_browser(registry: &BrowserRegistry, instance: u64) {
+        registry
+            .page_started(
+                "opening-tab",
+                "workspace-1",
+                instance,
+                "https://example.com/fixture".to_owned(),
+            )
+            .unwrap();
+        registry
+            .page_finished(
+                "opening-tab",
+                "workspace-1",
+                instance,
+                "https://example.com/fixture".to_owned(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_waits_for_native_visible_loaded_tab_before_next_snapshot() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let (registry, capability, origin) = opening_browser_registry();
+        let native_ready = Arc::new(AtomicBool::new(false));
+        let wait_registry = registry.clone();
+        let wait_native = Arc::clone(&native_ready);
+        let waiting = tokio::spawn(async move {
+            wait_for_agent_browser_ready(
+                &wait_registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || wait_native.load(Ordering::SeqCst),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "registration must happen first");
+        let instance = register_opening_browser(&registry, false);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "registration alone does not open a tab"
+        );
+        registry
+            .set_visible("opening-tab", "workspace-1", true)
+            .unwrap();
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "visible loading tab is not ready");
+        finish_opening_browser(&registry, instance);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "registry readiness cannot replace a native executor"
+        );
+        native_ready.store(true, Ordering::SeqCst);
+        tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+        let opened = waiting.await.unwrap().unwrap();
+        assert_eq!(opened.visible, Some(true));
+        assert_eq!(opened.load_state, Some(BrowserLoadState::Ready));
+        assert!(opened.document_epoch.unwrap() > 0);
+        // These are the exact registry gates of the immediately following
+        // semantic snapshot; acquisition must succeed with a ready document.
+        let next = registry
+            .begin_agent_control(capability, "opening-tab")
+            .unwrap();
+        assert_eq!(next.load_state, Some(BrowserLoadState::Ready));
+        assert_eq!(next.document_epoch, opened.document_epoch);
+        assert!(registry
+            .observation_fence(capability, "opening-tab")
+            .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_completes_without_renderer_adoption_or_preview_visibility() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, false);
+        registry
+            .bind_independent_open(capability, "opening-tab", instance)
+            .unwrap();
+        registry
+            .mark_independent_host_ready("opening-tab", "workspace-1", instance)
+            .unwrap();
+        finish_opening_browser(&registry, instance);
+        let snapshot = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.visible, Some(false));
+        assert_eq!(snapshot.independent_input, Some(true));
+        assert!(registry
+            .observation_fence(capability, "opening-tab")
+            .is_ok());
+        assert_eq!(registry.independent_tabs("workspace-1").len(), 1);
+        assert!(registry.independent_tabs("other-workspace").is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_wait_uses_one_bounded_deadline() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            wait_for_agent_browser_ready(
+                &registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || false
+            )
+            .await
+            .unwrap_err(),
+            "browser tab did not become ready before the deadline"
+        );
+        assert_eq!(tokio::time::Instant::now() - started, AGENT_OPEN_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_wait_observes_stop_revoke_close_replace_and_takeover() {
+        for operation in ["stop", "revoke", "close", "replace", "takeover", "unshare"] {
+            let (registry, capability, origin) = opening_browser_registry();
+            register_opening_browser(&registry, false);
+            let wait_registry = registry.clone();
+            let waiting = tokio::spawn(async move {
+                wait_for_agent_browser_ready(
+                    &wait_registry,
+                    capability,
+                    "opening-tab",
+                    &origin,
+                    AGENT_OPEN_TIMEOUT,
+                    || false,
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            let expected = match operation {
+                "stop" => {
+                    registry
+                        .stop_agent_control("opening-tab", "workspace-1")
+                        .await
+                        .unwrap();
+                    "browser control was stopped by the user"
+                }
+                "revoke" => {
+                    registry.revoke_agent_capability(capability);
+                    "browser capability is unavailable"
+                }
+                "close" | "replace" => {
+                    registry.remove("opening-tab", "workspace-1").unwrap();
+                    if operation == "replace" {
+                        register_opening_browser(&registry, true);
+                        "browser session was replaced while waiting"
+                    } else {
+                        "browser tab closed before it became ready"
+                    }
+                }
+                "takeover" => {
+                    registry
+                        .take_human_control("opening-tab", "workspace-1")
+                        .await
+                        .unwrap();
+                    "browser tab was taken over while opening"
+                }
+                "unshare" => {
+                    registry
+                        .revoke_browser_access("opening-tab", "workspace-1")
+                        .unwrap();
+                    "browser origin is not shared with this agent"
+                }
+                _ => unreachable!(),
+            };
+            tokio::time::advance(AGENT_LIFECYCLE_POLL_INTERVAL).await;
+            assert_eq!(waiting.await.unwrap().unwrap_err(), expected, "{operation}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_agent_open_wait_never_acquires_control_later() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, false);
+        let wait_registry = registry.clone();
+        let waiting = tokio::spawn(async move {
+            wait_for_agent_browser_ready(
+                &wait_registry,
+                capability,
+                "opening-tab",
+                &origin,
+                AGENT_OPEN_TIMEOUT,
+                || true,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        registry
+            .set_visible("opening-tab", "workspace-1", true)
+            .unwrap();
+        finish_opening_browser(&registry, instance);
+        tokio::time::advance(AGENT_OPEN_TIMEOUT).await;
+        let snapshot = registry.snapshot("opening-tab", "workspace-1").unwrap();
+        assert_eq!(
+            snapshot.controller.unwrap().kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_cannot_reclaim_takeover_before_its_first_poll() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, true);
+        finish_opening_browser(&registry, instance);
+        registry
+            .take_human_control("opening-tab", "workspace-1")
+            .await
+            .unwrap();
+        let result = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || true,
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "browser tab was taken over while opening"
+        );
+        assert_eq!(
+            registry
+                .snapshot("opening-tab", "workspace-1")
+                .unwrap()
+                .controller
+                .unwrap()
+                .kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_open_rechecks_instance_at_native_executor_boundary() {
+        let (registry, capability, origin) = opening_browser_registry();
+        let instance = register_opening_browser(&registry, true);
+        finish_opening_browser(&registry, instance);
+        let result = wait_for_agent_browser_ready(
+            &registry,
+            capability,
+            "opening-tab",
+            &origin,
+            AGENT_OPEN_TIMEOUT,
+            || {
+                // A replacement can land between registry inspection and native
+                // lookup; the final acquisition must preserve the instance fence.
+                registry.remove("opening-tab", "workspace-1").unwrap();
+                let replacement = register_opening_browser(&registry, true);
+                finish_opening_browser(&registry, replacement);
+                true
+            },
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "browser session was replaced while waiting"
+        );
+        assert_eq!(
+            registry
+                .snapshot("opening-tab", "workspace-1")
+                .unwrap()
+                .controller
+                .unwrap()
+                .kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+    }
 
     #[test]
     fn recovered_browser_publishes_agent_control_before_observation() {

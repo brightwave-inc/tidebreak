@@ -15,7 +15,9 @@
 //! decision resumes it through [`tidebreak_harness::HarnessSession::resume_turn`].
 
 mod adapter;
+mod browser_tools;
 pub mod leg;
+mod native_tools;
 mod session;
 
 pub use adapter::InternalAdapter;

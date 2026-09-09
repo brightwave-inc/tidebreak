@@ -644,13 +644,38 @@ function BrowserAgentAccessControl({
       access.scope === "loopback_workspace"
         ? "Local sites shared"
         : `${originLabel} shared`;
+    // Grants persisted before the screenshot disclosure observe and control
+    // without capture. Saying so here is part of the consent contract: the
+    // user can see exactly what the agent's model receives, and re-sharing
+    // is the explicit path to add screenshots.
+    const textOnly = !access.canCaptureScreens;
     return (
       <div
         className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md bg-success-background/65 px-1.5 text-2xs font-medium text-success-foreground"
-        aria-label={`Shared with agent: ${access.origin}`}
+        aria-label={
+          textOnly
+            ? `Shared with agent without screenshots: ${access.origin}`
+            : `Shared with agent including screenshots: ${access.origin}`
+        }
       >
         <ShieldCheck className="size-3 shrink-0" />
         <span className="max-w-28 truncate">{sharedLabel}</span>
+        {textOnly && (
+          <WithTooltip label="Screenshots are not shared. Choose Share with agent to review the screenshot permission.">
+            <span className="shrink-0 opacity-75">· text only</span>
+          </WithTooltip>
+        )}
+        {textOnly && onShare && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="2xs"
+            className="text-success-foreground hover:bg-success/10 hover:text-success-foreground"
+            onClick={onShare}
+          >
+            Allow screenshots
+          </Button>
+        )}
         {onRevoke && (
           <Button
             type="button"

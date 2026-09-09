@@ -29,6 +29,7 @@ pub mod bus;
 pub mod chat_titling;
 pub mod chatgpt_runtime;
 pub mod code;
+pub use code::chrome;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 pub mod connected_apps;
@@ -172,20 +173,21 @@ use tidebreak_core::{
     ask_user_questions_tool_spec, browser_act_tool_spec, browser_list_tool_spec,
     browser_navigate_tool_spec, browser_screenshot_tool_spec, browser_snapshot_tool_spec,
     browser_upload_tool_spec, browser_wait_tool_spec, computer_capture_screen_tool_spec,
-    computer_click_tool_spec, computer_focus_window_tool_spec, computer_key_press_tool_spec,
-    computer_list_windows_tool_spec, computer_read_app_content_tool_spec,
-    computer_return_to_tidebreak_tool_spec, computer_scroll_tool_spec,
-    computer_type_text_tool_spec, computer_wait_tool_spec, exit_plan_mode_tool_spec,
-    import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
-    read_connected_file_tool_spec, request_folder_access_tool_spec,
+    computer_click_tool_spec, computer_drag_tool_spec, computer_hover_tool_spec,
+    computer_key_press_tool_spec, computer_launch_app_tool_spec, computer_list_windows_tool_spec,
+    computer_read_app_content_tool_spec, computer_resize_window_tool_spec,
+    computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
+    exit_plan_mode_tool_spec, import_connected_file_tool_spec, list_connected_folders_tool_spec,
+    list_folder_tool_spec, read_connected_file_tool_spec, request_folder_access_tool_spec,
     validate_ask_user_questions_arguments, validate_browser_act_arguments,
     validate_browser_list_arguments, validate_browser_navigate_arguments,
     validate_browser_screenshot_arguments, validate_browser_snapshot_arguments,
     validate_browser_upload_arguments, validate_browser_wait_arguments,
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
-    validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
+    validate_computer_drag_arguments, validate_computer_hover_arguments,
+    validate_computer_key_press_arguments, validate_computer_launch_app_arguments,
     validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
-    validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
+    validate_computer_resize_window_arguments, validate_computer_scroll_arguments,
     validate_computer_type_text_arguments, validate_computer_wait_arguments,
     validate_exit_plan_mode_arguments, validate_import_connected_file_arguments,
     validate_list_connected_folders_arguments, validate_list_folder_arguments,
@@ -240,6 +242,58 @@ impl BrowserChannelBinding {
     /// Return the native runtime.
     #[must_use]
     pub fn runtime(&self) -> &Arc<dyn BrowserRuntime> {
+        &self.runtime
+    }
+
+    /// Return the absolute bridge executable path.
+    #[must_use]
+    pub fn bridge_command(&self) -> &std::path::Path {
+        &self.bridge_command
+    }
+}
+/// Public contract for desktop native computer-use adapters. The desktop
+/// implements [`NativeRuntime`] behind an `Arc` and installs it with the
+/// native-binding bind variants.
+pub use crate::code::native_runtime::{
+    NativeOperationHandle, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
+};
+
+/// Bind-time pairing of the desktop native computer-use runtime and the
+/// trusted bridge executable.
+///
+/// Both halves must be present for the server to mint native channels. The
+/// desktop constructs this when it has a [`NativeRuntime`] and has resolved
+/// the absolute path to the `tidebreak` CLI sidecar. When either half is
+/// absent, no native computer-use tools are advertised or injected —
+/// sessions work exactly as before the native channel existed.
+///
+/// `bridge_command` must be an absolute path. The desktop sibling resolver
+/// owns existence, file-type, and executable checks; the server boundary
+/// validates absoluteness as defense in depth.
+#[derive(Clone)]
+pub struct NativeChannelBinding {
+    /// The desktop native computer-use adapter.
+    pub runtime: Arc<dyn NativeRuntime>,
+    /// Absolute path to the trusted bridge executable.
+    pub bridge_command: PathBuf,
+}
+
+impl NativeChannelBinding {
+    /// Construct a binding from both required halves.
+    ///
+    /// `bridge_command` must be absolute; the desktop sibling resolver must
+    /// have already verified existence and executability.
+    #[must_use]
+    pub fn new(runtime: Arc<dyn NativeRuntime>, bridge_command: PathBuf) -> Self {
+        Self {
+            runtime,
+            bridge_command,
+        }
+    }
+
+    /// Return the native runtime.
+    #[must_use]
+    pub fn runtime(&self) -> &Arc<dyn NativeRuntime> {
         &self.runtime
     }
 
@@ -565,6 +619,7 @@ pub async fn bind(config: Config, route_runtime: RouteRuntime) -> Result<Server>
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -588,6 +643,7 @@ pub async fn bind_configured(config: Config, route_runtime: RouteRuntime) -> Res
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -617,6 +673,7 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -645,6 +702,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -674,6 +732,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
+        None,
         None,
         route_runtime,
     )
@@ -714,6 +773,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         browser_runtime,
         None,
         false,
+        None,
         route_runtime,
     )
     .await
@@ -728,6 +788,10 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
 /// When both halves are present (the binding always carries both, by
 /// construction), session creation mints a session-private capability
 /// file and injects the bridge executable path into engine config.
+///
+/// `native_binding` follows the same rule for the native computer-use
+/// channel: `None` advertises no native tools; a present binding mints a
+/// session-private native capability file per session.
 #[allow(clippy::too_many_arguments)]
 pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
     config: Config,
@@ -738,6 +802,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     let (browser_runtime, browser_bridge_command) = match binding {
@@ -755,6 +820,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         browser_runtime,
         browser_bridge_command,
         false,
+        native_binding,
         route_runtime,
     )
     .await
@@ -774,6 +840,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     let (browser_runtime, browser_bridge_command) = match binding {
@@ -791,6 +858,7 @@ pub async fn bind_configured_with_desktop_foreground_browser_executor(
         browser_runtime,
         browser_bridge_command,
         true,
+        native_binding,
         route_runtime,
     )
     .await
@@ -808,6 +876,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
     foreground_browser_executor: bool,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
@@ -819,6 +888,16 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     {
         return Err(AgentError::config(format!(
             "browser bridge command must be an absolute path: {}",
+            bridge.display()
+        )));
+    }
+    if let Some(bridge) = native_binding
+        .as_ref()
+        .map(NativeChannelBinding::bridge_command)
+        .filter(|bridge| !bridge.is_absolute())
+    {
+        return Err(AgentError::config(format!(
+            "native bridge command must be an absolute path: {}",
             bridge.display()
         )));
     }
@@ -835,6 +914,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
         browser_runtime,
         browser_bridge_command,
         foreground_browser_executor,
+        native_binding,
         route_runtime,
     )
     .await
@@ -1042,6 +1122,7 @@ async fn bind_inner(
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
     foreground_browser_executor: bool,
+    native_binding: Option<NativeChannelBinding>,
     route_runtime: RouteRuntime,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
@@ -1339,6 +1420,10 @@ async fn bind_inner(
         harness_llm,
     )
     .with_gateway_runtime(state.gateway.clone())
+    // The native computer-use adapter and its bridge executable arrive as
+    // one binding so a runtime can never be installed without the sidecar
+    // that harness bridges invoke, and vice versa.
+    .with_native_binding(native_binding.map(|binding| (binding.runtime, binding.bridge_command)))
     // A channel-bound session on this machine's engine starts in the
     // operator's default mode and may ask up to the operator's ceiling
     // (decision 88); both are `ask` unless the deployment says otherwise.
@@ -1987,18 +2072,14 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             computer_read_app_content_tool_spec(),
             validate_computer_read_app_content_arguments,
         ),
-        (
-            computer_return_to_tidebreak_tool_spec(),
-            validate_computer_return_to_tidebreak_arguments,
-        ),
         (computer_wait_tool_spec(), validate_computer_wait_arguments),
     ] {
         tools.register_validated_client(spec, ApprovalClass::ReadOnly, validate);
     }
     // The acting tools are Sensitive, resolving to `ComputerMayControlApp`
-    // through `ToolApprovalKind::for_tool_name`. Scroll and focus act too —
-    // they synthesize input, warp the cursor, and raise windows — so they are
-    // not read-only and plan mode refuses them.
+    // through `ToolApprovalKind::for_tool_name`. Independent input still changes
+    // the target app, so plan mode refuses it. Focus-changing compatibility
+    // operations are not registered.
     for (spec, validate) in [
         (
             computer_click_tool_spec(),
@@ -2017,8 +2098,17 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             validate_computer_scroll_arguments,
         ),
         (
-            computer_focus_window_tool_spec(),
-            validate_computer_focus_window_arguments,
+            computer_launch_app_tool_spec(),
+            validate_computer_launch_app_arguments,
+        ),
+        (
+            computer_hover_tool_spec(),
+            validate_computer_hover_arguments,
+        ),
+        (computer_drag_tool_spec(), validate_computer_drag_arguments),
+        (
+            computer_resize_window_tool_spec(),
+            validate_computer_resize_window_arguments,
         ),
     ] {
         tools.register_validated_client(spec, ApprovalClass::Sensitive, validate);
@@ -2171,6 +2261,40 @@ pub fn desktop_connect_options(url: &str) -> sea_orm::ConnectOptions {
         .idle_timeout(None)
         .max_lifetime(None);
     options
+}
+
+#[cfg(test)]
+mod computer_use_registration_tests {
+    use super::*;
+
+    #[test]
+    fn native_registry_exposes_every_supported_tool_with_correct_authority() {
+        let mut tools = ToolRegistry::new();
+        register_computer_use_tools(&mut tools);
+        let names: std::collections::BTreeSet<_> =
+            tools.specs().into_iter().map(|spec| spec.name).collect();
+        let expected = tidebreak_core::computer_use_tool_specs();
+        for name in expected.iter().map(|spec| spec.name.as_str()) {
+            assert!(names.contains(name), "missing native tool: {name}");
+            let expected = if tidebreak_core::is_computer_use_control_tool(name) {
+                ApprovalClass::Sensitive
+            } else {
+                ApprovalClass::ReadOnly
+            };
+            assert_eq!(tools.registered_class(name), Some(expected), "{name}");
+        }
+        assert_eq!(names.len(), expected.len());
+        for name in [
+            tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL,
+            tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+        ] {
+            assert!(
+                !names.contains(name),
+                "focus-changing tool remains exposed: {name}"
+            );
+            assert_eq!(tools.registered_class(name), None);
+        }
+    }
 }
 
 #[cfg(test)]

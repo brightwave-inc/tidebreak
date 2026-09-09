@@ -28,6 +28,25 @@ impl AuditSink for BreakableAudit {
     }
 }
 
+/// Reopen a durable state directory after dropping its broker, tolerating the
+/// brief lock-inheritance window: concurrently running tests spawn fake
+/// helper processes, and between fork and exec a child still holds every
+/// inherited (CLOEXEC) descriptor — including a just-dropped broker's flock —
+/// so an immediate reopen can transiently see the directory as owned. Only
+/// WouldBlock retries; every other error is the test's real signal.
+fn reopen_broker(temp: &tempfile::TempDir, state_dir: &std::path::Path) -> Broker {
+    for _ in 0..100 {
+        match Broker::open(test_policy(temp), state_dir) {
+            Ok(broker) => return broker,
+            Err(BrokerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("reopening the state directory failed: {error:?}"),
+        }
+    }
+    panic!("state directory stayed locked across the retry budget");
+}
+
 fn test_policy(temp: &tempfile::TempDir) -> RootPolicy {
     RootPolicy::for_test(
         temp.path().join("home"),
@@ -3064,7 +3083,7 @@ fn version_two_read_grants_migrate_without_gaining_write() {
         .retain(|grant| grant["capability"] != serde_json::json!("write_files"));
     std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
 
-    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let broker = reopen_broker(&temp, &state_dir);
     let state = broker.shared.state.lock().unwrap();
     assert!(state
         .grants
@@ -4444,8 +4463,10 @@ fn completed_receipts_are_bounded_without_breaking_retry_or_receipt_lookup() {
 // ---------------------------------------------------------------------------
 
 use crate::computer_use::{
-    AxTree, CaptureMeta, ElementDescription, PermissionStatus, WindowFrame, WindowInfo,
+    AxTree, CaptureMeta, ElementDescription, PermissionStatus, WaitCondition, WaitObservation,
+    WindowFrame, WindowInfo,
 };
+use crate::{ConditionWire, CuGrantAppResult};
 use crate::{CuConfirmControlActionRequest, CuListAppGrantsRequest, CuResolveHandoffRequest};
 
 /// A scripted backend: the broker's policy is what is under test, so the
@@ -4460,8 +4481,19 @@ struct StubCuBackend {
     keys: Mutex<Vec<String>>,
     scrolled: Mutex<Vec<String>>,
     focused: Mutex<Vec<String>>,
+    launched: Mutex<Vec<String>>,
+    hovered: Mutex<Vec<String>>,
+    dragged: Mutex<Vec<String>>,
+    resized: Mutex<Vec<(String, f64, f64)>>,
+    wait_conditions: Mutex<Vec<(String, WaitCondition)>>,
     capture_png: Vec<u8>,
+    tree_override: Mutex<Option<AxTree>>,
+    windows_override: Mutex<Option<Vec<WindowInfo>>>,
+    annotated_marks: Mutex<Vec<crate::set_of_marks::Mark>>,
     fail_click: Mutex<Option<BackendErrorKind>>,
+    /// (op, mode) for every control dispatch, so tests can assert the broker
+    /// hands the backend the mode the wire carried (background by default).
+    modes: Mutex<Vec<(&'static str, ExecutionMode)>>,
 }
 
 impl StubCuBackend {
@@ -4504,9 +4536,40 @@ impl StubCuBackend {
         self.focused.lock().unwrap().clone()
     }
 
+    fn launched(&self) -> Vec<String> {
+        self.launched.lock().unwrap().clone()
+    }
+
+    fn hovered(&self) -> Vec<String> {
+        self.hovered.lock().unwrap().clone()
+    }
+
+    fn dragged(&self) -> Vec<String> {
+        self.dragged.lock().unwrap().clone()
+    }
+
+    fn resized(&self) -> Vec<(String, f64, f64)> {
+        self.resized.lock().unwrap().clone()
+    }
+
+    fn wait_conditions(&self) -> Vec<(String, WaitCondition)> {
+        self.wait_conditions.lock().unwrap().clone()
+    }
+
+    fn modes(&self) -> Vec<(&'static str, ExecutionMode)> {
+        self.modes.lock().unwrap().clone()
+    }
+
+    fn note_mode(&self, op: &'static str, mode: ExecutionMode) {
+        self.modes.lock().unwrap().push((op, mode));
+    }
+
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
     /// finds exactly one mark.
     fn ax_tree(&self) -> AxTree {
+        if let Some(tree) = self.tree_override.lock().unwrap().as_ref() {
+            return tree.clone();
+        }
         AxTree {
             app_name: Some("Example".to_owned()),
             tree: serde_json::json!({
@@ -4549,7 +4612,24 @@ impl ComputerUseBackend for StubCuBackend {
             width: 800,
             height: 600,
             media_type: "image/png".to_owned(),
+            coordinate_frame: Some(crate::computer_use::WindowFrame {
+                x: -200.0,
+                y: 80.0,
+                width: 1600.0,
+                height: 1200.0,
+            }),
         })
+    }
+
+    fn capture_with_marks(
+        &self,
+        target: &CaptureTarget,
+        out_path: &Path,
+        marks: &[crate::set_of_marks::Mark],
+        _max_dimension: Option<u32>,
+    ) -> Result<CaptureMeta, BackendError> {
+        *self.annotated_marks.lock().unwrap() = marks.to_vec();
+        self.capture(target, out_path)
     }
 
     fn read_ax_tree(
@@ -4562,6 +4642,9 @@ impl ComputerUseBackend for StubCuBackend {
     }
 
     fn list_windows(&self, _bundle_id: Option<&str>) -> Result<Vec<WindowInfo>, BackendError> {
+        if let Some(windows) = self.windows_override.lock().unwrap().as_ref() {
+            return Ok(windows.clone());
+        }
         Ok(vec![WindowInfo {
             window_id: 7,
             title: Some("Inbox".to_owned()),
@@ -4583,6 +4666,7 @@ impl ComputerUseBackend for StubCuBackend {
         target: &ElementTarget,
         _button: Option<&str>,
         _click_count: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         if let Some(kind) = *self.fail_click.lock().unwrap() {
             return Err(BackendError {
@@ -4594,10 +4678,13 @@ impl ComputerUseBackend for StubCuBackend {
             .lock()
             .unwrap()
             .push((bundle_id.to_owned(), target.element_id.clone()));
+        self.note_mode("click", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4606,12 +4693,16 @@ impl ComputerUseBackend for StubCuBackend {
         _bundle_id: &str,
         text: &str,
         _target: &ElementTarget,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.typed.lock().unwrap().push(text.to_owned());
+        self.note_mode("type_text", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4620,12 +4711,16 @@ impl ComputerUseBackend for StubCuBackend {
         _bundle_id: &str,
         key: &str,
         _modifiers: Option<&[String]>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.keys.lock().unwrap().push(key.to_owned());
+        self.note_mode("key_press", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4635,12 +4730,16 @@ impl ComputerUseBackend for StubCuBackend {
         _target: &ElementTarget,
         _dx: Option<f64>,
         _dy: Option<f64>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.scrolled.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("scroll", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4648,12 +4747,106 @@ impl ComputerUseBackend for StubCuBackend {
         &self,
         bundle_id: &str,
         _window_id: Option<u32>,
+        mode: ExecutionMode,
     ) -> Result<ControlMeta, BackendError> {
         self.focused.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("focus_window", mode);
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
             detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
+        })
+    }
+
+    fn launch_app(
+        &self,
+        bundle_id: &str,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        self.launched.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("launch_app", mode);
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
+        })
+    }
+
+    fn hover(
+        &self,
+        bundle_id: &str,
+        _target: &ElementTarget,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        self.hovered.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("hover", mode);
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
+        })
+    }
+
+    fn drag(
+        &self,
+        bundle_id: &str,
+        _from: &ElementTarget,
+        _to: &ElementTarget,
+        _duration_ms: Option<u64>,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        self.dragged.lock().unwrap().push(bundle_id.to_owned());
+        self.note_mode("drag", mode);
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: true,
+            detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
+        })
+    }
+
+    fn resize_window(
+        &self,
+        bundle_id: &str,
+        _window_id: Option<u32>,
+        width: f64,
+        height: f64,
+        mode: ExecutionMode,
+    ) -> Result<ControlMeta, BackendError> {
+        self.resized
+            .lock()
+            .unwrap()
+            .push((bundle_id.to_owned(), width, height));
+        self.note_mode("resize_window", mode);
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+            execution_mode: Some(mode),
+            cursor: None,
+        })
+    }
+
+    fn wait_condition(
+        &self,
+        bundle_id: &str,
+        condition: &WaitCondition,
+        _timeout_seconds: f64,
+    ) -> Result<WaitObservation, BackendError> {
+        self.wait_conditions
+            .lock()
+            .unwrap()
+            .push((bundle_id.to_owned(), condition.clone()));
+        Ok(WaitObservation {
+            met: true,
+            timed_out: false,
         })
     }
 
@@ -4737,6 +4930,7 @@ impl CuFixture {
                 bundle_id: bundle_id.map(str::to_owned),
                 consent: ConsentMethod::PermissionDialog,
                 single_use,
+                all_sessions: false,
             }))
             .unwrap();
         let ControlResult::CuGrantApp(result) = result else {
@@ -4755,7 +4949,44 @@ impl CuFixture {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         })
+    }
+}
+
+#[test]
+fn known_os_permission_failures_preserve_the_specific_permission() {
+    for message in [
+        "Accessibility permission is not granted",
+        "Screen Recording permission is not granted",
+    ] {
+        let response = error_response(BrokerError::ComputerUse(BackendError {
+            kind: BackendErrorKind::PermissionDenied,
+            message: message.to_owned(),
+        }));
+        assert_eq!(response.code, ErrorCode::OsPermissionDenied);
+        assert_eq!(response.message, message);
+        assert!(response.retryable);
+    }
+}
+
+#[test]
+fn unknown_os_permission_failures_do_not_expose_backend_messages() {
+    for message in [
+        "/private/helper-state: permission denied",
+        "Accessibility permission is not granted; private helper details",
+        "Screen Recording permission is not granted\nprivate helper details",
+    ] {
+        let response = error_response(BrokerError::ComputerUse(BackendError {
+            kind: BackendErrorKind::PermissionDenied,
+            message: message.to_owned(),
+        }));
+        assert_eq!(response.code, ErrorCode::OsPermissionDenied);
+        assert_eq!(
+            response.message,
+            "an OS permission required for this operation is not granted"
+        );
+        assert!(response.retryable);
     }
 }
 
@@ -4768,6 +4999,313 @@ fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
     assert_eq!(response.code, ErrorCode::Yielded);
     assert_ne!(response.code, ErrorCode::Denied);
     assert!(!response.retryable);
+    assert_eq!(
+        response.message,
+        "computer control stopped before the operation could finish"
+    );
+}
+
+#[test]
+fn execution_mode_reaches_the_backend_and_defaults_to_background() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // A wire payload without the field decodes to background, and the broker
+    // hands the backend exactly that mode.
+    let decoded: OperationEnvelope = serde_json::from_value(serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": crate::RequestId::new(),
+        "context": fixture.context,
+        "request": {
+            "operation": "cu_launch_app",
+            "payload": { "bundle_id": "com.example.app" }
+        }
+    }))
+    .unwrap();
+    unwrap_response(fixture.broker.operator().handle(decoded)).unwrap();
+
+    // An explicit foreground request is passed through untouched — and the
+    // truthful mode the backend reports comes back in the ControlMeta.
+    let result = fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 800.0,
+            height: 600.0,
+            execution_mode: ExecutionMode::Foreground,
+        })
+        .unwrap();
+    let OperationResult::CuResizeWindow(meta) = result else {
+        panic!("unexpected result");
+    };
+    assert_eq!(meta.execution_mode, Some(ExecutionMode::Foreground));
+
+    assert_eq!(
+        fixture.backend.modes(),
+        vec![
+            ("launch_app", ExecutionMode::Background),
+            ("resize_window", ExecutionMode::Foreground),
+        ]
+    );
+}
+
+#[test]
+fn requires_foreground_survives_the_operation_mapping_without_a_consent_card() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    *fixture.backend.fail_click.lock().unwrap() = Some(BackendErrorKind::RequiresForeground);
+
+    let error = fixture.click("com.example.app").unwrap_err();
+    // Its own code — never Denied, so the desktop cannot mistake a refused
+    // background takeover for a grant miss and raise a consent card, and
+    // never retryable, so nothing re-fires an uncertain action automatically.
+    assert_eq!(error.code, ErrorCode::RequiresForeground);
+    assert_ne!(error.code, ErrorCode::Denied);
+    assert!(!error.retryable);
+}
+
+#[test]
+fn native_primitives_authorize_as_control_and_reach_the_backend() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    fixture
+        .operate(OperationRequest::CuLaunchApp {
+            bundle_id: "com.example.app".to_owned(),
+            execution_mode: Default::default(),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuHover {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire {
+                x: Some(10.0),
+                y: Some(20.0),
+                ..Default::default()
+            },
+            execution_mode: Default::default(),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                element_fingerprint: Some("fp1".to_owned()),
+                ..Default::default()
+            },
+            to: ElementTargetWire {
+                x: Some(30.0),
+                y: Some(40.0),
+                ..Default::default()
+            },
+            duration_ms: Some(250),
+            execution_mode: Default::default(),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: Some(7),
+            width: 900.0,
+            height: 700.0,
+            execution_mode: Default::default(),
+        })
+        .unwrap();
+
+    assert_eq!(fixture.backend.launched(), ["com.example.app"]);
+    assert_eq!(fixture.backend.hovered(), ["com.example.app"]);
+    assert_eq!(fixture.backend.dragged(), ["com.example.app"]);
+    assert_eq!(
+        fixture.backend.resized(),
+        [("com.example.app".to_owned(), 900.0, 700.0)]
+    );
+
+    let events = fixture.audit.events.lock().unwrap();
+    for operation in [
+        AuditOperation::CuLaunchApp,
+        AuditOperation::CuHover,
+        AuditOperation::CuDrag,
+        AuditOperation::CuResizeWindow,
+    ] {
+        let intents = events
+            .iter()
+            .filter(|event| {
+                event.operation == operation && event.outcome == AuditOutcome::Attempted
+            })
+            .count();
+        let allowed = events
+            .iter()
+            .filter(|event| event.operation == operation && event.outcome == AuditOutcome::Allowed)
+            .count();
+        assert_eq!((intents, allowed), (1, 1), "{operation:?}");
+    }
+}
+
+#[test]
+fn read_grants_never_cover_launch_hover_drag_or_resize() {
+    let fixture = cu_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject,
+            capability: Capability::ReadAppContent,
+            bundle_id: Some("com.example.app".to_owned()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+            all_sessions: false,
+        }))
+        .unwrap();
+    for request in [
+        OperationRequest::CuLaunchApp {
+            bundle_id: "com.example.app".to_owned(),
+            execution_mode: Default::default(),
+        },
+        OperationRequest::CuHover {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire::default(),
+            execution_mode: Default::default(),
+        },
+        OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire::default(),
+            to: ElementTargetWire::default(),
+            duration_ms: None,
+            execution_mode: Default::default(),
+        },
+        OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 100.0,
+            height: 100.0,
+            execution_mode: Default::default(),
+        },
+    ] {
+        let error = operate(&fixture.broker.operator(), context, request).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied);
+    }
+    assert!(fixture.backend.launched().is_empty());
+    assert!(fixture.backend.hovered().is_empty());
+    assert!(fixture.backend.dragged().is_empty());
+    assert!(fixture.backend.resized().is_empty());
+}
+
+#[test]
+fn new_control_ops_are_blocklist_gated_and_bounded() {
+    let fixture = cu_setup();
+    fixture.broker.shared.state.lock().unwrap().grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            fixture.subject,
+            Capability::ControlApp,
+            Scope::App {
+                bundle_id: "com.apple.SecurityAgent".to_owned(),
+            },
+            ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+        )
+        .unwrap(),
+    );
+    let error = fixture
+        .operate(OperationRequest::CuLaunchApp {
+            bundle_id: "com.apple.SecurityAgent".to_owned(),
+            execution_mode: Default::default(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.launched().is_empty());
+
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    let error = fixture
+        .operate(OperationRequest::CuDrag {
+            bundle_id: "com.example.app".to_owned(),
+            from: ElementTargetWire::default(),
+            to: ElementTargetWire::default(),
+            duration_ms: Some(10_001),
+            execution_mode: Default::default(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    let error = fixture
+        .operate(OperationRequest::CuResizeWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: None,
+            width: 10_001.0,
+            height: 1.0,
+            execution_mode: Default::default(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(fixture.backend.dragged().is_empty());
+    assert!(fixture.backend.resized().is_empty());
+}
+
+#[test]
+fn condition_wait_uses_read_authority_and_never_types() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ReadAppContent, Some("com.example.app"));
+    fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.example.app".to_owned(),
+            condition: ConditionWire::TextPresent {
+                text: "Ready".to_owned(),
+            },
+            timeout_seconds: None,
+        })
+        .unwrap();
+    let OperationResult::CuWaitCondition(observation) = fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.example.app".to_owned(),
+            condition: ConditionWire::WindowVisible,
+            timeout_seconds: Some(20.0),
+        })
+        .unwrap()
+    else {
+        panic!("expected condition result")
+    };
+    assert!(observation.met);
+    assert!(!observation.timed_out);
+
+    // Read authority suffices for waits (pure observation) and no input
+    // synthesis ever happened.
+    assert_eq!(
+        fixture.backend.wait_conditions(),
+        [
+            (
+                "com.example.app".to_owned(),
+                WaitCondition::TextPresent {
+                    text: "Ready".to_owned()
+                }
+            ),
+            ("com.example.app".to_owned(), WaitCondition::WindowVisible),
+        ]
+    );
+    assert!(fixture.backend.clicks().is_empty());
+    assert!(fixture.backend.keys().is_empty());
+    assert!(fixture.backend.typed.lock().unwrap().is_empty());
+
+    // A wait for a blocked app is refused even with a grant.
+    fixture.broker.shared.state.lock().unwrap().grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            fixture.subject,
+            Capability::ReadAppContent,
+            Scope::App {
+                bundle_id: "com.apple.SecurityAgent".to_owned(),
+            },
+            ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+        )
+        .unwrap(),
+    );
+    let error = fixture
+        .operate(OperationRequest::CuWaitCondition {
+            bundle_id: "com.apple.SecurityAgent".to_owned(),
+            condition: ConditionWire::AppRunning,
+            timeout_seconds: None,
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
 }
 
 #[test]
@@ -4777,11 +5315,14 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
     // hand (the control surface refuses it, tested below) and the op still
     // refuses.
     for blocked in [
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
+        "com.apple.loginwindow",
+        "com.apple.CoreAuthUI",
+        "com.apple.coreauthd",
+        "com.apple.keychainaccess",
+        "com.apple.systempreferences",
         "com.apple.SecurityAgent",
         "io.brightwave.tidebreak",
-        "io.brightwave.anything",
+        "io.brightwave.tidebreak.staging",
     ] {
         fixture.broker.shared.state.lock().unwrap().grants.push(
             Grant::from_consent(
@@ -4806,6 +5347,7 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
                 bundle_id: Some(blocked.to_owned()),
                 consent: ConsentMethod::PermissionDialog,
                 single_use: false,
+                all_sessions: false,
             }))
             .unwrap_err();
         assert_eq!(grant_error.code, ErrorCode::Denied, "{blocked}");
@@ -4813,8 +5355,62 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
     }
     assert!(fixture.backend.clicks().is_empty());
     // A lookalike suffix is not the blocked bundle.
-    fixture.grant(Capability::ControlApp, Some("com.apple.Terminalized"));
-    fixture.click("com.apple.Terminalized").unwrap();
+    fixture.grant(Capability::ControlApp, Some("com.apple.SecurityAgentish"));
+    fixture.click("com.apple.SecurityAgentish").unwrap();
+}
+
+#[test]
+fn development_app_reads_and_control_require_explicit_app_grants() {
+    for bundle_id in [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.microsoft.VSCode",
+        "com.jetbrains.CLion",
+        "com.apple.dt.Xcode",
+        "com.raycast.macos",
+        "io.brightwave.another-product",
+        "dev.tidebreak.desktop-test",
+    ] {
+        let fixture = cu_setup();
+        let read_request = OperationRequest::CuReadAppContent {
+            bundle_id: bundle_id.to_owned(),
+            max_depth: None,
+            max_nodes: None,
+        };
+        let capture_request = OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: bundle_id.to_owned(),
+            },
+        };
+        assert_eq!(
+            fixture.click(bundle_id).unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fixture.operate(read_request.clone()).unwrap_err().code,
+            ErrorCode::Denied,
+        );
+        assert_eq!(
+            fixture.operate(capture_request.clone()).unwrap_err().code,
+            ErrorCode::Denied,
+        );
+        fixture.grant(Capability::ReadAppContent, Some(bundle_id));
+        assert!(matches!(
+            fixture.operate(read_request).unwrap(),
+            OperationResult::CuReadAppContent(_)
+        ));
+        assert_eq!(
+            fixture.click(bundle_id).unwrap_err().code,
+            ErrorCode::Denied
+        );
+        fixture.grant(Capability::ControlApp, Some(bundle_id));
+        fixture.click(bundle_id).unwrap();
+        assert_eq!(fixture.backend.clicks().len(), 1, "{bundle_id}");
+        assert!(matches!(
+            fixture.operate(capture_request).unwrap(),
+            OperationResult::CuCaptureScreen(_)
+        ));
+    }
 }
 
 #[test]
@@ -4880,6 +5476,7 @@ fn a_commit_shaped_key_press_is_held_for_confirmation() {
             bundle_id: "com.example.app".to_owned(),
             key: "d".to_owned(),
             modifiers: Some(vec!["cmd".to_owned(), "shift".to_owned()]),
+            execution_mode: Default::default(),
         })
         .unwrap();
     let OperationResult::CuNeedsConfirmation(confirmation) = held else {
@@ -4909,6 +5506,7 @@ fn a_plain_navigation_key_proceeds_without_a_confirmation() {
             bundle_id: "com.example.app".to_owned(),
             key: "left".to_owned(),
             modifiers: None,
+            execution_mode: Default::default(),
         })
         .unwrap();
     assert!(matches!(result, OperationResult::CuKeyPress(_)));
@@ -4989,6 +5587,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }))
         .unwrap();
     assert!(matches!(granted, ControlResult::CuGrantApp(_)));
@@ -5003,6 +5602,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap_err();
@@ -5036,6 +5636,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }),
     }))
     .unwrap();
@@ -5053,6 +5654,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap_err();
@@ -5075,6 +5677,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             },
             button: None,
             click_count: None,
+            execution_mode: Default::default(),
         },
     )
     .unwrap();
@@ -5092,6 +5695,83 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::AuditUnavailable);
     assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn unfiltered_window_lists_omit_blocked_app_owners() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ReadAppContent, Some("com.example.app"));
+    let window = fixture.backend.list_windows(None).unwrap().remove(0);
+    let bundles = [
+        "com.example.app",
+        "com.apple.keychainaccess",
+        "com.apple.SecurityAgent.helper",
+        "io.brightwave.tidebreak.dev",
+        "io.brightwave.tidebreak-fixture",
+    ];
+    *fixture.backend.windows_override.lock().unwrap() = Some(
+        bundles
+            .iter()
+            .enumerate()
+            .map(|(index, bundle)| WindowInfo {
+                window_id: u32::try_from(index).unwrap(),
+                bundle_id: Some((*bundle).to_owned()),
+                title: Some(format!("Window owned by {bundle}")),
+                ..window.clone()
+            })
+            .collect(),
+    );
+
+    let result = fixture
+        .operate(OperationRequest::CuListWindows { bundle_id: None })
+        .unwrap();
+    let OperationResult::CuListWindows { windows } = result else {
+        panic!("window list expected")
+    };
+    assert_eq!(
+        windows
+            .iter()
+            .filter_map(|window| window.bundle_id.as_deref())
+            .collect::<Vec<_>>(),
+        ["com.example.app", "io.brightwave.tidebreak-fixture"],
+    );
+}
+
+#[test]
+fn dense_captures_only_annotate_marks_the_model_can_reference() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::CaptureScreen, Some("com.example.app"));
+    *fixture.backend.tree_override.lock().unwrap() = Some(AxTree {
+        app_name: Some("Example".to_owned()),
+        tree: serde_json::json!({
+            "role": "AXWindow",
+            "children": (0..100).map(|index| serde_json::json!({
+                "role": "AXButton",
+                "id": format!("0.{index}"),
+                "fingerprint": format!("fp-{index}"),
+                "title": format!("Button {index}"),
+                "frame": { "x": 0.0, "y": index * 30, "width": 60.0, "height": 24.0 },
+            })).collect::<Vec<_>>(),
+        }),
+        truncated: false,
+    });
+
+    let result = fixture
+        .operate(OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+        })
+        .unwrap();
+    let OperationResult::CuCaptureScreen(capture) = result else {
+        panic!("capture expected")
+    };
+    assert_eq!(capture.marks.len(), 80);
+    assert_eq!(capture.marks.last().unwrap().mark, 80);
+    assert_eq!(
+        *fixture.backend.annotated_marks.lock().unwrap(),
+        capture.marks
+    );
 }
 
 #[test]
@@ -5141,6 +5821,36 @@ fn captures_cross_the_wire_as_a_single_use_handoff() {
         .unwrap_err();
     assert_eq!(second.code, ErrorCode::NotFound);
     assert!(!second.retryable);
+}
+
+#[test]
+fn detailed_capture_preserves_coordinates_and_can_disable_marks() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::CaptureScreen, Some("com.example.app"));
+    let result = fixture
+        .operate(OperationRequest::CuCaptureScreenDetailed {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+            annotate: false,
+            window_id: None,
+            max_dimension: Some(720),
+        })
+        .unwrap();
+    let OperationResult::CuCaptureScreen(capture) = result else {
+        panic!("capture expected")
+    };
+    assert!(
+        capture.marks.is_empty(),
+        "unannotated captures must not expose stale marks"
+    );
+    let frame = capture
+        .coordinate_frame
+        .expect("capture transform must reach the desktop");
+    assert_eq!(
+        (frame.x, frame.y, frame.width, frame.height),
+        (-200.0, 80.0, 1600.0, 1200.0)
+    );
 }
 
 #[test]
@@ -5247,6 +5957,12 @@ fn hello_advertises_computer_use_only_when_a_backend_is_available() {
         "cu_scroll",
         "cu_focus_window",
         "cu_wait",
+        "cu_capture_screen_detailed",
+        "cu_launch_app",
+        "cu_hover",
+        "cu_drag",
+        "cu_resize_window",
+        "cu_wait_condition",
     ] {
         assert!(
             hello.operations.iter().any(|advertised| advertised == op),
@@ -5284,6 +6000,7 @@ fn every_computer_use_op_lands_in_the_audit_trail_desensitized() {
             bundle_id: "com.example.app".to_owned(),
             key: "return".to_owned(),
             modifiers: None,
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
@@ -5584,12 +6301,14 @@ fn scroll_and_focus_record_intent_before_act() {
             target: ElementTargetWire::default(),
             dx: None,
             dy: Some(40.0),
+            execution_mode: Default::default(),
         })
         .unwrap();
     fixture
         .operate(OperationRequest::CuFocusWindow {
             bundle_id: "com.example.app".to_owned(),
             window_id: Some(7),
+            execution_mode: Default::default(),
         })
         .unwrap();
     assert_eq!(fixture.backend.scrolls(), ["com.example.app"]);
@@ -5636,6 +6355,7 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }),
     }))
     .unwrap();
@@ -5648,10 +6368,12 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
             target: ElementTargetWire::default(),
             dx: None,
             dy: Some(40.0),
+            execution_mode: Default::default(),
         },
         OperationRequest::CuFocusWindow {
             bundle_id: "com.example.app".to_owned(),
             window_id: Some(7),
+            execution_mode: Default::default(),
         },
     ] {
         let error = operate(&broker.operator(), context, request).unwrap_err();
@@ -5660,4 +6382,231 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
     }
     assert!(fixture.backend.scrolls().is_empty());
     assert!(fixture.backend.focuses().is_empty());
+}
+
+#[test]
+fn saved_native_app_permission_survives_sessions_reload_and_exact_revocation() {
+    let fixture = durable_cu_setup();
+    let bundle = "dev.tidebreak.fixture";
+    let granted = fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some(bundle.into()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+            all_sessions: true,
+        }))
+        .unwrap();
+    let ControlResult::CuGrantApp(granted) = granted else {
+        panic!("grant expected")
+    };
+    let second_id = Uuid::new_v4();
+    let second = ExecutionContext::standalone(second_id).unwrap();
+    let read = |app: &str| OperationRequest::CuReadAppContent {
+        bundle_id: app.into(),
+        max_depth: None,
+        max_nodes: None,
+    };
+    operate(&fixture.broker.operator(), second, read(bundle)).unwrap();
+    for request in [
+        read("dev.tidebreak.other"),
+        OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::Display { display_id: None },
+        },
+        OperationRequest::CuListWindows { bundle_id: None },
+    ] {
+        assert_eq!(
+            operate(&fixture.broker.operator(), second, request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+    }
+    assert!(matches!(
+        authorize(
+            &fixture.broker.controller().lock_state().unwrap(),
+            second,
+            Capability::ListRoots,
+            Resource::Subject,
+        ),
+        Err(BrokerError::Denied)
+    ));
+    let duplicate = fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject: GrantSubject::conversation(second_id).unwrap(),
+            capability: Capability::ControlApp,
+            bundle_id: Some(bundle.into()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+            all_sessions: true,
+        }))
+        .unwrap();
+    assert!(
+        matches!(duplicate, ControlResult::CuGrantApp(ref result) if !result.granted && result.grant_id == granted.grant_id)
+    );
+    fixture.grant(
+        Capability::ReadAppContent,
+        Some("dev.tidebreak.session-only"),
+    );
+    assert_eq!(
+        operate(
+            &fixture.broker.operator(),
+            second,
+            read("dev.tidebreak.session-only")
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+    fixture
+        .control(ControlRequest::PurgeConversationSubject(
+            PurgeConversationSubjectRequest {
+                conversation_id: fixture.subject.id(),
+            },
+        ))
+        .unwrap();
+    operate(&fixture.broker.operator(), second, read(bundle)).unwrap();
+    assert_eq!(
+        fixture
+            .operate(read("dev.tidebreak.session-only"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    let original_subject = fixture.subject;
+    let CuFixture {
+        _temp: temp,
+        broker,
+        backend,
+        audit,
+        ..
+    } = fixture;
+    let state_dir = temp.path().join("app-data/host-broker");
+    drop(broker);
+    let reloaded = Broker::test_open_with_computer_use(
+        test_policy(&temp),
+        &state_dir,
+        audit,
+        backend.clone(),
+        temp.path().join("cu-staging"),
+    )
+    .unwrap();
+    operate(&reloaded.operator(), second, read(bundle)).unwrap();
+    let listed = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListGrantStatements,
+    }))
+    .unwrap();
+    let ControlResult::ListGrantStatements { grants } = listed else {
+        panic!("grants expected")
+    };
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant_id, granted.grant_id);
+    assert_eq!(grants[0].subject, original_subject);
+    assert!(grants[0].native_app_all_sessions);
+    // A held consequential action must recheck the saved permission at confirmation.
+    backend.set_label("Send");
+    let held = operate(
+        &reloaded.operator(),
+        second,
+        OperationRequest::CuClick {
+            bundle_id: bundle.into(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".into()),
+                element_fingerprint: Some("fp1".into()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+            execution_mode: Default::default(),
+        },
+    )
+    .unwrap();
+    let OperationResult::CuNeedsConfirmation(held) = held else {
+        panic!("confirmation expected")
+    };
+    let revoked = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::RevokeGrant(RevokeGrantRequest {
+            subject: original_subject,
+            grant_id: granted.grant_id,
+        }),
+    }))
+    .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::RevokeGrant(RevokeGrantResult { revoked: true })
+    ));
+    assert_eq!(
+        operate(&reloaded.operator(), second, read(bundle))
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    let confirmed = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::CuConfirmControlAction(CuConfirmControlActionRequest {
+            confirmation_id: held.confirmation_id,
+        }),
+    }))
+    .unwrap_err();
+    assert_eq!(confirmed.code, ErrorCode::Denied);
+    assert!(backend.clicks().is_empty());
+    drop(reloaded);
+    let again = reopen_broker(&temp, &state_dir);
+    assert!(
+        again.shared.state.lock().unwrap().grants.is_empty(),
+        "revocation remains durable"
+    );
+}
+
+#[test]
+fn saved_native_app_permission_refuses_scope_widening_and_keeps_legacy_grants() {
+    let fixture = cu_setup();
+    for (capability, bundle_id, single_use) in [
+        (Capability::CaptureScreen, None, false),
+        (Capability::ReadFiles, Some("dev.tidebreak.fixture"), false),
+        (
+            Capability::ControlApp,
+            Some("com.apple.SecurityAgent"),
+            false,
+        ),
+        (Capability::ControlApp, Some("dev.tidebreak.fixture"), true),
+    ] {
+        assert!(fixture
+            .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+                subject: fixture.subject,
+                capability,
+                bundle_id: bundle_id.map(str::to_owned),
+                consent: ConsentMethod::PermissionDialog,
+                single_use,
+                all_sessions: true,
+            }))
+            .is_err());
+    }
+    let legacy = fixture.grant(Capability::ReadAppContent, Some("dev.tidebreak.fixture"));
+    let grant = fixture
+        .broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .find(|grant| grant.id() == legacy.grant_id)
+        .unwrap()
+        .clone();
+    let mut wire = serde_json::to_value(&grant).unwrap();
+    assert!(wire.get("native_app_all_sessions").is_none());
+    let restored: Grant = serde_json::from_value(wire.clone()).unwrap();
+    assert!(!restored.native_app_all_sessions());
+    // An old subject or persisted file cannot turn a folder/display grant into global authority.
+    wire["native_app_all_sessions"] = serde_json::json!(true);
+    wire["scope"] = serde_json::json!({"kind":"screen"});
+    wire["capability"] = serde_json::json!("capture_screen");
+    assert!(serde_json::from_value::<Grant>(wire).is_err());
 }

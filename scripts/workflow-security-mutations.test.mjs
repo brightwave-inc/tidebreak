@@ -605,6 +605,60 @@ const mutations = [
         );
       }),
   },
+  ...[
+    { file: ".github/workflows/release.yml", prepare: "prepare_macos", build: "build_macos" },
+    { file: ".github/workflows/staging-publish.yml", prepare: "prepare_macos_staging", build: "build_macos_staging" },
+  ].flatMap(({ file, prepare, build }) => [
+    {
+      name: `${prepare} helper checksum omission`,
+      file,
+      expected: "macOS computer-use helper survives packaging and is signed before bundling",
+      mutate: (source) => editWorkflowJob(source, prepare, (job) =>
+        job.replace('              "$cu_helper" \\\n', ""),
+      ),
+    },
+    {
+      name: `${build} helper archive file-set omission`,
+      file,
+      expected: "macOS computer-use helper survives packaging and is signed before bundling",
+      mutate: (source) => editWorkflowJob(source, build, (job) =>
+        job.replace('              "./crates/tidebreak-desktop/binaries/tidebreak-cu-helper-$RELEASE_TARGET" \\\n', ""),
+      ),
+    },
+    {
+      name: `${build} helper resource restoration omission`,
+      file,
+      expected: "macOS computer-use helper survives packaging and is signed before bundling",
+      mutate: (source) => editWorkflowJob(source, build, (job) =>
+        job.replace('          install -m 755 "$PREPARED_ROOT/$cu_helper" "$cu_resource"\n', ""),
+      ),
+    },
+    {
+      name: `${build} helper signing omission`,
+      file,
+      expected: "macOS computer-use helper survives packaging and is signed before bundling",
+      mutate: (source) => editWorkflowJob(source, build, (job) =>
+        job.replace(/      - name: Sign the computer-use helper resource\n[\s\S]*?(?=\n      - name:)/, ""),
+      ),
+    },
+    {
+      name: `${build} helper signing team mismatch allowed`,
+      file,
+      expected: "macOS computer-use helper survives packaging and is signed before bundling",
+      mutate: (source) => editWorkflowJob(source, build, (job) =>
+        job.replace(' && "$helper_team" = "$app_team"', ""),
+      ),
+    },
+  ]),
+  {
+    name: "universal helper architecture verification omission",
+    file: ".github/workflows/release.yml",
+    expected: "macOS computer-use helper survives packaging and is signed before bundling",
+    mutate: (source) => editWorkflowJob(source, "combine_macos", (job) =>
+      job.replace('for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$cu_helper"; do',
+        'for file in "$app_binary" "$broker_sidecar" "$cli_sidecar"; do'),
+    ),
+  },
   {
     name: "README macOS download matches an uploaded asset",
     file: "README.md",

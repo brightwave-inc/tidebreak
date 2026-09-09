@@ -8,7 +8,10 @@ export default function WelcomeScreen() {
   const session = useSessionStore((state) => state.session);
 
   if (session?.machine) {
-    return <Redirect href="/sessions" />;
+    // Land on the hub so every surface is a push with a back affordance;
+    // redirecting into an index surface leaves it as the root of the stack
+    // with no way back out.
+    return <Redirect href="/home" />;
   }
   if (session) {
     return <Redirect href="/attach" />;

@@ -1,8 +1,11 @@
 import type { LayoutState } from "@/panel/panelTypes";
 import {
   type CodeEditorRegion,
+  closeEditorTab,
   codeBrowserIds,
+  isEditorTab,
   openCodeEditor,
+  adoptAgentBrowser,
   removedCodeBrowserIds,
 } from "../codeChrome";
 import { attachedRemotely } from "@/host";
@@ -11,7 +14,11 @@ import {
   readBrowserTabLayout,
   writeBrowserTabLayout,
 } from "./browserTabLayout";
-import { closeCodeBrowser } from "../browser/browserHost";
+import {
+  closeCodeBrowser,
+  listIndependentBrowserTabs,
+  nativeCodeBrowserHost,
+} from "../browser/browserHost";
 import { seedBrowserSession } from "../browser/browserPersistence";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -113,6 +120,94 @@ export function useBrowserTabs({
       openCodeEditor(layout, { type: "browser", browserId }, preferredRegion),
     );
   }
+
+  // Native creation does not depend on this page. Adopt its preview without
+  // selecting it, including tabs opened before this hook mounted.
+  const layoutRef = useRef(layout);
+  const renderedLayoutRef = useRef(layout);
+  if (renderedLayoutRef.current !== layout) {
+    renderedLayoutRef.current = layout;
+    layoutRef.current = layout;
+  }
+  const setLayoutRef = useRef(setLayout);
+  setLayoutRef.current = setLayout;
+  useEffect(() => {
+    if (attachedRemotely() || !nativeCodeBrowserHost.available()) return;
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    const adopt = (browserId: string, url?: string, title?: string) => {
+      if (cancelled || closedBrowserIdsRef.current.has(browserId)) return;
+      const next = adoptAgentBrowser(layoutRef.current, browserId);
+      if (next === layoutRef.current) return;
+      seedBrowserSession({ browserId, workspaceId, initialUrl: url });
+      if (url) {
+        setBrowserInitialUrls((current) => ({ ...current, [browserId]: url }));
+      }
+      setBrowserTitles((current) => ({
+        ...current,
+        [browserId]: title || "Browser (agent)",
+      }));
+      layoutRef.current = next;
+      setLayoutRef.current(next);
+    };
+    void nativeCodeBrowserHost
+      .subscribe((event) => {
+        if (cancelled || event.workspaceId !== workspaceId) return;
+        if (event.type === "agent_open_requested") {
+          adopt(event.browserId, event.url, event.title);
+        } else if (event.type === "agent_closed_tab") {
+          // Remember closes even before discovery returns its snapshot.
+          closedBrowserIdsRef.current.add(event.browserId);
+          const current = layoutRef.current;
+          const primaryIndex = current.tabs
+            .filter(isEditorTab)
+            .findIndex(
+              (tab) =>
+                tab.type === "browser" && tab.browserId === event.browserId,
+            );
+          const splitIndex =
+            current.editorSplit?.tabs.findIndex(
+              (tab) =>
+                tab.type === "browser" && tab.browserId === event.browserId,
+            ) ?? -1;
+          const next =
+            primaryIndex >= 0
+              ? closeEditorTab(current, primaryIndex)
+              : splitIndex >= 0
+                ? closeEditorTab(current, splitIndex, "secondary")
+                : current;
+          if (next !== current) {
+            layoutRef.current = next;
+            setLayoutRef.current(next);
+          }
+        }
+      })
+      .then(async (stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        unsubscribe = stop;
+        // Subscribe first so a close racing with discovery cannot resurrect a tab.
+        for (const tab of await listIndependentBrowserTabs(workspaceId)) {
+          if (
+            tab.exists &&
+            tab.workspaceId === workspaceId &&
+            tab.independentInput
+          ) {
+            adopt(tab.browserId, tab.url, tab.title);
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          console.error("Could not discover independent browser tabs", error);
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [workspaceId]);
 
   /** The page behind a tab reported its document title. */
   function setBrowserTitle(browserId: string, title: string) {

@@ -473,6 +473,14 @@ impl ScopedCode {
         self.runtime.workspace_blob(&self.owner, id, path).await
     }
 
+    pub async fn workspace_file(
+        &self,
+        id: WorkspaceId,
+        path: &str,
+    ) -> Result<worktree::WorktreeFile, ServerError> {
+        self.runtime.workspace_file(&self.owner, id, path).await
+    }
+
     pub async fn workspace_files(
         &self,
         id: WorkspaceId,

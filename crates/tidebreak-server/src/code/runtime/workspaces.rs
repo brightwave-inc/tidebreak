@@ -987,6 +987,18 @@ impl CodeRuntime {
             .map_err(map_worktree)
     }
 
+    pub(crate) async fn workspace_file(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        path: &str,
+    ) -> Result<worktree::WorktreeFile, ServerError> {
+        let workspace = self.require_live_workspace(owner, workspace_id).await?;
+        worktree::read_worktree_file_bytes(std::path::Path::new(&workspace.worktree_path), path)
+            .await
+            .map_err(map_worktree)
+    }
+
     pub(crate) async fn workspace_diff(
         &self,
         owner: &OwnerId,

@@ -559,7 +559,8 @@ async fn gateway_identity_conflicting_local_and_upstream_ids_are_not_equivalent_
     assert_eq!(policy.vendor, None);
     assert_eq!(policy.verification, VerificationTier::Unverified);
     assert_eq!(policy.input_modalities, vec![InputModality::Text]);
-    assert!(!policy.supports_structured_output);
+    // Gateway protocols still enforce structured output without a curated map.
+    assert!(policy.supports_structured_output);
     assert!(!policy.supports_reasoning);
     assert!(policy.reasoning_efforts.is_empty());
 }
@@ -594,7 +595,7 @@ async fn gateway_identity_conflicting_recognized_aliases_are_not_equivalent_or_e
     assert_eq!(policy.vendor, None);
     assert_eq!(policy.verification, VerificationTier::Unverified);
     assert_eq!(policy.input_modalities, vec![InputModality::Text]);
-    assert!(!policy.supports_structured_output);
+    assert!(policy.supports_structured_output);
     assert!(!policy.supports_reasoning);
     assert!(policy.reasoning_efforts.is_empty());
 }

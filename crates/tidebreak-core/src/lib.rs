@@ -55,9 +55,12 @@ pub mod blob;
 pub mod browser;
 pub mod cancel;
 pub mod chat_journal;
+pub mod chrome_computer_use;
+pub mod chrome_connection;
 pub mod citation;
 pub mod client_tools;
 pub mod code;
+pub mod computer_session;
 pub mod computer_use;
 pub mod config;
 pub mod connected_app;
@@ -142,26 +145,37 @@ pub use attention::{
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
 pub use browser::{
-    browser_act_tool_spec, browser_list_tool_spec, browser_navigate_tool_spec,
-    browser_screenshot_tool_spec, browser_snapshot_tool_spec, browser_upload_tool_spec,
-    browser_wait_tool_spec, is_browser_tool, valid_browser_id, valid_browser_upload_path,
-    valid_browser_url, validate_browser_act_arguments, validate_browser_list_arguments,
-    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    browser_act_tool_spec, browser_activate_tool_spec, browser_close_tool_spec,
+    browser_diagnostics_tool_spec, browser_list_tool_spec, browser_navigate_tool_spec,
+    browser_open_tool_spec, browser_screenshot_tool_spec, browser_snapshot_tool_spec,
+    browser_upload_tool_spec, browser_wait_tool_spec, is_browser_tool, valid_browser_chord_key,
+    valid_browser_id, valid_browser_press_key, valid_browser_upload_path, valid_browser_url,
+    validate_browser_act_arguments, validate_browser_activate_arguments,
+    validate_browser_close_arguments, validate_browser_diagnostics_arguments,
+    validate_browser_list_arguments, validate_browser_navigate_arguments,
+    validate_browser_open_arguments, validate_browser_screenshot_arguments,
     validate_browser_snapshot_arguments, validate_browser_upload_arguments,
     validate_browser_wait_arguments, BrowserActArgs, BrowserActResult, BrowserActStatus,
-    BrowserAction, BrowserContentTrust, BrowserControllerKind, BrowserControllerState,
+    BrowserAction, BrowserActivateArgs, BrowserCloseArgs, BrowserContentTrust,
+    BrowserControllerKind, BrowserControllerState, BrowserDiagnosticsArgs,
+    BrowserDiagnosticsChannel, BrowserDiagnosticsEntry, BrowserDiagnosticsResult,
     BrowserElementBounds, BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName,
-    BrowserFrameStatus, BrowserGrantCapability, BrowserListArgs, BrowserListResult,
-    BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserOrigin,
-    BrowserOriginScope, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSemanticFrame, BrowserSemanticNode, BrowserSemanticNodeKind, BrowserSessionSummary,
-    BrowserSnapshotArgs, BrowserUploadArgs, BrowserUploadResource, BrowserUploadResult,
-    BrowserUploadStatus, BrowserViewport, BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult,
-    BrowserWaitStatus, BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL,
-    BROWSER_SCREENSHOT_TOOL, BROWSER_SNAPSHOT_TOOL, BROWSER_TOOLS, BROWSER_UPLOAD_TOOL,
-    BROWSER_WAIT_TOOL, DEFAULT_BROWSER_SNAPSHOT_NODES, DEFAULT_BROWSER_WAIT_TIMEOUT_MS,
-    MAX_BROWSER_ID_CHARS, MAX_BROWSER_SNAPSHOT_NODES, MAX_BROWSER_UPLOAD_PATH_BYTES,
-    MAX_BROWSER_URL_CHARS,
+    BrowserExecutionMode, BrowserFrameStatus, BrowserGrantCapability, BrowserInputMethod,
+    BrowserLifecycleResult, BrowserLifecycleStatus, BrowserListArgs, BrowserListResult,
+    BrowserLoadState, BrowserLogLevel, BrowserModifier, BrowserNavigateArgs, BrowserNavigateResult,
+    BrowserOpenArgs, BrowserOpenResult, BrowserOrigin, BrowserOriginScope, BrowserPageSnapshot,
+    BrowserPoint, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSemanticFrame,
+    BrowserSemanticNode, BrowserSemanticNodeKind, BrowserSessionSummary, BrowserSnapshotArgs,
+    BrowserUploadArgs, BrowserUploadResource, BrowserUploadResult, BrowserUploadStatus,
+    BrowserViewport, BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus,
+    BROWSER_ACTIVATE_TOOL, BROWSER_ACT_TOOL, BROWSER_CLOSE_TOOL, BROWSER_DIAGNOSTICS_TOOL,
+    BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_OPEN_TOOL, BROWSER_SCREENSHOT_TOOL,
+    BROWSER_SNAPSHOT_TOOL, BROWSER_TOOLS, BROWSER_UPLOAD_TOOL, BROWSER_WAIT_TOOL,
+    DEFAULT_BROWSER_DIAGNOSTICS_ENTRIES, DEFAULT_BROWSER_SNAPSHOT_NODES,
+    DEFAULT_BROWSER_WAIT_TIMEOUT_MS, MAX_BROWSER_DIAGNOSTICS_ENTRIES,
+    MAX_BROWSER_DIAGNOSTICS_TEXT_CHARS, MAX_BROWSER_ID_CHARS, MAX_BROWSER_SCREENSHOT_FRAME_BYTES,
+    MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES, MAX_BROWSER_SNAPSHOT_NODES,
+    MAX_BROWSER_UPLOAD_PATH_BYTES, MAX_BROWSER_URL_CHARS,
 };
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
@@ -212,25 +226,57 @@ pub use compaction::{
     DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
     DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
+
+pub use chrome_computer_use::{
+    chrome_act_tool_spec, chrome_activate_tab_tool_spec, chrome_close_tab_tool_spec,
+    chrome_computer_use_tool_specs, chrome_diagnostics_tool_spec, chrome_list_tabs_tool_spec,
+    chrome_navigate_tool_spec, chrome_new_tab_tool_spec, chrome_screenshot_tool_spec,
+    chrome_snapshot_tool_spec, chrome_wait_tool_spec, is_chrome_computer_use_tool,
+    valid_chrome_target_ref, valid_chrome_url, validate_chrome_computer_use_arguments,
+    ChromeActArgs, ChromeActResult, ChromeActStatus, ChromeAction, ChromeConnectionGrant,
+    ChromeConsoleEntry, ChromeDiagnosticsArgs, ChromeDiagnosticsResult, ChromeFrameStatus,
+    ChromeGrantCapability, ChromeListTabsArgs, ChromeListTabsResult, ChromeNavigateArgs,
+    ChromeNavigateResult, ChromeNetworkEntry, ChromeNewTabArgs, ChromeOriginScope,
+    ChromePageSnapshot, ChromeScreenshotArgs, ChromeScreenshotResult, ChromeSemanticFrame,
+    ChromeSemanticNode, ChromeSemanticNodeKind, ChromeSnapshotArgs, ChromeTabMutationResult,
+    ChromeTabRefArgs, ChromeTabSummary, ChromeViewport, ChromeWaitArgs, ChromeWaitCondition,
+    ChromeWaitResult, ChromeWaitStatus, CHROME_ACTIVATE_TAB_TOOL, CHROME_ACT_TOOL,
+    CHROME_CLOSE_TAB_TOOL, CHROME_DIAGNOSTICS_TOOL, CHROME_LIST_TABS_TOOL, CHROME_NAVIGATE_TOOL,
+    CHROME_NEW_TAB_TOOL, CHROME_SCREENSHOT_TOOL, CHROME_SNAPSHOT_TOOL, CHROME_USE_TOOLS,
+    CHROME_WAIT_TOOL, DEFAULT_CHROME_DIAGNOSTICS_ENTRIES, DEFAULT_CHROME_SNAPSHOT_NODES,
+    DEFAULT_CHROME_WAIT_TIMEOUT_MS, MAX_CHROME_ACTION_VALUE_CHARS, MAX_CHROME_DIAGNOSTICS_ENTRIES,
+    MAX_CHROME_DIAGNOSTICS_ENTRY_CHARS, MAX_CHROME_SCREENSHOT_DIMENSION,
+    MAX_CHROME_SCREENSHOT_PNG_BYTES, MAX_CHROME_SNAPSHOT_NODES, MAX_CHROME_TARGET_REF_CHARS,
+    MAX_CHROME_URL_CHARS, MAX_CHROME_WAIT_TIMEOUT_MS,
+};
 pub use computer_use::{
-    computer_capture_screen_tool_spec, computer_click_tool_spec, computer_focus_window_tool_spec,
-    computer_key_press_tool_spec, computer_list_windows_tool_spec,
-    computer_read_app_content_tool_spec, computer_return_to_tidebreak_tool_spec,
-    computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
+    computer_capture_screen_tool_spec, computer_click_tool_spec, computer_drag_tool_spec,
+    computer_focus_window_tool_spec, computer_hover_tool_spec, computer_key_press_tool_spec,
+    computer_launch_app_tool_spec, computer_list_windows_tool_spec,
+    computer_read_app_content_tool_spec, computer_resize_window_tool_spec,
+    computer_return_to_tidebreak_tool_spec, computer_scroll_tool_spec,
+    computer_type_text_tool_spec, computer_use_tool_specs, computer_wait_tool_spec,
     is_computer_use_control_tool, is_computer_use_tool, validate_computer_capture_screen_arguments,
-    validate_computer_click_arguments, validate_computer_focus_window_arguments,
-    validate_computer_key_press_arguments, validate_computer_list_windows_arguments,
-    validate_computer_read_app_content_arguments, validate_computer_return_to_tidebreak_arguments,
+    validate_computer_click_arguments, validate_computer_drag_arguments,
+    validate_computer_focus_window_arguments, validate_computer_hover_arguments,
+    validate_computer_key_press_arguments, validate_computer_launch_app_arguments,
+    validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
+    validate_computer_resize_window_arguments, validate_computer_return_to_tidebreak_arguments,
     validate_computer_scroll_arguments, validate_computer_type_text_arguments,
-    validate_computer_wait_arguments, ClickButton, ComputerCaptureScreenArgs, ComputerClickArgs,
-    ComputerFocusWindowArgs, ComputerKeyPressArgs, ComputerListWindowsArgs,
-    ComputerReadAppContentArgs, ComputerReturnToTidebreakArgs, ComputerScrollArgs,
-    ComputerTypeTextArgs, ComputerWaitArgs, ElementTargetArgs, KeyModifier,
-    COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_FOCUS_WINDOW_TOOL,
-    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
-    COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
-    COMPUTER_USE_CONTROL_TOOLS, COMPUTER_USE_TOOLS, COMPUTER_WAIT_TOOL, MAX_MARK, MAX_READ_DEPTH,
-    MAX_READ_NODES, MAX_TYPE_TEXT_CHARS, MAX_WAIT_SECONDS,
+    validate_computer_use_arguments, validate_computer_wait_arguments, ClickButton,
+    ComputerCaptureScreenArgs, ComputerClickArgs, ComputerDragArgs, ComputerFocusWindowArgs,
+    ComputerHoverArgs, ComputerKeyPressArgs, ComputerLaunchAppArgs, ComputerListWindowsArgs,
+    ComputerReadAppContentArgs, ComputerResizeWindowArgs, ComputerReturnToTidebreakArgs,
+    ComputerScrollArgs, ComputerTypeTextArgs, ComputerWaitArgs, ComputerWaitConditionArgs,
+    ElementTargetArgs, ExecutionMode, KeyModifier, COMPUTER_CAPTURE_SCREEN_TOOL,
+    COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL, COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL,
+    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL,
+    COMPUTER_READ_APP_CONTENT_TOOL, COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+    COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL, COMPUTER_USE_CONTROL_TOOLS, COMPUTER_USE_TOOLS,
+    COMPUTER_WAIT_TOOL, DEFAULT_CAPTURE_MAX_DIMENSION, DEFAULT_CONDITION_TIMEOUT_SECONDS,
+    MAX_CAPTURE_MAX_DIMENSION, MAX_CONDITION_TIMEOUT_SECONDS, MAX_DRAG_DURATION_MS, MAX_MARK,
+    MAX_READ_DEPTH, MAX_READ_NODES, MAX_TYPE_TEXT_CHARS, MAX_WAIT_CONDITION_TEXT_CHARS,
+    MAX_WAIT_SECONDS, MAX_WINDOW_DIMENSION,
 };
 pub use config::{Config, Profile, VaultSecretConfig};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

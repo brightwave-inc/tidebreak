@@ -17,6 +17,10 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::Config;
 
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+mod agent_browser_dialogs;
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+mod agent_browser_host;
 mod attachments;
 mod broker;
 #[allow(
@@ -26,6 +30,7 @@ mod broker;
 mod browser_control;
 mod browser_downloads;
 mod browser_grants;
+mod browser_independence;
 #[cfg(target_os = "macos")]
 mod browser_native_webview;
 mod browser_profile;
@@ -40,12 +45,16 @@ mod browser_semantics;
 mod browser_url_observer;
 mod channel;
 mod chat_debug;
+mod chrome_runtime_adapter;
 mod client_execution;
 mod code_browser;
 mod code_editor;
 mod code_worktree;
 #[cfg(test)]
 mod command_parity;
+mod computer_runtime_adapter;
+mod computer_use_action;
+mod computer_use_permissions;
 mod deep_link;
 mod deliverables;
 mod documents;
@@ -53,6 +62,8 @@ mod host_access;
 mod host_authority;
 mod image_attachments;
 mod menu;
+mod native_cursor_overlay;
+mod native_runtime_adapter;
 mod node_install;
 mod office_install;
 mod office_pdf;
@@ -864,6 +875,7 @@ pub fn run() {
             present_native_notification,
             code_browser::code_browser_import_legacy_state,
             code_browser::code_browser_command,
+            code_browser::code_browser_agent_tabs,
             code_worktree::open_code_worktree,
             code_editor::open_in_editor,
             code_editor::detect_external_editors,
@@ -884,6 +896,9 @@ pub fn run() {
             node_install::install_node_runtime,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
+            computer_use_permissions::computer_use_permission_status,
+            computer_use_permissions::request_computer_use_permissions,
+            computer_use_permissions::open_computer_use_permission_settings,
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,
@@ -971,6 +986,11 @@ pub fn run() {
             browser_url_observer::detach_all_browser_url_observers();
         }
         tauri::RunEvent::Exit => {
+            if let Some(runtime) =
+                app.try_state::<Arc<computer_runtime_adapter::DesktopComputerRuntime>>()
+            {
+                tauri::async_runtime::block_on(runtime.shutdown());
+            }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
         }
         _ => {}
@@ -1046,6 +1066,22 @@ async fn boot_server(
         browser_runtime,
         desktop_sibling_exe("tidebreak")?,
     );
+    // Native computer use for code sessions rides the same trusted bridge
+    // executable. The adapter is installed on every platform; it reports
+    // unavailable off macOS, so no channel is minted there.
+    let computer_runtime = Arc::new(computer_runtime_adapter::DesktopComputerRuntime::new(
+        app.clone(),
+        app.path()
+            .app_cache_dir()
+            .map_err(|error| error.to_string())?,
+        app.path().home_dir().map_err(|error| error.to_string())?,
+    ));
+    app.manage(computer_runtime.clone());
+    let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = computer_runtime;
+    let native_binding = tidebreak_server::NativeChannelBinding::new(
+        native_runtime,
+        desktop_sibling_exe("tidebreak")?,
+    );
     let server = tidebreak_server::bind_configured_with_desktop_foreground_browser_executor(
         config,
         client_executor_id,
@@ -1055,6 +1091,7 @@ async fn boot_server(
         Some(local_voice),
         Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
         Some(browser_binding),
+        Some(native_binding),
     )
     .await
     .map_err(|e| e.to_string())?;

@@ -229,6 +229,7 @@ pub(crate) async fn list_consent_statements(
             .await?
             .into_iter()
             .map(|grant| crate::consent::ConsentStatementSnapshot {
+                native_app_all_sessions: None,
                 handle: crate::consent::ConsentHandle::ToolGrant {
                     call_id: grant.source_call_id,
                 },

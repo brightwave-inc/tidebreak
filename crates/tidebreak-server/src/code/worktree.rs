@@ -1942,6 +1942,7 @@ pub fn two_word_name(seed: u128) -> String {
 }
 
 const MAX_BLOB_BYTES: usize = 512 * 1_024;
+const MAX_VIEWABLE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
 
 /// One worktree file's text, bounded so a huge blob cannot fill the viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1952,31 +1953,20 @@ pub struct WorktreeBlob {
     pub binary: bool,
 }
 
+/// One worktree file's original bytes for an inline viewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeFile {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+}
+
 /// Read one relative worktree file as UTF-8 text.
 pub async fn read_worktree_file(
     worktree_path: &Path,
     relative: &str,
 ) -> Result<WorktreeBlob, WorktreeError> {
-    let rel = validate_relative_file(relative)?;
-    let abs = worktree_path.join(&rel);
-    let canonical_root = tokio::fs::canonicalize(worktree_path)
-        .await
-        .map_err(|err| WorktreeError::internal(format!("could not resolve the worktree: {err}")))?;
-    let canonical = tokio::fs::canonicalize(&abs)
-        .await
-        .map_err(|_| WorktreeError::user(format!("file not found: {}", rel.display())))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err(WorktreeError::user("path must stay inside the worktree"));
-    }
-    let metadata = tokio::fs::metadata(&canonical).await.map_err(|err| {
-        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
-    })?;
-    if !metadata.is_file() {
-        return Err(WorktreeError::user(format!(
-            "{} is not a file",
-            rel.display()
-        )));
-    }
+    let (rel, canonical) = resolve_worktree_file(worktree_path, relative).await?;
     let file = tokio::fs::File::open(&canonical).await.map_err(|err| {
         WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
     })?;
@@ -2007,6 +1997,64 @@ pub async fn read_worktree_file(
         truncated,
         binary: false,
     })
+}
+
+/// Read one relative worktree file as original bytes for an inline viewer.
+pub async fn read_worktree_file_bytes(
+    worktree_path: &Path,
+    relative: &str,
+) -> Result<WorktreeFile, WorktreeError> {
+    let (rel, canonical) = resolve_worktree_file(worktree_path, relative).await?;
+    let file = tokio::fs::File::open(&canonical).await.map_err(|err| {
+        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+    })?;
+    let mut bytes = Vec::new();
+    let read = file
+        .take((MAX_VIEWABLE_FILE_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|err| {
+            WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+        })?;
+    if read > MAX_VIEWABLE_FILE_BYTES {
+        return Err(WorktreeError::user(
+            "file is too large to preview; open it in your editor",
+        ));
+    }
+    let path = rel.to_string_lossy().replace('\\', "/");
+    let media_type = crate::media_type::sniff_media_type(&bytes, Some(&path));
+    Ok(WorktreeFile {
+        path,
+        bytes,
+        media_type,
+    })
+}
+
+async fn resolve_worktree_file(
+    worktree_path: &Path,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), WorktreeError> {
+    let rel = validate_relative_file(relative)?;
+    let abs = worktree_path.join(&rel);
+    let canonical_root = tokio::fs::canonicalize(worktree_path)
+        .await
+        .map_err(|err| WorktreeError::internal(format!("could not resolve the worktree: {err}")))?;
+    let canonical = tokio::fs::canonicalize(&abs)
+        .await
+        .map_err(|_| WorktreeError::user(format!("file not found: {}", rel.display())))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(WorktreeError::user("path must stay inside the worktree"));
+    }
+    let metadata = tokio::fs::metadata(&canonical).await.map_err(|err| {
+        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(WorktreeError::user(format!(
+            "{} is not a file",
+            rel.display()
+        )));
+    }
+    Ok((rel, canonical))
 }
 
 fn validate_relative_file(value: &str) -> Result<PathBuf, WorktreeError> {
@@ -3178,6 +3226,23 @@ mod tests {
         assert_eq!(blob.content.len(), MAX_BLOB_BYTES);
         assert!(blob.content.starts_with("hello "));
         assert_ne!(blob.content, huge);
+    }
+
+    #[tokio::test]
+    async fn workspace_file_returns_original_image_bytes_and_media_type() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "image-file");
+        create_ready(&repo, &path, "tidebreak/image-file", "main").await;
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        std::fs::write(path.join("preview.png"), png).unwrap();
+
+        let file = read_worktree_file_bytes(&path, "preview.png")
+            .await
+            .unwrap();
+        assert_eq!(file.path, "preview.png");
+        assert_eq!(file.bytes, png);
+        assert_eq!(file.media_type, "image/png");
     }
 
     #[cfg(windows)]

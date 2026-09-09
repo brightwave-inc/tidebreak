@@ -230,6 +230,111 @@ const toolHeavyMessages: ChatMessage[] = [
   },
 ];
 
+/**
+ * Prose, a quiet success, a live bounded run, and a failed excerpt in one
+ * column — the mixed journal the tool-row redesign is judged against.
+ */
+const mixedExecMessages: ChatMessage[] = [
+  {
+    id: "mixed-user",
+    role: "user",
+    text: "Run the formatter, start the unit suite, and fix the deck renderer if it fails.",
+    createdAt: "2026-09-09T15:00:00.000Z",
+  },
+  {
+    id: "mixed-assistant-1",
+    role: "assistant",
+    text: "I will keep routine commands quiet in the journal and only open failures so the error is one glance away.",
+    sources: [],
+    createdAt: "2026-09-09T15:00:04.000Z",
+  },
+  {
+    id: "mixed-exec-ok",
+    role: "tool",
+    callId: "mixed-ok",
+    name: "exec",
+    status: "completed",
+    preview: {
+      tool: "exec",
+      command: "pnpm",
+      args: ["exec", "biome", "check", "src/ToolCallCard.tsx"],
+      cwd: "crates/tidebreak-desktop/ui",
+      files: [],
+      summary: "Checking the tool card module",
+    },
+    result: {
+      tool: "exec",
+      exitCode: 0,
+      timedOut: false,
+      outputTruncated: false,
+      stdout: "Checked 1 file in 18ms. No fixes applied.\n",
+      stderr: "",
+      backend: "local",
+    },
+  },
+  {
+    id: "mixed-exec-run",
+    role: "tool",
+    callId: "mixed-run",
+    name: "exec",
+    status: "running",
+    preview: {
+      tool: "exec",
+      command: "pnpm",
+      args: ["test", "src/ToolPreview.test.ts"],
+      cwd: "crates/tidebreak-desktop/ui",
+      files: [],
+      summary: "Running the preview unit tests",
+    },
+    result: {
+      tool: "exec",
+      exitCode: null,
+      timedOut: false,
+      outputTruncated: false,
+      stdout: Array.from(
+        { length: 16 },
+        (_, index) => ` ✓ grounded headline case ${index + 1}`,
+      ).join("\n"),
+      stderr: "",
+      backend: "local",
+    },
+  },
+  {
+    id: "mixed-exec-fail",
+    role: "tool",
+    callId: "mixed-fail",
+    name: "exec",
+    status: "failed",
+    preview: {
+      tool: "exec",
+      command: "python3",
+      args: [
+        "/workspace/checkout/scripts/very/long/path/render_deck.py",
+        "reports/q3.pptx",
+      ],
+      cwd: "checkout",
+      files: ["reports/q3.pptx"],
+    },
+    result: {
+      tool: "exec",
+      exitCode: 1,
+      timedOut: false,
+      outputTruncated: false,
+      stdout: "",
+      stderr:
+        "Error: Cannot find module 'pptxgenjs'\n    at Object.<anonymous> (scripts/render_deck.py:12)\n",
+      backend: "local",
+    },
+  },
+  {
+    id: "mixed-assistant-2",
+    role: "assistant",
+    text: "The deck renderer is missing `pptxgenjs`. I can install it next, or switch the script to the workspace package that already provides it.",
+    sources: [],
+    createdAt: "2026-09-09T15:00:40.000Z",
+  },
+];
+
 const failureMessages: ChatMessage[] = [
   {
     id: "failure-user",
@@ -417,6 +522,20 @@ export const CompactingConversation: Story = {
 };
 
 export const ToolHeavySession: Story = {};
+
+/**
+ * Mixed journal: prose, quiet success, bounded running output, and a failed
+ * command with an error excerpt — all in the shared reading column.
+ */
+export const MixedToolRows: Story = {
+  args: { messages: mixedExecMessages, busy: true, pinLastTurn: true },
+};
+
+/** Same mix at a narrow pane width so truncation cannot widen the column. */
+export const MixedToolRowsNarrow: Story = {
+  args: { messages: mixedExecMessages, busy: true, pinLastTurn: true },
+  globals: { viewport: { value: "compact", isRotated: false } },
+};
 
 export const RetryableFailure: Story = {
   args: { messages: failureMessages },

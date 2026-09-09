@@ -20,10 +20,33 @@ use uuid::Uuid;
 
 const DIRECTORY: &str = "browser";
 const FILE_NAME: &str = "agent-origin-grants.json";
-const VERSION: u8 = 1;
+/// Version 2 records consent taken under the screenshot disclosure: capture
+/// and diagnostics capabilities may appear only in v2 files, because only the
+/// v2 consent flow tells the user that visible pixels reach the selected
+/// model. Version 1 files predate that disclosure and load without them.
+const VERSION: u8 = 2;
+const LEGACY_VERSION: u8 = 1;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_GRANTS: usize = 256;
 const MAX_WORKSPACE_ID_CHARS: usize = 200;
+
+/// Every capability a stored grant may carry, in canonical persist order.
+const STORED_CAPABILITY_ORDER: [BrowserGrantCapability; 5] = [
+    BrowserGrantCapability::BrowserObserveOrigin,
+    BrowserGrantCapability::BrowserControlOrigin,
+    BrowserGrantCapability::BrowserCaptureVisibleTab,
+    BrowserGrantCapability::BrowserDiagnoseOrigin,
+    BrowserGrantCapability::BrowserTransferFiles,
+];
+
+/// The capabilities a version-1 consent flow could have written. Capture and
+/// diagnostics require the v2 disclosure, so a v1 file containing them was
+/// not written by any Tidebreak consent flow and must not load.
+const LEGACY_CAPABILITIES: [BrowserGrantCapability; 3] = [
+    BrowserGrantCapability::BrowserObserveOrigin,
+    BrowserGrantCapability::BrowserControlOrigin,
+    BrowserGrantCapability::BrowserTransferFiles,
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BrowserGrant {
@@ -127,14 +150,10 @@ impl BrowserGrantStore {
                 owner_id: grant.owner_id.clone(),
                 workspace_id: grant.workspace_id.clone(),
                 scope: (&grant.scope).into(),
-                capabilities: [
-                    BrowserGrantCapability::BrowserObserveOrigin,
-                    BrowserGrantCapability::BrowserControlOrigin,
-                    BrowserGrantCapability::BrowserTransferFiles,
-                ]
-                .into_iter()
-                .filter(|capability| grant.capabilities.contains(capability))
-                .collect(),
+                capabilities: STORED_CAPABILITY_ORDER
+                    .into_iter()
+                    .filter(|capability| grant.capabilities.contains(capability))
+                    .collect(),
             })
             .collect();
         let bytes = serde_json::to_vec_pretty(&StoredBrowserGrants {
@@ -227,13 +246,24 @@ fn load_grants(path: &Path) -> Result<Vec<BrowserGrant>, String> {
     }
     let stored: StoredBrowserGrants = serde_json::from_slice(&bytes)
         .map_err(|_| "Browser sharing storage is invalid".to_owned())?;
-    if stored.version != VERSION || stored.grants.len() > MAX_GRANTS {
+    if !matches!(stored.version, VERSION | LEGACY_VERSION) || stored.grants.len() > MAX_GRANTS {
         return Err("Browser sharing storage uses an unsupported format".to_owned());
     }
     let mut grants = Vec::with_capacity(stored.grants.len());
     for grant in stored.grants {
         let capabilities = grant.capabilities.iter().copied().collect::<HashSet<_>>();
         if capabilities.len() != grant.capabilities.len() {
+            return Err("Browser sharing storage is invalid".to_owned());
+        }
+        // A version-1 consent flow never showed the screenshot disclosure, so
+        // a v1 file carrying capture or diagnostics consent is not something
+        // Tidebreak wrote. Refuse it entirely rather than trimming it, the
+        // same way every other malformed consent file is refused.
+        if stored.version == LEGACY_VERSION
+            && !capabilities
+                .iter()
+                .all(|capability| LEGACY_CAPABILITIES.contains(capability))
+        {
             return Err("Browser sharing storage is invalid".to_owned());
         }
         grants.push(BrowserGrant {
@@ -337,7 +367,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         let mut cases = vec![
             serde_json::json!(null),
-            serde_json::json!({"version": 2, "grants": []}),
+            serde_json::json!({"version": 3, "grants": []}),
         ];
         for (field, value) in [
             ("owner_id", serde_json::json!("")),
@@ -457,5 +487,81 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         symlink(&outside, &store.directory).unwrap();
         assert!(BrowserGrantStore::open(private.path()).is_err());
+    }
+
+    #[test]
+    fn version_one_consent_migrates_without_gaining_capture_or_diagnostics() {
+        let private = tempfile::tempdir().unwrap();
+        let (store, _) = BrowserGrantStore::open(private.path()).unwrap();
+        write_private(
+            &store.path,
+            serde_json::json!({
+                "version": 1,
+                "grants": [{
+                    "owner_id": OwnerId::local(),
+                    "workspace_id": "workspace-1",
+                    "scope": { "kind": "origin", "origin": "https://example.com" },
+                    "capabilities": ["browser_control_origin", "browser_transfer_files"]
+                }]
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let (_, restored) = BrowserGrantStore::open(private.path()).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0]
+            .capabilities
+            .contains(&BrowserGrantCapability::BrowserControlOrigin));
+        assert!(!restored[0]
+            .capabilities
+            .contains(&BrowserGrantCapability::BrowserCaptureVisibleTab));
+        assert!(!restored[0]
+            .capabilities
+            .contains(&BrowserGrantCapability::BrowserDiagnoseOrigin));
+    }
+
+    #[test]
+    fn version_one_consent_claiming_capture_or_diagnostics_never_loads() {
+        for capability in ["browser_capture_visible_tab", "browser_diagnose_origin"] {
+            let private = tempfile::tempdir().unwrap();
+            let (store, _) = BrowserGrantStore::open(private.path()).unwrap();
+            write_private(
+                &store.path,
+                serde_json::json!({
+                    "version": 1,
+                    "grants": [{
+                        "owner_id": OwnerId::local(),
+                        "workspace_id": "workspace-1",
+                        "scope": { "kind": "origin", "origin": "https://example.com" },
+                        "capabilities": ["browser_observe_origin", capability]
+                    }]
+                })
+                .to_string()
+                .as_bytes(),
+            );
+            assert!(
+                BrowserGrantStore::open(private.path()).is_err(),
+                "{capability} must not load from a pre-disclosure file"
+            );
+        }
+    }
+
+    #[test]
+    fn disclosed_capture_consent_persists_as_version_two_and_round_trips() {
+        let private = tempfile::tempdir().unwrap();
+        let (store, _) = BrowserGrantStore::open(private.path()).unwrap();
+        let mut disclosed = grant("workspace-1", "https://example.com");
+        disclosed
+            .capabilities
+            .insert(BrowserGrantCapability::BrowserCaptureVisibleTab);
+        disclosed
+            .capabilities
+            .insert(BrowserGrantCapability::BrowserDiagnoseOrigin);
+        store.persist(std::slice::from_ref(&disclosed)).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(json["version"], 2);
+        let (_, restored) = BrowserGrantStore::open(private.path()).unwrap();
+        assert_eq!(restored, vec![disclosed]);
     }
 }

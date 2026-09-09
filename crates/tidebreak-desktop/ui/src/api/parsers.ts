@@ -1608,6 +1608,10 @@ type UncheckedPlanDecisionResult = Partial<
   >
 >;
 
+type UncheckedImagesResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "images" }>, unknown>
+>;
+
 type UncheckedScreenCaptureResult = Partial<
   Record<
     keyof Extract<WireToolResultPreview, { tool: "screen_capture" }>,
@@ -1615,7 +1619,7 @@ type UncheckedScreenCaptureResult = Partial<
   >
 >;
 
-/** One image reference shared by the exec and screen-capture previews. The
+/** One image reference shared by tool result previews. The
  * `blob_id` names the pixels in the blob store; `media_type` is the snake_case
  * variant name the Rust enum serializes to. */
 function parseImageRef(value: unknown): {
@@ -1838,6 +1842,16 @@ export function parseToolResultPreview(
       plan,
       accepted,
       feedback: (feedback as string | undefined) ?? null,
+    };
+  }
+  if (value.tool === "images") {
+    const { images }: UncheckedImagesResult = value;
+    if (!Array.isArray(images) || images.length === 0) return null;
+    const parsed = images.map(parseImageRef);
+    if (parsed.some((image) => image === null)) return null;
+    return {
+      tool: "images",
+      images: parsed as NonNullable<ReturnType<typeof parseImageRef>>[],
     };
   }
   if (value.tool === "screen_capture") {

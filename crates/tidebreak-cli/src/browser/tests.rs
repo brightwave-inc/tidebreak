@@ -749,12 +749,14 @@ fn parse_browser_screenshot_requires_identity_and_bounds_dimensions() {
             document_epoch,
             max_width,
             max_height,
+            output,
         } => {
             assert_eq!(browser_id, "browser-1");
             assert_eq!(snapshot_id, "snapshot-1");
             assert_eq!(document_epoch, 9);
             assert_eq!(max_width, Some(1440));
             assert_eq!(max_height, Some(0));
+            assert_eq!(output, None);
         }
         other => panic!("expected Screenshot, got {other:?}"),
     }
@@ -831,11 +833,16 @@ fn parse_browser_act_builds_a_canonical_native_action() {
         document_epoch,
         target_ref,
         action,
+        execution_mode,
     } = command
     else {
         panic!("expected Act");
     };
     assert_eq!(browser_id, "browser-1");
+    assert_eq!(
+        execution_mode,
+        tidebreak_core::BrowserExecutionMode::Background
+    );
     assert_eq!(snapshot_id, "snapshot-1");
     assert_eq!(document_epoch, 9);
     assert_eq!(target_ref, "@e3");
@@ -908,16 +915,50 @@ fn browser_mcp_registers_act_only_when_the_capability_is_true() {
         endpoint: "http://127.0.0.1:9876/code/browser".to_owned(),
         token: VALID_TOKEN.to_owned(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
-    assert!(browser_tool_registry(&client, false)
-        .get(tidebreak_core::BROWSER_ACT_TOOL)
-        .is_none());
-    let enabled = browser_tool_registry(&client, true);
+    let disabled = browser_tool_registry(&client, BrowserToolCapabilities::default());
+    for tool in [
+        tidebreak_core::BROWSER_ACT_TOOL,
+        tidebreak_core::BROWSER_OPEN_TOOL,
+        tidebreak_core::BROWSER_CLOSE_TOOL,
+        tidebreak_core::BROWSER_ACTIVATE_TOOL,
+        tidebreak_core::BROWSER_DIAGNOSTICS_TOOL,
+    ] {
+        assert!(
+            disabled.get(tool).is_none(),
+            "{tool} must stay unregistered"
+        );
+    }
+    let enabled = browser_tool_registry(
+        &client,
+        BrowserToolCapabilities {
+            semantic_actions: true,
+            lifecycle: true,
+            developer_diagnostics: true,
+        },
+    );
     let act = enabled
         .get(tidebreak_core::BROWSER_ACT_TOOL)
         .expect("browser_act must register");
     assert_eq!(act.approval_class(), ApprovalClass::Sensitive);
+    for (tool, class) in [
+        (tidebreak_core::BROWSER_OPEN_TOOL, ApprovalClass::Sensitive),
+        (tidebreak_core::BROWSER_CLOSE_TOOL, ApprovalClass::Sensitive),
+        (
+            tidebreak_core::BROWSER_ACTIVATE_TOOL,
+            ApprovalClass::Sensitive,
+        ),
+        (
+            tidebreak_core::BROWSER_DIAGNOSTICS_TOOL,
+            ApprovalClass::ReadOnly,
+        ),
+    ] {
+        let registered = enabled.get(tool).expect("capability tool must register");
+        assert_eq!(registered.approval_class(), class, "{tool}");
+    }
 }
 
 #[test]
@@ -1025,6 +1066,49 @@ fn screenshot_output_attaches_pixels_without_serializing_base64() {
     let durable = serde_json::to_string(&output).unwrap();
     assert!(!durable.contains(ONE_PIXEL_PNG));
     assert!(!durable.contains("imageBase64"));
+}
+
+#[test]
+fn screenshot_file_replaces_public_files_privately_and_refuses_symlinks() {
+    let result = BrowserScreenshotResult {
+        browser_id: "browser-1".into(),
+        snapshot_id: "snapshot-1".into(),
+        document_epoch: 4,
+        image_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
+        mime_type: "image/png".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("screenshot.png");
+    std::fs::write(&path, b"old image").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let receipt = write_screenshot_output(&result, &path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(receipt.byte_len, bytes.len() as u64);
+    assert_eq!(bytes, decode_and_fit_screenshot(&result).unwrap().bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.path().join("linked.png");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(write_screenshot_output(&result, &link).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        if cfg!(unix) { 2 } else { 1 }
+    );
 }
 
 #[test]
@@ -1245,6 +1329,8 @@ async fn client_does_not_follow_redirects() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
 
@@ -1321,6 +1407,8 @@ async fn overlimit_response_body_is_refused() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut big_client = client.clone();
@@ -1420,6 +1508,8 @@ async fn browser_list_decodes_successful_json_response() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1479,6 +1569,8 @@ async fn browser_list_decodes_server_error_body() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1543,6 +1635,8 @@ async fn server_error_body_containing_token_is_scrubbed() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: token.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1622,6 +1716,8 @@ async fn browser_navigate_decodes_response() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let mut test_client = client.clone();
@@ -1664,7 +1760,9 @@ async fn browser_mcp_text_can_drive_a_snapshot_action_sequence() {
     let action = json!({
         "browserId": "browser-1", "snapshotId": "snap-1", "documentEpoch": 3,
         "ref": "element-1", "action": "click", "status": "ok",
-        "message": "Action completed", "requiresResnapshot": true
+        "message": "Action completed", "requiresResnapshot": true,
+        "executionMode": "background",
+        "inputMethod": "dom"
     });
     let responses = [snapshot.clone(), action.clone()];
     let handle = tokio::spawn(async move {
@@ -1727,11 +1825,16 @@ async fn browser_mcp_text_can_drive_a_snapshot_action_sequence() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: true,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = BrowserClient::new(&cap).unwrap();
     let ctx = ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None);
     let server = tidebreak_mcp::McpServer::new(
-        Arc::new(browser_tool_registry(&client, cap.semantic_actions)),
+        Arc::new(browser_tool_registry(
+            &client,
+            BrowserToolCapabilities::from_capfile(&cap),
+        )),
         ctx,
     )
     .with_approval_gate(Arc::new(AutoApproveGate));
@@ -1944,6 +2047,8 @@ async fn browser_client_ignores_ambient_http_proxy() {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
         semantic_actions: false,
+        lifecycle: false,
+        developer_diagnostics: false,
     };
     let client = {
         let _env_lock = PROXY_ENV_LOCK.lock().await;
@@ -1982,4 +2087,38 @@ async fn browser_client_ignores_ambient_http_proxy() {
         has_auth,
         "Authorization must reach the listener: {req_headers:?}"
     );
+}
+
+#[test]
+fn parse_browser_act_requires_an_explicit_foreground_mode() {
+    let flags = [
+        "act",
+        "--browser-id",
+        "browser-1",
+        "--snapshot-id",
+        "snapshot-1",
+        "--document-epoch",
+        "9",
+        "--ref",
+        "@e3",
+        "--click",
+        "--execution-mode",
+    ];
+    let parse = |mode: &str| {
+        parse_browser(
+            flags
+                .iter()
+                .chain(std::iter::once(&mode))
+                .map(|arg| arg.to_string())
+                .collect(),
+        )
+    };
+    assert!(matches!(
+        parse("foreground").unwrap(),
+        BrowserCommand::Act {
+            execution_mode: tidebreak_core::BrowserExecutionMode::Foreground,
+            ..
+        }
+    ));
+    assert!(parse("automatic").is_err());
 }

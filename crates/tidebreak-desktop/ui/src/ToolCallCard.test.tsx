@@ -106,7 +106,7 @@ describe("toolCallPresentation", () => {
 });
 
 describe("ToolCommandCard", () => {
-  it("titles itself with the command instead of a generic phrase", () => {
+  it("titles itself with a grounded command target instead of a generic phrase", () => {
     const markup = renderToStaticMarkup(
       <ToolCommandCard
         name="exec"
@@ -116,7 +116,9 @@ describe("ToolCommandCard", () => {
       />,
     );
 
-    expect(visibleText(markup)).toContain("cargo test --workspace");
+    // Grounded title: command head + meaningful arg, not the full argv and not
+    // the generic allowlisted phrase.
+    expect(visibleText(markup)).toContain("cargo test");
     expect(visibleText(markup)).not.toContain("Ran a command");
     // The allowlisted phrase still names the card for assistive technology.
     expect(markup).toContain('aria-label="Run a command: Command complete"');
@@ -155,7 +157,7 @@ describe("ToolCommandCard", () => {
     );
   });
 
-  it("opens while the command is running and closes once it has settled", () => {
+  it("opens while running or failed, and stays quiet once a success settles", () => {
     const running = renderToStaticMarkup(
       <ToolCommandCard
         name="exec"
@@ -178,13 +180,21 @@ describe("ToolCommandCard", () => {
         name="exec"
         status="failed"
         preview={preview}
-        result={null}
+        result={{
+          tool: "exec",
+          exitCode: 1,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "",
+          stderr: "module not found\n",
+        }}
       />,
     );
 
     expect(running).toContain('aria-expanded="true"');
     expect(done).toContain('aria-expanded="false"');
-    expect(failed).toContain('aria-expanded="false"');
+    expect(failed).toContain('aria-expanded="true"');
+    expect(visibleText(failed)).toContain("module not found");
   });
 
   it("keeps settled metadata in the expanded detail", () => {
@@ -222,6 +232,8 @@ describe("ToolCommandCard", () => {
     expect(completed).not.toContain("Done");
     expect(waiting).not.toContain("Waiting for approval");
     expect(cancelled).not.toContain("Not run");
+
+    // A failed command starts open so the exit badge is already readable.
     expect(
       visibleText(
         renderToStaticMarkup(
@@ -229,11 +241,18 @@ describe("ToolCommandCard", () => {
             name="exec"
             status="failed"
             preview={preview}
-            result={null}
+            result={{
+              tool: "exec",
+              exitCode: 1,
+              timedOut: false,
+              outputTruncated: false,
+              stdout: "",
+              stderr: "boom\n",
+            }}
           />,
         ),
       ),
-    ).not.toContain("Failed");
+    ).toContain("Exit 1");
 
     // A live command starts open, so its status is already part of the
     // detail the reader needs now.

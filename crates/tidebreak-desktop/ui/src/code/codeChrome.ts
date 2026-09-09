@@ -529,6 +529,23 @@ export function openCodeEditor(
   );
 }
 
+/** Add an agent preview without selecting it or changing either editor group. */
+export function adoptAgentBrowser(
+  layout: LayoutState,
+  browserId: string,
+): LayoutState {
+  if (codeBrowserIds(layout).includes(browserId)) return layout;
+  return {
+    ...layout,
+    tabs: [...layout.tabs, { type: "browser", browserId }],
+    // The empty Code workspace shows Main agent. Keep that selection when
+    // the first browser becomes available as an inactive editor tab.
+    conversationFocused: layout.tabs.some(isEditorTab)
+      ? layout.conversationFocused
+      : true,
+  };
+}
+
 /**
  * Reorder one group's tabs, keeping whatever was active active.
  *

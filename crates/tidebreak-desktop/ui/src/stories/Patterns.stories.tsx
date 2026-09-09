@@ -138,12 +138,14 @@ $ pnpm test -- TaskPlanCard.dom.test.tsx`}
           </div>
           <div>
             <p className="text-xs font-medium text-muted-foreground">
-              Failed (collapsed)
+              Failed (open with error excerpt)
             </p>
             <ToolCardShell
               icon={<FileText className="size-3.5" aria-hidden="true" />}
               title="Checking the PowerPoint library"
+              subtitle="Error: Cannot find module 'pptxgenjs'"
               label="Run a command: Tool could not complete"
+              defaultExpanded
               badge={
                 <>
                   <Badge variant="outline">Local</Badge>
@@ -156,8 +158,8 @@ $ pnpm test -- TaskPlanCard.dom.test.tsx`}
                 <CircleAlert className="text-muted-foreground size-3.5" />
               }
             >
-              <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-                <pre className="whitespace-pre-wrap">
+              <div className="text-muted-foreground font-mono text-xs">
+                <pre className="overflow-x-auto whitespace-pre">
                   {`Error: Cannot find module 'pptxgenjs'`}
                 </pre>
               </div>

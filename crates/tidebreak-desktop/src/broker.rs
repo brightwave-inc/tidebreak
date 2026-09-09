@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 use tauri::{async_runtime::JoinHandle, AppHandle};
 use tauri_plugin_shell::ShellExt;
 use thiserror::Error;
@@ -17,7 +19,7 @@ use tidebreak_host_broker::{
     RequestId, Response, PROTOCOL_VERSION,
 };
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot},
     time::{timeout, timeout_at, Instant},
@@ -25,7 +27,12 @@ use tokio::{
 
 const SIDECAR_NAME: &str = "tidebreak-host-broker";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// One native broker request can describe a target and then act, or read an
+// Accessibility tree and then capture. Reserve both helper invocations, each
+// including cancellation and release, plus transport and startup overhead.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(
+    tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT.as_secs() * 2 + 5,
+);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_QUEUE_CAPACITY: usize = 32;
 pub(crate) const MUTATION_DISPATCH_WINDOW: Duration = Duration::from_secs(5);
@@ -51,6 +58,7 @@ pub(crate) struct BrokerClient {
     commands: mpsc::Sender<BrokerCommand>,
     admission: StdMutex<BrokerAdmission>,
     task: StdMutex<Option<JoinHandle<()>>>,
+    native_cancel_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +73,12 @@ enum BrokerAdmission {
 impl BrokerClient {
     pub(crate) fn new(app: AppHandle, data_dir: PathBuf, home_dir: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
+        let native_cancel_path = native_cancel_path(&data_dir);
+        if let Err(error) =
+            write_native_generation(&native_cancel_path, &uuid::Uuid::new_v4().to_string())
+        {
+            eprintln!("tidebreak-desktop: native computer control is unavailable: {error}");
+        }
         let task = tauri::async_runtime::spawn(
             BrokerWorker {
                 app,
@@ -81,7 +95,22 @@ impl BrokerClient {
             commands,
             admission: StdMutex::new(BrokerAdmission::Running),
             task: StdMutex::new(Some(task)),
+            native_cancel_path,
         }
+    }
+
+    /// Interrupt helper input without waiting behind a running broker call.
+    pub(crate) fn cancel_native_actions(&self) -> Result<(), BrokerClientError> {
+        write_native_generation(&self.native_cancel_path, "stopped").map_err(|error| {
+            // Missing state also cancels input if an atomic replacement fails.
+            let _ = std::fs::remove_file(&self.native_cancel_path);
+            BrokerClientError::Transport(error.to_string())
+        })
+    }
+
+    pub(crate) fn resume_native_actions(&self) -> Result<(), BrokerClientError> {
+        write_native_generation(&self.native_cancel_path, &uuid::Uuid::new_v4().to_string())
+            .map_err(|error| BrokerClientError::Transport(error.to_string()))
     }
 
     pub(crate) async fn control(
@@ -243,6 +272,7 @@ impl BrokerClient {
     }
 
     pub(crate) async fn shutdown(&self) {
+        let _ = self.cancel_native_actions();
         self.set_admission(BrokerAdmission::Shutdown);
         let (reply, finished) = oneshot::channel();
         let acknowledged = matches!(
@@ -410,21 +440,12 @@ impl BrokerWorker {
         if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(BrokerClientError::DispatchExpired);
         }
-        let exchange = self
+        let result = self
             .session
             .as_mut()
             .expect("session initialized")
-            .exchange(request);
-        let result = match dispatch_deadline {
-            Some(deadline) => timeout_at(deadline, exchange)
-                .await
-                .map_err(|_| BrokerClientError::DispatchExpired)
-                .and_then(|result| result),
-            None => timeout(REQUEST_TIMEOUT, exchange)
-                .await
-                .map_err(|_| BrokerClientError::Timeout)
-                .and_then(|result| result),
-        };
+            .exchange_before(request, dispatch_deadline)
+            .await;
         if result
             .as_ref()
             .is_err_and(BrokerClientError::poisons_session)
@@ -488,6 +509,14 @@ impl Session {
             .args(args)
             .env_clear();
         sidecar = sidecar.envs(minimal_environment());
+        sidecar = sidecar.env(
+            tidebreak_host_broker::HELPER_CANCEL_PATH_ENV,
+            native_cancel_path(data_dir),
+        );
+        #[cfg(target_os = "macos")]
+        if let Some(helper) = computer_use_helper_path(app.path().resource_dir().ok().as_deref()) {
+            sidecar = sidecar.env(tidebreak_host_broker::HELPER_PATH_ENV, helper);
+        }
 
         let command: std::process::Command = sidecar.into();
         let mut command = Command::from(command);
@@ -536,26 +565,16 @@ impl Session {
         &mut self,
         request: SidecarRequest,
     ) -> Result<ExchangeResult, BrokerClientError> {
-        let (expected_channel, expected_id) = match &request {
-            SidecarRequest::Control(envelope) => (Channel::Control, envelope.request_id),
-            SidecarRequest::Operation(envelope) => (Channel::Operation, envelope.request_id),
-        };
-        let mut encoded = serde_json::to_vec(&request).map_err(|_| BrokerClientError::Protocol)?;
-        if encoded.len() > MAX_REQUEST_BYTES {
-            return Err(BrokerClientError::Protocol);
-        }
-        encoded.push(b'\n');
-        let stdin = self.stdin.as_mut().ok_or(BrokerClientError::Closed)?;
-        stdin
-            .write_all(&encoded)
-            .await
-            .map_err(|_| BrokerClientError::Closed)?;
-        stdin.flush().await.map_err(|_| BrokerClientError::Closed)?;
+        self.exchange_before(request, None).await
+    }
 
-        let frame = read_frame(&mut self.stdout).await?;
-        let response: SidecarResponse =
-            serde_json::from_slice(&frame).map_err(|_| BrokerClientError::Protocol)?;
-        decode_response(response, expected_channel, expected_id)
+    async fn exchange_before(
+        &mut self,
+        request: SidecarRequest,
+        dispatch_deadline: Option<Instant>,
+    ) -> Result<ExchangeResult, BrokerClientError> {
+        let stdin = self.stdin.as_mut().ok_or(BrokerClientError::Closed)?;
+        exchange_with_io(request, stdin, &mut self.stdout, dispatch_deadline).await
     }
 
     async fn stop(mut self) {
@@ -565,6 +584,77 @@ impl Session {
         }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+    }
+}
+
+async fn exchange_with_io(
+    request: SidecarRequest,
+    stdin: &mut (impl AsyncWrite + Unpin),
+    stdout: &mut (impl AsyncBufRead + Unpin),
+    dispatch_deadline: Option<Instant>,
+) -> Result<ExchangeResult, BrokerClientError> {
+    if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(BrokerClientError::DispatchExpired);
+    }
+    let confirmed_native_input = matches!(
+        &request,
+        SidecarRequest::Control(ControlEnvelope {
+            request: ControlRequest::CuConfirmControlAction(_),
+            ..
+        })
+    );
+    let (expected_channel, expected_id) = match &request {
+        SidecarRequest::Control(envelope) => (Channel::Control, envelope.request_id),
+        SidecarRequest::Operation(envelope) => (Channel::Operation, envelope.request_id),
+    };
+    let mut encoded = serde_json::to_vec(&request).map_err(|_| BrokerClientError::Protocol)?;
+    if encoded.len() > MAX_REQUEST_BYTES {
+        return Err(BrokerClientError::Protocol);
+    }
+    encoded.push(b'\n');
+    let write = async {
+        stdin
+            .write_all(&encoded)
+            .await
+            .map_err(|_| BrokerClientError::Closed)?;
+        stdin.flush().await.map_err(|_| BrokerClientError::Closed)
+    };
+    let read = async {
+        let frame = read_frame(stdout).await?;
+        let response: SidecarResponse =
+            serde_json::from_slice(&frame).map_err(|_| BrokerClientError::Protocol)?;
+        decode_response(response, expected_channel, expected_id)
+    };
+    if confirmed_native_input {
+        // A confirmed action may leave keys or buttons pressed. Bound admission
+        // separately so the broker stays alive for the helper's full cleanup
+        // window after this single frame has been sent. Never replay the frame.
+        match dispatch_deadline {
+            Some(deadline) => timeout_at(deadline, write)
+                .await
+                .map_err(|_| BrokerClientError::DispatchExpired)?,
+            None => timeout(REQUEST_TIMEOUT, write)
+                .await
+                .map_err(|_| BrokerClientError::Timeout)?,
+        }?;
+        return timeout(REQUEST_TIMEOUT, read)
+            .await
+            .map_err(|_| BrokerClientError::Timeout)
+            .and_then(|result| result);
+    }
+    let exchange = async {
+        write.await?;
+        read.await
+    };
+    match dispatch_deadline {
+        Some(deadline) => timeout_at(deadline, exchange)
+            .await
+            .map_err(|_| BrokerClientError::DispatchExpired)
+            .and_then(|result| result),
+        None => timeout(REQUEST_TIMEOUT, exchange)
+            .await
+            .map_err(|_| BrokerClientError::Timeout)
+            .and_then(|result| result),
     }
 }
 
@@ -663,6 +753,61 @@ async fn read_frame(input: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>, 
     }
 }
 
+/// Resolve only app-owned paths. A harness cannot select the privileged helper.
+fn native_cancel_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("computer-use-control").join("generation")
+}
+
+fn write_native_generation(path: &Path, generation: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing control directory"))?;
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let temporary = directory.join(format!(".generation-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(generation.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn computer_use_helper_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let packaged = resource_dir.map(|dir| dir.join("host-broker/tidebreak-cu-helper"));
+    if let Some(path) = packaged.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+    // Tauri dev runs outside a bundle, after prepare-sidecar stages the helper.
+    #[cfg(debug_assertions)]
+    {
+        let staged =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/host-broker/tidebreak-cu-helper");
+        if staged.is_file() {
+            return Some(staged);
+        }
+    }
+    None
+}
+
 fn minimal_environment() -> Vec<(OsString, OsString)> {
     MINIMAL_ENV_KEYS
         .iter()
@@ -720,12 +865,209 @@ impl BrokerClientError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_deadline_allows_two_helpers_with_cancellation_and_release() {
+        assert!(
+            super::REQUEST_TIMEOUT
+                >= tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT * 2
+                    + std::time::Duration::from_secs(5)
+        );
+    }
+
     use tidebreak_host_broker::{
         sidecar::{SidecarResponse, TransportError, TransportErrorCode},
         ControlResponseEnvelope, ControlResult, HelloResult, Response,
     };
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_control_waits_for_cleanup_after_dispatch_deadline_without_replay() {
+        let request_id = RequestId::new();
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let expected_request = serde_json::to_vec(&request).unwrap();
+        let (mut client_write, mut server_read) = tokio::io::duplex(4096);
+        let (mut server_write, client_read) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut reader = BufReader::new(&mut server_read);
+            assert_eq!(read_frame(&mut reader).await.unwrap(), expected_request);
+            tokio::time::sleep(
+                tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                    + Duration::from_secs(6),
+            )
+            .await;
+            let response = SidecarResponse::Control(ControlResponseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id,
+                response: Response::Error(tidebreak_host_broker::ErrorResponse {
+                    code: ErrorCode::Internal,
+                    message: "input cleanup completed".into(),
+                    retryable: false,
+                }),
+            });
+            let mut encoded = serde_json::to_vec(&response).unwrap();
+            encoded.push(b'\n');
+            server_write.write_all(&encoded).await.unwrap();
+            let mut extra = Vec::new();
+            reader.read_to_end(&mut extra).await.unwrap();
+            assert!(extra.is_empty(), "confirmed control must never replay");
+        });
+        let started = Instant::now();
+        let result = exchange_with_io(
+            request,
+            &mut client_write,
+            &mut BufReader::new(client_read),
+            Some(started + MUTATION_DISPATCH_WINDOW),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BrokerClientError::Broker { ref message, .. }) if message == "input cleanup completed"),
+            "confirmation must receive the cleanup response, not expire at dispatch deadline"
+        );
+        assert!(Instant::now() > started + MUTATION_DISPATCH_WINDOW);
+        drop(client_write);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_native_input_waits_for_description_and_cleanup() {
+        let request_id = RequestId::new();
+        let request = SidecarRequest::Operation(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            context: tidebreak_host_broker::ExecutionContext::standalone(uuid::Uuid::new_v4())
+                .unwrap(),
+            request: tidebreak_host_broker::OperationRequest::CuClick {
+                bundle_id: "dev.tidebreak.fixture".into(),
+                target: tidebreak_host_broker::ElementTargetWire {
+                    element_id: Some("0.1".into()),
+                    ..Default::default()
+                },
+                button: None,
+                click_count: None,
+                execution_mode: tidebreak_host_broker::computer_use::ExecutionMode::Background,
+            },
+        });
+        let (mut client_write, server_read) = tokio::io::duplex(4096);
+        let (mut server_write, client_read) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            read_frame(&mut BufReader::new(server_read)).await.unwrap();
+            tokio::time::sleep(
+                tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT
+                    + Duration::from_secs(6),
+            )
+            .await;
+            let response =
+                SidecarResponse::Operation(tidebreak_host_broker::OperationResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    response: Response::Error(tidebreak_host_broker::ErrorResponse {
+                        code: ErrorCode::Internal,
+                        message: "description and input cleanup completed".into(),
+                        retryable: false,
+                    }),
+                });
+            let mut encoded = serde_json::to_vec(&response).unwrap();
+            encoded.push(b'\n');
+            server_write.write_all(&encoded).await.unwrap();
+        });
+        let result = exchange_with_io(
+            request,
+            &mut client_write,
+            &mut BufReader::new(client_read),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BrokerClientError::Broker { ref message, .. }) if message == "description and input cleanup completed"),
+            "the response bound must include both helper invocations"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_confirmation_is_not_dispatched() {
+        use tokio::io::AsyncReadExt as _;
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let (mut write, mut peer) = tokio::io::duplex(4096);
+        let result = exchange_with_io(
+            request,
+            &mut write,
+            &mut BufReader::new(tokio::io::empty()),
+            Some(Instant::now()),
+        )
+        .await;
+        assert!(matches!(result, Err(BrokerClientError::DispatchExpired)));
+        drop(write);
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty(), "expired confirmation must send no frame");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_control_response_still_has_a_cleanup_bound() {
+        let request = SidecarRequest::Control(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::CuConfirmControlAction(
+                tidebreak_host_broker::CuConfirmControlActionRequest {
+                    confirmation_id: uuid::Uuid::new_v4(),
+                },
+            ),
+        });
+        let (mut write, _peer) = tokio::io::duplex(4096);
+        let (_server, read) = tokio::io::duplex(4096);
+        let started = Instant::now();
+        let result = exchange_with_io(
+            request,
+            &mut write,
+            &mut BufReader::new(read),
+            Some(started + MUTATION_DISPATCH_WINDOW),
+        )
+        .await;
+        assert!(matches!(result, Err(BrokerClientError::Timeout)));
+        assert_eq!(Instant::now() - started, REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn native_stop_and_resume_replace_the_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = native_cancel_path(directory.path());
+        let first = uuid::Uuid::new_v4().to_string();
+        write_native_generation(&path, &first).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        write_native_generation(&path, "stopped").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "stopped");
+        let resumed = uuid::Uuid::new_v4().to_string();
+        write_native_generation(&path, &resumed).unwrap();
+        assert_ne!(first, resumed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), resumed);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn quiesce_closes_admission_before_its_queue_barrier() {
@@ -734,6 +1076,7 @@ mod tests {
             commands,
             admission: StdMutex::new(BrokerAdmission::Running),
             task: StdMutex::new(None),
+            native_cancel_path: PathBuf::new(),
         };
         let (first_reply, _first_finished) = oneshot::channel();
         client

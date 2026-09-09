@@ -6114,7 +6114,10 @@ async fn background_roles_walk_the_callers_entitlements() {
     .unwrap()
     .expect("the caller's entitlements must serve the utility role");
     assert_eq!(utility.provider, providers::ProviderKind::ModelGateway);
-    assert_eq!(utility.id, "acme-opus");
+    // Cheapest-first over the caller's snapshot: acme-gpt has the smaller
+    // context window. Gateway protocols enforce structured output, so it is
+    // eligible even without a curated alias map.
+    assert_eq!(utility.id, "acme-gpt");
 
     assert!(
         model_roles::resolve(
@@ -6129,6 +6132,59 @@ async fn background_roles_walk_the_callers_entitlements() {
         .unwrap()
         .is_none(),
         "background work with no caller must be skipped, never run as somebody else"
+    );
+}
+
+/// A hosted caller's catalog may list only deployment-local model ids with no
+/// curated alias. Gateway protocols still enforce structured output, so the
+/// utility role must resolve — otherwise workspace titling silently leaves
+/// every new checkout on its generated two-word name.
+#[tokio::test]
+async fn background_roles_accept_gateway_models_without_curated_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let snapshot = providers::GatewayModelSnapshot {
+        gateway_url: "https://gateway.example".to_owned(),
+        installation_id: None,
+        models: vec![providers::CustomModelConfig {
+            id: "acme-inhouse-llm".into(),
+            display_name: Some("Acme In-house".into()),
+            context_window: 64_000,
+            max_output_tokens: 8_000,
+            ..Default::default()
+        }],
+        model_protocols: [(
+            "acme-inhouse-llm".to_owned(),
+            providers::GatewayModelProtocol::OpenaiResponses,
+        )]
+        .into_iter()
+        .collect(),
+        model_reasoning_efforts: Default::default(),
+        member_catalog: Some("v1".into()),
+        catalog_etag: None,
+    };
+
+    let utility = model_roles::resolve(
+        &*store,
+        &*secrets,
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+        model_roles::ModelRole::Utility,
+        Some(&snapshot),
+    )
+    .await
+    .unwrap()
+    .expect("a gateway-only model must still serve the utility role");
+    assert_eq!(utility.provider, providers::ProviderKind::ModelGateway);
+    assert_eq!(utility.id, "acme-inhouse-llm");
+    assert!(
+        utility.supports_structured_output,
+        "gateway protocols enforce structured output without a curated map"
     );
 }
 

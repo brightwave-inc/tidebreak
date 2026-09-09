@@ -196,6 +196,11 @@ export const PermissionsConfigured: Story = {
   args: { panel: "permissions" },
 };
 
+export const PermissionsSavedAppsCompact: Story = {
+  args: { panel: "permissions" },
+  globals: { viewport: { value: "compact", isRotated: false } },
+};
+
 export const PermissionsLoading: Story = {
   args: { panel: "permissions", state: "loading" },
 };

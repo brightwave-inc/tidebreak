@@ -2,11 +2,20 @@ import { useRouter } from "expo-router";
 import { useMemo, useState } from "react";
 import { Pressable, Text, TextInput } from "react-native";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
-import { AttachError, discoverMachine, probePolicy } from "../src/lib/attach";
+import {
+  AttachError,
+  REASON_UNREACHABLE,
+  discoverMachine,
+  probePolicy,
+} from "../src/lib/attach";
 import { tokenStore } from "../src/session/runtime";
 import { useSessionStore } from "../src/session/store";
 
 type Stage = "idle" | "discover" | "verify" | "probe";
+
+type Failure =
+  | { kind: "unreachable"; detail: string }
+  | { kind: "error"; message: string };
 
 export default function AttachScreen() {
   const router = useRouter();
@@ -14,7 +23,7 @@ export default function AttachScreen() {
   const setSession = useSessionStore((state) => state.setSession);
   const [url, setUrl] = useState(session?.machinePrefillUrl ?? "");
   const [stage, setStage] = useState<Stage>("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
 
   const hint = useMemo(() => {
     switch (stage) {
@@ -34,7 +43,7 @@ export default function AttachScreen() {
       router.replace("/");
       return;
     }
-    setError(null);
+    setFailure(null);
     setStage("discover");
     try {
       const discovered = await discoverMachine(url, session.gatewayUrl);
@@ -51,10 +60,15 @@ export default function AttachScreen() {
       setSession(tokenStore.snapshot());
       router.replace("/home");
     } catch (err) {
-      if (err instanceof AttachError) {
-        setError(`${err.stage}: ${err.message}`);
+      if (err instanceof AttachError && err.reason === REASON_UNREACHABLE) {
+        setFailure({ kind: "unreachable", detail: err.message });
+      } else if (err instanceof AttachError) {
+        setFailure({ kind: "error", message: `${err.stage}: ${err.message}` });
       } else {
-        setError(err instanceof Error ? err.message : "Attach failed.");
+        setFailure({
+          kind: "error",
+          message: err instanceof Error ? err.message : "Attach failed.",
+        });
       }
     } finally {
       setStage("idle");
@@ -80,7 +94,25 @@ export default function AttachScreen() {
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"
       />
       {hint ? <Text className="text-sm text-info-foreground">{hint}</Text> : null}
-      {error ? <ErrorText>{error}</ErrorText> : null}
+      {failure?.kind === "unreachable" ? (
+        <>
+          <ErrorText>
+            Couldn’t reach the machine. Hosted machines often sit on a private
+            network — check that this phone is connected to the VPN or network
+            the machine requires, then retry. ({failure.detail})
+          </ErrorText>
+          <Pressable
+            disabled={stage !== "idle"}
+            className="rounded-lg border border-border px-4 py-3"
+            onPress={() => void attach()}
+          >
+            <Text className="text-center text-base font-medium text-foreground">
+              Retry
+            </Text>
+          </Pressable>
+        </>
+      ) : null}
+      {failure?.kind === "error" ? <ErrorText>{failure.message}</ErrorText> : null}
       <Pressable
         disabled={stage !== "idle" || url.trim().length === 0}
         className="rounded-lg bg-primary px-4 py-3"

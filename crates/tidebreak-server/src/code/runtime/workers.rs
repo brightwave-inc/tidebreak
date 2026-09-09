@@ -267,13 +267,45 @@ impl CodeRuntime {
                 };
                 Some(
                     self.browser_tokens
-                        .issue_with_semantic_actions(
+                        .issue_with_capabilities(
                             browser_subject,
                             bridge,
-                            runtime.supports_semantic_actions(),
+                            crate::code::browser_channel::BrowserChannelCapabilities {
+                                semantic_actions: runtime.supports_semantic_actions(),
+                                lifecycle: runtime.supports_lifecycle(),
+                                developer_diagnostics: runtime.supports_developer_diagnostics(),
+                            },
                         )
                         .map_err(ServerError::internal)?,
                 )
+            }
+            _ => None,
+        };
+
+        // Mint a native computer-use channel only when the desktop native
+        // runtime, its bridge executable, and a workspace are all present.
+        // The session-private capfile path is injected through
+        // TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app token
+        // enters argv or the model. Absent runtime or bridge = no capfile,
+        // no channel, and no native tools on any harness.
+        let native = match (
+            self.native_runtime.as_ref(),
+            self.native_bridge_command.as_ref(),
+            session.workspace_id,
+        ) {
+            (Some(runtime), Some(bridge), Some(workspace)) if runtime.is_available() => {
+                let capfile = self
+                    .native_tokens
+                    .issue(NativeSubject {
+                        owner: session.owner.clone(),
+                        workspace,
+                        session: session.id,
+                    })
+                    .map_err(ServerError::internal)?;
+                Some(tidebreak_harness::NativeChannelSpec::new(
+                    capfile,
+                    bridge.clone(),
+                ))
             }
             _ => None,
         };
@@ -375,6 +407,7 @@ impl CodeRuntime {
             binary: binary.clone(),
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
+            native,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {

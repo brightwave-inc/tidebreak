@@ -18,8 +18,8 @@
 //! * Capfiles are written create-new (mode 0600 on Unix) → sync → drop →
 //!   atomic rename. Temp files are deleted on every post-create failure path.
 //! * The JSON payload carries only `version`, `endpoint`, `token`, and the
-//!   runtime's `semantic_actions` capability — no owner, workspace, or
-//!   session identifiers.
+//!   runtime's `semantic_actions`, `lifecycle`, and `developer_diagnostics`
+//!   capabilities — no owner, workspace, or session identifiers.
 //! * In-memory authority is revoked before best-effort file deletion.
 
 use std::collections::HashMap;
@@ -41,6 +41,15 @@ const CAPFILE_PREFIX: &str = "browser-cap-";
 const CAPFILE_SUBDIR: &str = "browser-caps";
 
 // ── data types ──────────────────────────────────────────────────────────────
+
+/// Runtime capability flags recorded in a session capfile so the MCP bridge
+/// only registers tools the native runtime can actually serve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BrowserChannelCapabilities {
+    pub semantic_actions: bool,
+    pub lifecycle: bool,
+    pub developer_diagnostics: bool,
+}
 
 /// The `{owner, workspace, session}` subject derived from a token look-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,15 +177,38 @@ impl BrowserTokenRegistry {
         subject: BrowserSubject,
         bridge_command: &Path,
     ) -> Result<BrowserChannelSpec, String> {
-        self.issue_with_semantic_actions(subject, bridge_command, false)
+        self.issue_with_capabilities(
+            subject,
+            bridge_command,
+            BrowserChannelCapabilities::default(),
+        )
     }
 
     /// Mint a channel and record whether its runtime supports native actions.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn issue_with_semantic_actions(
         &self,
         subject: BrowserSubject,
         bridge_command: &Path,
         semantic_actions: bool,
+    ) -> Result<BrowserChannelSpec, String> {
+        self.issue_with_capabilities(
+            subject,
+            bridge_command,
+            BrowserChannelCapabilities {
+                semantic_actions,
+                ..BrowserChannelCapabilities::default()
+            },
+        )
+    }
+
+    /// Mint a channel and record the exact tool capabilities its runtime
+    /// reports, so the bridge's advertised tool set stays honest.
+    pub fn issue_with_capabilities(
+        &self,
+        subject: BrowserSubject,
+        bridge_command: &Path,
+        capabilities: BrowserChannelCapabilities,
     ) -> Result<BrowserChannelSpec, String> {
         if !bridge_command.is_absolute() {
             return Err(format!(
@@ -212,7 +244,7 @@ impl BrowserTokenRegistry {
             CAPFILE_VERSION,
             &loopback_base,
             &token,
-            semantic_actions,
+            capabilities,
         ) {
             Ok(()) => {}
             Err(e) => return Err(e),
@@ -234,7 +266,9 @@ impl BrowserTokenRegistry {
 
         Ok(
             BrowserChannelSpec::new(capfile_path, bridge_command.to_path_buf())
-                .with_semantic_actions(semantic_actions),
+                .with_semantic_actions(capabilities.semantic_actions)
+                .with_lifecycle(capabilities.lifecycle)
+                .with_developer_diagnostics(capabilities.developer_diagnostics),
         )
     }
 
@@ -349,7 +383,7 @@ fn write_capfile(
     version: u32,
     loopback_base: &str,
     token: &str,
-    semantic_actions: bool,
+    capabilities: BrowserChannelCapabilities,
 ) -> Result<(), String> {
     let parent = path
         .parent()
@@ -373,7 +407,9 @@ fn write_capfile(
         "version": version,
         "endpoint": endpoint,
         "token": token,
-        "semantic_actions": semantic_actions,
+        "semantic_actions": capabilities.semantic_actions,
+        "lifecycle": capabilities.lifecycle,
+        "developer_diagnostics": capabilities.developer_diagnostics,
     });
 
     let body_bytes =
@@ -632,7 +668,7 @@ mod tests {
     // ── capfile schema ───────────────────────────────────────────────────
 
     #[test]
-    fn capfile_schema_is_exact_and_defaults_semantic_actions_off() {
+    fn capfile_schema_is_exact_and_defaults_optional_capabilities_off() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("schema");
@@ -642,20 +678,31 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
 
         let obj = value.as_object().expect("capfile must be a JSON object");
-        let expected: HashSet<&str> = ["version", "endpoint", "token", "semantic_actions"]
-            .iter()
-            .copied()
-            .collect();
+        let expected: HashSet<&str> = [
+            "version",
+            "endpoint",
+            "token",
+            "semantic_actions",
+            "lifecycle",
+            "developer_diagnostics",
+        ]
+        .iter()
+        .copied()
+        .collect();
         let actual: HashSet<&str> = obj.keys().map(String::as_str).collect();
 
         assert_eq!(
             actual, expected,
-            "capfile must have exactly {{version, endpoint, token, semantic_actions}} keys"
+            "capfile must contain only the endpoint, token, version, and declared capability flags"
         );
         assert_eq!(value["version"], CAPFILE_VERSION);
         assert!(value["token"].as_str().unwrap().starts_with("tbreak_bt_"));
         assert_eq!(value["semantic_actions"], false);
+        assert_eq!(value["lifecycle"], false);
+        assert_eq!(value["developer_diagnostics"], false);
         assert!(!spec.semantic_actions);
+        assert!(!spec.lifecycle);
+        assert!(!spec.developer_diagnostics);
     }
 
     #[test]
@@ -670,6 +717,39 @@ mod tests {
 
         assert_eq!(value["semantic_actions"], true);
         assert!(spec.semantic_actions);
+    }
+
+    #[test]
+    fn issued_spec_and_capfile_retain_each_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        for semantic_actions in [false, true] {
+            for lifecycle in [false, true] {
+                for developer_diagnostics in [false, true] {
+                    let capabilities = BrowserChannelCapabilities {
+                        semantic_actions,
+                        lifecycle,
+                        developer_diagnostics,
+                    };
+                    let spec = reg
+                        .issue_with_capabilities(
+                            subject("capabilities"),
+                            &test_bridge_command(),
+                            capabilities,
+                        )
+                        .unwrap();
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&spec.capability_file).unwrap())
+                            .unwrap();
+                    assert_eq!(spec.semantic_actions, semantic_actions);
+                    assert_eq!(spec.lifecycle, lifecycle);
+                    assert_eq!(spec.developer_diagnostics, developer_diagnostics);
+                    assert_eq!(value["semantic_actions"], spec.semantic_actions);
+                    assert_eq!(value["lifecycle"], spec.lifecycle);
+                    assert_eq!(value["developer_diagnostics"], spec.developer_diagnostics);
+                }
+            }
+        }
     }
 
     #[test]

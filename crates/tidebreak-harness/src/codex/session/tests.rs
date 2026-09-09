@@ -10,6 +10,7 @@ fn app_server_plan_is_clean() {
         &[],
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -23,6 +24,7 @@ fn extra_bypass_flag_is_rejected() {
         &["--dangerously-bypass-approvals-and-sandbox".into()],
         std::path::Path::new("/workspace"),
         &[],
+        None,
         None,
         None,
     )
@@ -278,6 +280,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         binary: Some(PathBuf::from("codex")),
         sink,
         browser: None,
+        native: None,
     })
 }
 
@@ -586,6 +589,7 @@ fn spec_for(
         binary: Some(binary.to_path_buf()),
         sink: Arc::new(SilentSink),
         browser: None,
+        native: None,
     }
 }
 
@@ -1314,12 +1318,76 @@ async fn native_steer_uses_the_active_turn_id_and_waits_for_ack() {
 // ── Browser MCP advertisement contract tests ──
 
 #[test]
+fn native_present_appends_exactly_one_trusted_config_override() {
+    let spec = crate::NativeChannelSpec::new(
+        std::path::PathBuf::from("/tmp/native-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let plan = compose_app_server_plan(
+        std::path::Path::new("/usr/bin/codex"),
+        &[],
+        std::path::Path::new("/workspace"),
+        &[],
+        None,
+        Some(&spec),
+        None,
+    )
+    .unwrap();
+    let overrides: Vec<_> = plan
+        .argv
+        .iter()
+        .filter(|arg| arg.starts_with("mcp_servers.tb-native="))
+        .collect();
+    assert_eq!(overrides.len(), 1);
+    let value = overrides[0];
+    assert!(value.contains("\"/usr/local/bin/tidebreak\""));
+    assert!(value.contains("args=[\"computer-mcp\"]"));
+    assert!(value.contains("env_vars=[\"TIDEBREAK_NATIVE_CAPFILE\"]"));
+    // The capfile path is inherited through the environment, never argv.
+    assert!(!plan
+        .argv
+        .iter()
+        .any(|arg| arg.contains("/tmp/native-cap.json")));
+}
+
+#[test]
+fn browser_and_native_each_get_their_own_override() {
+    let browser = BrowserChannelSpec::new(
+        std::path::PathBuf::from("/tmp/browser-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let native = crate::NativeChannelSpec::new(
+        std::path::PathBuf::from("/tmp/native-cap.json"),
+        std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+    );
+    let plan = compose_app_server_plan(
+        std::path::Path::new("/usr/bin/codex"),
+        &[],
+        std::path::Path::new("/workspace"),
+        &[],
+        Some(&browser),
+        Some(&native),
+        None,
+    )
+    .unwrap();
+    assert!(plan
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("mcp_servers.tb-browser=")));
+    assert!(plan
+        .argv
+        .iter()
+        .any(|arg| arg.starts_with("mcp_servers.tb-native=")));
+}
+
+#[test]
 fn browser_absent_produces_same_argv_as_before() {
     let plan = compose_app_server_plan(
         std::path::Path::new("/usr/bin/codex"),
         &[],
         std::path::Path::new("/workspace"),
         &[],
+        None,
         None,
         None,
     )
@@ -1339,6 +1407,7 @@ fn browser_present_appends_exactly_one_trusted_config_override() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1373,6 +1442,7 @@ fn browser_override_is_after_extra_argv() {
         &[],
         Some(&spec),
         None,
+        None,
     )
     .unwrap();
     let browser_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -1393,6 +1463,7 @@ fn browser_capfile_path_is_never_in_argv() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1415,6 +1486,7 @@ fn browser_env_key_is_stripped_from_plan_even_when_browser_is_some() {
         std::path::Path::new("/workspace"),
         &[("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into())],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1440,6 +1512,7 @@ fn session_relay_key_survives_the_reserved_namespace_strip() {
             ("TIDEBREAK_LLM_KEY".into(), "tbreak_hl_test".into()),
             ("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into()),
         ],
+        None,
         None,
         Some("TIDEBREAK_LLM_KEY"),
     )
@@ -1467,6 +1540,7 @@ fn relay_key_is_stripped_when_no_relay_is_wired() {
         &[("TIDEBREAK_LLM_KEY".into(), "from-settings".into())],
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(plan.env.is_empty(), "{:?}", plan.env);
@@ -1484,6 +1558,7 @@ fn bridge_command_with_spaces_remains_one_command_value() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1509,6 +1584,7 @@ fn bridge_command_with_backslashes_is_escaped() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1537,6 +1613,7 @@ fn bridge_command_with_embedded_quote_is_escaped() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
     )
     .unwrap();
@@ -1567,8 +1644,269 @@ fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
         &[],
         Some(&spec),
         None,
+        None,
     )
     .expect_err("non-UTF-8 bridge paths must fail closed");
 
     assert!(error.to_string().contains("not valid UTF-8"));
+}
+
+#[cfg(unix)]
+const FAKE_MCP_APPROVAL_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+*'"method":"initialize"'*)
+  printf '{"id":%s,"result":{"userAgent":"fake/0.153.0"}}\n' "$id"
+  ;;
+*'"method":"thread/start"'*)
+  printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.153.0","turns":[]}}}\n' "$id"
+  ;;
+*'"method":"turn/start"'*)
+  printf '{"id":%s,"result":{"turn":{"id":"TURN-1","status":"inProgress"}}}\n' "$id"
+  cat "$FAKE_MCP_PREFIX"
+  ;;
+*'"result":'*)
+  printf '%s\n' "$line" >> "$FAKE_CODEX_CALLS"
+  cat "$FAKE_MCP_SUFFIX"
+  ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+fn mcp_approval_session(
+    dir: &std::path::Path,
+    initial_mode: PermissionMode,
+    unsupported: bool,
+) -> (Arc<CodexSession>, Arc<RecordingSink>) {
+    let capture = include_str!("../../../fixtures/codex/0.153.0/mcp-approval-approve.ndjson");
+    let mut frames: Vec<Value> = capture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
+        .collect();
+    let thread_id = frames[0]["params"]["threadId"].as_str().unwrap().to_owned();
+    let turn_id = frames[0]["params"]["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    if unsupported {
+        frames[2]["params"]["mode"] = json!("url");
+        frames[2]["params"]["url"] = json!("https://example.invalid/consent");
+        frames[2]["params"]["elicitationId"] = json!("generic-consent");
+    }
+    let text = |frames: &[Value]| {
+        frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .to_string()
+                    .replace(&thread_id, "THREAD-1")
+                    .replace(&turn_id, "TURN-1")
+                    + "\n"
+            })
+            .collect::<String>()
+    };
+    std::fs::write(dir.join("prefix"), text(&frames[..3])).unwrap();
+    std::fs::write(dir.join("suffix"), text(&frames[4..])).unwrap();
+    let binary = dir.join("codex");
+    write_app_server(&binary, FAKE_MCP_APPROVAL_SERVER);
+    let mut spec = spec_for(dir, &binary, None);
+    spec.permission_mode = initial_mode;
+    for (key, file) in [("FAKE_MCP_PREFIX", "prefix"), ("FAKE_MCP_SUFFIX", "suffix")] {
+        spec.extra_env
+            .push((key.into(), dir.join(file).to_string_lossy().into_owned()));
+    }
+    let sink = Arc::new(RecordingSink::default());
+    spec.sink = sink.clone();
+    (Arc::new(CodexSession::new(spec)), sink)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_tool_approvals_follow_current_mode_and_reply_on_the_wire() {
+    for (initial, current, decision) in [
+        (
+            PermissionMode::Auto,
+            PermissionMode::Auto,
+            ApprovalDecision::Approve,
+        ),
+        (
+            PermissionMode::Ask,
+            PermissionMode::Ask,
+            ApprovalDecision::Deny {
+                feedback: Some("No capture".into()),
+            },
+        ),
+        (
+            PermissionMode::Allow,
+            PermissionMode::Ask,
+            ApprovalDecision::Approve,
+        ),
+        (
+            PermissionMode::Ask,
+            PermissionMode::Allow,
+            ApprovalDecision::Approve,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, sink) = mcp_approval_session(dir.path(), initial, false);
+        session.set_permission_mode(current).await.unwrap();
+        let running = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(turn("Capture fixture")).await }
+        });
+        if current != PermissionMode::Allow {
+            let approval = timeout(Duration::from_secs(2), async {
+                loop {
+                    let approval =
+                        sink.events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find_map(|event| match event {
+                                HarnessEvent::ApprovalRequested {
+                                    harness_ref,
+                                    kind: Some(tidebreak_core::ApprovalKind::Other { summary }),
+                                    ..
+                                } if summary == "mcp__tb-browser__browser_screenshot" => {
+                                    Some(harness_ref.clone())
+                                }
+                                _ => None,
+                            });
+                    if let Some(approval) = approval {
+                        break approval;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recognized MCP request never reached the approval policy");
+            assert!(
+                calls(dir.path()).is_empty(),
+                "approval must wait for a decision"
+            );
+            assert!(matches!(
+                session
+                    .decide(
+                        approval.clone(),
+                        ApprovalDecision::Answers {
+                            answers: Vec::new()
+                        }
+                    )
+                    .await,
+                Err(HarnessError::DecisionUnsupported(_))
+            ));
+            session
+                .decide(approval.clone(), decision.clone())
+                .await
+                .unwrap();
+            assert!(
+                session.decide(approval, decision.clone()).await.is_err(),
+                "do not replay a consumed request"
+            );
+        }
+        timeout(Duration::from_secs(2), running)
+            .await
+            .expect("approval left the turn hanging")
+            .unwrap()
+            .unwrap();
+        let messages = calls(dir.path());
+        assert_eq!(messages.len(), 1);
+        let response: Value = serde_json::from_str(&messages[0]).unwrap();
+        let accept = matches!(decision, ApprovalDecision::Approve);
+        assert_eq!(
+            response,
+            json!({"id":0,"result":{
+                "action":if accept {"accept"} else {"decline"},
+                "content":if accept {json!({})} else {Value::Null},"_meta":null,
+            }})
+        );
+        assert!(sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::ApprovalResolved { .. })));
+        if current == PermissionMode::Allow {
+            assert!(!sink
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. })));
+        }
+        session.park().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unsupported_mcp_elicitation_declines_without_parking_even_in_allow_mode() {
+    for mode in [PermissionMode::Ask, PermissionMode::Allow] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, sink) = mcp_approval_session(dir.path(), mode, true);
+        timeout(
+            Duration::from_secs(2),
+            session.run_turn(turn("unsupported form")),
+        )
+        .await
+        .expect("unsupported MCP elicitation hung")
+        .unwrap();
+        let messages = calls(dir.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&messages[0]).unwrap(),
+            json!({"id":0,"result":{"action":"decline","content":null,"_meta":null}})
+        );
+        let events = sink.events.lock().unwrap().clone();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::HarnessNotice {
+                level: tidebreak_core::HarnessNoticeLevel::Warning,
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
+        session.park().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn duplicate_mcp_elicitation_rejects_stale_approval_before_server_resolution() {
+    let sink = Arc::new(RecordingSink::default());
+    let session = unit_session(sink.clone());
+    let capture = include_str!("../../../fixtures/codex/0.153.0/mcp-approval-approve.ndjson");
+    let frames: Vec<Value> = capture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
+        .collect();
+    for frame in &frames[..3] {
+        session.emit_parsed(&frame.to_string()).await;
+    }
+    // No serverRequest/resolved or item/completed frame has arrived.
+    session.emit_parsed(&frames[2].to_string()).await;
+    let result = session
+        .decide(
+            HarnessApprovalRef::engine("call_fixture"),
+            ApprovalDecision::Approve,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(HarnessError::Other(ref message)) if message.contains("no parked approval"))
+    );
+    assert!(sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event,
+        HarnessEvent::ApprovalResolved { harness_ref, decision: ApprovalDecision::Deny { .. } }
+        if harness_ref.call_id == "call_fixture")));
 }

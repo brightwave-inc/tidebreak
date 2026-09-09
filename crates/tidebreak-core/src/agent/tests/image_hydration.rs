@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,9 +12,10 @@ use crate::context;
 use crate::db::DbStore;
 use crate::error::Result;
 use crate::event::AgentEvent;
-use crate::image::{ImageMediaType, ImageRef};
+use crate::image::{ImageData, ImageMediaType, ImageRef};
 use crate::model::Chat;
 use crate::provider::{ChatRequest, ProviderEvent, ProviderId};
+use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolSpec};
 
 /// An in-memory blob store: enough to prove hydration reads the bytes the
 /// attachment names, without a filesystem in the way.
@@ -113,6 +115,7 @@ async fn captured_request(
         store,
         AgentConfig {
             model: "fake".into(),
+            image_input: true,
             ..Default::default()
         },
     );
@@ -282,6 +285,168 @@ async fn hydration_is_bounded_so_a_long_chat_cannot_grow_the_outbound_body() {
     {
         if let ContentBlock::Image { image } = block {
             assert!(request.images.contains(image.blob_id));
+        }
+    }
+}
+
+struct ScreenshotTool {
+    name: &'static str,
+    images: Vec<(ImageRef, ImageData)>,
+}
+
+#[async_trait]
+impl Tool for ScreenshotTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.into(),
+            description: "Return screenshot fixtures".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+        Ok(ToolOutput::text("captured").with_images(self.images.clone()))
+    }
+}
+
+struct ScreenshotProvider {
+    name: &'static str,
+    called: AtomicBool,
+}
+
+#[async_trait]
+impl ModelProvider for ScreenshotProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("screenshot")
+    }
+
+    async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let events = if self.called.swap(true, Ordering::SeqCst) {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "done".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "capture".into(),
+                    name: self.name.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
+#[tokio::test]
+async fn screenshot_tools_retain_all_images_through_stored_results_and_rebuilt_transcripts() {
+    for name in [
+        crate::BROWSER_SCREENSHOT_TOOL,
+        crate::COMPUTER_CAPTURE_SCREEN_TOOL,
+        crate::CHROME_SCREENSHOT_TOOL,
+    ] {
+        let (store, chat, _dir) = store_with_chat(&format!("{name}.db")).await;
+        let blobs = Arc::new(MemBlobs::default());
+        let images: Vec<_> = [
+            b"first screenshot".as_slice(),
+            b"second screenshot".as_slice(),
+        ]
+        .into_iter()
+        .map(|pixels| {
+            (
+                image_ref(uuid::Uuid::new_v4(), pixels),
+                ImageData::new(ImageMediaType::Png, pixels.to_vec()),
+            )
+        })
+        .collect();
+        let agent = Agent::new(
+            Arc::new(ScreenshotProvider {
+                name,
+                called: AtomicBool::new(false),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ScreenshotTool {
+                name,
+                images: images.clone(),
+            }))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                image_input: true,
+                ..Default::default()
+            },
+        )
+        .with_blobs(blobs.clone());
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "capture the app", &tx).await.unwrap();
+        drop(tx);
+        let _: Vec<AgentEvent> = rx.collect().await;
+        drop(agent);
+
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 1, "{name}");
+        let expected: Vec<_> = images.iter().map(|(image, _)| *image).collect();
+        assert_eq!(
+            calls[0].result_preview,
+            Some(crate::ToolResultPreview::Images {
+                images: expected.clone()
+            }),
+            "{name} must retain every screenshot reference in its stored result",
+        );
+        for (image, _) in &images {
+            assert!(
+                !store
+                    .ensure_orphan_blob_retirement(image.blob_id)
+                    .await
+                    .unwrap(),
+                "{name} must keep its screenshot bytes available for later turns",
+            );
+        }
+
+        // This agent has no screenshot tool. Only the stored result can supply
+        // the images in the request built for this later turn.
+        let request = captured_request(
+            store,
+            Some(blobs as Arc<dyn BlobStore>),
+            &chat,
+            "compare the captured screens",
+        )
+        .await;
+        let restored: Vec<_> = request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Image { image } => Some(*image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored, expected, "{name} must preserve image order");
+        for (image, data) in &images {
+            assert_eq!(
+                request
+                    .images
+                    .get(image.blob_id)
+                    .expect("restored screenshot bytes")
+                    .bytes(),
+                data.bytes(),
+                "{name}",
+            );
         }
     }
 }

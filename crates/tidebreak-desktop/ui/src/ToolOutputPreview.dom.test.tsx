@@ -35,4 +35,25 @@ describe("ToolOutputPreview", () => {
     expect(screen.queryByRole("button", { name: /more line/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
   });
+
+  it("follows the tail when asked, and still offers the full text", async () => {
+    render(
+      <ToolOutputPreview
+        text={twelveLines}
+        collapsedLines={4}
+        followTail
+        bare
+      />,
+    );
+
+    const body = screen.getByLabelText("Output");
+    expect(body.textContent).toContain("line 12");
+    expect(body.textContent).not.toMatch(/^line 1$/m);
+    expect(body.textContent).not.toContain("line 8");
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "· · · 8 more lines" }),
+    );
+    expect(screen.getByLabelText("Output").textContent).toMatch(/^line 1$/m);
+  });
 });
