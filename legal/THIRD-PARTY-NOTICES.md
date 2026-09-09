@@ -2000,19 +2000,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/chanced/jsonptr
 - License text: `LICENSE-APACHE` ([L-ae8de7e1b783](#l-ae8de7e1b783)), `LICENSE-MIT` ([L-055a17110636](#l-055a17110636))
 
-### jsonschema 0.52.0
+### jsonschema 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: `LICENSE` ([L-19c8b10a10ca](#l-19c8b10a10ca))
 
-### jsonschema-regex 0.52.1
+### jsonschema-regex 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: not distributed with this package
 
-### jsonschema-value 0.52.1
+### jsonschema-value 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -2982,7 +2982,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/ref-cast
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### referencing 0.52.1
+### referencing 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
