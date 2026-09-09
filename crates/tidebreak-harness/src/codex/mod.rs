@@ -1170,6 +1170,7 @@ requires_openai_auth = true
         assert_eq!(caps_for(Some("codex-cli 0.147.0")), CapLevel::Supported);
         assert_eq!(caps_for(Some("0.147.9")), CapLevel::Supported);
         assert_eq!(caps_for(Some("codex-cli 0.153.0")), CapLevel::Supported);
+        assert_eq!(caps_for(Some("codex-cli 0.153.4")), CapLevel::Supported);
         assert_eq!(caps_for(Some("codex-cli 0.146.3")), CapLevel::Unknown);
         assert_eq!(
             caps_for(Some("codex-cli 0.147.0-alpha.1")),
