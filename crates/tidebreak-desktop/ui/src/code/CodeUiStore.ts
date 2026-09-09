@@ -19,6 +19,8 @@ const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
 const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
 const RAIL_PREFS_KEY = "tidebreak.code-rail-prefs";
+const COLLAPSED_WORKSPACE_GROUPS_KEY =
+  "tidebreak.code-workspace-collapsed-groups";
 const HARNESS_KINDS: readonly HarnessKind[] = [
   "claude_code",
   "codex",
@@ -298,6 +300,34 @@ function readStoredRailPrefs(): CodeRailPrefs {
   }
 }
 
+function readStoredCollapsedWorkspaceGroups(): string[] {
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_WORKSPACE_GROUPS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((key): key is string => typeof key === "string")
+    ) {
+      return [];
+    }
+    return [...new Set(parsed)];
+  } catch {
+    return [];
+  }
+}
+
+function storeCollapsedWorkspaceGroups(keys: readonly string[]): void {
+  try {
+    window.localStorage.setItem(
+      COLLAPSED_WORKSPACE_GROUPS_KEY,
+      JSON.stringify(keys),
+    );
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
+
 function storeRailPrefs(prefs: CodeRailPrefs): void {
   try {
     window.localStorage.setItem(RAIL_PREFS_KEY, JSON.stringify(prefs));
@@ -339,6 +369,10 @@ export type CodeUiStore = {
   /** Files and diff scoped to one turn, or the whole worktree when null. */
   inspectorScope: InspectorScope | null;
   railPrefs: CodeRailPrefs;
+  /** Source and subgroup preferences use independent keys. */
+  collapsedWorkspaceGroups: string[];
+  setCollapsedWorkspaceGroups: (keys: readonly string[]) => void;
+  toggleWorkspaceGroup: (key: string) => void;
   lastCreate: CodeCreateDefaults | null;
   /** Optimistic first-agent handoffs, keyed by the workspace that owns them. */
   workspaceStartups: Record<string, WorkspaceStartup>;
@@ -493,6 +527,20 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
   inspectorScope: null,
   railPrefs: readStoredRailPrefs(),
+  collapsedWorkspaceGroups: readStoredCollapsedWorkspaceGroups(),
+  setCollapsedWorkspaceGroups: (keys) => {
+    const collapsedWorkspaceGroups = [...new Set(keys)];
+    storeCollapsedWorkspaceGroups(collapsedWorkspaceGroups);
+    set({ collapsedWorkspaceGroups });
+  },
+  toggleWorkspaceGroup: (key) => {
+    const collapsed = get().collapsedWorkspaceGroups;
+    get().setCollapsedWorkspaceGroups(
+      collapsed.includes(key)
+        ? collapsed.filter((candidate) => candidate !== key)
+        : [...collapsed, key],
+    );
+  },
   lastCreate: readStoredCreateDefaults(),
   workspaceStartups: {},
   setWorkspaceStartup: (workspaceId, startup) =>

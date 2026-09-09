@@ -1,12 +1,15 @@
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore, workspaceDigests } from "./CodeUpdatesStore";
-import { arrangeWorkspaces } from "./workspaceCards";
+import {
+  arrangeWorkspaceSections,
+  visibleWorkspaceGroups,
+} from "./workspaceCards";
 
 /**
  * Walking the workspace rail from the keyboard.
  *
- * The order is the rail's own — the same `arrangeWorkspaces` call the rail
+ * The order is the rail's own — the same grouping and collapse state the rail
  * renders, read from the same stores. Recomputing it here rather than caching
  * a list is what keeps the chord landing on the card the reader can see: sort
  * order, repo grouping, and archiving all move rows, and a remembered order
@@ -36,14 +39,20 @@ export function stepWorkspaceId(
 export function railWorkspaceIds(): string[] {
   const { repos, workspaces, sessionsByWorkspace } =
     useCodeCatalogStore.getState();
-  const { sortMode } = useCodeUiStore.getState().railPrefs;
+  const { railPrefs, collapsedWorkspaceGroups } = useCodeUiStore.getState();
+  const { sortMode } = railPrefs;
   const digests = workspaceDigests(useCodeUpdatesStore.getState());
-  return arrangeWorkspaces(
+  const sections = arrangeWorkspaceSections(
     sortMode,
     repos,
     workspaces,
     digests,
     sessionsByWorkspace,
+  );
+  return visibleWorkspaceGroups(
+    sections,
+    sortMode,
+    collapsedWorkspaceGroups,
   ).flatMap((group) => group.workspaces.map((workspace) => workspace.id));
 }
 
