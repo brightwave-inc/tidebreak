@@ -582,7 +582,7 @@ jobs:
           name: tidebreak-staging-macos-universal-${{ needs.validate_staging.outputs.version }}
           path: dist/macos/universal/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
       - name: Remove temporary signing material
         if: ${{ always() }}
@@ -803,3 +803,6 @@ jobs:
             }
             curl --fail --silent --show-error --head "$url" >/dev/null
           done
+
+      - name: Prune old staging releases
+        run: scripts/prune-staging-releases.sh

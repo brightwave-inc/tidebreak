@@ -2627,6 +2627,55 @@ test("staging desktop publishes only under the staging prefix", () => {
     /s3:\/\/\$DOWNLOADS_S3_BUCKET\/tidebreak\/latest\.json/,
   );
   assert.doesNotMatch(publishStaging, /tidebreak\/releases\/v\$TIDEBREAK_VERSION/);
+  assert.match(publishStaging, /scripts\/prune-staging-releases\.sh/);
+  assert.doesNotMatch(publishStaging, /STAGING_PRUNE_DRY_RUN/);
+  const stagingSignedUpload = workflowJob(
+    stagingPublish ?? release,
+    "build_macos_staging",
+  );
+  const signedUploadAt = stagingSignedUpload.indexOf(
+    "Upload verified macOS artifacts",
+  );
+  assert.notEqual(signedUploadAt, -1);
+  assert.match(
+    stagingSignedUpload.slice(signedUploadAt, signedUploadAt + 400),
+    /retention-days: 1/,
+  );
+
+  const stagingPrune = workflows["staging-prune.yml"];
+  assert.ok(stagingPrune);
+  assert.match(stagingPrune, /^on:\n  schedule:\n    - cron: "[^"]+"$/m);
+  assert.match(stagingPrune, /^  workflow_dispatch:$/m);
+  assert.match(
+    stagingPrune,
+    /dry_run:\n        description: [^\n]+\n        required: false\n        default: true\n        type: boolean/,
+  );
+  assert.doesNotMatch(stagingPrune, /^\s*pull_request(?:_target)?:/m);
+  assert.doesNotMatch(stagingPrune, /^\s*push:/m);
+  assert.match(stagingPrune, /^permissions:\n  contents: read$/m);
+  assert.match(stagingPrune, /^  group: tidebreak-desktop-staging-prune$/m);
+  assert.doesNotMatch(
+    stagingPrune,
+    /^  group: tidebreak-desktop-staging-build$/m,
+  );
+  assert.match(stagingPrune, /cancel-in-progress: false/);
+  assert.match(stagingPrune, /if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(stagingPrune, /environment:\n      name: desktop-staging/);
+  assert.match(stagingPrune, /id-token: write/);
+  assert.match(stagingPrune, /scripts\/prune-staging-releases\.sh/);
+  assert.match(
+    stagingPrune,
+    /uses: aws-actions\/configure-aws-credentials@[0-9a-f]{40}/,
+  );
+  assert.doesNotMatch(stagingPrune, /secrets\./);
+  assert.doesNotMatch(stagingPrune, /desktop-production/);
+  assert.doesNotMatch(stagingPrune, /tidebreak\/latest\.json/);
+  assert.doesNotMatch(stagingPrune, /tidebreak\/releases\//);
+  assert.match(stagingPrune, /github\.event\.inputs\.dry_run \|\| false/);
+  assert.match(
+    stagingPrune,
+    /role-session-name: tidebreak-staging-prune-\$\{\{ github\.run_id \}\}/,
+  );
 
   const stagingOverlay = JSON.parse(
     readFileSync(

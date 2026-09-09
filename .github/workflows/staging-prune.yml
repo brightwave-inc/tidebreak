@@ -1,0 +1,72 @@
+name: Prune staging desktop releases
+
+# Staging publishes an immutable prefix per build. The updater only needs
+# latest.json and the artifacts it names, so older prefixes are unused storage.
+# Publish already prunes after a successful upload; this workflow is the
+# backstop (weekly) and the way to inspect a dry-run before the first cleanup.
+
+on:
+  schedule:
+    - cron: "47 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List prefixes that would be deleted without deleting them
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # Separate from tidebreak-desktop-staging-build so a prune cannot cancel a
+  # pending notarization. The planner refuses to delete the live feed version.
+  group: tidebreak-desktop-staging-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: prune staging releases
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: desktop-staging
+      url: https://downloads.brightwave.io/tidebreak/staging/manifest.json
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
+      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
+      STAGING_PRUNE_DRY_RUN: ${{ github.event.inputs.dry_run || false }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate staging hosting configuration
+        run: |
+          missing=()
+          for name in \
+            AWS_REGION \
+            AWS_RELEASE_ROLE_ARN \
+            DOWNLOADS_S3_BUCKET; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-staging hosting configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: tidebreak-staging-prune-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prune old staging releases
+        run: scripts/prune-staging-releases.sh
