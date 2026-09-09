@@ -435,7 +435,7 @@ child sessions or workspaces.
 
 ### Self-drive child sessions
 
-The internal engine also exposes native tools for starting independent
+The internal engine also exposes native tools for starting independent (decision [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md))
 workspace sessions under one conversation and driving them, without moving
 the parent conversation into a repository:
 
