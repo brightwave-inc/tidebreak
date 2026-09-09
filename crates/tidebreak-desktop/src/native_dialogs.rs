@@ -61,6 +61,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registered_plugin_initializes_native_dialog_state() {
+        use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
+        use tauri::Manager;
+        use tauri_plugin_dialog::{Dialog, DialogExt};
+
+        let app = mock_builder()
+            .plugin(init())
+            .build(mock_context(noop_assets()))
+            .expect("dialog plugin registers and initializes");
+        let state = app
+            .try_state::<Dialog<MockRuntime>>()
+            .expect("native dialog setup registers its managed state");
+        assert!(std::ptr::eq(app.dialog(), state.inner()));
+        let _file_picker = app.dialog().file();
+        let _message = app
+            .dialog()
+            .message("Native dialog setup remains available");
+    }
+
+    #[test]
     fn dialog_plugin_preserves_browser_globals() {
         let plugin = init::<tauri::Wry>();
         assert_eq!(plugin.name(), "dialog");
