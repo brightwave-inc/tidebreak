@@ -1033,6 +1033,15 @@ impl ResolvedModelPolicy {
     /// custom treatment.
     fn gateway_for(model: &CustomModelConfig) -> Self {
         let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
+        // Model Gateway protocols enforce structured output: Anthropic via a
+        // forced tool or `output_config.format`, OpenAI via `json_schema`.
+        // Unlike an arbitrary compatible endpoint, background utility work
+        // (workspace titling, chat titling, the approval judge) can depend on
+        // that contract even when the row does not map to a curated vendor id.
+        // Without this, a hosted caller's entitled models that lack curated
+        // aliases resolve the utility role to nothing and every workspace keeps
+        // its generated two-word name (decision 62).
+        policy.supports_structured_output = true;
         let Some(spec) = gateway_curated_spec(model) else {
             return policy;
         };

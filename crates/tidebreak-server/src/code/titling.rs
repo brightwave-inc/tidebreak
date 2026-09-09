@@ -165,7 +165,16 @@ async fn propose_from_message(
     // Resolved per call, like every consumer of the utility role: `None` means
     // this install has no model for background work. On a hosted machine both
     // the role and the provider resolve as the workspace's owner (decision 62).
-    let caller_gateway = state.caller_gateway_snapshot(owner).await.ok().flatten();
+    let caller_gateway = match state.caller_gateway_snapshot(owner).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "could not read caller gateway entitlements for workspace naming"
+            );
+            None
+        }
+    };
     let Some(utility) = crate::model_roles::resolve_utility_model(
         &*state.store,
         &*state.secrets,
@@ -175,6 +184,11 @@ async fn propose_from_message(
     )
     .await?
     else {
+        if caller_gateway.is_some() {
+            tracing::warn!(
+                "no utility model in the caller's gateway entitlements; leaving the workspace on its generated name"
+            );
+        }
         return Ok(ProposalOutcome::NotApplicable);
     };
     let provider = state.resolver.resolve_for(Some(owner)).await;
