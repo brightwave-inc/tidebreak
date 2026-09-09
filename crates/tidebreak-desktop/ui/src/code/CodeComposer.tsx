@@ -38,6 +38,7 @@ import {
 } from "../PastedText";
 import { reasoningEffortOptions } from "../ModelMenu";
 import { familyForModelId } from "../modelFamilies";
+import { providerLabel } from "../ModelSelection";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import {
   ClaudeIcon,
@@ -269,14 +270,21 @@ export function HarnessModelMenu({
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
-    return groups
-      .flatMap((group) => group.options)
-      .filter(
-        (option) =>
-          option.label.toLowerCase().includes(needle) ||
-          option.id.toLowerCase().includes(needle) ||
-          option.source.toLowerCase().includes(needle),
-      );
+    return groups.flatMap((group) =>
+      group.options.filter((option) => {
+        const family = familyForModelId(option.id);
+        const vendor = codeModelVendor(option);
+        return [
+          option.label,
+          option.id,
+          option.source,
+          group.label,
+          vendor ? providerLabel(vendor) : "",
+          family?.label ?? "",
+          family?.match ?? "",
+        ].some((value) => value.toLowerCase().includes(needle));
+      }),
+    );
   }, [groups, query]);
   const visible = searching
     ? matches

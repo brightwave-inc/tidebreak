@@ -87,6 +87,39 @@ const OPENCODE: CodeModelOption[] = [
   },
 ];
 
+/**
+ * A Model Gateway catalog: first-party vendors plus open-model families whose
+ * tab labels (`Z.ai`, …) are not substrings of the model id. Search has to hit
+ * those rail labels, not only `display_name` / `id`.
+ */
+const GATEWAY_MIXED: CodeModelOption[] = [
+  {
+    id: "claude-sonnet-4",
+    label: "Claude Sonnet 4",
+    source: "opencode · model-gateway",
+    vendor: "anthropic",
+  },
+  {
+    id: "gpt-5",
+    label: "GPT 5",
+    source: "opencode · model-gateway",
+    vendor: null,
+    default: true,
+  },
+  {
+    id: "glm-5.2",
+    label: "GLM 5.2",
+    source: "opencode · model-gateway",
+    vendor: null,
+  },
+  {
+    id: "deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash",
+    source: "opencode · model-gateway",
+    vendor: null,
+  },
+];
+
 /** One vendor: no All entry, because there is nothing to lift. */
 export const SingleVendor: Story = {
   args: {
@@ -103,6 +136,19 @@ export const MixedCatalog: Story = {
     harness: "opencode",
     options: OPENCODE,
     value: "openai/gpt-5.6-sol",
+    onChange: () => undefined,
+  },
+};
+
+/**
+ * Gateway rows split by vendor and family. Typing `z.ai` in search should
+ * keep GLM and drop the rest — the same contract as the chat ModelMenu.
+ */
+export const GatewayCatalogSearch: Story = {
+  args: {
+    harness: "opencode",
+    options: GATEWAY_MIXED,
+    value: "gpt-5",
     onChange: () => undefined,
   },
 };

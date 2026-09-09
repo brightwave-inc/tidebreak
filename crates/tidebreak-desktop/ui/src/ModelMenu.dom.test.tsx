@@ -184,6 +184,47 @@ it("splits a mixed gateway catalog into vendor tabs", async () => {
   expect(screen.getByRole("menuitem", { name: "Mystery Model" })).toBeTruthy();
 });
 
+it("searches a gateway catalog by vendor and family tab labels", async () => {
+  const gatewayModels: ModelInfo[] = [
+    {
+      ...MODELS[0],
+      key: "model_gateway::claude-sonnet-4",
+      provider: "model_gateway",
+      vendor: "anthropic",
+    },
+    {
+      ...MODELS[2],
+      key: "model_gateway::glm-5.2",
+      id: "glm-5.2",
+      display_name: "GLM 5.2",
+      provider: "model_gateway",
+      vendor: null,
+    },
+  ];
+  render(
+    <ModelMenu
+      models={gatewayModels}
+      value={gatewayModels[0].key}
+      onSetUpProvider={() => {}}
+      onChange={() => {}}
+    />,
+  );
+
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
+  await user.keyboard("z.ai");
+
+  expect(screen.getByRole("searchbox", { name: "Search models" })).toHaveValue(
+    "z.ai",
+  );
+  expect(screen.getByRole("menuitem", { name: /GLM 5.2/ })).toBeTruthy();
+  expect(
+    screen.queryByRole("menuitem", { name: /Claude Sonnet 4/ }),
+  ).toBeNull();
+});
+
 it("opens when the first-task walkthrough is on the model step", () => {
   useFirstTaskGuide.getState().setSurface("model");
   render(
