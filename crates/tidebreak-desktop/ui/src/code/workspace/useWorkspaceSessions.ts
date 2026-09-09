@@ -24,13 +24,11 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
 } from "../labels";
-import { hasLocalHostAuthority } from "../../host";
 import { liveCodeSessions } from "../parsers";
-import { publishCodeImage } from "../../attachments";
 import { toast } from "sonner";
-import { uploadImageAttachment } from "../../ImageAttachments";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { useCodeUiStore } from "../CodeUiStore";
+import { submitFirstCodeTurn } from "../publishCodeSessionImages";
 import { useConversationDigests } from "../CodeUpdatesStore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { useNavigate } from "@tanstack/react-router";
@@ -361,39 +359,15 @@ export function useWorkspaceSessions({
       }
 
       try {
-        const attachments = heldImages?.length
-          ? await Promise.all(
-              heldImages.map(async (file) => {
-                const published = hasLocalHostAuthority()
-                  ? await publishCodeImage(created.id, file)
-                  : await uploadImageAttachment(
-                      startedWithClient,
-                      created.id,
-                      file,
-                      {
-                        onProgress: () => undefined,
-                        signal: new AbortController().signal,
-                        path: (id) =>
-                          `/sessions/${encodeURIComponent(id)}/attachments/images`,
-                      },
-                    );
-                return {
-                  blob_id: published.attachmentId,
-                  media_type: published.mediaType,
-                };
-              }),
-            )
-          : [];
-        if (attachments.length > 0) {
-          await startedWithClient.submitCodeTurn(
-            created.id,
-            message,
-            undefined,
-            attachments,
-          );
-        } else {
-          await startedWithClient.submitCodeTurn(created.id, message);
-        }
+        // Publish into this session only after create, then send once. Using
+        // blob ids reserved for another session (or never published) is what
+        // yields "attachment blob … was not published to session …".
+        await submitFirstCodeTurn({
+          client: startedWithClient,
+          sessionId: created.id,
+          message,
+          images: heldImages ?? [],
+        });
         clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
       } catch (err) {
         if (heldImages && heldImages.length > 0) {
