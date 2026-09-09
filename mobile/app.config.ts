@@ -16,8 +16,10 @@ const SCHEME: Record<AppVariant, string> = {
 };
 
 // Printed by `eas init`; see mobile/DEPLOYING.md. eas-cli cannot write into a
-// dynamic (TS) config, so the id is pasted here by hand.
-const EAS_PROJECT_ID = "TODO_RUN_EAS_INIT";
+// dynamic (TS) config, so the id is pasted here by hand. While it is empty the
+// EAS/updates fields are omitted entirely — a placeholder value makes
+// `eas init` believe the project is already linked and fail.
+const EAS_PROJECT_ID = "";
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
@@ -40,17 +42,21 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   // force a store build. Keep this config deterministic: a value that changes
   // between runs breaks fingerprint routing.
   runtimeVersion: { policy: "fingerprint" },
-  updates: {
-    url: `https://u.expo.dev/${EAS_PROJECT_ID}`,
-    requestHeaders: {
-      "expo-channel-name":
-        VARIANT === "production"
-          ? "production"
-          : VARIANT === "staging"
-            ? "staging"
-            : "development",
-    },
-  },
+  ...(EAS_PROJECT_ID
+    ? {
+        updates: {
+          url: `https://u.expo.dev/${EAS_PROJECT_ID}`,
+          requestHeaders: {
+            "expo-channel-name":
+              VARIANT === "production"
+                ? "production"
+                : VARIANT === "staging"
+                  ? "staging"
+                  : "development",
+          },
+        },
+      }
+    : {}),
   ios: {
     supportsTablet: true,
     appleTeamId: "CUURNS78Y4",
@@ -94,8 +100,12 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   extra: {
     appVariant: VARIANT,
     oauthRedirectUri: `${SCHEME[VARIANT]}://callback`,
-    eas: {
-      projectId: EAS_PROJECT_ID,
-    },
+    ...(EAS_PROJECT_ID
+      ? {
+          eas: {
+            projectId: EAS_PROJECT_ID,
+          },
+        }
+      : {}),
   },
 });
