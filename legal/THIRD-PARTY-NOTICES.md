@@ -28,7 +28,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 851
-- Desktop UI production packages: 535
+- Desktop UI production packages: 536
 - Distinct license texts: 590
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -5364,19 +5364,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @extend-ai/react-docx 0.8.4
+### @extend-ai/react-docx 0.9.1
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-docx.git
 - License text: `LICENSE` ([L-24fdfac792e0](#l-24fdfac792e0))
 
-### @extend-ai/react-pptx 0.1.2
+### @extend-ai/react-pptx 0.2.0
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-pptx.git
 - License text: `LICENSE` ([L-89aba894e358](#l-89aba894e358))
 
-### @extend-ai/react-xlsx 0.16.2
+### @extend-ai/react-xlsx 0.16.3
 
 - License: `MIT`
 - Repository: git+https://github.com/extend-hq/react-xlsx.git
@@ -5442,7 +5442,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/jridgewell/resolve-uri
 - License text: `LICENSE` ([L-b8778b155bfd](#l-b8778b155bfd))
 
-### @jridgewell/sourcemap-codec 1.5.5
+### @jridgewell/sourcemap-codec 1.6.0
 
 - License: `MIT`
 - Repository: git+https://github.com/jridgewell/sourcemaps.git
@@ -5868,12 +5868,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/virtual-core 3.17.7
-
-- License: `MIT`
-- Repository: git+https://github.com/TanStack/virtual.git
-- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
-
 ### @tanstack/virtual-core 3.17.8
 
 - License: `MIT`
@@ -5940,7 +5934,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react-dom 19.2.5
+### @types/react-dom 19.2.7
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
@@ -6946,6 +6940,12 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/comma-separated-tokens
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
 
+### commander 15.0.0
+
+- License: `MIT`
+- Repository: git+https://github.com/tj/commander.js.git
+- License text: `LICENSE` ([L-4cc9c2af4eb0](#l-4cc9c2af4eb0))
+
 ### commander 2.20.3
 
 - License: `MIT`
@@ -7186,7 +7186,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/101arrowz/fflate
 - License text: `LICENSE` ([L-0a1df3a083d0](#l-0a1df3a083d0))
 
-### framer-motion 13.1.1
+### framer-motion 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion/
@@ -7271,6 +7271,12 @@ License identifiers named across all declared expressions:
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
 ### highlight.js 11.11.1
+
+- License: `BSD-3-Clause`
+- Repository: git://github.com/highlightjs/highlight.js.git
+- License text: `LICENSE` ([L-eabb8d3cadaf](#l-eabb8d3cadaf))
+
+### highlight.js 11.12.0
 
 - License: `BSD-3-Clause`
 - Repository: git://github.com/highlightjs/highlight.js.git
@@ -7384,7 +7390,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/KaTeX/KaTeX.git
 - License text: `LICENSE` ([L-d3c8c167dfa0](#l-d3c8c167dfa0))
 
-### katex 0.18.4
+### katex 0.18.6
 
 - License: `MIT`
 - Repository: https://github.com/KaTeX/KaTeX.git
@@ -7456,7 +7462,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.37.0
+### lucide-react 1.41.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7756,13 +7762,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/monaco-editor
 - License text: `LICENSE` ([L-806766baa900](#l-806766baa900))
 
-### motion 13.1.1
+### motion 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
 - License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
 
-### motion-dom 13.1.1
+### motion-dom 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
@@ -7954,7 +7960,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/theKashey/react-remove-scroll-bar
 - License text: not distributed with this package
 
-### react-resizable-panels 4.12.3
+### react-resizable-panels 4.12.4
 
 - License: `MIT`
 - Repository: https://github.com/bvaughn/react-resizable-panels.git
