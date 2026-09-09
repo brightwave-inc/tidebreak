@@ -6,8 +6,8 @@
   "packageManager": "pnpm@10.18.3",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
