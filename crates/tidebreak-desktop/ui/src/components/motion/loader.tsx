@@ -2,7 +2,13 @@
 // beui.dev/components/motion/loader
 
 import { motion, useReducedMotion } from "motion/react";
-import { useEffect, useId, useState, type HTMLAttributes } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+  type HTMLAttributes,
+} from "react";
 import { EASE_IN_OUT } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
@@ -308,39 +314,115 @@ function Morph({ size, speed, reduce }: PartProps) {
 
 const COMET_TRAIL = [0, 1, 2, 3, 4, 5];
 
+// Shared visible-time clock for every comet. CSS `animate-spin` freezes while
+// the document is hidden; this clock freezes on the same boundary so a comet
+// mounted after the tab returns still matches ones that were paused. One
+// document listener for the process — no per-spinner timers or rAF loops.
+let cometFrozenVisibleMs = 0;
+let cometVisibleOriginMs = 0;
+let cometDocumentHidden = false;
+let cometVisibilityBound = false;
+
+function onCometVisibilityChange(): void {
+  if (typeof document === "undefined") return;
+  const hidden = document.visibilityState === "hidden";
+  // Ignore no-op dispatches (tests reset visibility without a real transition).
+  if (hidden === cometDocumentHidden) return;
+  cometDocumentHidden = hidden;
+  if (hidden) {
+    cometFrozenVisibleMs += performance.now() - cometVisibleOriginMs;
+  } else {
+    cometVisibleOriginMs = performance.now();
+  }
+}
+
+function bindCometVisibilityClock(): void {
+  if (cometVisibilityBound || typeof document === "undefined") return;
+  cometVisibilityBound = true;
+  cometDocumentHidden = document.visibilityState === "hidden";
+  if (cometDocumentHidden) {
+    // Never ran a visible segment: pin phase to "now" so it stops advancing.
+    cometFrozenVisibleMs = performance.now();
+  } else {
+    // Origin 0 keeps shared time === performance.now() until the first hide.
+    cometVisibleOriginMs = 0;
+  }
+  document.addEventListener("visibilitychange", onCometVisibilityChange);
+}
+
+/** Elapsed ms that advance only while the document is visible. */
+function cometSharedNowMs(): number {
+  if (typeof document === "undefined") {
+    return performance.now();
+  }
+  bindCometVisibilityClock();
+  if (cometDocumentHidden) {
+    return cometFrozenVisibleMs;
+  }
+  return cometFrozenVisibleMs + (performance.now() - cometVisibleOriginMs);
+}
+
+/** Negative CSS delay that places a comet on the shared rotation clock. */
+function cometSpinDelayMs(speed: number): number {
+  const durationMs = Math.max(speed, 0.001) * 1000;
+  return -(cometSharedNowMs() % durationMs);
+}
+
+/** Test-only: clear accumulated visible time between cases. */
+export function resetCometSharedClockForTests(): void {
+  cometFrozenVisibleMs = 0;
+  cometVisibleOriginMs = 0;
+  cometDocumentHidden =
+    typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 function Comet({ size, speed, reduce }: PartProps) {
   const head = size * 0.2;
   const r = size / 2 - head / 2;
+  // Freeze the delay on mount (and if `speed` changes). Computing it during
+  // every render would restart the CSS animation on each parent update.
+  const delayMs = useMemo(() => cometSpinDelayMs(speed), [speed]);
+  const trail = COMET_TRAIL.map((i) => {
+    const scale = 1 - i * 0.13;
+    const sz = head * scale;
+    return (
+      <span
+        key={i}
+        className="absolute top-1/2 left-1/2 rounded-full bg-current"
+        style={{
+          width: sz,
+          height: sz,
+          marginLeft: -sz / 2,
+          marginTop: -sz / 2,
+          opacity: 1 - i * 0.16,
+          transform: `rotate(${-i * 15}deg) translateY(${-r}px)`,
+        }}
+      />
+    );
+  });
+
   return (
     <span className="relative" style={{ width: size, height: size }}>
-      <motion.span
-        className="absolute inset-0"
-        animate={reduce ? REDUCED.animate : { rotate: 360 }}
-        transition={
-          reduce
-            ? REDUCED.transition
-            : { duration: speed, ease: "linear", repeat: Infinity }
-        }
-      >
-        {COMET_TRAIL.map((i) => {
-          const scale = 1 - i * 0.13;
-          const sz = head * scale;
-          return (
-            <span
-              key={i}
-              className="absolute top-1/2 left-1/2 rounded-full bg-current"
-              style={{
-                width: sz,
-                height: sz,
-                marginLeft: -sz / 2,
-                marginTop: -sz / 2,
-                opacity: 1 - i * 0.16,
-                transform: `rotate(${-i * 15}deg) translateY(${-r}px)`,
-              }}
-            />
-          );
-        })}
-      </motion.span>
+      {reduce ? (
+        <motion.span
+          className="absolute inset-0"
+          animate={REDUCED.animate}
+          transition={REDUCED.transition}
+        >
+          {trail}
+        </motion.span>
+      ) : (
+        <span
+          className="absolute inset-0 animate-spin"
+          data-comet-spin=""
+          style={{
+            animationDuration: `${speed}s`,
+            animationDelay: `${delayMs}ms`,
+          }}
+        >
+          {trail}
+        </span>
+      )}
     </span>
   );
 }
