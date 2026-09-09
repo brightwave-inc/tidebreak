@@ -19,21 +19,23 @@ export default tseslint.config(
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
-      // Hermes release builds have no web crypto/base64 globals; dev tooling
-      // polyfills them, so only CI can catch a stray reference before device.
+      // Dev tooling polyfills web globals that a Hermes release build may not
+      // have (global crypto crashed on-device pairing; #3292). Only CI can
+      // catch a stray reference before the device does.
       "no-restricted-globals": [
         "error",
         {
           name: "crypto",
-          message: "No global crypto in Hermes release builds - use expo-crypto.",
+          message: "Hermes has no global crypto - use expo-crypto.",
         },
         {
           name: "btoa",
-          message: "No btoa in Hermes release builds - encode base64 in JS.",
+          message:
+            "Engine coverage varies - use the base64url helpers in src/lib/crypto.ts.",
         },
         {
           name: "atob",
-          message: "No atob in Hermes release builds - decode base64 in JS.",
+          message: "Engine coverage varies - decode base64 in pure JS.",
         },
       ],
     },
