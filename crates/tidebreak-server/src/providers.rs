@@ -151,6 +151,16 @@ pub fn gateway_reasoning_efforts_for_model<'a>(
         .map(|(_, efforts)| efforts.as_slice())
 }
 
+/// Whether the caller's gateway catalog lists this engine selection.
+/// Missing effort metadata does not make an entitled model unknown.
+pub(crate) fn gateway_lists_model(snapshot: &GatewayModelSnapshot, selection: &str) -> bool {
+    snapshot.models.iter().any(|model| {
+        std::iter::once(model.id.as_str())
+            .chain(model.aliases.iter().map(String::as_str))
+            .any(|id| gateway_selection_matches(selection, id))
+    })
+}
+
 /// Intersect one gateway model's ladder with the harness surface that carries
 /// it. A listed row wins over the engine-wide ladder. Hosted picker rows are
 /// empty compat listings, so ignore `adapter.list_models` on that path and

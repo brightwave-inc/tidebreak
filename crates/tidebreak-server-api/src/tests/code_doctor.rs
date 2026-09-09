@@ -347,6 +347,7 @@ async fn the_doctor_reports_relay_engines_ready_on_a_hosted_machine() {
 struct FakeModelGateway {
     anthropic: Option<serde_json::Value>,
     openai: Option<serde_json::Value>,
+    catalog: Option<serde_json::Value>,
     anthropic_reads: Arc<AtomicUsize>,
     openai_reads: Arc<AtomicUsize>,
 }
@@ -356,6 +357,7 @@ impl FakeModelGateway {
         Self {
             anthropic,
             openai,
+            catalog: None,
             anthropic_reads: Arc::new(AtomicUsize::new(0)),
             openai_reads: Arc::new(AtomicUsize::new(0)),
         }
@@ -424,6 +426,15 @@ impl FakeModelGateway {
                 }))
             }),
         );
+        if let Some(catalog) = self.catalog {
+            app = app.route(
+                "/api/v1/me/catalog",
+                axum::routing::get(move || {
+                    let catalog = catalog.clone();
+                    async move { axum::Json(catalog) }
+                }),
+            );
+        }
         if let Some(listing) = self.anthropic {
             let reads = self.anthropic_reads.clone();
             app = app.route(
@@ -484,7 +495,7 @@ impl FakeModelGateway {
 async fn hosted_model_app(
     gateway: Arc<crate::obo_gateway::OboGateway>,
     record_caller: bool,
-) -> (Router, Arc<str>, tempfile::TempDir) {
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -517,9 +528,9 @@ async fn hosted_model_app(
             ..AgentConfig::default()
         },
     );
-    state.code = Some(runtime);
+    state.code = Some(runtime.clone());
     let token = state.token.clone();
-    (app(state), token, dir)
+    (app(state), token, runtime, dir)
 }
 
 async fn fetch_harness_models(
@@ -545,6 +556,109 @@ fn model_ids(listing: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
+/// A hosted model can omit its effort metadata. The picker offers the
+/// engine's levels, so session creation and attachment must accept them.
+#[tokio::test]
+async fn hosted_claude_efforts_follow_the_gateway_catalog() {
+    for (efforts, medium_allowed, high_allowed) in [
+        (None, true, true),
+        (Some(serde_json::Value::Null), true, true),
+        (Some(serde_json::json!([])), false, false),
+        (Some(serde_json::json!(["low", "high"])), false, true),
+    ] {
+        let mut fake = FakeModelGateway::new(
+            Some(serde_json::json!({
+                "data": [{ "id": "claude-fable-5-1", "display_name": "Claude Fable 5.1" }]
+            })),
+            None,
+        );
+        let mut model = serde_json::json!({
+            "id": "claude-fable-5-1",
+            "name": "Claude Fable 5.1",
+            "provider_name": "Anthropic",
+            "protocols": ["anthropic_messages"],
+            "supports_tools": true,
+            "supports_vision": true,
+        });
+        if let Some(efforts) = efforts {
+            model["supported_reasoning_efforts"] = efforts;
+        }
+        fake.catalog = Some(serde_json::json!({ "models": [model], "apps": [] }));
+        let (gateway, gateway_server) = fake.start().await;
+        let (router, token, runtime, dir) = hosted_model_app(gateway, true).await;
+        let addr = serve(router).await;
+        runtime.start(format!("http://{addr}")).await.unwrap();
+        let client = reqwest::Client::new();
+        let repo = init_git_repo(dir.path());
+        let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+        let listing: serde_json::Value =
+            fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::ClaudeCode)
+                .await
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(model_ids(&listing), ["claude-fable-5-1"]);
+
+        for (effort, allowed) in [("medium", medium_allowed), ("high", high_allowed)] {
+            let response = client
+                .post(format!(
+                    "http://{addr}/code/workspaces/{}/sessions",
+                    json_id(&workspace)
+                ))
+                .bearer_auth(token.as_ref())
+                .json(&serde_json::json!({
+                    "harness": "claude_code",
+                    "permission_mode": "plan",
+                    "model": "claude-fable-5-1",
+                    "reasoning_effort": effort,
+                }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap();
+            if allowed {
+                assert_eq!(status, reqwest::StatusCode::CREATED, "{effort}: {body}");
+                assert_eq!(body["reasoning_effort"], effort, "{body}");
+                let stored: serde_json::Value = client
+                    .get(format!(
+                        "http://{addr}/code/sessions/{}/debug",
+                        json_id(&body)
+                    ))
+                    .bearer_auth(token.as_ref())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                assert_eq!(stored["session"]["reasoning_effort"], effort, "{stored}");
+            } else {
+                assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+            }
+        }
+        let unknown = client
+            .post(format!(
+                "http://{addr}/code/workspaces/{}/sessions",
+                json_id(&workspace)
+            ))
+            .bearer_auth(token.as_ref())
+            .json(&serde_json::json!({
+                "harness": "claude_code",
+                "permission_mode": "plan",
+                "model": "unlisted",
+                "reasoning_effort": "high",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        gateway_server.abort();
+    }
+}
+
 /// Issue 2755: all four hosted engines list the caller-usable gateway rows
 /// their relay wiring can run. OpenCode's ids name the configured provider,
 /// duplicate raw ids prefer the Anthropic surface, malformed rows disappear,
@@ -554,7 +668,7 @@ async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
     let fake = FakeModelGateway::full();
     let observed = fake.clone();
     let (gateway, gateway_server) = fake.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir) = hosted_model_app(gateway, true).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
 
@@ -660,7 +774,7 @@ async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
     );
     let observed_anthropic = anthropic_only.clone();
     let (gateway, gateway_server) = anthropic_only.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir) = hosted_model_app(gateway, true).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let claude = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::ClaudeCode).await;
@@ -678,7 +792,7 @@ async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
     );
     let observed_openai = openai_only.clone();
     let (gateway, gateway_server) = openai_only.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir) = hosted_model_app(gateway, true).await;
     let addr = serve(router).await;
     for kind in [HarnessKind::Codex, HarnessKind::Grok] {
         let response = fetch_harness_models(&client, addr, token.as_ref(), kind).await;
@@ -697,7 +811,7 @@ async fn a_hosted_model_listing_without_caller_ownership_fails_closed() {
     let fake = FakeModelGateway::full();
     let observed = fake.clone();
     let (gateway, gateway_server) = fake.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, false).await;
+    let (router, token, _runtime, _dir) = hosted_model_app(gateway, false).await;
     let addr = serve(router).await;
     let response = fetch_harness_models(
         &reqwest::Client::new(),
