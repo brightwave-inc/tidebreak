@@ -1668,7 +1668,8 @@ impl Controller {
         let mut changed = false;
 
         let before = next.grants.len();
-        next.grants.retain(|grant| grant.subject() != subject);
+        next.grants
+            .retain(|grant| grant.subject() != subject || grant.native_app_all_sessions());
         changed |= next.grants.len() != before;
         // The conversation subject is gone with the chat, so its settled
         // positions go too. A project subject the chat happened to use is not
@@ -1822,10 +1823,14 @@ impl Controller {
             }
         }
         let scope = cu_grant_scope(request.capability, request.bundle_id.as_deref())?;
+        if request.all_sessions && (request.single_use || request.bundle_id.is_none()) {
+            return Err(BrokerError::InvalidCuRequest);
+        }
         let mut state = self.lock_state()?;
         let mut next = state.clone();
         let same_tuple = |grant: &Grant| {
-            grant.subject() == request.subject
+            grant.native_app_all_sessions() == request.all_sessions
+                && (request.all_sessions || grant.subject() == request.subject)
                 && grant.capability() == request.capability
                 && *grant.scope() == scope
         };
@@ -1867,6 +1872,11 @@ impl Controller {
         } else {
             grant
         };
+        let grant = if request.all_sessions {
+            grant.for_all_native_sessions()?
+        } else {
+            grant
+        };
         let grant_id = grant.id();
         next.grants.push(grant);
         self.commit_state(&mut state, next)?;
@@ -1884,7 +1894,8 @@ impl Controller {
         let mut next = state.clone();
         let before = next.grants.len();
         next.grants.retain(|grant| {
-            !(grant.subject() == request.subject
+            !(!grant.native_app_all_sessions()
+                && grant.subject() == request.subject
                 && grant.capability() == request.capability
                 && *grant.scope() == scope)
         });
@@ -1894,7 +1905,8 @@ impl Controller {
                 .grants
                 .iter()
                 .filter(|grant| {
-                    grant.subject() == request.subject
+                    !grant.native_app_all_sessions()
+                        && grant.subject() == request.subject
                         && grant.capability() == request.capability
                         && *grant.scope() == scope
                 })
@@ -2667,7 +2679,8 @@ impl Operator {
                         .grants
                         .iter()
                         .find(|grant| {
-                            context.grant_subject_matches(grant.subject())
+                            !grant.native_app_all_sessions()
+                                && context.grant_subject_matches(grant.subject())
                                 && matches!(grant.scope(), Scope::App { .. })
                                 && cu_read_granted(grant.capability())
                         })
@@ -3492,7 +3505,7 @@ fn authorize_computer_use(
         .grants
         .iter()
         .find(|grant| {
-            context.grant_subject_matches(grant.subject())
+            (grant.native_app_all_sessions() || context.grant_subject_matches(grant.subject()))
                 && matches!(
                     grant.scope(),
                     Scope::App { bundle_id: granted } if granted == bundle_id
@@ -3582,10 +3595,11 @@ fn list_cu_app_grants(state: &State, subject: GrantSubject) -> Vec<GrantStatemen
         .iter()
         .filter(|grant| {
             !grant.is_single_use()
-                && grant.subject() == subject
+                && (grant.native_app_all_sessions() || grant.subject() == subject)
                 && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
         })
         .map(|grant| GrantStatementSummary {
+            native_app_all_sessions: grant.native_app_all_sessions(),
             grant_id: grant.id(),
             subject: grant.subject(),
             capability: grant.capability(),
@@ -4804,6 +4818,7 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
     let mut statements = live
         .chain(dormant)
         .map(|(grant, dormant)| GrantStatementSummary {
+            native_app_all_sessions: grant.native_app_all_sessions(),
             grant_id: grant.id(),
             subject: grant.subject(),
             capability: grant.capability(),

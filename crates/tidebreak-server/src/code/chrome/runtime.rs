@@ -175,6 +175,81 @@ const DEFAULT_CHROME_SCREENSHOT_DIMENSION: f64 = 1440.0;
 /// Bounded number of capture attempts while fitting the shared transport's
 /// per-image byte budget.
 const SCREENSHOT_FIT_ATTEMPTS: usize = 4;
+/// The cursor lives only for one action in a dedicated isolated world.
+struct CursorDecoration {
+    context: i64,
+    frame: String,
+    loader: String,
+    id: String,
+    width: f64,
+    height: f64,
+}
+
+pub(super) const CHROME_CURSOR_SCRIPT: &str = r##"(payload => {
+  const key = Symbol.for("io.brightwave.tidebreak.chrome.agent-cursor");
+  const prior = globalThis[key];
+  if (payload.clear) {
+    if (prior && prior.id === payload.id) prior.clear();
+    return "cleared";
+  }
+  if (String(location.href) !== payload.url || innerWidth !== payload.width
+      || innerHeight !== payload.height || !Number.isFinite(payload.x)
+      || !Number.isFinite(payload.y) || payload.x < 0 || payload.y < 0
+      || payload.x >= innerWidth || payload.y >= innerHeight) return "stale";
+  prior?.clear();
+  if (!document.documentElement) return "unavailable";
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  host.setAttribute("data-tidebreak-ghost-cursor", "");
+  host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483647!important;contain:strict!important;user-select:none!important;";
+  const shadow = host.attachShadow({mode:"closed"});
+  const ns = "http://www.w3.org/2000/svg";
+  const cursor = document.createElementNS(ns, "svg");
+  cursor.setAttribute("viewBox", "0 0 24 24");
+  cursor.setAttribute("width", "24");
+  cursor.setAttribute("height", "24");
+  cursor.style.cssText = "position:absolute;overflow:visible;pointer-events:none;";
+  cursor.style.left = `${payload.x - 4}px`;
+  cursor.style.top = `${payload.y - 3}px`;
+  const ring = document.createElementNS(ns, "circle");
+  for (const [name, value] of Object.entries({cx:"4",cy:"3",r:"8",fill:"none",stroke:"oklch(0.6 0.125 195)","stroke-width":"1.5",opacity:"0.55"})) ring.setAttribute(name, value);
+  cursor.appendChild(ring);
+  const outline = document.createElementNS(ns, "path");
+  for (const [name, value] of Object.entries({d:"m4 3 7.07 17 2.51-7.39L21 10.07z",fill:"oklch(0.6 0.125 195)",stroke:"oklch(0.985 0.002 240)","stroke-width":"2","stroke-linejoin":"round"})) outline.setAttribute(name, value);
+  cursor.appendChild(outline);
+  shadow.appendChild(cursor);
+  document.documentElement.appendChild(host);
+  const state = {id:payload.id, timer:null, frame:null, clear:null};
+  const events = ["pagehide", "popstate", "hashchange", "resize"];
+  state.clear = () => {
+    clearTimeout(state.timer);
+    if (state.frame !== null) cancelAnimationFrame(state.frame);
+    for (const event of events) removeEventListener(event, state.clear);
+    host.remove();
+    if (globalThis[key] === state) delete globalThis[key];
+  };
+  globalThis[key] = state;
+  for (const event of events) addEventListener(event, state.clear, {once:true});
+  const checkDocument = () => {
+    if (String(location.href) !== payload.url || innerWidth !== payload.width
+        || innerHeight !== payload.height) { state.clear(); return; }
+    state.frame = requestAnimationFrame(checkDocument);
+  };
+  state.frame = requestAnimationFrame(checkDocument);
+  // A lost debugger cannot run host cleanup. This expiry needs no connection.
+  state.timer = setTimeout(state.clear, 1500);
+  return "shown";
+})"##;
+
+fn cursor_clear_params(cursor: &CursorDecoration) -> Value {
+    let payload = json!({"clear":true,"id":cursor.id});
+    json!({
+        "expression":format!("({CHROME_CURSOR_SCRIPT})({payload})"),
+        "contextId":cursor.context,
+        "returnByValue":true,
+    })
+}
+
 /// Best-effort neutralizer for a pressed key or mouse button.
 ///
 /// Armed before the down event is issued: once that command is queued, its
@@ -191,6 +266,7 @@ struct InputHold {
     session: String,
     releases: Vec<(&'static str, Value)>,
     focus_sessions: Vec<String>,
+    cursor: Option<CursorDecoration>,
     cleanup_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 impl InputHold {
@@ -200,6 +276,7 @@ impl InputHold {
             session: tab.cdp_session.clone(),
             releases: Vec::new(),
             focus_sessions: Vec::new(),
+            cursor: None,
             cleanup_guard: Some(cleanup_guard),
         }
     }
@@ -227,6 +304,71 @@ impl InputHold {
         }
         Ok(())
     }
+    async fn show_cursor(
+        &mut self,
+        access: &Access,
+        snapshot: &Snapshot,
+        event: &Value,
+    ) -> Result<(), String> {
+        let x = event["x"]
+            .as_f64()
+            .filter(|x| x.is_finite())
+            .ok_or("Chrome cursor position is invalid")?;
+        let y = event["y"]
+            .as_f64()
+            .filter(|y| y.is_finite())
+            .ok_or("Chrome cursor position is invalid")?;
+        let root = snapshot
+            .frames
+            .first()
+            .ok_or("Chrome root frame is unavailable")?;
+        if root.cdp_session != self.session || !access.permits(&root.url) {
+            return Err("Chrome cursor is outside the approved root frame".into());
+        }
+        if self.cursor.is_none() {
+            let context = access.command(Some(&self.session), "Page.createIsolatedWorld", json!({
+                "frameId":root.id,"worldName":"tidebreak-computer-use-cursor","grantUniveralAccess":false
+            })).await?["executionContextId"].as_i64().ok_or("Chrome cursor world is unavailable")?;
+            let viewport = access
+                .eval(
+                    &self.session,
+                    Some(context),
+                    "({width:innerWidth,height:innerHeight})".into(),
+                )
+                .await?;
+            self.cursor = Some(CursorDecoration {
+                context,
+                frame: root.id.clone(),
+                loader: root.loader.clone(),
+                id: Uuid::new_v4().to_string(),
+                width: viewport["width"]
+                    .as_f64()
+                    .filter(|n| n.is_finite() && *n > 0.0)
+                    .ok_or("Chrome cursor viewport is unavailable")?,
+                height: viewport["height"]
+                    .as_f64()
+                    .filter(|n| n.is_finite() && *n > 0.0)
+                    .ok_or("Chrome cursor viewport is unavailable")?,
+            });
+        }
+        let cursor = self.cursor.as_ref().unwrap();
+        if x < 0.0 || y < 0.0 || x >= cursor.width || y >= cursor.height {
+            return Err("Chrome cursor position is outside its viewport".into());
+        }
+        let payload = json!({"id":cursor.id,"url":root.url,"x":x,"y":y,"width":cursor.width,"height":cursor.height});
+        let shown = access
+            .eval(
+                &self.session,
+                Some(cursor.context),
+                format!("({CHROME_CURSOR_SCRIPT})({payload})"),
+            )
+            .await?;
+        if shown != "shown" {
+            return Err("Chrome cursor target changed; take a fresh snapshot".into());
+        }
+        Ok(())
+    }
+
     fn arm(&mut self, method: &'static str, params: Value) {
         self.releases.push((method, params));
     }
@@ -239,10 +381,12 @@ impl InputHold {
             &self.session,
             &self.releases,
             &self.focus_sessions,
+            self.cursor.as_ref(),
         )
         .await;
         self.releases.clear();
         self.focus_sessions.clear();
+        self.cursor = None;
         result
     }
 }
@@ -252,6 +396,7 @@ async fn restore_page_input(
     session: &str,
     releases: &[(&'static str, Value)],
     focus_sessions: &[String],
+    cursor: Option<&CursorDecoration>,
 ) -> Result<(), String> {
     let mut failed = false;
     for (method, params) in releases {
@@ -261,6 +406,32 @@ async fn restore_page_input(
         )
         .await;
         failed |= !matches!(result, Ok(Ok(_)));
+    }
+    if let Some(cursor) = cursor {
+        let cleared = tokio::time::timeout(
+            INPUT_RELEASE_TIMEOUT,
+            cdp.command_in_session(session, "Runtime.evaluate", cursor_clear_params(cursor)),
+        )
+        .await;
+        let removed = matches!(cleared, Ok(Ok(ref value)) if value.get("exceptionDetails").is_none() && value["result"]["value"] == "cleared");
+        // A completed click can replace the document before cleanup. Confirm
+        // that the old document is gone before accepting a lost cursor world.
+        let document_replaced = if removed {
+            false
+        } else {
+            let current = tokio::time::timeout(
+                INPUT_RELEASE_TIMEOUT,
+                cdp.command_in_session(session, "Page.getFrameTree", json!({})),
+            )
+            .await;
+            matches!(current, Ok(Ok(ref value)) if {
+                let frame = &value["frameTree"]["frame"];
+                let id = frame["id"].as_str().unwrap_or("");
+                let loader = frame["loaderId"].as_str().unwrap_or("");
+                !id.is_empty() && !loader.is_empty() && (id != cursor.frame || loader != cursor.loader)
+            })
+        };
+        failed |= !removed && !document_replaced;
     }
     // Queue all resets before waiting. The total cleanup ceiling does not
     // grow with the page's number of out-of-process frame sessions.
@@ -286,20 +457,22 @@ async fn restore_page_input(
 
 impl Drop for InputHold {
     fn drop(&mut self) {
-        if self.releases.is_empty() && self.focus_sessions.is_empty() {
+        if self.releases.is_empty() && self.focus_sessions.is_empty() && self.cursor.is_none() {
             return;
         }
         let cdp = self.cdp.clone();
         let session = std::mem::take(&mut self.session);
         let releases = std::mem::take(&mut self.releases);
         let focus_sessions = std::mem::take(&mut self.focus_sessions);
+        let cursor = self.cursor.take();
         let cleanup_guard = self.cleanup_guard.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             cdp.close();
             return;
         };
         runtime.spawn(async move {
-            let _ = restore_page_input(&cdp, &session, &releases, &focus_sessions).await;
+            let _ = restore_page_input(&cdp, &session, &releases, &focus_sessions, cursor.as_ref())
+                .await;
             drop(cleanup_guard);
         });
     }
@@ -335,12 +508,6 @@ impl Access {
                     } => "Chrome control stopped",
                 }
             } => {
-                if method == "Page.bringToFront" {
-                    // The host holds shared foreground ownership until this
-                    // reply. A sent activation must not change focus after the
-                    // host releases that ownership on cancellation.
-                    let _ = tokio::time::timeout_at(deadline, &mut command).await;
-                }
                 Err(reason.into())
             },
         };
@@ -766,6 +933,16 @@ impl ChromeComputerUseService {
         Ok(())
     }
     pub async fn dispatch(&self, scope: &ChromeScope, call: &ComputerUseCall) -> ChromeCallOutcome {
+        if call.name == CHROME_ACTIVATE_TAB_TOOL {
+            let mut rejected = outcome(
+                call,
+                ComputerUseOutcome::Rejected,
+                "Chrome tab activation is unavailable because it changes your active tab. Use independent actions on the target tab; do not retry through foreground control.",
+                Value::Null,
+            );
+            rejected.result.error_code = Some("independent_input_unavailable".into());
+            return rejected;
+        }
         let _serial = self.serial.lock().await;
         if !validate_chrome_computer_use_arguments(&call.name, &call.arguments) {
             return outcome(
@@ -778,13 +955,16 @@ impl ChromeComputerUseService {
         if let Err(error) = self.access(scope, None) {
             return outcome(call, ComputerUseOutcome::Rejected, &error, Value::Null);
         }
+        // A dropped action can still own asynchronous cleanup after releasing
+        // the serial gate. Drain it before snapshots, captures, or navigation.
+        let _prior_input_cleanup = if call.name == CHROME_ACT_TOOL {
+            None
+        } else {
+            Some(self.input_cleanup.lock().await)
+        };
         let mutating = matches!(
             call.name.as_str(),
-            CHROME_NEW_TAB_TOOL
-                | CHROME_CLOSE_TAB_TOOL
-                | CHROME_ACTIVATE_TAB_TOOL
-                | CHROME_NAVIGATE_TOOL
-                | CHROME_ACT_TOOL
+            CHROME_NEW_TAB_TOOL | CHROME_CLOSE_TAB_TOOL | CHROME_NAVIGATE_TOOL | CHROME_ACT_TOOL
         );
         if mutating {
             let mut inner = self.inner.lock().unwrap();
@@ -939,33 +1119,21 @@ impl ChromeComputerUseService {
                     }
                 }
             }
-            CHROME_CLOSE_TAB_TOOL | CHROME_ACTIVATE_TAB_TOOL => {
+            CHROME_CLOSE_TAB_TOOL => {
                 let args: ChromeTabRefArgs = parse(call)?;
                 let (access, mut tab) = self.tab(scope, &args.target_ref)?;
                 let frames = access.frames(&tab.cdp_session).await?;
                 self.refresh(&mut tab, &frames)?;
-                if call.name == CHROME_CLOSE_TAB_TOOL {
-                    access
-                        .command(
-                            None,
-                            "Target.closeTarget",
-                            json!({"targetId":tab.target_id}),
-                        )
-                        .await?;
-                    self.inner.lock().unwrap().tabs.remove(&args.target_ref);
-                    tab.summary.active = false;
-                    tab.summary.load_state = BrowserLoadState::Idle;
-                } else {
-                    access
-                        .command(Some(&tab.cdp_session), "Page.bringToFront", json!({}))
-                        .await?;
-                    tab.summary.active = true;
-                    self.inner
-                        .lock()
-                        .unwrap()
-                        .tabs
-                        .insert(args.target_ref, tab.clone());
-                }
+                access
+                    .command(
+                        None,
+                        "Target.closeTarget",
+                        json!({"targetId":tab.target_id}),
+                    )
+                    .await?;
+                self.inner.lock().unwrap().tabs.remove(&args.target_ref);
+                tab.summary.active = false;
+                tab.summary.load_state = BrowserLoadState::Idle;
                 data(tab.summary)
             }
             CHROME_NAVIGATE_TOOL => {
@@ -1329,8 +1497,12 @@ impl ChromeComputerUseService {
         access: &Access,
         tab: &Tab,
         snapshot: &Snapshot,
+        hold: &mut InputHold,
         event: Value,
     ) -> Result<(), String> {
+        self.checked_snapshot(access, tab, &snapshot.id, snapshot.epoch)
+            .await?;
+        hold.show_cursor(access, snapshot, &event).await?;
         self.checked_snapshot(access, tab, &snapshot.id, snapshot.epoch)
             .await?;
         access
@@ -1375,25 +1547,25 @@ impl ChromeComputerUseService {
      self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true})).await?;
      let(dx,dy)=self.probe(&access,&tab,&snapshot,to_ref,json!({"scroll":false})).await?;
      let(x,y)=self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":false})).await?;
-     self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x,"y":y})).await?;
+     self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mouseMoved","x":x,"y":y})).await?;
      // Cleanup releases back at the origin so it can never complete the drop.
      hold.arm("Input.cancelDragging",json!({}));
      hold.arm("Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}));
-     self.mouse(&access,&tab,&snapshot,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1})).await?;
-     for step in 1..=12 {let t=f64::from(step)/12.0;self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x+(dx-x)*t,"y":y+(dy-y)*t,"button":"left","buttons":1})).await?;tokio::time::sleep(Duration::from_millis(16)).await;}
-     self.mouse(&access,&tab,&snapshot,json!({"type":"mouseReleased","x":dx,"y":dy,"button":"left","buttons":0,"clickCount":1})).await?;
+     self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1})).await?;
+     for step in 1..=12 {let t=f64::from(step)/12.0;self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mouseMoved","x":x+(dx-x)*t,"y":y+(dy-y)*t,"button":"left","buttons":1})).await?;tokio::time::sleep(Duration::from_millis(16)).await;}
+     self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mouseReleased","x":dx,"y":dy,"button":"left","buttons":0,"clickCount":1})).await?;
      hold.disarm();
     }
     ChromeAction::Click|ChromeAction::DoubleClick|ChromeAction::Hover|ChromeAction::Scroll{..}=>{
      let(x,y)=self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":true})).await?;
-     self.mouse(&access,&tab,&snapshot,json!({"type":"mouseMoved","x":x,"y":y})).await?;
+     self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mouseMoved","x":x,"y":y})).await?;
      match &args.action {
       ChromeAction::Hover=>{},
-      ChromeAction::Scroll{x:dx,y:dy}=>{self.mouse(&access,&tab,&snapshot,json!({"type":"mouseWheel","x":x,"y":y,"deltaX":dx.unwrap_or(0.0),"deltaY":dy.unwrap_or(0.0)})).await?;},
+      ChromeAction::Scroll{x:dx,y:dy}=>{self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mouseWheel","x":x,"y":y,"deltaX":dx.unwrap_or(0.0),"deltaY":dy.unwrap_or(0.0)})).await?;},
       _=>{let count=if args.action==ChromeAction::DoubleClick{2}else{1};for click in 1..=count{
        self.probe(&access,&tab,&snapshot,&args.node_ref,json!({"scroll":false})).await?;
        hold.arm("Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":click}));
-       self.mouse(&access,&tab,&snapshot,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":click})).await?;
+       self.mouse(&access,&tab,&snapshot,&mut hold,json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":click})).await?;
        access.command(Some(&tab.cdp_session),"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":click})).await?;
        hold.disarm();
       }}

@@ -17,6 +17,8 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::Config;
 
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+mod agent_browser_host;
 mod attachments;
 mod broker;
 #[allow(
@@ -57,6 +59,7 @@ mod host_access;
 mod host_authority;
 mod image_attachments;
 mod menu;
+mod native_cursor_overlay;
 mod native_runtime_adapter;
 mod node_install;
 mod office_install;

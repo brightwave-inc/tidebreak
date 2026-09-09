@@ -22,10 +22,14 @@ const listConnectedFolders = vi.hoisted(() =>
 const grantFolderCapability = vi.hoisted(() =>
   vi.fn<() => Promise<boolean | null>>(),
 );
+const onCapabilityConsentsChanged = vi.hoisted(() =>
+  vi.fn<(handler: () => void) => () => void>(() => () => {}),
+);
 vi.mock("../host", () => ({
   hasNativeHost: () => false,
   attachedRemotely: () => false,
   listCapabilityConsents,
+  onCapabilityConsentsChanged,
   revokeCapabilityConsent,
   listConnectedFolders,
   grantFolderCapability,
@@ -105,7 +109,84 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const savedAppStatement: ConsentStatementSnapshot = {
+  handle: {
+    kind: "capability_grant",
+    grant_id: "77777777-7777-7777-7777-777777777777",
+  },
+  level: { level: "chat", chat_id: "former-code-session" },
+  level_title: null,
+  native_app_all_sessions: true,
+  verb: { kind: "capability", capability: "control_app" },
+  resource: {
+    kind: "host_app",
+    bundle_id: "dev.tidebreak.fixture",
+    display_name: "Computer-use fixture",
+  },
+  method: "permission_dialog",
+  granted_at: "2026-09-09T12:00:00Z",
+};
+
 describe("PermissionsPanel", () => {
+  it("refreshes saved app permissions after a native consent event", async () => {
+    const client = api({
+      listConsentStatements: vi.fn().mockResolvedValue([]),
+    });
+    render(<PermissionsPanel client={client} />);
+    await screen.findByText(/Nothing saved yet/);
+    listCapabilityConsents.mockResolvedValue([savedAppStatement]);
+    act(() => onCapabilityConsentsChanged.mock.calls.at(-1)?.[0]());
+    await screen.findByText("Computer-use fixture (dev.tidebreak.fixture)");
+  });
+
+  it("shows saved app access in a different Code task and revokes the exact grant", async () => {
+    listCapabilityConsents.mockResolvedValue([savedAppStatement]);
+    revokeCapabilityConsent.mockImplementation(() => {
+      listCapabilityConsents.mockResolvedValue([]);
+      return Promise.resolve(true);
+    });
+    render(
+      <PermissionsPanel
+        client={api({ listConsentStatements: vi.fn().mockResolvedValue([]) })}
+        chat={{ id: "another-code-session", project_id: null }}
+        knownChatIds={new Set(["another-code-session"])}
+      />,
+    );
+    await screen.findByText("All tasks on this Mac");
+    screen.getByText("Computer-use fixture (dev.tidebreak.fixture)");
+    screen.getByText("Control, read, and capture this app");
+    expect(screen.queryByText(/Nothing saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deleted work/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Revoke", hidden: false }),
+    );
+    await waitFor(() =>
+      expect(revokeCapabilityConsent).toHaveBeenCalledWith(savedAppStatement),
+    );
+    await screen.findByText(/Nothing saved for this work yet/);
+  });
+
+  it("keeps native session grants in their original task", () => {
+    const scoped = { ...savedAppStatement, native_app_all_sessions: false };
+    expect(
+      statementsForChat([scoped], {
+        id: "another-code-session",
+        project_id: null,
+      }),
+    ).toEqual([]);
+    expect(
+      statementsForChat([savedAppStatement], {
+        id: "another-code-session",
+        project_id: null,
+      }),
+    ).toEqual([savedAppStatement]);
+    expect(levelLabel(savedAppStatement, { chatIds: new Set() })).toBe(
+      "All tasks on this Mac",
+    );
+    expect(levelLabel(scoped, { chatIds: new Set() })).toBe("Task former…sion");
+  });
+
   it("revokes a tool grant after confirmation and drops the row", async () => {
     const listConsentStatements = vi.fn().mockResolvedValue([execStatement]);
     const client = api({

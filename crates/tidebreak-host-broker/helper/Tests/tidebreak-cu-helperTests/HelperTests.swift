@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -57,7 +58,477 @@ struct HelperTests {
         print("PASS testInvocationCancellationRefusesFurtherInput")
         try suite.testModifierAndMouseEventsHaveTrackedReleases()
         print("PASS testModifierAndMouseEventsHaveTrackedReleases")
-        print("26 helper regression tests passed")
+        try suite.testTargetedInputUsesPrivateStateAndBoundWindow()
+        print("PASS testTargetedInputUsesPrivateStateAndBoundWindow")
+        try suite.testTargetedInputStopsOnFocusAndPointerChangesAndReleases()
+        print("PASS testTargetedInputStopsOnFocusAndPointerChangesAndReleases")
+        try suite.testTargetedInputRejectsPIDReuseAndCancellation()
+        print("PASS testTargetedInputRejectsPIDReuseAndCancellation")
+        try suite.testTargetedJournalRetainsDestinationAndReleasePayload()
+        print("PASS testTargetedJournalRetainsDestinationAndReleasePayload")
+        try suite.testProductionTargetAllowsUnrelatedPointerAndAppChanges()
+        print("PASS testProductionTargetAllowsUnrelatedPointerAndAppChanges")
+        try suite.testTargetedKeysPreserveModifierTranslation()
+        print("PASS testTargetedKeysPreserveModifierTranslation")
+        try suite.testTargetedMouseRecoveryUsesLastAgentPosition()
+        print("PASS testTargetedMouseRecoveryUsesLastAgentPosition")
+        try suite.testTargetedScrollPreservesDeltasAndWindow()
+        print("PASS testTargetedScrollPreservesDeltasAndWindow")
+        try suite.testProductionDragCancellationReleasesWithoutTakeover()
+        print("PASS testProductionDragCancellationReleasesWithoutTakeover")
+        try suite.testProductionRejectsBeforeDownWithoutRelease()
+        print("PASS testProductionRejectsBeforeDownWithoutRelease")
+        try suite.testTargetedTextPreservesUnicode()
+        print("PASS testTargetedTextPreservesUnicode")
+        try suite.testTargetedRepeatedClickPreservesCount()
+        print("PASS testTargetedRepeatedClickPreservesCount")
+        try suite.testProductionMouseMovementKeepsUserPointerIndependent()
+        print("PASS testProductionMouseMovementKeepsUserPointerIndependent")
+        try suite.testRecoveryPreservesQuartzUnicodePayload()
+        print("PASS testRecoveryPreservesQuartzUnicodePayload")
+        print("40 helper regression tests passed")
+    }
+
+    private func targetedFixture() -> TargetedInput.Observation {
+        .init(
+            target: .init(
+                pid: 123, bundleId: "dev.fixture", launchedAt: 1234,
+                windowId: 42, frame: CGRect(x: 10, y: 20, width: 400, height: 300)),
+            frontmostPid: 456, pointer: CGPoint(x: 900, y: 700))
+    }
+
+    func testTargetedInputUsesPrivateStateAndBoundWindow() throws {
+        let observed = targetedFixture()
+        var received: [CGEvent] = []
+        let session = try TargetedInput.Session(
+            target: observed.target, observation: { observed },
+            checkCancellation: {},
+            deliver: { event, pid in
+                expectEqual(pid, observed.target.pid)
+                received.append(event)
+            }, pause: { _ in })
+        let point = CGPoint(x: 100, y: 120)
+        let down = try session.mouse(.leftMouseDown, at: point)
+        let up = try session.mouse(.leftMouseUp, at: point)
+        expectEqual(CGEventSource(event: down)?.sourceStateID, session.source.sourceStateID)
+        expectFalse(session.source.sourceStateID == .combinedSessionState)
+        expectFalse(session.source.sourceStateID == .hidSystemState)
+        expectEqual(NSEvent(cgEvent: down)?.windowNumber, 42)
+        expectEqual(down.location, point)
+        expectEqual(EventWindowLocation.get(down), CGPoint(x: 90, y: 100))
+        expectEqual(down.getIntegerValueField(.eventTargetUnixProcessID), 123)
+        expectEqual(down.getIntegerValueField(.mouseEventWindowUnderMousePointer), 42)
+        expectEqual(
+            down.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent), 42)
+        let key = try session.key(0, down: true, characters: "a")
+        expectEqual(CGEventSource(event: key)?.sourceStateID, session.source.sourceStateID)
+        expectEqual(NSEvent(cgEvent: key)?.windowNumber, 42)
+        let endpoint = CGPoint(x: 150, y: 180)
+        let move = try session.mouse(.leftMouseDragged, at: endpoint)
+        let result = try session.run([
+            .init(event: down, release: up, delay: 0.02),
+            .init(event: move, release: nil, delay: 0.02),
+        ])
+        expectEqual(result.delivered, 2)
+        expectEqual(result.released, 1)
+        expectEqual(received.map { $0.type }, [.leftMouseDown, .leftMouseDragged, .leftMouseUp])
+        expectEqual(received.last?.location, endpoint)
+        expectEqual(EventWindowLocation.get(received.last!), CGPoint(x: 140, y: 160))
+    }
+
+    func testProductionMouseMovementKeepsUserPointerIndependent() throws {
+        try recoveryFixture { request, _ in
+            let baseline = targetedFixture()
+            var observed = baseline
+            var received: [CGEvent] = []
+            let session = try TargetedInput.Session(
+                target: baseline.target, observation: { observed },
+                checkCancellation: {},
+                deliver: { event, pid in
+                    expectEqual(pid, baseline.target.pid)
+                    received.append(event)
+                },
+                pause: { _ in
+                    observed = .init(target: baseline.target, frontmostPid: 789, pointer: .zero)
+                }, requireUnchangedDesktop: false)
+            let point = CGPoint(x: 100, y: 120)
+            let event = try session.mouse(.mouseMoved, at: point)
+            try session.perform([.init(event: event, release: nil, delay: 0.02)], request: request)
+            expectEqual(received.map { $0.type }, [.mouseMoved])
+            expectEqual(received.first?.location, point)
+            expectEqual(NSEvent(cgEvent: received.first!)?.windowNumber, 42)
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+        }
+    }
+
+    func testTargetedRepeatedClickPreservesCount() throws {
+        try recoveryFixture { request, _ in
+            let baseline = targetedFixture()
+            var received: [(CGEventType, Int)] = []
+            let session = try TargetedInput.Session(
+                target: baseline.target, observation: { baseline },
+                checkCancellation: {},
+                deliver: { event, _ in
+                    received.append((event.type, NSEvent(cgEvent: event)?.clickCount ?? -1))
+                }, pause: { _ in }, requireUnchangedDesktop: false)
+            var steps: [TargetedInput.Step] = []
+            let point = CGPoint(x: 100, y: 120)
+            for click in 1...3 {
+                let down = try session.mouse(.leftMouseDown, at: point, clickCount: Int64(click))
+                let up = try session.mouse(.leftMouseUp, at: point, clickCount: Int64(click))
+                steps += [
+                    .init(event: down, release: up, delay: 0.02),
+                    .init(event: up, release: nil, delay: 0.05),
+                ]
+            }
+            try session.perform(steps, request: request)
+            expectEqual(
+                received.map { $0.0 },
+                [
+                    .leftMouseDown, .leftMouseUp, .leftMouseDown,
+                    .leftMouseUp, .leftMouseDown, .leftMouseUp,
+                ])
+            expectEqual(received.map { $0.1 }, [1, 1, 2, 2, 3, 3])
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+        }
+    }
+
+    func testRecoveryPreservesQuartzUnicodePayload() throws {
+        let baseline = targetedFixture()
+        let session = try TargetedInput.Session(
+            target: baseline.target, observation: { baseline },
+            checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+        for text in ["é", "界", "🙂"] {
+            let normal = try session.key(0, down: false, characters: text)
+            let held = InputRecovery.Held(
+                kind: "key", code: 0, releaseText: text,
+                releaseTextIgnoringModifiers: text, releaseFlags: 0)
+            let recovered = try InputRecovery.releaseEvent(
+                held, target: baseline.target, source: session.source)
+            func unicode(_ event: CGEvent) -> [UniChar] {
+                var units = [UniChar](repeating: 0, count: 8)
+                var length = 0
+                event.keyboardGetUnicodeString(
+                    maxStringLength: units.count,
+                    actualStringLength: &length, unicodeString: &units)
+                return Array(units.prefix(length))
+            }
+            expectEqual(unicode(recovered), unicode(normal))
+            expectEqual(unicode(recovered), Array(text.utf16))
+            expectEqual(NSEvent(cgEvent: recovered)?.windowNumber, 42)
+        }
+    }
+
+    func testTargetedTextPreservesUnicode() throws {
+        let baseline = targetedFixture()
+        let session = try TargetedInput.Session(
+            target: baseline.target, observation: { baseline },
+            checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+        let text = "aA! é e\u{301} 😀 中"
+        let steps = try session.textSteps(text)
+        expectEqual(
+            steps.filter { $0.event.type == .keyDown }.compactMap {
+                NSEvent(cgEvent: $0.event)?.characters
+            }.joined(), text)
+        expectTrue(steps.allSatisfy { NSEvent(cgEvent: $0.event)?.windowNumber == 42 })
+        let recovered = steps.filter { $0.event.type == .keyDown }.map { step in
+            var units = [UniChar](repeating: 0, count: 8)
+            var length = 0
+            step.event.keyboardGetUnicodeString(
+                maxStringLength: units.count,
+                actualStringLength: &length, unicodeString: &units)
+            return String(utf16CodeUnits: units, count: length)
+        }.joined()
+        expectEqual(recovered, text)
+        expectError(try session.textSteps(String(repeating: "a", count: 501)))
+    }
+
+    func testProductionRejectsBeforeDownWithoutRelease() throws {
+        try recoveryFixture { request, _ in
+            let baseline = targetedFixture()
+            var validations = 0
+            var received: [CGEventType] = []
+            let session = try TargetedInput.Session(
+                target: baseline.target, observation: { baseline },
+                checkCancellation: {
+                    validations += 1
+                    if validations == 2 { throw HelperError(code: .yielded, message: "stopped") }
+                }, deliver: { event, _ in received.append(event.type) }, pause: { _ in },
+                requireUnchangedDesktop: false)
+            let point = CGPoint(x: 100, y: 120)
+            let down = try session.mouse(.leftMouseDown, at: point)
+            let up = try session.mouse(.leftMouseUp, at: point)
+            expectError(
+                try session.perform([.init(event: down, release: up, delay: 0)], request: request))
+            expectTrue(received.isEmpty)
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+        }
+    }
+
+    func testProductionDragCancellationReleasesWithoutTakeover() throws {
+        for replaceTarget in [false, true] {
+            try recoveryFixture { request, _ in
+                let baseline = targetedFixture()
+                var observed = baseline
+                var cancelled = false
+                var received: [CGEvent] = []
+                let session = try TargetedInput.Session(
+                    target: baseline.target, observation: { observed },
+                    checkCancellation: {
+                        if cancelled { throw HelperError(code: .yielded, message: "stopped") }
+                    },
+                    deliver: { event, pid in
+                        expectEqual(pid, baseline.target.pid)
+                        received.append(event)
+                    },
+                    pause: { _ in
+                        cancelled = true
+                        if replaceTarget {
+                            observed = .init(
+                                target: .init(
+                                    pid: baseline.target.pid,
+                                    bundleId: baseline.target.bundleId, launchedAt: 9876,
+                                    windowId: baseline.target.windowId, frame: baseline.target.frame
+                                ),
+                                frontmostPid: 789, pointer: .zero)
+                        } else {
+                            observed = .init(
+                                target: baseline.target, frontmostPid: 789, pointer: .zero)
+                        }
+                    }, requireUnchangedDesktop: false)
+                let point = CGPoint(x: 100, y: 120)
+                let down = try session.mouse(.leftMouseDown, at: point)
+                let up = try session.mouse(.leftMouseUp, at: point)
+                let move = try session.mouse(.leftMouseDragged, at: CGPoint(x: 150, y: 180))
+                do {
+                    try session.perform(
+                        [
+                            .init(event: down, release: up, delay: 0.02),
+                            .init(event: move, release: nil, delay: 0),
+                        ], request: request)
+                    fatalError("cancelled input must fail")
+                } catch let error as HelperError {
+                    expectEqual(error.code, .operationFailed)
+                }
+                expectEqual(
+                    received.map { $0.type },
+                    replaceTarget ? [.leftMouseDown] : [.leftMouseDown, .leftMouseUp])
+                expectEqual(try InputRecovery.load(request).held.count, replaceTarget ? 1 : 0)
+                if !replaceTarget {
+                    expectEqual(received.last?.location, point)
+                    expectEqual(EventWindowLocation.get(received.last!), CGPoint(x: 90, y: 100))
+                }
+            }
+        }
+    }
+
+    func testTargetedScrollPreservesDeltasAndWindow() throws {
+        let observed = targetedFixture()
+        let session = try TargetedInput.Session(
+            target: observed.target, observation: { observed },
+            checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+        let point = CGPoint(x: 100, y: 120)
+        for (dx, dy) in [(120.0, -45.0), (-33.0, 140.0)] {
+            let reference = try requireValue(
+                CGEvent(
+                    scrollWheelEvent2Source: session.source,
+                    units: .pixel, wheelCount: 2, wheel1: Control.scrollWheelDelta(dy),
+                    wheel2: Control.scrollWheelDelta(dx), wheel3: 0))
+            let expected = try requireValue(NSEvent(cgEvent: reference))
+            let event = try session.scroll(at: point, dx: dx, dy: dy)
+            let actual = try requireValue(NSEvent(cgEvent: event))
+            expectEqual(event.type, .scrollWheel)
+            expectEqual(actual.scrollingDeltaX, expected.scrollingDeltaX)
+            expectEqual(actual.scrollingDeltaY, expected.scrollingDeltaY)
+            expectEqual(actual.hasPreciseScrollingDeltas, expected.hasPreciseScrollingDeltas)
+            expectEqual(actual.windowNumber, 42)
+            expectEqual(EventWindowLocation.get(event), CGPoint(x: 90, y: 100))
+            expectEqual(event.location, point)
+        }
+    }
+
+    func testTargetedKeysPreserveModifierTranslation() throws {
+        let observed = targetedFixture()
+        let session = try TargetedInput.Session(
+            target: observed.target, observation: { observed },
+            checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+        for code: CGKeyCode in [0, 18] {
+            for flags: CGEventFlags in [.maskShift, [.maskShift, .maskCommand], .maskAlternate] {
+                let reference = try requireValue(
+                    CGEvent(
+                        keyboardEventSource: session.source,
+                        virtualKey: code, keyDown: true))
+                reference.flags = flags
+                let expected = try requireValue(NSEvent(cgEvent: reference))
+                for down in [true, false] {
+                    let targeted = try session.key(code, down: down, flags: flags)
+                    let actual = try requireValue(NSEvent(cgEvent: targeted))
+                    expectEqual(actual.characters, expected.characters)
+                    expectEqual(
+                        actual.charactersIgnoringModifiers, expected.charactersIgnoringModifiers)
+                    expectEqual(actual.windowNumber, 42)
+                    expectEqual(targeted.flags, flags)
+                }
+            }
+        }
+    }
+
+    func testTargetedInputStopsOnFocusAndPointerChangesAndReleases() throws {
+        for focusChange in [false, true] {
+            let baseline = targetedFixture()
+            var observed = baseline
+            var received: [CGEventType] = []
+            let session = try TargetedInput.Session(
+                target: baseline.target, observation: { observed },
+                checkCancellation: {}, deliver: { event, _ in received.append(event.type) },
+                pause: { _ in
+                    observed = .init(
+                        target: baseline.target,
+                        frontmostPid: focusChange ? baseline.target.pid : baseline.frontmostPid,
+                        pointer: focusChange ? baseline.pointer : .zero)
+                })
+            let down = try session.mouse(.leftMouseDown, at: CGPoint(x: 100, y: 120))
+            let up = try session.mouse(.leftMouseUp, at: CGPoint(x: 100, y: 120))
+            let move = try session.mouse(.leftMouseDragged, at: CGPoint(x: 150, y: 120))
+            expectError(
+                try session.run([
+                    .init(event: down, release: up, delay: 0.02),
+                    .init(event: move, release: nil, delay: 0.02),
+                ]))
+            expectEqual(received, [.leftMouseDown, .leftMouseUp])
+        }
+    }
+
+    func testTargetedInputRejectsPIDReuseAndCancellation() throws {
+        let baseline = targetedFixture()
+        for replaceTarget in [false, true] {
+            var observed = baseline
+            var cancelled = false
+            var received: [CGEventType] = []
+            let session = try TargetedInput.Session(
+                target: baseline.target, observation: { observed },
+                checkCancellation: { if cancelled { throw TestFailure.expectedValue } },
+                deliver: { event, _ in received.append(event.type) },
+                pause: { _ in
+                    cancelled = true
+                    if replaceTarget {
+                        observed = .init(
+                            target: .init(
+                                pid: baseline.target.pid,
+                                bundleId: baseline.target.bundleId, launchedAt: 9876,
+                                windowId: baseline.target.windowId, frame: baseline.target.frame),
+                            frontmostPid: baseline.frontmostPid, pointer: baseline.pointer)
+                    }
+                })
+            let down = try session.key(0, down: true, characters: "a")
+            let up = try session.key(0, down: false, characters: "a")
+            expectError(
+                try session.run([
+                    .init(event: down, release: up, delay: 0.02),
+                    .init(event: down, release: nil, delay: 0.02),
+                ]))
+            expectEqual(received, replaceTarget ? [.keyDown] : [.keyDown, .keyUp])
+        }
+    }
+
+    func testTargetedJournalRetainsDestinationAndReleasePayload() throws {
+        try recoveryFixture { request, _ in
+            let observed = targetedFixture()
+            let session = try TargetedInput.Session(
+                target: observed.target, observation: { observed },
+                checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+            let down = try session.key(0, down: true, flags: .maskShift)
+            var received: [(CGEventType, pid_t)] = []
+            try InputRecovery.post(
+                down, request: request, target: observed.target,
+                deliver: { event, pid in received.append((event.type, pid)) })
+            let journal = try InputRecovery.load(request)
+            expectEqual(journal.target, observed.target)
+            let held = try requireValue(journal.held.first)
+            expectEqual(held.releaseText, NSEvent(cgEvent: down)?.characters)
+            expectEqual(
+                held.releaseTextIgnoringModifiers,
+                NSEvent(cgEvent: down)?.charactersIgnoringModifiers)
+            expectEqual(held.releaseFlags, CGEventFlags.maskShift.rawValue)
+            let release = try InputRecovery.releaseEvent(
+                held, target: observed.target,
+                source: session.source)
+            expectEqual(release.type, .keyUp)
+            expectEqual(release.getIntegerValueField(.eventTargetUnixProcessID), 123)
+            expectEqual(NSEvent(cgEvent: release)?.windowNumber, 42)
+            expectEqual(release.flags, .maskShift)
+            expectEqual(NSEvent(cgEvent: release)?.characters, NSEvent(cgEvent: down)?.characters)
+            expectEqual(
+                NSEvent(cgEvent: release)?.charactersIgnoringModifiers,
+                NSEvent(cgEvent: down)?.charactersIgnoringModifiers)
+            let recovered = try InputRecovery.recover(
+                journal: journal, request: request,
+                physicallyHeld: { _ in false },
+                release: { control in
+                    let event = try InputRecovery.releaseEvent(
+                        control, target: observed.target,
+                        source: session.source)
+                    received.append((event.type, observed.target.pid))
+                })
+            expectEqual(recovered.released, 1)
+            expectEqual(received.map { $0.0 }, [.keyDown, .keyUp])
+            expectTrue(received.allSatisfy { $0.1 == 123 })
+            expectTrue(try InputRecovery.load(request).held.isEmpty)
+            let replaced = TargetedInput.Target(
+                pid: 123, bundleId: "dev.fixture", launchedAt: 9999,
+                windowId: 42, frame: observed.target.frame)
+            expectFalse(InputRecovery.sameDestination(replaced, observed.target))
+        }
+    }
+
+    func testTargetedMouseRecoveryUsesLastAgentPosition() throws {
+        try recoveryFixture { request, _ in
+            let observed = targetedFixture()
+            let session = try TargetedInput.Session(
+                target: observed.target, observation: { observed },
+                checkCancellation: {}, deliver: { _, _ in }, pause: { _ in })
+            let down = try session.mouse(.leftMouseDown, at: CGPoint(x: 100, y: 120))
+            let endpoint = CGPoint(x: 150, y: 180)
+            let move = try session.mouse(.leftMouseDragged, at: endpoint)
+            var received: [CGEventType] = []
+            let deliver: (CGEvent, pid_t) -> Void = { event, pid in
+                expectEqual(pid, observed.target.pid)
+                received.append(event.type)
+            }
+            expectError(
+                try InputRecovery.post(
+                    move, request: request, target: observed.target,
+                    deliver: deliver))
+            expectTrue(received.isEmpty)
+            try InputRecovery.post(
+                down, request: request, target: observed.target, deliver: deliver)
+            try InputRecovery.post(
+                move, request: request, target: observed.target, deliver: deliver)
+            let journal = try InputRecovery.load(request)
+            let held = try requireValue(journal.held.first)
+            let release = try InputRecovery.releaseEvent(
+                held, target: observed.target, source: session.source)
+            expectEqual(received, [.leftMouseDown, .leftMouseDragged])
+            expectEqual(release.location, endpoint)
+            expectEqual(EventWindowLocation.get(release), CGPoint(x: 140, y: 160))
+            expectEqual(NSEvent(cgEvent: release)?.windowNumber, 42)
+            expectEqual(CGEventSource(event: release)?.sourceStateID, session.source.sourceStateID)
+            expectEqual(release.getIntegerValueField(.eventTargetUnixProcessID), 123)
+        }
+    }
+
+    func testProductionTargetAllowsUnrelatedPointerAndAppChanges() throws {
+        let baseline = targetedFixture()
+        var observed = baseline
+        let session = try TargetedInput.Session(
+            target: baseline.target, observation: { observed },
+            checkCancellation: {}, deliver: { _, _ in }, pause: { _ in },
+            requireUnchangedDesktop: false)
+        observed = .init(target: baseline.target, frontmostPid: 789, pointer: .zero)
+        expectSuccess(try session.validate())
+        observed = .init(target: baseline.target, frontmostPid: baseline.target.pid, pointer: .zero)
+        expectError(try session.validate())
+        expectSuccess(try session.validate(releasing: true))
     }
 
     private func recoveryFixture(_ work: (HelperRequest, URL) throws -> Void) throws {
@@ -211,15 +682,28 @@ struct HelperTests {
         let command = try request(#"{"op":"hover"}"#)
         expectNil(command.executionMode)
         let calls: [(HelperRequest) throws -> Control.Result] = [
-            Control.hover, Control.drag, Control.keyPress, Control.focusWindow,
+            Control.focusWindow
         ]
         for call in calls {
             expectError(try call(command)) { error in
-                expectEqual((error as? HelperError)?.code, .requiresForeground)
+                expectEqual((error as? HelperError)?.code, .independentInputUnavailable)
             }
         }
         let foreground = try request(#"{"op":"hover","execution_mode":"foreground"}"#)
-        expectSuccess(try Control.requireForeground(foreground, operation: "hover"))
+        expectError(try Control.requireForeground(foreground, operation: "hover"))
+        for operation in [
+            "click", "type_text", "key_press", "scroll", "focus_window", "launch_app", "hover",
+            "drag",
+            "resize_window",
+        ] {
+            let legacy = try request("{\"op\":\"\(operation)\",\"execution_mode\":\"foreground\"}")
+            expectError(try legacy.requireIndependentInput()) { error in
+                expectEqual((error as? HelperError)?.code, .independentInputUnavailable)
+            }
+        }
+        let recovery = try request(
+            #"{"op":"release_recorded_input","execution_mode":"foreground"}"#)
+        expectSuccess(try recovery.requireIndependentInput())
     }
 
     func testExecutionModeIsExplicitInControlResults() throws {

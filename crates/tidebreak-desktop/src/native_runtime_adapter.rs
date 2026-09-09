@@ -369,6 +369,8 @@ impl NativeRuntime for DesktopNativeRuntime {
                 "native computer use on this platform".to_owned(),
             ));
         }
+        let state = self.app.state::<HostAccess>();
+        let admission = state.computer_use.admit_native_input(scope.session);
         self.validate_scope(scope).await?;
         let session = self.session(scope.session);
         // Remember the interrupt generation from before we queued: an
@@ -392,7 +394,6 @@ impl NativeRuntime for DesktopNativeRuntime {
         session.reserve_request(call)?;
         let cancelled = session.subscribe_at_generation(queued_at_generation)?;
 
-        let state = self.app.state::<HostAccess>();
         let operation = execute_session_native_operation(
             &self.app,
             state.inner(),
@@ -400,6 +401,7 @@ impl NativeRuntime for DesktopNativeRuntime {
             CallId::from(call.request_id),
             &call.name,
             call.arguments.clone(),
+            admission,
         );
         let acting = crate::client_execution::computer_use::acts_on_host(&call.name);
         let outcome = await_session_operation(
@@ -919,6 +921,11 @@ mod tests {
             (false, "computer_unavailable", ComputerUseOutcome::Rejected),
             (false, "operation_failed", ComputerUseOutcome::Rejected),
             (true, "requires_foreground", ComputerUseOutcome::Rejected),
+            (
+                true,
+                "independent_input_unavailable",
+                ComputerUseOutcome::Rejected,
+            ),
             (true, "control_yielded", ComputerUseOutcome::Unknown),
             (false, "control_yielded", ComputerUseOutcome::Rejected),
             (true, "stopped_by_user", ComputerUseOutcome::Rejected),

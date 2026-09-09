@@ -17,6 +17,8 @@ let requiredMacOSVersion = OperatingSystemVersion(majorVersion: 13, minorVersion
 struct AppArguments {
     var fixtureDirectory: URL
     var runID: String
+    var background: Bool
+    var recordInput: Bool
 }
 
 // Bounded, inspectable fixture state. All state is intentionally observable
@@ -24,6 +26,8 @@ struct AppArguments {
 final class FixtureState {
     let runID: String
     private let store: EventStore
+    private var recordedInputCount = 0
+    private var independentPointerMoves = 0
     private var submissionCounter = 0
     private var textValue = ""
     private var dropdownSelection = "First"
@@ -37,10 +41,10 @@ final class FixtureState {
     private var windowWidth = 920.0
     private var windowHeight = 760.0
 
-    init(store: EventStore, runID: String) {
+    init(store: EventStore, runID: String, background: Bool = false, recordInput: Bool = false) {
         self.store = store
         self.runID = runID
-        store.write("launch_ready", payload: ["app_id": fixtureBundleID, "title": fixtureWindowTitle])
+        store.write("launch_ready", payload: ["app_id": fixtureBundleID, "title": fixtureWindowTitle, "background": background, "record_input": recordInput])
     }
 
     func submissionCount() -> Int { submissionCounter }
@@ -51,6 +55,37 @@ final class FixtureState {
     func dragTarget() -> String { lastDragTarget }
     func currentDelayedStatus() -> String { delayedStatus }
     func isSecondWindowOpen() -> Bool { secondWindowOpen }
+
+    /// Observe delivered input without changing how AppKit dispatches it.
+    func noteInput(_ event: NSEvent) {
+        guard recordedInputCount < 400 else { return }
+        recordedInputCount += 1
+        let local = event.locationInWindow
+        let point = event.cgEvent?.location ?? .zero
+        var payload: [String: Any] = [
+            "type": event.type.rawValue,
+            "window_number": event.windowNumber,
+            "location_in_window": ["x": local.x, "y": local.y],
+            "quartz_location": ["x": point.x, "y": point.y],
+            "app_active": NSApp.isActive,
+            "window_key": event.window?.isKeyWindow ?? false,
+            "source_pid": event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1,
+        ]
+        if event.type == .keyDown || event.type == .keyUp {
+            payload["key_code"] = event.keyCode
+        }
+        if [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp].contains(event.type) {
+            payload["click_count"] = event.clickCount
+        }
+        store.write("input_received", payload: payload)
+        if event.type == .mouseMoved,
+           (event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0) > 0,
+           !NSApp.isActive {
+            independentPointerMoves += 1
+            store.write("independent_mouse_moved", payload: payload)
+            snapshot()
+        }
+    }
 
     func snapshot() {
         store.write("state_snapshot", payload: snapshotPayload())
@@ -66,6 +101,7 @@ final class FixtureState {
             "dropdown": dropdownSelection,
             "checkbox": checkboxChecked,
             "hovered": hovered,
+            "independent_pointer_moves": independentPointerMoves,
             "drag_dropped": dragDropped,
             "drag_target": lastDragTarget,
             "delayed_status": delayedStatus,
@@ -162,11 +198,13 @@ class FlippedView: NSView {
 
 final class HoverStatusView: NSView {
     var onHoverChanged: ((Bool) -> Void)?
+    var tracksWhileInactive = false
     private var trackingArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
         if let trackingArea { removeTrackingArea(trackingArea) }
-        let options: NSTrackingArea.Options = [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited]
+        let activation: NSTrackingArea.Options = tracksWhileInactive ? .activeAlways : .activeInKeyWindow
+        let options: NSTrackingArea.Options = [activation, .inVisibleRect, .mouseEnteredAndExited]
         let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingArea = area
@@ -249,6 +287,8 @@ private func formLabel(_ text: String, width: CGFloat) -> NSTextField {
 
 final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let fixtureDirectory: URL
+    private let background: Bool
+    private let recordInput: Bool
     private var state: FixtureState
     private(set) var currentRunID: String
 
@@ -273,8 +313,10 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
     private var lastScrollY: CGFloat = 0
     private var delayedWorkItem: DispatchWorkItem?
 
-    init(fixtureDirectory: URL, state: FixtureState) {
+    init(fixtureDirectory: URL, state: FixtureState, background: Bool = false, recordInput: Bool = false) {
         self.fixtureDirectory = fixtureDirectory
+        self.background = background
+        self.recordInput = recordInput
         self.state = state
         self.currentRunID = state.runID
         let window = NSWindow(
@@ -289,12 +331,24 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         window.setAccessibilityTitle(fixtureWindowTitle)
         window.minSize = NSSize(width: 760, height: 640)
         window.delegate = self
+        window.acceptsMouseMovedEvents = true
+        hoverView.tracksWhileInactive = background
         buildContent()
         window.center()
-        window.makeKeyAndOrderFront(nil)
+        if background {
+            window.orderFront(nil)
+            window.makeFirstResponder(inputField)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+        }
         window.contentView?.layoutSubtreeIfNeeded()
         positionDragItem()
         state.snapshot()
+    }
+
+    func noteInput(_ event: NSEvent) {
+        guard event.window === window else { return }
+        state.noteInput(event)
     }
 
     @available(*, unavailable)
@@ -612,7 +666,11 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
             note.centerYAnchor.constraint(equalTo: secondRoot.centerYAnchor),
         ])
         second.center()
-        second.makeKeyAndOrderFront(nil)
+        if background {
+            second.orderFront(nil)
+        } else {
+            second.makeKeyAndOrderFront(nil)
+        }
         secondWindowButton.title = "Close second window"
         state.setSecondWindowOpen(true)
     }
@@ -629,7 +687,7 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
         }
         do {
             let store = try EventStore(fixtureDirectory: fixtureDirectory, runID: freshRunID)
-            let newState = FixtureState(store: store, runID: freshRunID)
+            let newState = FixtureState(store: store, runID: freshRunID, background: background, recordInput: recordInput)
             let oldState = state
             state = newState
             currentRunID = freshRunID
@@ -677,13 +735,16 @@ final class FixtureWindowController: NSWindowController, NSWindowDelegate, NSTex
 final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
     private let arguments: AppArguments
     private var windowController: FixtureWindowController?
+    private var inputMonitor: Any?
 
     init(arguments: AppArguments) {
         self.arguments = arguments
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        if !arguments.background {
+            NSRunningApplication.current.activate(options: [.activateAllWindows])
+        }
         let app = NSApplication.shared
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
@@ -694,8 +755,19 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
         app.mainMenu = menu
         do {
             let store = try EventStore(fixtureDirectory: arguments.fixtureDirectory, runID: arguments.runID)
-            let state = FixtureState(store: store, runID: arguments.runID)
-            windowController = FixtureWindowController(fixtureDirectory: arguments.fixtureDirectory, state: state)
+            let state = FixtureState(store: store, runID: arguments.runID, background: arguments.background, recordInput: arguments.recordInput)
+            windowController = FixtureWindowController(
+                fixtureDirectory: arguments.fixtureDirectory, state: state,
+                background: arguments.background, recordInput: arguments.recordInput)
+            if arguments.recordInput {
+                inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+                    .keyDown, .keyUp, .leftMouseDown, .leftMouseUp,
+                    .leftMouseDragged, .mouseMoved, .rightMouseDown, .rightMouseUp,
+                ]) { [weak self] event in
+                    self?.windowController?.noteInput(event)
+                    return event
+                }
+            }
         } catch {
             NSLog("ComputerUseFixture: could not start: %@", String(describing: error))
             NSApp.terminate(nil)
@@ -710,10 +782,16 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
 private func parseArguments(from arguments: [String]) throws -> AppArguments {
     var fixtureDirectory: URL?
     var requestedRunID: String?
+    var background = ProcessInfo.processInfo.environment["TIDEBREAK_CU_FIXTURE_BACKGROUND"] == "1"
+    var recordInput = ProcessInfo.processInfo.environment["TIDEBREAK_CU_FIXTURE_RECORD_INPUT"] == "1"
     var index = 0
     while index < arguments.count {
         let argument = arguments[index]
         switch argument {
+        case "--background":
+            background = true
+        case "--record-input":
+            recordInput = true
         case "--fixture-dir":
             index += 1
             guard index < arguments.count else { throw FixtureError.missingFixtureDirectory }
@@ -743,7 +821,7 @@ private func parseArguments(from arguments: [String]) throws -> AppArguments {
         let suffix = UUID().uuidString.prefix(8)
         runID = "\(prefix)-\(suffix)"
     }
-    return AppArguments(fixtureDirectory: fixtureDirectory, runID: runID)
+    return AppArguments(fixtureDirectory: fixtureDirectory, runID: runID, background: background, recordInput: recordInput)
 }
 
 extension FixtureError {

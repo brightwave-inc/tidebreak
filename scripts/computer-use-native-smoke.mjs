@@ -272,7 +272,7 @@ export async function runNativeSmoke({
   // or a claimed success string is never enough.
   const launch = unwrapResult(
     await call("computer_launch_app", {
-      execution_mode: "foreground",
+      execution_mode: "background",
       app_id: APP_ID,
     }),
     "computer_launch_app",
@@ -295,8 +295,8 @@ export async function runNativeSmoke({
 
   const baseline = await readEvents(fixtureDir, runID);
   assert.ok(
-    baseline.some((record) => record.event === "launch_ready"),
-    "fixture must write launch_ready before acceptance",
+    baseline.some((record) => record.event === "launch_ready" && record.payload.background === true && record.payload.record_input === true),
+    "fixture must launch with --background --record-input before independent-input acceptance",
   );
   const before = await currentSnapshot();
   assert.equal(before.submission_count ?? 0, 0, "fixture must start unsubmitted");
@@ -310,12 +310,12 @@ export async function runNativeSmoke({
   const text = "Native acceptance " + runID;
   const typeTarget = findTarget(initialTree, "fixture-text-input");
   await call("computer_click", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
   });
   await call("computer_type_text", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     text,
     element_id: typeTarget.id, element_fingerprint: typeTarget.fingerprint,
@@ -329,7 +329,7 @@ export async function runNativeSmoke({
 
   const addTarget = findTarget(await readTree(call), "fixture-add-button");
   await call("computer_click", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: addTarget.id, element_fingerprint: addTarget.fingerprint,
   });
@@ -347,47 +347,49 @@ export async function runNativeSmoke({
   assert.ok(screenshot.bytes >= 8 * 1024, "screenshot must contain real pixels");
   assert.notEqual(screenshot.sha256, beforeScreenshot.sha256, "capture must show a change after submission");
 
-  await call("computer_focus_window", { execution_mode: "foreground", app_id: APP_ID, window_id: mainWindowId });
-
   const treeForSelect = await readTree(call);
   const dropdown = findTarget(treeForSelect, "fixture-dropdown");
   await call("computer_click", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: dropdown.id, element_fingerprint: dropdown.fingerprint,
   });
-  await call("computer_key_press", { execution_mode: "foreground", app_id: APP_ID, key: "down" });
-  await call("computer_key_press", { execution_mode: "foreground", app_id: APP_ID, key: "return" });
+  await call("computer_key_press", { execution_mode: "background", app_id: APP_ID, key: "down" });
+  await call("computer_key_press", { execution_mode: "background", app_id: APP_ID, key: "return" });
   await waitFor((state) => state.dropdown === "Second", "dropdown selection");
   await assertSnapshotValue(await currentSnapshot(), "dropdown", "Second", "dropdown");
 
   const checkbox = findTarget(await readTree(call), "fixture-checkbox");
   await call("computer_click", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: checkbox.id, element_fingerprint: checkbox.fingerprint,
   });
   await waitFor((state) => state.checkbox === true, "checkbox checked");
   await assertSnapshotValue(await currentSnapshot(), "checkbox", true, "checkbox");
 
+  const movesBefore = (await currentSnapshot()).independent_pointer_moves ?? 0;
   const hover = findTarget(await readTree(call), "fixture-hover-area");
   const hoverResult = unwrapResult(
     await call("computer_hover", {
-      execution_mode: "foreground",
+      execution_mode: "background",
       app_id: APP_ID,
       element_id: hover.id, element_fingerprint: hover.fingerprint,
     }),
     "computer_hover",
   );
   assert.ok(hoverResult, "hover must complete");
-  await waitFor((state) => state.hovered === true, "hover");
-  await assertSnapshotValue(await currentSnapshot(), "hovered", true, "hover");
+  await waitFor((state) => state.independent_pointer_moves > movesBefore, "independent pointer movement");
+  const moveEvents = await readEvents(fixtureDir, runID);
+  assert.ok(moveEvents.some((event) => event.event === "independent_mouse_moved" &&
+    event.payload.app_active === false && event.payload.window_key === false),
+    "the inactive fixture must receive independent mouse movement");
 
   const dragTree = await readTree(call);
   const source = findTarget(dragTree, "fixture-drag-item");
   const destination = findTarget(dragTree, "fixture-drop-target");
   await call("computer_drag", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     from: { element_id: source.id, element_fingerprint: source.fingerprint },
     to: { element_id: destination.id, element_fingerprint: destination.fingerprint },
@@ -400,7 +402,7 @@ export async function runNativeSmoke({
 
   const scrollTarget = findTarget(await readTree(call), "fixture-scroll-area");
   await call("computer_scroll", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: scrollTarget.id, element_fingerprint: scrollTarget.fingerprint,
     dx: 0,
@@ -415,7 +417,7 @@ export async function runNativeSmoke({
 
   const delayed = findTarget(await readTree(call), "fixture-delayed-button");
   await call("computer_click", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     element_id: delayed.id, element_fingerprint: delayed.fingerprint,
   });
@@ -424,7 +426,7 @@ export async function runNativeSmoke({
   await assertSnapshotValue(await currentSnapshot(), "delayed_status", "completed", "delayed transition");
 
   await call("computer_resize_window", {
-    execution_mode: "foreground",
+    execution_mode: "background",
     app_id: APP_ID,
     window_id: mainWindowId,
     width: 1040,
@@ -440,7 +442,7 @@ export async function runNativeSmoke({
   if (secondWindow) {
     const secondButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
-      execution_mode: "foreground",
+      execution_mode: "background",
       app_id: APP_ID,
       element_id: secondButton.id, element_fingerprint: secondButton.fingerprint,
     });
@@ -450,10 +452,9 @@ export async function runNativeSmoke({
       "computer_list_windows",
     )).windows ?? [];
     assert.ok(twoWindows.length >= 2, "second fixture window must be listed");
-    await call("computer_focus_window", { execution_mode: "foreground", app_id: APP_ID, window_id: mainWindowId });
     const closeButton = findTarget(await readTree(call), "fixture-second-window-button");
     await call("computer_click", {
-      execution_mode: "foreground",
+      execution_mode: "background",
       app_id: APP_ID,
       element_id: closeButton.id, element_fingerprint: closeButton.fingerprint,
     });
@@ -465,7 +466,7 @@ export async function runNativeSmoke({
     assert.equal((await currentSnapshot()).submission_count, 1, "later actions must not submit again");
     const resetButton = findTarget(await readTree(call), "fixture-reset-button");
     await call("computer_click", {
-      execution_mode: "foreground",
+      execution_mode: "background",
       app_id: APP_ID,
       element_id: resetButton.id, element_fingerprint: resetButton.fingerprint,
     });
@@ -494,7 +495,7 @@ export async function runNativeSmoke({
   const screenshots = [beforeScreenshot, screenshot];
   return {
     scope: "computer_use_native_smoke",
-    execution_mode: "foreground",
+    execution_mode: "background",
     status: "passed",
     app_id: APP_ID,
     run_id: runID,
@@ -514,6 +515,7 @@ export async function runNativeSmoke({
       "screenshot_file_and_metadata",
     ],
     remainingGates: [
+      "native_tracking_hover",
       "stop",
       "takeover",
       "approval_surface",

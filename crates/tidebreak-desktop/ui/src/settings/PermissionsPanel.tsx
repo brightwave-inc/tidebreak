@@ -20,6 +20,7 @@ import {
   grantFolderCapability,
   listCapabilityConsents,
   listConnectedFolders,
+  onCapabilityConsentsChanged,
   revokeCapabilityConsent,
   type ConnectedFolder,
 } from "../host";
@@ -63,6 +64,9 @@ const CAPABILITY_LABELS: Record<
   read_files: "Read files",
   write_files: "Write files",
   execute_commands: "Run commands",
+  capture_screen: "Capture screenshots",
+  read_app_content: "Read this app",
+  control_app: "Control, read, and capture this app",
 };
 
 /** The verb line: the class of action this statement allows. */
@@ -144,6 +148,12 @@ export function resourceLabel(statement: ConsentStatementSnapshot): string {
       );
     case "host_subject":
       return "Connected folders";
+    case "host_app":
+      return resource.display_name
+        ? `${resource.display_name} (${resource.bundle_id})`
+        : resource.bundle_id;
+    case "host_screen":
+      return "Whole display";
     case "host_root":
       return (
         resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`
@@ -171,6 +181,7 @@ export function shortOpaqueId(id: string): string {
 
 /** The identity of whatever a statement reaches, for grouping. */
 export function levelKey(statement: ConsentStatementSnapshot): string {
+  if (statement.native_app_all_sessions) return "native-app-all-sessions";
   return statement.level.level === "chat"
     ? `chat:${statement.level.chat_id}`
     : `project:${statement.level.project_id}`;
@@ -185,7 +196,13 @@ export function isMissingSubject(
   statement: ConsentStatementSnapshot,
   known?: { chatIds?: ReadonlySet<string>; projectIds?: ReadonlySet<string> },
 ): boolean {
-  if (!known) return false;
+  if (
+    statement.native_app_all_sessions ||
+    statement.resource.kind === "host_app" ||
+    statement.resource.kind === "host_screen" ||
+    !known
+  )
+    return false;
   if (statement.level.level === "chat") {
     return known.chatIds ? !known.chatIds.has(statement.level.chat_id) : false;
   }
@@ -204,6 +221,7 @@ export function levelLabel(
   statement: ConsentStatementSnapshot,
   known?: { chatIds?: ReadonlySet<string>; projectIds?: ReadonlySet<string> },
 ): string {
+  if (statement.native_app_all_sessions) return "All tasks on this Mac";
   const title = statement.level_title?.trim();
   if (statement.level.level === "project") {
     if (isMissingSubject(statement, known)) {
@@ -216,7 +234,12 @@ export function levelLabel(
   if (isMissingSubject(statement, known)) {
     return `Deleted work ${shortOpaqueId(statement.level.chat_id)}`;
   }
-  return title || `Work ${shortOpaqueId(statement.level.chat_id)}`;
+  const taskLabel =
+    statement.resource.kind === "host_app" ||
+    statement.resource.kind === "host_screen"
+      ? "Task"
+      : "Work";
+  return title || `${taskLabel} ${shortOpaqueId(statement.level.chat_id)}`;
 }
 
 /** Statements that reach one conversation: its own grants plus project grants. */
@@ -225,6 +248,7 @@ export function statementsForChat(
   chat: { id: string; project_id: string | null },
 ): ConsentStatementSnapshot[] {
   return statements.filter((statement) => {
+    if (statement.native_app_all_sessions) return true;
     if (statement.level.level === "chat") {
       return statement.level.chat_id === chat.id;
     }
@@ -296,7 +320,9 @@ function AccessRow({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{title}</p>
+        <p className="truncate text-sm font-medium" title={title}>
+          {title}
+        </p>
         <p className="text-muted-foreground mt-0.5 truncate text-sm">
           {subtitle}
         </p>
@@ -417,6 +443,8 @@ export function PermissionsPanel({
     }
   }, [client, chatId, chatProjectId]);
 
+  useEffect(() => onCapabilityConsentsChanged(() => void reload()), [reload]);
+
   useEffect(() => {
     setStatements(null);
     setUnreadableFolders([]);
@@ -515,6 +543,11 @@ export function PermissionsPanel({
   const body = (
     <>
       {error && <SettingsError>{error}</SettingsError>}
+      {statements === null && !error && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading saved approvals…
+        </p>
+      )}
       {statements !== null &&
         statements.length === 0 &&
         unreadableFolders.length === 0 &&
@@ -580,11 +613,7 @@ export function PermissionsPanel({
             reach it are included. Revoke anything to be asked again.
           </p>
         </div>
-        {statements === null ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : (
-          body
-        )}
+        {body}
       </div>
     );
   }

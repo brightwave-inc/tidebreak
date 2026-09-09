@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+type DomFixture = { window: Window & typeof globalThis };
+const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
+  JSDOM: new (
+    html: string,
+    options: { runScripts: string; url: string },
+  ) => DomFixture;
+};
 
 const source = readFileSync(
   path.resolve(process.cwd(), "../src/browser_semantics.rs"),
@@ -42,15 +51,23 @@ type SnapshotNode = {
   actionExecutionModes: Record<string, string[]>;
 };
 
-function snapshot(): SnapshotNode[] {
+function snapshot(realm = window): SnapshotNode[] {
   const script = sharedScripts(rustScript("SNAPSHOT_SCRIPT"))
     .replace("__MAX_NODES__", "50")
     .replace("__MARKER__", "popup-select-fixture");
-  return JSON.parse(window.eval(script)).nodes;
+  return JSON.parse(realm.eval(script)).nodes;
 }
 
-function select(node: SnapshotNode, inputMethod: "dom" | "native") {
+function act(
+  node: SnapshotNode,
+  inputMethod: "dom" | "native" | "independent_native",
+  action: Record<string, unknown>,
+  points?: Array<{ x: number; y: number }>,
+  realm = window,
+  fillStage?: "focus" | "select_all" | "insert" | "verify",
+) {
   const payload = {
+    fillStage,
     inputMethod,
     framePath: node.framePath,
     selector: node.selector,
@@ -64,7 +81,8 @@ function select(node: SnapshotNode, inputMethod: "dom" | "native") {
       href: node.href,
       sensitive: node.sensitive,
     },
-    action: { type: "select", value: "test" },
+    action,
+    points,
   };
   const script = sharedScripts(rustScript("NATIVE_ACTION_RESOLUTION_SCRIPT"))
     .replace(
@@ -72,7 +90,11 @@ function select(node: SnapshotNode, inputMethod: "dom" | "native") {
       inputMethod === "dom" ? rustScript("BACKGROUND_DOM_ACTION_SCRIPT") : "",
     )
     .replace("__PAYLOAD__", JSON.stringify(payload));
-  return JSON.parse(window.eval(script));
+  return JSON.parse(realm.eval(script));
+}
+
+function select(node: SnapshotNode, inputMethod: "dom" | "native") {
+  return act(node, inputMethod, { type: "select", value: "test" });
 }
 
 beforeEach(() => {
@@ -165,5 +187,314 @@ describe("popup select browser actions", () => {
     )!;
     expect(password.actions).toEqual(["human_takeover"]);
     expect(password.actionExecutionModes).toEqual({});
+  });
+});
+
+describe("independent DOM event actions", () => {
+  let realm: Window & typeof globalThis;
+  let fixture: DomFixture;
+  beforeEach(() => {
+    // Use jsdom's own Window: Vitest's global proxy is not a UIEvent view.
+    fixture = new JSDOM(document.body.innerHTML, {
+      runScripts: "outside-only",
+      url: "http://localhost/",
+    });
+    realm = fixture.window;
+    for (const element of realm.document.querySelectorAll("input, select")) {
+      element.getBoundingClientRect = () => ({
+        x: 10,
+        y: 10,
+        left: 10,
+        top: 10,
+        right: 110,
+        bottom: 40,
+        width: 100,
+        height: 30,
+        toJSON: () => ({}),
+      });
+    }
+    realm.document.elementFromPoint = () =>
+      realm.document.querySelector("#popup");
+  });
+  afterEach(() => fixture.window.close());
+  it("delivers a page key shortcut without changing the active editor or its selection", () => {
+    const editor = realm.document.querySelector<HTMLInputElement>("#editor")!;
+    const target = realm.document.querySelector<HTMLSelectElement>("#popup")!;
+    editor.focus();
+    editor.setSelectionRange(2, 6);
+    let shortcutCount = 0;
+    const events: Array<{
+      type: string;
+      key: string;
+      trusted: boolean;
+      meta: boolean;
+    }> = [];
+    for (const type of ["keydown", "keyup"]) {
+      target.addEventListener(type, (event) => {
+        const key = event as KeyboardEvent;
+        events.push({
+          type,
+          key: key.key,
+          trusted: key.isTrusted,
+          meta: key.metaKey,
+        });
+        if (type === "keydown" && key.metaKey && key.key === "a")
+          shortcutCount += 1;
+      });
+    }
+    const node = snapshot(realm).find(
+      (candidate) => candidate.selector === "#popup",
+    )!;
+    const result = act(
+      node,
+      "dom",
+      { type: "key_chord", key: "a", modifiers: ["meta"] },
+      undefined,
+      realm,
+    );
+    expect(result.inputDispatched).toBe(true);
+    expect(result.message).toContain("not applied");
+    expect(shortcutCount).toBe(1);
+    expect(events).toEqual([
+      { type: "keydown", key: "a", trusted: false, meta: true },
+      { type: "keyup", key: "a", trusted: false, meta: true },
+    ]);
+    expect(realm.document.activeElement).toBe(editor);
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([2, 6]);
+    expect(editor.value).toBe("keep typing");
+  });
+
+  it.each([
+    ["right_click", "contextmenu", 2],
+    ["double_click", "dblclick", 0],
+  ])(
+    "delivers %s to its page handler without focusing the target",
+    (type, expected, button) => {
+      const editor = realm.document.querySelector<HTMLInputElement>("#editor")!;
+      const target = realm.document.querySelector<HTMLSelectElement>("#popup")!;
+      editor.focus();
+      let handled = 0;
+      target.addEventListener(String(expected), (event) => {
+        expect((event as MouseEvent).button).toBe(button);
+        expect(event.isTrusted).toBe(false);
+        handled += 1;
+      });
+      const node = snapshot(realm).find(
+        (candidate) => candidate.selector === "#popup",
+      )!;
+      expect(act(node, "dom", { type }, undefined, realm).inputDispatched).toBe(
+        true,
+      );
+      expect(handled).toBe(1);
+      expect(realm.document.activeElement).toBe(editor);
+    },
+  );
+
+  it("delivers one bounded pointer drag to a canvas handler and releases its button", () => {
+    const editor = realm.document.querySelector<HTMLInputElement>("#editor")!;
+    const target = realm.document.createElement("canvas");
+    target.id = "canvas";
+    target.getBoundingClientRect =
+      realm.document.querySelector("#popup")!.getBoundingClientRect;
+    realm.document.body.appendChild(target);
+    realm.document.elementFromPoint = () => target;
+    editor.focus();
+    editor.setSelectionRange(2, 6);
+    let buttonHeld = false;
+    let dropped = false;
+    const moves: Array<[number, number]> = [];
+    target.addEventListener("pointerdown", (event) => {
+      expect((event as PointerEvent).isPrimary).toBe(false);
+      expect(event.isTrusted).toBe(false);
+      buttonHeld = true;
+    });
+    target.addEventListener("pointermove", (event) => {
+      const pointer = event as PointerEvent;
+      expect(pointer.buttons).toBe(1);
+      expect(buttonHeld).toBe(true);
+      moves.push([pointer.clientX, pointer.clientY]);
+    });
+    target.addEventListener("pointerup", (event) => {
+      expect((event as PointerEvent).buttons).toBe(0);
+      buttonHeld = false;
+      dropped = true;
+    });
+    const node = snapshot(realm).find(
+      (candidate) => candidate.selector === "#canvas",
+    )!;
+    const result = act(
+      node,
+      "dom",
+      { type: "drag" },
+      [
+        { x: 2, y: 2 },
+        { x: 70, y: 20 },
+      ],
+      realm,
+    );
+    expect(result.inputDispatched).toBe(true);
+    expect(result.message).toContain(
+      "Native drag-and-drop and trusted pointer behavior are not applied",
+    );
+    expect(moves).toHaveLength(8);
+    expect(moves.at(-1)).toEqual([80, 30]);
+    expect(dropped).toBe(true);
+    expect(buttonHeld).toBe(false);
+    expect(realm.document.activeElement).toBe(editor);
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([2, 6]);
+  });
+
+  it("refuses pointer drag before any event when the engine lacks PointerEvent", () => {
+    const target = realm.document.querySelector<HTMLSelectElement>("#popup")!;
+    const down = vi.fn();
+    target.addEventListener("pointerdown", down);
+    const node = snapshot(realm).find(
+      (candidate) => candidate.selector === "#popup",
+    )!;
+    const previous = realm.PointerEvent;
+    Object.defineProperty(realm, "PointerEvent", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      const result = act(
+        node,
+        "dom",
+        { type: "drag" },
+        [
+          { x: 2, y: 2 },
+          { x: 70, y: 20 },
+        ],
+        realm,
+      );
+      expect(result.status).toBe("unsupported_native");
+      expect(result.inputDispatched).toBeUndefined();
+      expect(down).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(realm, "PointerEvent", {
+        configurable: true,
+        value: previous,
+      });
+    }
+  });
+});
+
+describe("independent host fill preparation", () => {
+  function fieldTarget() {
+    const field = document.querySelector<HTMLInputElement>("#editor")!;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => field,
+    });
+    return {
+      field,
+      node: snapshot().find((candidate) => candidate.selector === "#editor")!,
+    };
+  }
+
+  it("prepares DOM focus and selection without requiring a key native window", () => {
+    const { field, node } = fieldTarget();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const result = act(
+      node,
+      "independent_native",
+      { type: "fill", value: "replacement" },
+      undefined,
+      window,
+      "focus",
+    );
+    expect(result.status).toBe("ready");
+    expect(result.inputDispatched).toBe(true);
+    expect(result.targetDomFocused).toBe(true);
+    expect(field.value).toBe("keep typing");
+    expect([field.selectionStart, field.selectionEnd]).toEqual([
+      0,
+      field.value.length,
+    ]);
+    const insert = act(
+      node,
+      "independent_native",
+      { type: "fill", value: "replacement" },
+      undefined,
+      window,
+      "insert",
+    );
+    expect(insert.status).toBe("ready");
+    expect(insert.targetFocused).toBe(true);
+  });
+
+  it("requires fresh selection and target identity before native insertion", () => {
+    const { field, node } = fieldTarget();
+    act(
+      node,
+      "independent_native",
+      { type: "fill", value: "replacement" },
+      undefined,
+      window,
+      "focus",
+    );
+    field.setSelectionRange(1, 3);
+    expect(
+      act(
+        node,
+        "independent_native",
+        { type: "fill", value: "replacement" },
+        undefined,
+        window,
+        "insert",
+      ).status,
+    ).toBe("pending_native_input");
+    field.replaceWith(field.cloneNode(true));
+    expect(
+      act(
+        node,
+        "independent_native",
+        { type: "fill", value: "replacement" },
+        undefined,
+        window,
+        "insert",
+      ).status,
+    ).toBe("stale_target");
+  });
+
+  it("reports a mutation when a focus handler replaces the target", () => {
+    const { field, node } = fieldTarget();
+    field.addEventListener("focus", () =>
+      field.replaceWith(field.cloneNode(true)),
+    );
+    const result = act(
+      node,
+      "independent_native",
+      { type: "fill", value: "replacement" },
+      undefined,
+      window,
+      "focus",
+    );
+    expect(result.status).toBe("stale_target");
+    expect(result.inputDispatched).toBe(true);
+    expect(document.querySelector<HTMLInputElement>("#editor")!.value).toBe(
+      "keep typing",
+    );
+  });
+});
+
+describe("independent native input boundary", () => {
+  it("refuses native canvas drag while preserving DOM drag", () => {
+    document.body.innerHTML =
+      '<canvas id="canvas" tabindex="0" aria-label="Drawing"></canvas>';
+    const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => canvas,
+    });
+    const node = snapshot().find(
+      (candidate) => candidate.selector === "#canvas",
+    )!;
+    const action = { type: "drag", to: { x: 20, y: 20 } };
+    const result = act(node, "independent_native", action);
+    expect(result.status).toBe("unsupported_native");
+    expect(result.inputDispatched).not.toBe(true);
+    // The real-realm drag test covers the retained DOM pointer sequence.
+    expect(node.actions).toContain("drag");
   });
 });

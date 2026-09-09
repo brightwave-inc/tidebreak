@@ -19,13 +19,19 @@ The hard blocklist retains the `io.brightwave.tidebreak` app family and OS authe
 
 The host derives owner, workspace, and session identity. Each operation carries a request id. Completed results may be recovered; unknown outcomes require inspection before another action. An interrupt cancels pending input and releases ownership. Session termination revokes access. Restart invalidates transient targets and controllers.
 
-Independent tabs may operate concurrently only when their adapter does not use desktop input. Any operation that uses mouse, keyboard, or foreground focus holds exclusive host input ownership. Human takeover ends that ownership before another queued action can begin.
+Independent tabs may operate concurrently when their adapters isolate input. Native actions retain host input ownership to serialize app-local event sequences and recovery. Human takeover ends that ownership before another queued action can begin. The agent never posts input to the global desktop or changes the hardware pointer.
 
 The three adapters cover Tidebreak's in-app browser, native macOS apps, and Chrome. Chrome uses an approved local debugging connection. Managed Chrome starts with a separate temporary profile. Existing Chrome access has a separate disclosure covering all web tabs exposed by that instance, including signed-in pages. The model cannot supply debugger endpoints. Developer diagnostics require explicit authority.
 
-Background execution is the default. The in-app browser uses synthetic DOM actions and shows a ghost cursor without moving the hardware pointer. Managed Chrome uses CDP input and creates tabs in the background. Native apps use accessibility actions that do not require activation. Native hover, drag, key chords, menus, and unsupported accessibility targets return `requires_foreground` before input. Foreground execution requires separate native approval; the runtime never automatically changes modes.
+All agent actions use independent input. Legacy requests for foreground control fail before input or consent. Focus and return-control tools are not advertised. An unsupported independent action must explain its limitation; it must never fall back to desktop takeover.
 
-A ghost cursor shows activity; it does not isolate desktop input. Background accessibility actions can still cause an app to raise its own window. Browser DOM events are synthetic and cannot reproduce every trusted-input behavior. Such limitations are explicit results, not a promise that all apps operate without focus. Foreground actions share exclusive input ownership, and Stop prevents queued actions until explicit Resume. An older Resume approval cannot clear a newer Stop.
+Chrome uses CDP input without activating a tab or bringing its window forward. The in-app browser uses DOM actions where those actions have the required behavior. Trusted embedded-browser input requires a separate agent-owned window that cannot become the key or main window. Page focus must stay within that window. A human explicitly takes ownership before the tab rejoins the main window.
+
+Native apps use accessibility operations or events bound to the approved process and window. The host checks the process launch identity, window identity, and geometry before dispatch. Input cancellation releases held buttons and keys only to that same process. Unrelated pointer movement or switching between other apps must not interrupt independent work. If the person starts using the target app, the agent stops sending new input.
+
+A teal ghost cursor marks the agent's action position without receiving input. The overlay cannot become key, take focus, or intercept clicks. Stop clears it and prevents queued actions until explicit Resume. An older Resume approval cannot clear a newer Stop.
+
+Independent input does not imply that every app handles every event. Native tracking areas may ignore injected movement, and embedded WebKit key handling can request changes to system cursor visibility. Qualification must check the target's visible effect and the person's pointer, foreground app, and editor focus. Synthetic DOM events must not claim trusted input, CSS hover, or native drag-and-drop behavior that they do not produce.
 
 ## Implementation contract
 

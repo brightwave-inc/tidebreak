@@ -109,6 +109,7 @@ pub(crate) struct ComputerUseActionEvent {
 }
 
 pub(crate) fn emit_computer_use_action(app: &AppHandle, event: &ComputerUseActionEvent) {
+    crate::native_cursor_overlay::update(app, event);
     if let Err(error) = app.emit(COMPUTER_USE_ACTION_EVENT, event) {
         eprintln!("tidebreak-desktop: could not emit computer-use activity: {error}");
     }
@@ -211,6 +212,57 @@ impl CallActivity {
             event: Some(event),
             emit: Box::new(emit),
         }
+    }
+
+    /// Geometry comes only from the helper's completed action result.
+    pub(crate) fn set_native_cursor(&mut self, cursor: Option<&serde_json::Value>) {
+        let (Some(event), Some(cursor)) = (self.event.as_mut(), cursor) else {
+            return;
+        };
+        if !matches!(event.source, ComputerUseActionSource::Native) {
+            return;
+        }
+        let number = |value: &serde_json::Value, field: &str| {
+            value.get(field)?.as_f64().filter(|value| value.is_finite())
+        };
+        let Some(window_id) = cursor
+            .get("window_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| *id != 0)
+        else {
+            return;
+        };
+        let (Some(point), Some(bounds)) = (cursor.get("point"), cursor.get("window_bounds")) else {
+            return;
+        };
+        let (Some(x), Some(y), Some(left), Some(top), Some(width), Some(height)) = (
+            number(point, "x"),
+            number(point, "y"),
+            number(bounds, "x"),
+            number(bounds, "y"),
+            number(bounds, "width"),
+            number(bounds, "height"),
+        ) else {
+            return;
+        };
+        if width <= 0.0
+            || height <= 0.0
+            || x < left
+            || y < top
+            || x > left + width
+            || y > top + height
+        {
+            return;
+        }
+        event.point = Some(ComputerUseActionPoint { x, y });
+        event.target_bounds = Some(ComputerUseActionBounds {
+            x: left,
+            y: top,
+            width,
+            height,
+        });
+        event.window_id = Some(window_id);
     }
 
     pub(crate) fn finish(mut self, success: bool, error_code: Option<&str>) {

@@ -1,4 +1,4 @@
-//! Broker-owned journals bind recovery to one foreground helper invocation.
+//! Broker-owned journals bind recovery to one helper input invocation.
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -41,7 +41,11 @@ fn private_file(path: &std::path::Path, contents: &[u8]) -> Result<(), BackendEr
 
 impl InputRecovery {
     pub(super) fn prepare(request: &mut Value) -> Result<Option<Self>, BackendError> {
-        if request.get("execution_mode").and_then(Value::as_str) != Some("foreground") {
+        if !matches!(
+            request.get("op").and_then(Value::as_str),
+            Some("click" | "type_text" | "key_press" | "scroll" | "hover" | "drag")
+        ) && request.get("execution_mode").and_then(Value::as_str) != Some("foreground")
+        {
             return Ok(None);
         }
         let mut builder = tempfile::Builder::new();
@@ -112,6 +116,23 @@ impl InputRecovery {
         if value["invocation_id"].as_str() != Some(&self.invocation) {
             return Err(failed("input journal belongs to another invocation"));
         }
+        if let Some(target) = value.get("target").filter(|target| !target.is_null()) {
+            if target["pid"]
+                .as_i64()
+                .is_none_or(|pid| pid <= 0 || pid > i64::from(i32::MAX))
+                || target["bundle_id"]
+                    .as_str()
+                    .is_none_or(|id| id.is_empty() || id.len() > 256)
+                || target["launched_at"]
+                    .as_f64()
+                    .is_none_or(|time| !time.is_finite() || time <= 0.0)
+                || target["window_id"]
+                    .as_u64()
+                    .is_none_or(|id| id == 0 || id > u64::from(u32::MAX))
+            {
+                return Err(failed("invalid independent input destination"));
+            }
+        }
         let held = value["held"]
             .as_array()
             .ok_or_else(|| failed("missing held input list"))?;
@@ -144,6 +165,56 @@ impl InputRecovery {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn background_input_gets_recovery_but_observation_does_not() {
+        for op in ["click", "type_text", "key_press", "scroll", "hover", "drag"] {
+            let mut request = json!({"op": op, "execution_mode": "background"});
+            let state = InputRecovery::prepare(&mut request).unwrap().unwrap();
+            assert!(request["input_journal_path"].is_string());
+            assert!(!state.pending().unwrap());
+        }
+        for op in ["capture", "read_ax_tree", "list_windows", "permissions"] {
+            let mut request = json!({"op": op});
+            assert!(InputRecovery::prepare(&mut request).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_invalid_target_identity() {
+        let mut request = json!({"op": "key_press", "execution_mode": "background"});
+        let state = InputRecovery::prepare(&mut request).unwrap().unwrap();
+        let target = json!({"pid": 123, "bundle_id": "dev.fixture", "launched_at": 1234,
+                            "window_id": 42});
+        for (field, invalid) in [
+            ("pid", json!(0)),
+            ("window_id", json!(0)),
+            ("launched_at", json!(-1)),
+            ("bundle_id", json!("")),
+        ] {
+            let mut invalid_target = target.clone();
+            invalid_target[field] = invalid;
+            std::fs::write(
+                &state.journal,
+                json!({"invocation_id": state.invocation,
+                "target": invalid_target, "held": [{"kind": "key", "code": 0}]})
+                .to_string(),
+            )
+            .unwrap();
+            assert!(
+                state.pending().is_err(),
+                "{field} must not authorize cleanup"
+            );
+        }
+        std::fs::write(
+            &state.journal,
+            json!({"invocation_id": state.invocation,
+            "target": target, "held": [{"kind": "key", "code": 0}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(state.pending().unwrap());
+    }
 
     #[test]
     fn private_invocations_reject_stale_oversized_and_invalid_records() {

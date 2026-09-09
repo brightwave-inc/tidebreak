@@ -7,11 +7,23 @@ enum InputRecovery {
     struct Held: Codable, Equatable {
         let kind: String
         let code: UInt16
+        var releaseText: String? = nil
+        var releaseTextIgnoringModifiers: String? = nil
+        var releaseFlags: UInt64? = nil
+        var releaseX: Double? = nil
+        var releaseY: Double? = nil
+        var releaseLocalX: Double? = nil
+        var releaseLocalY: Double? = nil
+        var eventNumber: Int64? = nil
+        var clickCount: Int64? = nil
+
+        func matches(_ other: Held) -> Bool { kind == other.kind && code == other.code }
     }
 
     struct Journal: Codable {
         let invocationId: String
         var held: [Held]
+        var target: TargetedInput.Target? = nil
     }
 
     struct Result: Encodable {
@@ -63,7 +75,11 @@ enum InputRecovery {
             journal.held.count <= 16,
             Set(journal.held.map { "\($0.kind):\($0.code)" }).count == journal.held.count,
             journal.held.allSatisfy({
-                ($0.kind == "key" && $0.code <= 127) || ($0.kind == "mouse" && $0.code <= 1)
+                (($0.kind == "key" && $0.code <= 127) || ($0.kind == "mouse" && $0.code <= 1))
+                    && ($0.releaseText?.utf16.count ?? 0) <= 16
+                    && ($0.releaseTextIgnoringModifiers?.utf16.count ?? 0) <= 16
+                    && ($0.releaseX?.isFinite ?? true) && ($0.releaseY?.isFinite ?? true)
+                    && ($0.releaseLocalX?.isFinite ?? true) && ($0.releaseLocalY?.isFinite ?? true)
             })
         else { throw fail("the journal does not describe this invocation's input") }
         return journal
@@ -120,27 +136,92 @@ enum InputRecovery {
         }
     }
 
-    static func post(_ event: CGEvent, request: HelperRequest) throws {
-        guard let (control, down) = heldControl(event) else {
-            event.post(tap: .cghidEventTap)
+    static func post(
+        _ event: CGEvent, request: HelperRequest,
+        target: TargetedInput.Target? = nil,
+        deliver: (CGEvent, pid_t) -> Void = { event, pid in event.postToPid(pid) }
+    ) throws {
+        guard let target else { throw fail("independent input requires a bound process") }
+        guard let (identity, down) = heldControl(event) else {
+            if event.type == .leftMouseDragged || event.type == .rightMouseDragged {
+                try checkCancellation(request)
+                var journal = try load(request)
+                let code: UInt16 = event.type == .leftMouseDragged ? 0 : 1
+                guard journal.target == target,
+                    let index = journal.held.firstIndex(where: {
+                        $0.kind == "mouse" && $0.code == code
+                    })
+                else { throw fail("the invocation does not hold this target's mouse button") }
+                try recordMousePosition(event, control: &journal.held[index])
+                try save(journal, request: request)
+            }
+            deliver(event, target.pid)
             return
         }
+        var control = identity
+        if down {
+            control.releaseFlags = event.flags.rawValue
+            if event.type == .flagsChanged, let flag = modifierFlag(control.code) {
+                control.releaseFlags = event.flags.subtracting(flag).rawValue
+            }
+            if control.kind == "key", event.type != .flagsChanged {
+                let native = NSEvent(cgEvent: event)
+                control.releaseText = native?.characters ?? ""
+                control.releaseTextIgnoringModifiers = native?.charactersIgnoringModifiers ?? ""
+            } else if control.kind == "mouse" {
+                try recordMousePosition(event, control: &control)
+                control.eventNumber = event.getIntegerValueField(.mouseEventNumber)
+                control.clickCount = event.getIntegerValueField(.mouseEventClickState)
+            }
+        }
         try track(
-            control, down: down, request: request,
-            deliver: {
-                event.post(tap: .cghidEventTap)
-            })
+            control, down: down, request: request, target: target,
+            deliver: { deliver(event, target.pid) })
+    }
+
+    private static func recordMousePosition(_ event: CGEvent, control: inout Held) throws {
+        guard let local = EventWindowLocation.get(event),
+            event.location.x.isFinite, event.location.y.isFinite,
+            local.x.isFinite, local.y.isFinite
+        else {
+            throw fail("mouse input has no independent window position")
+        }
+        control.releaseX = event.location.x
+        control.releaseY = event.location.y
+        control.releaseLocalX = local.x
+        control.releaseLocalY = local.y
+    }
+
+    static func modifierFlag(_ code: UInt16) -> CGEventFlags? {
+        switch code {
+        case 54, 55: return .maskCommand
+        case 56, 60: return .maskShift
+        case 58, 61: return .maskAlternate
+        case 59, 62: return .maskControl
+        case 63: return .maskSecondaryFn
+        default: return nil
+        }
     }
 
     /// The record precedes a down. A matching up precedes removal of its record.
     /// A crash between either pair leaves only a conservative release to retry.
-    static func track(_ control: Held, down: Bool, request: HelperRequest, deliver: () -> Void)
+    static func track(
+        _ control: Held, down: Bool, request: HelperRequest,
+        target: TargetedInput.Target? = nil, deliver: () -> Void
+    )
         throws
     {
         if down {
             try checkCancellation(request)
             var journal = try load(request)
-            guard !journal.held.contains(control), journal.held.count < 16 else {
+            if let target {
+                guard journal.target == nil || journal.target == target else {
+                    throw fail("input target changed during this invocation")
+                }
+                journal.target = target
+            }
+            guard !journal.held.contains(where: { $0.matches(control) }), journal.held.count < 16
+            else {
                 throw fail("the invocation already holds this input")
             }
             journal.held.append(control)
@@ -151,7 +232,7 @@ enum InputRecovery {
             // retains the record and reports an uncertain outcome on failure.
             deliver()
             var journal = try load(request)
-            journal.held.removeAll { $0 == control }
+            journal.held.removeAll { $0.matches(control) }
             try save(journal, request: request)
         }
     }
@@ -159,39 +240,89 @@ enum InputRecovery {
     static func releaseRecorded(_ request: HelperRequest) throws -> Result {
         guard AXIsProcessTrusted() else { throw fail("Accessibility permission is unavailable") }
         let journal = try load(request)
+        guard let target = journal.target, target.pid > 0,
+            target.launchedAt.isFinite, target.launchedAt > 0, target.windowId > 0,
+            !target.bundleId.isEmpty, !Control.isBlocked(target.bundleId),
+            let source = CGEventSource(stateID: .privateState)
+        else { throw fail("recorded input has no valid independent destination") }
         return try recover(
             journal: journal, request: request,
-            physicallyHeld: { control in
-                // Apple's CGEventSource.h defines HIDSystemState as hardware sources.
-                // Our events use combinedSessionState, which includes session sources.
-                if control.kind == "mouse" {
-                    return CGEventSource.buttonState(
-                        .hidSystemState, button: CGMouseButton(rawValue: UInt32(control.code))!)
-                }
-                return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(control.code))
-            },
+            // This source never posts to the hardware/session stream. A user's
+            // physical hold does not own this process-targeted synthetic down.
+            physicallyHeld: { _ in false },
             release: { control in
-                guard let source = CGEventSource(stateID: .combinedSessionState) else {
-                    throw fail("could not create a release event source")
+                let current = try TargetedInput.observe(target).target
+                guard sameDestination(current, target) else {
+                    throw fail("the original input process or window no longer exists")
                 }
-                let event: CGEvent?
-                if control.kind == "mouse" {
-                    guard let point = CGEvent(source: nil)?.location else {
-                        throw fail("could not read the current pointer position")
-                    }
-                    event = CGEvent(
-                        mouseEventSource: source,
-                        mouseType: control.code == 0 ? .leftMouseUp : .rightMouseUp,
-                        mouseCursorPosition: point, mouseButton: control.code == 0 ? .left : .right)
-                } else {
-                    event = CGEvent(
-                        keyboardEventSource: source, virtualKey: CGKeyCode(control.code),
-                        keyDown: false)
-                }
-                guard let event else { throw fail("could not create the recorded release") }
-                event.flags = CGEventSource.flagsState(.hidSystemState)
-                event.post(tap: .cghidEventTap)
+                let event = try releaseEvent(control, target: target, source: source)
+                event.postToPid(target.pid)
             })
+    }
+
+    static func sameDestination(_ current: TargetedInput.Target, _ recorded: TargetedInput.Target)
+        -> Bool
+    {
+        current.pid == recorded.pid && current.bundleId == recorded.bundleId
+            && current.launchedAt == recorded.launchedAt && current.windowId == recorded.windowId
+    }
+
+    static func releaseEvent(
+        _ control: Held, target: TargetedInput.Target,
+        source: CGEventSource
+    ) throws -> CGEvent {
+        let event: CGEvent?
+        if control.kind == "mouse" {
+            guard let x = control.releaseX, let y = control.releaseY,
+                let localX = control.releaseLocalX, let localY = control.releaseLocalY,
+                x.isFinite, y.isFinite, localX.isFinite, localY.isFinite
+            else {
+                throw fail("recorded mouse input has no independent position")
+            }
+            event =
+                NSEvent.mouseEvent(
+                    with: control.code == 0 ? .leftMouseUp : .rightMouseUp,
+                    location: .zero, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: Int(target.windowId), context: nil,
+                    eventNumber: Int(control.eventNumber ?? 0),
+                    clickCount: Int(control.clickCount ?? 1),
+                    pressure: 0)?.cgEvent
+            event?.location = CGPoint(x: x, y: y)
+            if let event {
+                try EventWindowLocation.set(event, point: CGPoint(x: localX, y: localY))
+            }
+            event?.setIntegerValueField(
+                .mouseEventWindowUnderMousePointer, value: Int64(target.windowId))
+            event?.setIntegerValueField(
+                .mouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+                value: Int64(target.windowId))
+        } else {
+            event =
+                NSEvent.keyEvent(
+                    with: .keyUp, location: .zero, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: Int(target.windowId),
+                    context: nil, characters: control.releaseText ?? "",
+                    charactersIgnoringModifiers: control.releaseTextIgnoringModifiers ?? control
+                        .releaseText
+                        ?? "",
+                    isARepeat: false,
+                    keyCode: control.code)?.cgEvent
+            if modifierFlag(control.code) != nil { event?.type = .flagsChanged }
+        }
+        guard let event else { throw fail("could not construct independent release") }
+        event.setSource(source)
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(target.pid))
+        event.flags = CGEventFlags(rawValue: control.releaseFlags ?? 0)
+        if control.kind == "key", modifierFlag(control.code) == nil,
+            let text = control.releaseText, !text.isEmpty
+        {
+            let units = Array(text.utf16)
+            event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        }
+        event.timestamp = DispatchTime.now().uptimeNanoseconds
+        return event
     }
 
     /// Reverse press order releases the primary key before its modifiers.

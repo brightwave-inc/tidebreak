@@ -30,15 +30,15 @@ use tauri_plugin_dialog::{
 };
 use tidebreak_core::{
     validate_computer_use_arguments, CallId, ComputerCaptureScreenArgs, ComputerClickArgs,
-    ComputerDragArgs, ComputerFocusWindowArgs, ComputerHoverArgs, ComputerKeyPressArgs,
-    ComputerLaunchAppArgs, ComputerListWindowsArgs, ComputerReadAppContentArgs,
-    ComputerResizeWindowArgs, ComputerReturnToTidebreakArgs, ComputerScrollArgs,
-    ComputerTypeTextArgs, ComputerWaitArgs, ComputerWaitConditionArgs, ImageRef, SessionId,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, COMPUTER_CAPTURE_SCREEN_TOOL,
-    COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL, COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL,
-    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL,
-    COMPUTER_READ_APP_CONTENT_TOOL, COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
-    COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
+    ComputerDragArgs, ComputerHoverArgs, ComputerKeyPressArgs, ComputerLaunchAppArgs,
+    ComputerListWindowsArgs, ComputerReadAppContentArgs, ComputerResizeWindowArgs,
+    ComputerScrollArgs, ComputerTypeTextArgs, ComputerWaitArgs, ComputerWaitConditionArgs,
+    ImageRef, SessionId, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_DRAG_TOOL,
+    COMPUTER_FOCUS_WINDOW_TOOL, COMPUTER_HOVER_TOOL, COMPUTER_KEY_PRESS_TOOL,
+    COMPUTER_LAUNCH_APP_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
+    COMPUTER_RESIZE_WINDOW_TOOL, COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL,
+    COMPUTER_TYPE_TEXT_TOOL, COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
 use tidebreak_host_broker::{
     is_blocked_control_bundle, Capability, ConditionWire, ConsentMethod, ControlRequest,
@@ -78,11 +78,6 @@ const STATE_EVENT: &str = "computer-use-state-changed";
 /// A control op touches the indicator as recently active for this long after
 /// its last broker round-trip; the renderer re-arms the banner on this window.
 const INDICATOR_IDLE_REARM: std::time::Duration = std::time::Duration::from_secs(30);
-/// Foreground-approval scope key for `computer_return_to_tidebreak`. It is
-/// Tidebreak's own (control-blocked) bundle id, so it can never collide with
-/// an app the broker could actually grant.
-const TIDEBREAK_FOCUS_SCOPE: &str = "io.brightwave.tidebreak";
-
 /// Capability a grant miss was asking for, in the card's vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +98,8 @@ enum ConsentDecision {
     /// Remember for the whole project (or this conversation, when it has no
     /// project — there is nowhere wider to durably put it).
     Always,
+    /// Remember this exact native app capability for all local tasks.
+    AllSessions,
     Decline,
 }
 
@@ -198,13 +195,6 @@ pub(crate) struct ComputerUseState {
     /// before dispatch (and prevents it) or after that dispatch has already
     /// completed. Read-only operations do not take this gate.
     acting_dispatch: tokio::sync::Mutex<()>,
-    /// (conversation, app) pairs the user has separately approved for
-    /// foreground takeover through the trusted native dialog. Host-side and
-    /// session-only, exactly like the halt latch: nothing the renderer or the
-    /// model produces can insert into this set, so an app-control grant can
-    /// never silently become a takeover. Cleared by Stop — after a halt, a
-    /// takeover must be re-approved.
-    foreground_takeovers: StdMutex<HashSet<(Uuid, String)>>,
     /// The broker dispatch that actually owns input, plus session stops that
     /// remain set until the user resumes. Cancellation and owner changes use
     /// this synchronous lock so a helper is stopped before its future drops.
@@ -217,6 +207,16 @@ struct DispatchState {
     cancelled: HashSet<SessionId>,
     revoked: HashSet<SessionId>,
     stop_revision: u64,
+    global_input_revision: u64,
+    session_input_revisions: HashMap<SessionId, u64>,
+}
+
+/// One request's input generation. Resume never revives an older request.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeInputAdmission {
+    allowed: bool,
+    global_revision: u64,
+    session_revision: u64,
 }
 
 struct ActingOwner<'a> {
@@ -237,7 +237,6 @@ impl Default for ComputerUseState {
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
             acting_dispatch: tokio::sync::Mutex::new(()),
-            foreground_takeovers: StdMutex::new(HashSet::new()),
             dispatch_state: StdMutex::new(DispatchState::default()),
         }
     }
@@ -295,17 +294,6 @@ impl ComputerUseState {
         *self.halt.borrow()
     }
 
-    /// Whether this chat already holds the user's separate takeover approval
-    /// for this scope (an app bundle id, or [`TIDEBREAK_FOCUS_SCOPE`]).
-    fn has_foreground_approval(&self, chat_id: Uuid, scope: &str) -> bool {
-        lock(&self.foreground_takeovers).contains(&(chat_id, scope.to_owned()))
-    }
-
-    /// Record a trusted-dialog takeover approval for (chat, scope).
-    fn remember_foreground_approval(&self, chat_id: Uuid, scope: &str) {
-        lock(&self.foreground_takeovers).insert((chat_id, scope.to_owned()));
-    }
-
     /// Await the next halt, returning immediately if already halted. A halt
     /// that fired between the pre-dispatch check and here is still observed:
     /// the watch receiver starts from the current value, not the next change.
@@ -343,8 +331,9 @@ impl ComputerUseState {
         cancel_helper: impl FnOnce() -> Result<(), E>,
     ) -> Result<bool, E> {
         let mut state = lock(&self.dispatch_state);
-        lock(&self.foreground_takeovers).retain(|(id, _)| *id != session.0);
         state.stop_revision = state.stop_revision.saturating_add(1);
+        let revision = state.session_input_revisions.entry(session).or_default();
+        *revision = revision.saturating_add(1);
         if revoked {
             state.cancelled.remove(&session);
             state.revoked.insert(session);
@@ -355,7 +344,6 @@ impl ComputerUseState {
             return Ok(false);
         }
         self.halt.send_replace(true);
-        lock(&self.foreground_takeovers).clear();
         cancel_helper()?;
         Ok(true)
     }
@@ -370,8 +358,8 @@ impl ComputerUseState {
     ) -> Result<(), E> {
         let mut state = lock(&self.dispatch_state);
         state.stop_revision = state.stop_revision.saturating_add(1);
+        state.global_input_revision = state.global_input_revision.saturating_add(1);
         self.halt.send_replace(true);
-        lock(&self.foreground_takeovers).clear();
         cancel_helper()
     }
 
@@ -385,6 +373,36 @@ impl ComputerUseState {
         self.drain_acting().await;
     }
 
+    pub(crate) fn admit_native_input(&self, session: SessionId) -> NativeInputAdmission {
+        let state = lock(&self.dispatch_state);
+        NativeInputAdmission {
+            allowed: !self.is_halted()
+                && !state.cancelled.contains(&session)
+                && !state.revoked.contains(&session),
+            global_revision: state.global_input_revision,
+            session_revision: state
+                .session_input_revisions
+                .get(&session)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    fn admission_is_current(&self, session: SessionId, admission: NativeInputAdmission) -> bool {
+        let state = lock(&self.dispatch_state);
+        admission.allowed
+            && !self.is_halted()
+            && !state.cancelled.contains(&session)
+            && !state.revoked.contains(&session)
+            && state.global_input_revision == admission.global_revision
+            && state
+                .session_input_revisions
+                .get(&session)
+                .copied()
+                .unwrap_or(0)
+                == admission.session_revision
+    }
+
     async fn dispatch_acting<T, F, Fut>(
         &self,
         session: SessionId,
@@ -394,12 +412,35 @@ impl ComputerUseState {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
+        let admission = self.admit_native_input(session);
+        self.dispatch_acting_admitted(session, admission, dispatch)
+            .await
+    }
+
+    async fn dispatch_acting_admitted<T, F, Fut>(
+        &self,
+        session: SessionId,
+        admission: NativeInputAdmission,
+        dispatch: F,
+    ) -> Result<T, StoredResolution>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
         let _dispatch = self.acting_dispatch.lock().await;
         let _owner = {
             let mut state = lock(&self.dispatch_state);
-            if self.is_halted()
+            if !admission.allowed
+                || self.is_halted()
                 || state.cancelled.contains(&session)
                 || state.revoked.contains(&session)
+                || state.global_input_revision != admission.global_revision
+                || state
+                    .session_input_revisions
+                    .get(&session)
+                    .copied()
+                    .unwrap_or(0)
+                    != admission.session_revision
             {
                 return Err(stopped_resolution());
             }
@@ -409,22 +450,6 @@ impl ComputerUseState {
             }
         };
         Ok(dispatch().await)
-    }
-
-    /// Keep foreground ownership until the caller's operation completes. The
-    /// caller drains any dispatched protocol command before returning.
-    pub(crate) async fn dispatch_foreground_operation<T, F, Fut>(
-        &self,
-        session: SessionId,
-        dispatch: F,
-    ) -> Result<T, ()>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = T>,
-    {
-        self.dispatch_acting(session, dispatch)
-            .await
-            .map_err(|_| ())
     }
 
     /// Foreground WK input shares the native app input owner. Dropping its
@@ -610,37 +635,65 @@ async fn native_consent_choice(
         MessageDialogResult::Custom(ref value) if value == "Allow once" => {
             Ok(ConsentDecision::Once)
         }
-        MessageDialogResult::No => {
-            if view.grant_scope == ConsentGrantScope::Chat {
-                return Ok(ConsentDecision::Chat);
-            }
-            let scope = native_three_way_choice(
-                app,
-                "Remember computer-use permission?",
-                "Choose how widely Tidebreak may remember this native permission.",
-                "This chat",
-                "This project",
-                "Cancel",
-            )
-            .await?;
-            remembered_scope(scope)
-        }
+        MessageDialogResult::No => remember_native_permission(app, view).await,
         MessageDialogResult::Custom(ref value) if value == "Remember permission…" => {
-            if view.grant_scope == ConsentGrantScope::Chat {
-                return Ok(ConsentDecision::Chat);
-            }
-            let scope = native_three_way_choice(
-                app,
-                "Remember computer-use permission?",
-                "Choose how widely Tidebreak may remember this native permission.",
-                "This chat",
-                "This project",
-                "Cancel",
-            )
-            .await?;
-            remembered_scope(scope)
+            remember_native_permission(app, view).await
         }
         _ => Ok(ConsentDecision::Decline),
+    }
+}
+
+async fn remember_native_permission(
+    app: &AppHandle,
+    view: &ConsentPromptView,
+) -> Result<ConsentDecision, String> {
+    if !view.bundle_id.is_empty() {
+        let bundle = crate::native_security_label(&view.bundle_id);
+        let label =
+            crate::native_security_label(view.app_name.as_deref().unwrap_or(&view.bundle_id));
+        let local_choice = if view.grant_scope == ConsentGrantScope::Chat {
+            "This task"
+        } else {
+            "This task or project…"
+        };
+        let answer = native_three_way_choice(
+            app,
+            "Remember app permission?",
+            &format!("Remember this permission for {label} ({bundle}) for this task, or always for local tasks in this Tidebreak profile? You can revoke it in Settings > Permissions."),
+            local_choice,
+            "Always allow this app",
+            "Cancel",
+        )
+        .await?;
+        match remembered_app_scope(answer, local_choice) {
+            ConsentDecision::Chat => {}
+            decision => return Ok(decision),
+        }
+    }
+    if view.grant_scope == ConsentGrantScope::Chat {
+        return Ok(ConsentDecision::Chat);
+    }
+    let scope = native_three_way_choice(
+        app,
+        "Remember computer-use permission?",
+        "Choose how widely Tidebreak may remember this native permission.",
+        "This chat",
+        "This project",
+        "Cancel",
+    )
+    .await?;
+    remembered_scope(scope)
+}
+
+fn remembered_app_scope(answer: MessageDialogResult, local_choice: &str) -> ConsentDecision {
+    match answer {
+        MessageDialogResult::Yes => ConsentDecision::Chat,
+        MessageDialogResult::No => ConsentDecision::AllSessions,
+        MessageDialogResult::Custom(value) if value == local_choice => ConsentDecision::Chat,
+        MessageDialogResult::Custom(value) if value == "Always allow this app" => {
+            ConsentDecision::AllSessions
+        }
+        _ => ConsentDecision::Decline,
     }
 }
 
@@ -698,17 +751,14 @@ pub(crate) async fn stop_computer_use_control(
     state
         .require_local(crate::host_authority::Authority::ComputerUse)
         .await?;
-    let cancelled = state
-        .computer_use
-        .stop_all(|| state.broker.cancel_native_actions());
-    emit_state(&app, &state.computer_use);
+    let cancelled = stop_all_native_input(&app, &state);
     if let Some(runtime) =
         app.try_state::<std::sync::Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>()
     {
         runtime.stop_all_chrome();
     }
     state.computer_use.drain_acting().await;
-    cancelled.map_err(|error| error.to_string())
+    cancelled
 }
 
 /// Re-arm control after a Stop. A renderer request may open the native prompt,
@@ -815,6 +865,7 @@ async fn execute_receipt(
     state: &HostAccess,
     mut receipt: ComputerUseReceipt,
 ) -> Result<(), String> {
+    let admission = state.computer_use.admit_native_input(receipt.chat_id);
     if let Some(resolution) = receipt.resolution.clone() {
         return publish_resolution(state, &receipt, &resolution).await;
     }
@@ -886,6 +937,7 @@ async fn execute_receipt(
         state,
         context,
         &claim.call,
+        admission,
         CaptureDelivery::PublishToChat,
     )
     .await;
@@ -1014,12 +1066,6 @@ pub(crate) struct SessionCaptureImage {
 #[derive(Debug)]
 enum CuAction {
     Broker(OperationRequest),
-    /// Return focus to Tidebreak itself. Deliberately not a broker op: Tidebreak
-    /// is on the control blocklist, and focusing our own window is a local
-    /// window-manager call, not synthesized input into another app. Reached
-    /// only in foreground mode — build_action refuses the background default —
-    /// and still gated on the user's separate takeover approval at execution.
-    ReturnToTidebreak,
     /// A bounded local pause. The broker exposes the same op clamped; keeping
     /// it local saves a round-trip and never reaches the helper either way.
     Wait(f64),
@@ -1034,14 +1080,11 @@ fn broker_mode(mode: Option<tidebreak_core::ExecutionMode>) -> ExecutionMode {
     }
 }
 
-/// The refusal every focus-taking call gets in background mode, and every
-/// broker `requires_foreground` maps to. Nothing acted; the agent must not
-/// blindly retry — a foreground re-issue is a deliberate escalation that asks
-/// the user first.
-fn requires_foreground_resolution() -> StoredResolution {
+/// Refuse shared pointer/focus input without offering a takeover retry.
+fn independent_input_resolution() -> StoredResolution {
     unavailable(
-        "requires_foreground",
-        "This action needs the user's real focus or pointer, so it cannot run in the default background mode and was not performed. Do not retry it automatically. If taking over the screen is truly necessary, re-issue the action with execution_mode set to \"foreground\", which asks the user for permission first.",
+        "independent_input_unavailable",
+        "This target does not support independent background input for this action. No action ran. Continue with another background app or browser action; do not retry in foreground mode.",
     )
 }
 
@@ -1050,9 +1093,13 @@ async fn execute_operation(
     state: &HostAccess,
     context: AuthoritativeContext,
     call: &ToolCallRecord,
+    admission: NativeInputAdmission,
     delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
+    if acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
+        return stopped_resolution();
+    }
     let action = match build_action(cu, call) {
         Ok(action) => action,
         Err(resolution) => return resolution,
@@ -1070,28 +1117,6 @@ async fn execute_operation(
     .map(|event| crate::computer_use_action::CallActivity::start(app, event));
     let resolution = async {
         match action {
-            CuAction::ReturnToTidebreak => {
-                // Foreground mode was already required by build_action; the
-                // takeover approval is still asked separately per chat.
-                if let Err(resolution) =
-                    ensure_foreground_takeover(app, state, call, TIDEBREAK_FOCUS_SCOPE).await
-                {
-                    return resolution;
-                }
-                match cu
-                    .dispatch_acting(call.chat_id, || async {
-                        crate::deep_link::focus_main_window(app);
-                        completed(serde_json::json!({
-                            "status": "ok",
-                            "focused": "tidebreak",
-                            "execution_mode": "foreground",
-                        }))
-                    })
-                    .await
-                {
-                    Ok(resolution) | Err(resolution) => resolution,
-                }
-            }
             CuAction::Wait(seconds) => {
                 let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
                 tokio::select! {
@@ -1101,12 +1126,17 @@ async fn execute_operation(
                 }
             }
             CuAction::Broker(request) => {
-                dispatch_broker(app, state, context, call, request, delivery).await
+                dispatch_broker(app, state, context, call, request, admission, delivery).await
             }
         }
     }
     .await;
-    if let Some(activity) = activity {
+    if let Some(mut activity) = activity {
+        if let StoredResolution::Completed { result, .. } = &resolution {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+                activity.set_native_cursor(value.get("cursor"));
+            }
+        }
         let (success, error_code) = match &resolution {
             StoredResolution::Completed { .. } => (true, None),
             StoredResolution::Failed { error_code, .. } => (false, Some(error_code.as_str())),
@@ -1127,6 +1157,20 @@ fn build_action(
     cu: &ComputerUseState,
     call: &ToolCallRecord,
 ) -> Result<CuAction, StoredResolution> {
+    // Old harness schemas may still send foreground. Refuse before target
+    // resolution, app grants, takeover prompts, or local window activation.
+    if call
+        .arguments
+        .get("execution_mode")
+        .and_then(serde_json::Value::as_str)
+        == Some("foreground")
+        || matches!(
+            call.name.as_str(),
+            COMPUTER_FOCUS_WINDOW_TOOL | COMPUTER_RETURN_TO_TIDEBREAK_TOOL
+        )
+    {
+        return Err(independent_input_resolution());
+    }
     let invalid = || {
         unavailable(
             "invalid_request",
@@ -1236,22 +1280,6 @@ fn build_action(
                 execution_mode: broker_mode(args.execution_mode),
             }))
         }
-        COMPUTER_FOCUS_WINDOW_TOOL => {
-            let args: ComputerFocusWindowArgs =
-                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
-            // Focusing always changes what the user is looking at, so the
-            // background default refuses here — before any broker round-trip —
-            // rather than leaving a path that steals focus without the
-            // explicit foreground escalation.
-            if broker_mode(args.execution_mode) != ExecutionMode::Foreground {
-                return Err(requires_foreground_resolution());
-            }
-            Ok(CuAction::Broker(OperationRequest::CuFocusWindow {
-                bundle_id: args.app_id,
-                window_id: args.window_id,
-                execution_mode: ExecutionMode::Foreground,
-            }))
-        }
         COMPUTER_LAUNCH_APP_TOOL => {
             let args: ComputerLaunchAppArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
@@ -1293,17 +1321,6 @@ fn build_action(
                 height: args.height,
                 execution_mode: broker_mode(args.execution_mode),
             }))
-        }
-        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
-            let args: ComputerReturnToTidebreakArgs =
-                serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
-            // Raising Tidebreak steals the user's focus like any other focus
-            // move; the background default refuses instead of bypassing the
-            // foreground escalation just because the target is our own window.
-            if broker_mode(args.execution_mode) != ExecutionMode::Foreground {
-                return Err(requires_foreground_resolution());
-            }
-            Ok(CuAction::ReturnToTidebreak)
         }
         COMPUTER_WAIT_TOOL => {
             let args: ComputerWaitArgs =
@@ -1407,50 +1424,6 @@ fn request_execution_mode(request: &OperationRequest) -> Option<ExecutionMode> {
     }
 }
 
-/// The separate per-app, per-chat takeover approval every foreground action
-/// requires. The existing app-control grant never implies it: the decision is
-/// made through the trusted native dialog and remembered host-side in
-/// [`ComputerUseState`], where neither renderer events nor model output can
-/// forge it. Raced against the Stop latch like every other prompt.
-async fn ensure_foreground_takeover(
-    app: &AppHandle,
-    state: &HostAccess,
-    call: &ToolCallRecord,
-    scope: &str,
-) -> Result<(), StoredResolution> {
-    let cu = &state.computer_use;
-    if cu.is_halted() {
-        return Err(stopped_resolution());
-    }
-    if cu.has_foreground_approval(call.chat_id.0, scope) {
-        return Ok(());
-    }
-    let target_label = if scope == TIDEBREAK_FOCUS_SCOPE {
-        "the Tidebreak window".to_owned()
-    } else {
-        crate::native_security_label(cu.app_name(scope).as_deref().unwrap_or(scope))
-    };
-    let message = format!(
-        "Allow Tidebreak to take over your screen for {target_label}? Foreground control moves your pointer, keyboard focus, and active window while it acts, instead of working in the background. You can stop control at any time."
-    );
-    let approved = tokio::select! {
-        approved = native_binary_choice(app, "Allow foreground control?", &message, "Take over") =>
-            approved.unwrap_or(false),
-        () = cu.wait_for_halt() => false,
-    };
-    if cu.is_halted() {
-        return Err(stopped_resolution());
-    }
-    if !approved {
-        return Err(unavailable(
-            "foreground_declined",
-            "The user declined to let Tidebreak take over the screen for this action. Do not retry in foreground mode; continue in the background or ask how they want to proceed.",
-        ));
-    }
-    cu.remember_foreground_approval(call.chat_id.0, scope);
-    Ok(())
-}
-
 /// The capability a grant miss on this call is asking for, matching the
 /// broker's own authorization: the three control tools need `ControlApp`;
 /// scroll, focus, and tree reads need `ReadAppContent`; capture and window
@@ -1483,6 +1456,7 @@ async fn dispatch_broker(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     request: OperationRequest,
+    admission: NativeInputAdmission,
     delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
@@ -1492,7 +1466,7 @@ async fn dispatch_broker(
     // The broker's blocklist is mirrored here so a blocked app fails closed
     // without surfacing a consent card for it. Acting dispatches take the Stop
     // gate below; that gate owns the authoritative final halt check.
-    if acting && cu.is_halted() {
+    if acting && !cu.admission_is_current(call.chat_id, admission) {
         return stopped_resolution();
     }
     if let Some(bundle_id) = bundle_id.as_deref() {
@@ -1503,16 +1477,9 @@ async fn dispatch_broker(
             );
         }
     }
-    // Foreground is an escalation on top of the app-control grant: it needs
-    // its own per-app, per-chat trusted approval before any broker dispatch.
-    // The approval outlives this call for the session (until Stop), so the
-    // post-consent re-issue and follow-up actions in the same chat/app do not
-    // re-prompt.
+    // Defend the dispatch boundary if an internal caller bypasses argument parsing.
     if request_execution_mode(&request) == Some(ExecutionMode::Foreground) {
-        let scope = bundle_id.clone().unwrap_or_default();
-        if let Err(resolution) = ensure_foreground_takeover(app, state, call, &scope).await {
-            return resolution;
-        }
+        return independent_input_resolution();
     }
     if let Some(bundle_id) = bundle_id.as_deref() {
         if acting {
@@ -1529,7 +1496,7 @@ async fn dispatch_broker(
     };
     let result = if acting {
         match cu
-            .dispatch_acting(call.chat_id, || state.broker.operation(envelope))
+            .dispatch_acting_admitted(call.chat_id, admission, || state.broker.operation(envelope))
             .await
         {
             Ok(result) => result,
@@ -1543,12 +1510,12 @@ async fn dispatch_broker(
             if cu.is_halted() {
                 return stopped_resolution();
             }
-            dispatch_confirmation(app, state, call, held).await
+            dispatch_confirmation(app, state, call, held, admission).await
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
             BrokerFailure::ConsentRequired => {
-                dispatch_consent(app, state, context, call, request, delivery).await
+                dispatch_consent(app, state, context, call, request, admission, delivery).await
             }
             BrokerFailure::Resolution(resolution) => resolution,
         },
@@ -1594,10 +1561,9 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
                 _ => "A macOS permission required for this operation is missing. Ask the user to check Tidebreak's permissions in System Settings, then retry.",
             },
         )),
-        // The helper could not act without taking over the user's focus or
-        // pointer, and did nothing. Surfaced verbatim as requires_foreground —
-        // never a consent card, never an automatic foreground retry.
-        ErrorCode::RequiresForeground => BrokerFailure::Resolution(requires_foreground_resolution()),
+        // The helper cannot act independently and ran no input. Keep this a
+        // refusal so the caller cannot escalate to shared pointer or focus input.
+        ErrorCode::RequiresForeground => BrokerFailure::Resolution(independent_input_resolution()),
         ErrorCode::StaleElement => BrokerFailure::Resolution(unavailable(
             "stale_element",
             "The target element moved or changed since it was last seen. Read the app content or capture the screen again, then retry against the fresh element.",
@@ -1636,9 +1602,13 @@ async fn dispatch_consent(
     context: AuthoritativeContext,
     call: &ToolCallRecord,
     request: OperationRequest,
+    admission: NativeInputAdmission,
     delivery: CaptureDelivery<'_>,
 ) -> StoredResolution {
     let cu = &state.computer_use;
+    if acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission) {
+        return stopped_resolution();
+    }
     let capability = consent_capability(call, &request);
     let bundle_id = request_bundle_id(&request).map(str::to_owned);
     let view = ConsentPromptView {
@@ -1659,7 +1629,9 @@ async fn dispatch_consent(
         () = cu.wait_for_halt() => ConsentDecision::Decline,
     };
 
-    if cu.is_halted() {
+    if cu.is_halted()
+        || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+    {
         return stopped_resolution();
     }
     let conversation_subject = match GrantSubject::conversation(call.chat_id.0) {
@@ -1678,7 +1650,9 @@ async fn dispatch_consent(
                 "The user declined to let Tidebreak use this app. Do not retry; ask how they want to proceed.",
             );
         }
-        ConsentDecision::Once | ConsentDecision::Chat => (capability, conversation_subject),
+        ConsentDecision::Once | ConsentDecision::Chat | ConsentDecision::AllSessions => {
+            (capability, conversation_subject)
+        }
         // "Always" takes the widest durable subject this conversation has —
         // its project, or the conversation itself when there is none.
         ConsentDecision::Always => (capability, context.subject),
@@ -1694,12 +1668,16 @@ async fn dispatch_consent(
         bundle_id: bundle_id.clone(),
         consent: ConsentMethod::PermissionDialog,
         single_use: decision == ConsentDecision::Once,
+        all_sessions: decision == ConsentDecision::AllSessions,
     });
     if let Err(error) = state.broker.control(grant).await {
         return map_control_error(&error);
     }
+    let _ = app.emit("capability-consents-changed", ());
 
-    if cu.is_halted() {
+    if cu.is_halted()
+        || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+    {
         revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
         return stopped_resolution();
     }
@@ -1717,7 +1695,7 @@ async fn dispatch_consent(
     let acting = acts_on_host(&call.name);
     let result = if acting {
         match cu
-            .dispatch_acting(call.chat_id, || state.broker.operation(envelope))
+            .dispatch_acting_admitted(call.chat_id, admission, || state.broker.operation(envelope))
             .await
         {
             Ok(result) => result,
@@ -1731,10 +1709,12 @@ async fn dispatch_consent(
     };
     let resolution = match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
-            if cu.is_halted() {
+            if cu.is_halted()
+                || (acts_on_host(&call.name) && !cu.admission_is_current(call.chat_id, admission))
+            {
                 stopped_resolution()
             } else {
-                dispatch_confirmation(app, state, call, held).await
+                dispatch_confirmation(app, state, call, held, admission).await
             }
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
@@ -1786,8 +1766,13 @@ async fn dispatch_confirmation(
     state: &HostAccess,
     call: &ToolCallRecord,
     held: tidebreak_host_broker::CuNeedsConfirmationResult,
+    admission: NativeInputAdmission,
 ) -> StoredResolution {
     let cu = &state.computer_use;
+    if !cu.admission_is_current(call.chat_id, admission) {
+        return stopped_resolution();
+    }
+
     let view = ConfirmationPromptView {
         call_id: call.id,
         chat_id: call.chat_id,
@@ -1822,7 +1807,7 @@ async fn dispatch_confirmation(
     });
     let deadline = tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
     let result = match cu
-        .dispatch_acting(call.chat_id, || {
+        .dispatch_acting_admitted(call.chat_id, admission, || {
             state.broker.control_without_retry(confirm, deadline)
         })
         .await
@@ -2110,6 +2095,7 @@ fn control_meta_json(meta: &tidebreak_host_broker::ControlMeta) -> serde_json::V
         // The mode the helper actually acted in — truthful result metadata,
         // absent when the helper predates the mode contract.
         "execution_mode": meta.execution_mode,
+        "cursor": meta.cursor,
     })
 }
 
@@ -2203,6 +2189,7 @@ pub(crate) fn cancel_session_native_input(
         .computer_use
         .cancel_session(session, || state.broker.cancel_native_actions())
         .map_err(|error| error.to_string());
+    crate::native_cursor_overlay::clear_session(app, &session.to_string());
     emit_state(app, &state.computer_use);
     result
 }
@@ -2216,6 +2203,7 @@ pub(crate) fn revoke_session_native_input(
         .computer_use
         .revoke_session(session, || state.broker.cancel_native_actions())
         .map_err(|error| error.to_string());
+    crate::native_cursor_overlay::clear_session(app, &session.to_string());
     emit_state(app, &state.computer_use);
     result
 }
@@ -2225,6 +2213,7 @@ pub(crate) fn stop_all_native_input(app: &AppHandle, state: &HostAccess) -> Resu
         .computer_use
         .stop_all(|| state.broker.cancel_native_actions())
         .map_err(|error| error.to_string());
+    crate::native_cursor_overlay::clear_all(app);
     emit_state(app, &state.computer_use);
     result
 }
@@ -2246,6 +2235,7 @@ pub(crate) async fn execute_session_native_operation(
     call_id: CallId,
     name: &str,
     arguments: serde_json::Value,
+    admission: NativeInputAdmission,
 ) -> Result<SessionNativeOutput, String> {
     let context = crate::host_access::session_native_context(session_id.0)?;
     let call = session_call_record(session_id, call_id, name, arguments);
@@ -2255,6 +2245,7 @@ pub(crate) async fn execute_session_native_operation(
         state,
         context,
         &call,
+        admission,
         CaptureDelivery::Inline(&mut images),
     )
     .await;
@@ -2314,6 +2305,43 @@ fn session_call_record(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remembered_app_choices_keep_task_project_and_all_tasks_distinct() {
+        for label in ["This task", "This task or project…"] {
+            assert_eq!(
+                remembered_app_scope(MessageDialogResult::Yes, label),
+                ConsentDecision::Chat
+            );
+            assert_eq!(
+                remembered_app_scope(MessageDialogResult::Custom(label.into()), label),
+                ConsentDecision::Chat
+            );
+            assert_eq!(
+                remembered_app_scope(MessageDialogResult::No, label),
+                ConsentDecision::AllSessions
+            );
+            assert_eq!(
+                remembered_app_scope(
+                    MessageDialogResult::Custom("Always allow this app".into()),
+                    label
+                ),
+                ConsentDecision::AllSessions
+            );
+            assert_eq!(
+                remembered_app_scope(MessageDialogResult::Cancel, label),
+                ConsentDecision::Decline
+            );
+            assert_eq!(
+                remembered_app_scope(MessageDialogResult::Custom("unknown".into()), label),
+                ConsentDecision::Decline
+            );
+        }
+        assert_eq!(
+            remembered_scope(MessageDialogResult::No).unwrap(),
+            ConsentDecision::Always
+        );
+    }
+
     #[test]
     fn native_app_consent_discloses_pixels_and_broader_control() {
         let mut view = ConsentPromptView {
@@ -2751,6 +2779,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_does_not_revive_an_admitted_request_from_before_stop() {
+        let cu = ComputerUseState::default();
+        let session = SessionId::new();
+        let admission = cu.admit_native_input(session);
+        cu.stop_all(|| Ok::<_, ()>(())).unwrap();
+        let admitted_while_stopped = cu.admit_native_input(session);
+        cu.resume();
+        assert!(!cu.is_halted());
+        assert!(cu
+            .dispatch_acting_admitted(session, admitted_while_stopped, || async {
+                panic!("a request admitted while stopped must remain refused");
+            })
+            .await
+            .is_err());
+        let result = cu
+            .dispatch_acting_admitted(session, admission, || async {
+                panic!("an old request must not reach the broker after Resume");
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(cu.dispatch_acting(session, || async {}).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resume_keeps_cancelled_requests_invalid_without_cancelling_other_sessions() {
+        let cu = ComputerUseState::default();
+        let cancelled = SessionId::new();
+        let other = SessionId::new();
+        let cancelled_admission = cu.admit_native_input(cancelled);
+        let other_admission = cu.admit_native_input(other);
+        cu.cancel_session(cancelled, || Ok::<_, ()>(())).unwrap();
+        cu.resume();
+        assert!(cu
+            .dispatch_acting_admitted(cancelled, cancelled_admission, || async {
+                panic!("a cancelled request must not run after Resume");
+            })
+            .await
+            .is_err());
+        assert!(cu
+            .dispatch_acting_admitted(other, other_admission, || async {})
+            .await
+            .is_ok());
+        assert!(cu.dispatch_acting(cancelled, || async {}).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_new_stop_invalidates_resume_waiting_for_the_dispatch_gate() {
         let cu = std::sync::Arc::new(ComputerUseState::default());
         let gate = cu.acting_dispatch.lock().await;
@@ -3057,9 +3131,7 @@ mod tests {
             panic!("wait stays local");
         };
         assert_eq!(seconds, 2.5);
-        // Returning focus to Tidebreak is a focus steal like any other: the
-        // background default refuses, and only an explicit foreground request
-        // maps to the local action (still gated on takeover approval later).
+        // Returning focus refuses in both default and legacy foreground modes.
         assert!(matches!(
             build_action(
                 &cu,
@@ -3075,7 +3147,7 @@ mod tests {
                     serde_json::json!({ "execution_mode": "foreground" })
                 )
             ),
-            Ok(CuAction::ReturnToTidebreak)
+            Err(StoredResolution::Failed { .. })
         ));
     }
 
@@ -3118,25 +3190,31 @@ mod tests {
             Some(ExecutionMode::Background)
         );
 
-        // An explicit foreground request survives the mapping.
-        let Ok(CuAction::Broker(request)) = build_action(
-            &cu,
-            &call(
-                COMPUTER_CLICK_TOOL,
-                serde_json::json!({
-                    "app_id": "dev.tidebreak.fixture",
-                    "x": 10.0,
-                    "y": 20.0,
-                    "execution_mode": "foreground",
-                }),
-            ),
-        ) else {
-            panic!("click maps");
-        };
-        assert_eq!(
-            request_execution_mode(&request),
-            Some(ExecutionMode::Foreground)
-        );
+        for name in [
+            COMPUTER_CLICK_TOOL,
+            COMPUTER_TYPE_TEXT_TOOL,
+            COMPUTER_SCROLL_TOOL,
+            COMPUTER_KEY_PRESS_TOOL,
+            COMPUTER_HOVER_TOOL,
+            COMPUTER_DRAG_TOOL,
+            COMPUTER_LAUNCH_APP_TOOL,
+            COMPUTER_RESIZE_WINDOW_TOOL,
+        ] {
+            let refused = build_action(
+                &cu,
+                &call(
+                    name,
+                    serde_json::json!({
+                        "app_id": "dev.tidebreak.fixture", "execution_mode": "foreground",
+                    }),
+                ),
+            )
+            .expect_err("foreground refuses before target parsing or grants");
+            assert!(
+                matches!(refused, StoredResolution::Failed { error_code, .. }
+                if error_code == "independent_input_unavailable")
+            );
+        }
 
         // Reads never carry a mode to gate on.
         let Ok(CuAction::Broker(request)) = build_action(
@@ -3172,52 +3250,22 @@ mod tests {
             resolved_at: None,
         };
 
-        let refused = build_action(
-            &cu,
-            &call(serde_json::json!({ "app_id": "com.example.app" })),
-        )
-        .expect_err("background focus must refuse");
-        let StoredResolution::Failed {
-            error_code, result, ..
-        } = &refused
-        else {
-            panic!("background focus fails the call");
-        };
-        assert_eq!(error_code, "requires_foreground");
-        assert!(result.contains("Do not retry it automatically"));
-
-        let action = build_action(
-            &cu,
-            &call(serde_json::json!({
-                "app_id": "com.example.app",
-                "execution_mode": "foreground",
-            })),
-        )
-        .expect("foreground focus maps to the broker op");
-        let CuAction::Broker(request) = action else {
-            panic!("focus is a broker op");
-        };
-        assert_eq!(
-            request_execution_mode(&request),
-            Some(ExecutionMode::Foreground)
-        );
-    }
-
-    #[tokio::test]
-    async fn foreground_takeover_approvals_are_scoped_and_withdrawn_by_stop() {
-        let cu = ComputerUseState::default();
-        let chat = Uuid::new_v4();
-        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
-        cu.remember_foreground_approval(chat, "com.example.app");
-        assert!(cu.has_foreground_approval(chat, "com.example.app"));
-        // Scoped to the exact (chat, app) pair — no bleed across apps or chats.
-        assert!(!cu.has_foreground_approval(chat, "com.other.app"));
-        assert!(!cu.has_foreground_approval(Uuid::new_v4(), "com.example.app"));
-        // Stop withdraws every takeover approval; resume does not restore it.
-        cu.halt().await;
-        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
-        cu.resume();
-        assert!(!cu.has_foreground_approval(chat, "com.example.app"));
+        for mode in [None, Some("background"), Some("foreground")] {
+            let mut arguments = serde_json::json!({"app_id": "com.example.app"});
+            if let Some(mode) = mode {
+                arguments["execution_mode"] = mode.into();
+            }
+            let refused = build_action(&cu, &call(arguments))
+                .expect_err("focus changes must refuse before grants or input");
+            let StoredResolution::Failed {
+                error_code, result, ..
+            } = refused
+            else {
+                panic!("expected a refusal");
+            };
+            assert_eq!(error_code, "independent_input_unavailable");
+            assert!(result.contains("No action ran"));
+        }
     }
 
     #[test]
@@ -3307,9 +3355,9 @@ mod tests {
             BrokerFailure::Resolution(StoredResolution::Failed {
                 error_code, result, ..
             }) => {
-                assert_eq!(error_code, "requires_foreground");
-                assert!(result.contains("execution_mode"));
-                assert!(result.contains("Do not retry it automatically"));
+                assert_eq!(error_code, "independent_input_unavailable");
+                assert!(result.contains("independent background input"));
+                assert!(result.contains("do not retry in foreground mode"));
             }
             _ => panic!("requires_foreground must never become a consent card"),
         }

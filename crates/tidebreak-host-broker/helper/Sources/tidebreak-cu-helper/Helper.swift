@@ -139,6 +139,16 @@ struct HelperRequest: Decodable {
     let dy: Double?
 }
 
+extension HelperRequest {
+    func requireIndependentInput() throws {
+        guard op == .releaseRecordedInput || executionMode != .foreground else {
+            throw HelperError(
+                code: .independentInputUnavailable,
+                message: "foreground input is disabled; use independent background input")
+        }
+    }
+}
+
 struct CaptureMark: Decodable {
     let mark: Int
     let frame: AXTree.Frame
@@ -174,6 +184,7 @@ enum HelperErrorCode: String, Encodable {
     /// broker reports an unsupported build rather than a generic failure.
     case unsupported = "unsupported"
     case requiresForeground = "requires_foreground"
+    case independentInputUnavailable = "independent_input_unavailable"
 }
 
 struct HelperError: Error {
@@ -210,6 +221,7 @@ struct CUHelper {
         }
 
         do {
+            try request.requireIndependentInput()
             switch request.op {
             case .releaseRecordedInput:
                 emit(try InputRecovery.releaseRecorded(request))

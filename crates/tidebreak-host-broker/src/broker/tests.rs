@@ -4684,6 +4684,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4701,6 +4702,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4718,6 +4720,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4736,6 +4739,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4752,6 +4756,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4767,6 +4772,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4783,6 +4789,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4801,6 +4808,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: true,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4822,6 +4830,7 @@ impl ComputerUseBackend for StubCuBackend {
             used_fallback: false,
             detail: None,
             execution_mode: Some(mode),
+            cursor: None,
         })
     }
 
@@ -4921,6 +4930,7 @@ impl CuFixture {
                 bundle_id: bundle_id.map(str::to_owned),
                 consent: ConsentMethod::PermissionDialog,
                 single_use,
+                all_sessions: false,
             }))
             .unwrap();
         let ControlResult::CuGrantApp(result) = result else {
@@ -5145,6 +5155,7 @@ fn read_grants_never_cover_launch_hover_drag_or_resize() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }))
         .unwrap();
     for request in [
@@ -5336,6 +5347,7 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
                 bundle_id: Some(blocked.to_owned()),
                 consent: ConsentMethod::PermissionDialog,
                 single_use: false,
+                all_sessions: false,
             }))
             .unwrap_err();
         assert_eq!(grant_error.code, ErrorCode::Denied, "{blocked}");
@@ -5575,6 +5587,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }))
         .unwrap();
     assert!(matches!(granted, ControlResult::CuGrantApp(_)));
@@ -5623,6 +5636,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }),
     }))
     .unwrap();
@@ -6341,6 +6355,7 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
             single_use: false,
+            all_sessions: false,
         }),
     }))
     .unwrap();
@@ -6367,4 +6382,231 @@ fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
     }
     assert!(fixture.backend.scrolls().is_empty());
     assert!(fixture.backend.focuses().is_empty());
+}
+
+#[test]
+fn saved_native_app_permission_survives_sessions_reload_and_exact_revocation() {
+    let fixture = durable_cu_setup();
+    let bundle = "dev.tidebreak.fixture";
+    let granted = fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some(bundle.into()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+            all_sessions: true,
+        }))
+        .unwrap();
+    let ControlResult::CuGrantApp(granted) = granted else {
+        panic!("grant expected")
+    };
+    let second_id = Uuid::new_v4();
+    let second = ExecutionContext::standalone(second_id).unwrap();
+    let read = |app: &str| OperationRequest::CuReadAppContent {
+        bundle_id: app.into(),
+        max_depth: None,
+        max_nodes: None,
+    };
+    operate(&fixture.broker.operator(), second, read(bundle)).unwrap();
+    for request in [
+        read("dev.tidebreak.other"),
+        OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::Display { display_id: None },
+        },
+        OperationRequest::CuListWindows { bundle_id: None },
+    ] {
+        assert_eq!(
+            operate(&fixture.broker.operator(), second, request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+    }
+    assert!(matches!(
+        authorize(
+            &fixture.broker.controller().lock_state().unwrap(),
+            second,
+            Capability::ListRoots,
+            Resource::Subject,
+        ),
+        Err(BrokerError::Denied)
+    ));
+    let duplicate = fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject: GrantSubject::conversation(second_id).unwrap(),
+            capability: Capability::ControlApp,
+            bundle_id: Some(bundle.into()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+            all_sessions: true,
+        }))
+        .unwrap();
+    assert!(
+        matches!(duplicate, ControlResult::CuGrantApp(ref result) if !result.granted && result.grant_id == granted.grant_id)
+    );
+    fixture.grant(
+        Capability::ReadAppContent,
+        Some("dev.tidebreak.session-only"),
+    );
+    assert_eq!(
+        operate(
+            &fixture.broker.operator(),
+            second,
+            read("dev.tidebreak.session-only")
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+    fixture
+        .control(ControlRequest::PurgeConversationSubject(
+            PurgeConversationSubjectRequest {
+                conversation_id: fixture.subject.id(),
+            },
+        ))
+        .unwrap();
+    operate(&fixture.broker.operator(), second, read(bundle)).unwrap();
+    assert_eq!(
+        fixture
+            .operate(read("dev.tidebreak.session-only"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    let original_subject = fixture.subject;
+    let CuFixture {
+        _temp: temp,
+        broker,
+        backend,
+        audit,
+        ..
+    } = fixture;
+    let state_dir = temp.path().join("app-data/host-broker");
+    drop(broker);
+    let reloaded = Broker::test_open_with_computer_use(
+        test_policy(&temp),
+        &state_dir,
+        audit,
+        backend.clone(),
+        temp.path().join("cu-staging"),
+    )
+    .unwrap();
+    operate(&reloaded.operator(), second, read(bundle)).unwrap();
+    let listed = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListGrantStatements,
+    }))
+    .unwrap();
+    let ControlResult::ListGrantStatements { grants } = listed else {
+        panic!("grants expected")
+    };
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant_id, granted.grant_id);
+    assert_eq!(grants[0].subject, original_subject);
+    assert!(grants[0].native_app_all_sessions);
+    // A held consequential action must recheck the saved permission at confirmation.
+    backend.set_label("Send");
+    let held = operate(
+        &reloaded.operator(),
+        second,
+        OperationRequest::CuClick {
+            bundle_id: bundle.into(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".into()),
+                element_fingerprint: Some("fp1".into()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+            execution_mode: Default::default(),
+        },
+    )
+    .unwrap();
+    let OperationResult::CuNeedsConfirmation(held) = held else {
+        panic!("confirmation expected")
+    };
+    let revoked = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::RevokeGrant(RevokeGrantRequest {
+            subject: original_subject,
+            grant_id: granted.grant_id,
+        }),
+    }))
+    .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::RevokeGrant(RevokeGrantResult { revoked: true })
+    ));
+    assert_eq!(
+        operate(&reloaded.operator(), second, read(bundle))
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    let confirmed = unwrap_response(reloaded.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::CuConfirmControlAction(CuConfirmControlActionRequest {
+            confirmation_id: held.confirmation_id,
+        }),
+    }))
+    .unwrap_err();
+    assert_eq!(confirmed.code, ErrorCode::Denied);
+    assert!(backend.clicks().is_empty());
+    drop(reloaded);
+    let again = reopen_broker(&temp, &state_dir);
+    assert!(
+        again.shared.state.lock().unwrap().grants.is_empty(),
+        "revocation remains durable"
+    );
+}
+
+#[test]
+fn saved_native_app_permission_refuses_scope_widening_and_keeps_legacy_grants() {
+    let fixture = cu_setup();
+    for (capability, bundle_id, single_use) in [
+        (Capability::CaptureScreen, None, false),
+        (Capability::ReadFiles, Some("dev.tidebreak.fixture"), false),
+        (
+            Capability::ControlApp,
+            Some("com.apple.SecurityAgent"),
+            false,
+        ),
+        (Capability::ControlApp, Some("dev.tidebreak.fixture"), true),
+    ] {
+        assert!(fixture
+            .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+                subject: fixture.subject,
+                capability,
+                bundle_id: bundle_id.map(str::to_owned),
+                consent: ConsentMethod::PermissionDialog,
+                single_use,
+                all_sessions: true,
+            }))
+            .is_err());
+    }
+    let legacy = fixture.grant(Capability::ReadAppContent, Some("dev.tidebreak.fixture"));
+    let grant = fixture
+        .broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .find(|grant| grant.id() == legacy.grant_id)
+        .unwrap()
+        .clone();
+    let mut wire = serde_json::to_value(&grant).unwrap();
+    assert!(wire.get("native_app_all_sessions").is_none());
+    let restored: Grant = serde_json::from_value(wire.clone()).unwrap();
+    assert!(!restored.native_app_all_sessions());
+    // An old subject or persisted file cannot turn a folder/display grant into global authority.
+    wire["native_app_all_sessions"] = serde_json::json!(true);
+    wire["scope"] = serde_json::json!({"kind":"screen"});
+    wire["capability"] = serde_json::json!("capture_screen");
+    assert!(serde_json::from_value::<Grant>(wire).is_err());
 }

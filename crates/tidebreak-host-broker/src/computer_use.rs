@@ -260,6 +260,9 @@ pub struct ControlMeta {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_mode: Option<ExecutionMode>,
+    /// Verified action geometry from the native helper, used only for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Value>,
 }
 
 /// A read-only description of a target element, used by the broker's
@@ -615,8 +618,10 @@ impl HelperBackend {
         if let Some(path) = std::env::var_os(HELPER_CANCEL_PATH_ENV) {
             attach_input_cancellation(&mut request, Path::new(&path))?;
         }
-        if request.get("execution_mode").and_then(Value::as_str) == Some("foreground")
-            && self.input_cleanup_failed.load(Ordering::Acquire)
+        if matches!(
+            request.get("op").and_then(Value::as_str),
+            Some("click" | "type_text" | "key_press" | "scroll" | "hover" | "drag")
+        ) && self.input_cleanup_failed.load(Ordering::Acquire)
         {
             return Err(BackendError::new(
                 BackendErrorKind::OperationFailed,
@@ -1318,6 +1323,7 @@ impl HelperBackend {
             used_fallback: parsed.used_fallback,
             detail: parsed.detail,
             execution_mode: parsed.execution_mode,
+            cursor: parsed.cursor,
         })
     }
 }
@@ -1344,7 +1350,9 @@ fn map_code(code: Option<&str>) -> BackendErrorKind {
         Some("not_found") => BackendErrorKind::NotFound,
         Some("invalid_request") => BackendErrorKind::InvalidRequest,
         Some("stale_element") => BackendErrorKind::StaleElement,
-        Some("requires_foreground") => BackendErrorKind::RequiresForeground,
+        Some("requires_foreground" | "independent_input_unavailable") => {
+            BackendErrorKind::RequiresForeground
+        }
         Some("yielded") => BackendErrorKind::Yielded,
         Some("target_outside_app") => BackendErrorKind::TargetOutsideApp,
         _ => BackendErrorKind::OperationFailed,
@@ -1401,6 +1409,8 @@ struct ControlResultJson {
     /// not an echo of the request.
     #[serde(default)]
     execution_mode: Option<ExecutionMode>,
+    #[serde(default)]
+    cursor: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1530,8 +1540,8 @@ exit 7
         fake_helper("recovery", &script.replace("BEHAVIOR", behavior))
     }
 
-    fn foreground_fixture(backend: &HelperBackend) -> Result<Value, BackendError> {
-        backend.run(json!({"op": "drag", "execution_mode": "foreground"}))
+    fn input_fixture(backend: &HelperBackend) -> Result<Value, BackendError> {
+        backend.run(json!({"op": "drag", "execution_mode": "background"}))
     }
 
     fn recovery_events(helper: &FakeHelper) -> String {
@@ -1541,8 +1551,9 @@ exit 7
     #[test]
     fn timeout_cancels_the_invocation_before_forcing_release() {
         let helper = recovery_helper("graceful");
-        let backend = HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(75));
-        let error = foreground_fixture(&backend).unwrap_err();
+        // Let the shell fixture start under parallel test load before testing cancellation.
+        let backend = HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(500));
+        let error = input_fixture(&backend).unwrap_err();
         assert!(error.message.contains("timed out"));
         assert_eq!(recovery_events(&helper), "operation\ncancelled\n");
         assert!(!backend.input_cleanup_failed.load(Ordering::Acquire));
@@ -1554,9 +1565,9 @@ exit 7
             let helper = recovery_helper(behavior);
             let backend =
                 HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(75));
-            assert!(foreground_fixture(&backend).is_err());
+            assert!(input_fixture(&backend).is_err());
             assert_eq!(recovery_events(&helper), "operation\ncleanup\n");
-            assert!(foreground_fixture(&backend).is_err());
+            assert!(input_fixture(&backend).is_err());
             assert_eq!(
                 recovery_events(&helper),
                 "operation\ncleanup\noperation\ncleanup\n"
@@ -1566,17 +1577,17 @@ exit 7
     }
 
     #[test]
-    fn failed_cleanup_preserves_the_journal_and_stops_foreground_but_allows_observation() {
+    fn failed_cleanup_preserves_the_journal_and_stops_input_but_allows_observation() {
         let helper = recovery_helper("cleanup_failure");
         let backend = HelperBackend::new(helper.path.clone());
-        let error = foreground_fixture(&backend).unwrap_err();
+        let error = input_fixture(&backend).unwrap_err();
         assert!(error
             .message
             .contains("Release any held mouse buttons or keys"));
         let path =
             PathBuf::from(std::fs::read_to_string(helper._dir.path().join("journal")).unwrap());
         assert!(path.is_file());
-        assert!(foreground_fixture(&backend)
+        assert!(input_fixture(&backend)
             .unwrap_err()
             .message
             .contains("remains stopped"));
@@ -1592,7 +1603,7 @@ exit 7
     fn claimed_success_with_held_input_becomes_uncertain_after_recovery() {
         let helper = recovery_helper("claimed_success");
         let backend = HelperBackend::new(helper.path.clone());
-        let error = foreground_fixture(&backend).unwrap_err();
+        let error = input_fixture(&backend).unwrap_err();
         assert!(error.message.contains("outcome is uncertain"));
         assert_eq!(recovery_events(&helper), "operation\ncleanup\n");
     }
@@ -1602,7 +1613,7 @@ exit 7
         let helper = recovery_helper("structured_error");
         let backend = HelperBackend::new(helper.path.clone());
         assert_eq!(
-            foreground_fixture(&backend).unwrap_err().kind,
+            input_fixture(&backend).unwrap_err().kind,
             BackendErrorKind::PermissionDenied
         );
         assert_eq!(recovery_events(&helper), "operation\n");

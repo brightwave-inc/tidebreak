@@ -774,7 +774,7 @@ usage: tidebreak computer <tool> --json '<arguments-json>' [--output <path>]
 `tidebreak computer list-tools` for the current set, e.g.
 computer_list_windows, computer_capture_screen, computer_click,
 computer_type_text, computer_key_press, computer_scroll,
-computer_focus_window, computer_return_to_tidebreak, computer_wait).
+computer_hover, computer_drag, computer_wait).
 
 --json     the tool's argument object, as one JSON string (use '{}' for none)
 --output   write the first result image (PNG) to this private path instead of

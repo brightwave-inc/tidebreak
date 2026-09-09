@@ -23,6 +23,10 @@ use tidebreak_core::{CallId, GrantLevel, GrantScope, RendererToolName, ToolAppro
 /// lives in.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct ConsentStatementSnapshot {
+    /// Exact native app consent shared by all local tasks in this profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub native_app_all_sessions: Option<bool>,
     /// What a revocation of this statement names, and where to send it.
     pub handle: ConsentHandle,
     /// How far the statement reaches — one chat, or every chat in a project.
@@ -85,6 +89,9 @@ pub enum HostCapability {
     WriteFiles,
     /// Expose a connected folder to model-authored commands.
     ExecuteCommands,
+    CaptureScreen,
+    ReadAppContent,
+    ControlApp,
 }
 
 /// What a consent statement's verb is allowed to touch.
@@ -95,6 +102,13 @@ pub enum ConsentResource {
     ActionScope { scope: GrantScope },
     /// A subject-wide host action that touches no particular folder.
     HostSubject,
+    /// An exact native app. The bundle id remains visible for review.
+    HostApp {
+        bundle_id: String,
+        display_name: Option<String>,
+    },
+    /// Whole-display capture, which always keeps its task/project scope.
+    HostScreen,
     /// An entire connected folder, named by the same safe identity the
     /// folders surface shows — never an absolute path.
     HostRoot {
@@ -144,6 +158,7 @@ mod tests {
         let granted_at: DateTime<Utc> = "2026-07-29T12:00:00Z".parse().unwrap();
 
         let tool = ConsentStatementSnapshot {
+            native_app_all_sessions: None,
             handle: ConsentHandle::ToolGrant {
                 call_id: CallId(call_id),
             },
@@ -185,6 +200,7 @@ mod tests {
 
         let project_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
         let capability = ConsentStatementSnapshot {
+            native_app_all_sessions: None,
             handle: ConsentHandle::CapabilityGrant {
                 grant_id: "44444444-4444-4444-4444-444444444444".into(),
             },

@@ -137,7 +137,7 @@ export function SettingsStatus({
 
 export function SettingsError({ children }: { children: ReactNode }) {
   return (
-    <p className="text-sm text-destructive break-words" role="alert">
+    <p className="text-sm text-critical-foreground break-words" role="alert">
       {children}
     </p>
   );

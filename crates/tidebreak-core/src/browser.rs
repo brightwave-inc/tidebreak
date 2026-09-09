@@ -611,7 +611,7 @@ pub enum BrowserActStatus {
     UnsupportedFrame,
     /// The action or target type is not supported by this engine.
     UnsupportedNative,
-    /// This action needs separately approved foreground native input.
+    /// Legacy refusal: independent input is unavailable. Foreground retry is forbidden.
     RequiresForeground,
     /// The action value was rejected (too long, invalid option, etc.).
     InvalidValue,
@@ -623,14 +623,15 @@ pub enum BrowserActStatus {
     Timeout,
 }
 
-/// Whether an action may take keyboard focus in Tidebreak.
+/// Independent browser action execution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserExecutionMode {
     /// Use synthetic DOM input without acquiring native keyboard focus.
     #[default]
     Background,
-    /// Use native input after separate approval to take keyboard focus.
+    /// Legacy value. Browser actions reject focus-taking input.
+    #[schemars(skip)]
     Foreground,
 }
 
@@ -691,15 +692,14 @@ pub struct BrowserActArgs {
     pub target_ref: String,
     /// The semantic action to perform.
     pub action: BrowserAction,
-    /// Background uses synthetic DOM input and preserves native focus. For
-    /// native input, request foreground and approve the focus disclosure.
+    /// Preserve native pointer and keyboard focus with independent input.
     #[serde(default)]
     pub execution_mode: BrowserExecutionMode,
 }
 
 /// One logical Tidebreak resource that the native browser executor may attach.
 ///
-/// Neither variant can represent a host path. The trusted foreground executor
+/// Neither variant can represent a host path. The trusted native executor
 /// resolves the opaque identity inside the persisted conversation and checks
 /// the exact bytes again after native confirmation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1429,7 +1429,7 @@ pub fn browser_screenshot_tool_spec() -> ToolSpec {
 pub fn browser_act_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActArgs>(
         BROWSER_ACT_TOOL,
-        "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. By default, execution_mode is background: bounded synthetic DOM actions preserve native keyboard focus. Results report executionMode and inputMethod. If a snapshot node lists actionExecutionModes for an action, use one of those execution_mode values. Popup select controls allow select only in background mode; native popup interaction requires human takeover. DOM events are not trusted input; CSS hover, keys, drag, and native controls may require foreground mode. Foreground input requires separate approval to take keyboard focus for that action. Never silently retry a DOM action as native input. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
+        "Perform one semantic action on a re-resolved interactive target from the latest snapshot, then re-snapshot. Browser actions preserve the user's pointer and native keyboard focus. Results report executionMode and inputMethod. DOM input is synthetic: key events reach page handlers without browser default editing or tab navigation; pointer drag reaches page handlers without native drag-and-drop; hover does not set CSS :hover. Verify each action's effect from the next snapshot. Unsupported operations return a typed refusal and never take focus. For file inputs, use browser_upload directly when available; do not scroll, focus, or click them with browser_act.",
     )
 }
 
@@ -1465,7 +1465,7 @@ pub fn browser_close_tool_spec() -> ToolSpec {
 pub fn browser_activate_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActivateArgs>(
         BROWSER_ACTIVATE_TOOL,
-        "Make one shared in-app browser tab visible and focused. Use this only when an operation genuinely needs visibility (screenshots, native input); prefer leaving tabs in the background so the user's cursor and focus are undisturbed. The user sees the tab switch happen. Activation does not grant any new origin access.",
+        "Make one shared in-app browser tab visible without changing native keyboard focus or the hardware pointer. Use this when an operation needs visibility, such as a screenshot. The user sees the tab switch happen. Activation does not grant any new origin access.",
     )
 }
 
@@ -1507,6 +1507,20 @@ mod tests {
         let mut invalid = request;
         invalid["execution_mode"] = json!("auto");
         assert!(!validate_browser_act_arguments(&invalid));
+    }
+
+    #[test]
+    fn browser_action_schema_advertises_only_independent_execution() {
+        let spec = browser_act_tool_spec();
+        let schema = &spec.input_schema["properties"]["execution_mode"];
+        assert!(!schema.to_string().contains("foreground"));
+        assert!(schema.to_string().contains("background"));
+        assert!(!spec.description.contains("require foreground"));
+        for action in ["press", "key_chord", "drag", "hover"] {
+            assert!(spec.input_schema["properties"]["action"]
+                .to_string()
+                .contains(action));
+        }
     }
 
     #[test]

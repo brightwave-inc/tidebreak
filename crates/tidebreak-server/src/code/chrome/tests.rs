@@ -179,54 +179,21 @@ async fn stop_drains_held_input_before_a_resumed_action_can_press_again() {
 }
 
 #[tokio::test]
-async fn stop_drains_a_sent_foreground_activation_before_returning() {
-    let (service, scope, requests, replies) = connection();
-    let reply_inject = replies.clone();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    respond(requests, replies, log.clone(), |request| {
-        if request["method"] == "Page.bringToFront" {
-            Scripted::Hold
-        } else {
-            page_reply(request)
-        }
-    });
-    let tab = service
-        .attach_existing_tab(&scope, "test", "T1")
-        .await
-        .unwrap();
-    let activation = call(
-        tidebreak_core::CHROME_ACTIVATE_TAB_TOOL,
-        json!({"targetRef":tab.target_ref}),
-    );
-    let mut task = dispatched(&service, &scope, activation.clone()).await;
-    let sent = logged(&log, |request| request["method"] == "Page.bringToFront").await;
-    service.ownership().trip();
-    assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
-        .await
-        .is_err());
-    reply_inject
-        .send(CdpFrame::Text(
-            json!({"id":sent["id"],"result":{}}).to_string(),
-        ))
-        .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
-    service.ownership().resume();
-    assert_eq!(
-        service.dispatch(&scope, &activation).await.result.outcome,
-        ComputerUseOutcome::Unknown
-    );
-    assert_eq!(
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|request| request["method"] == "Page.bringToFront")
-            .count(),
-        1
-    );
+async fn tab_activation_is_rejected_without_any_protocol_command() {
+    let (service, scope, mut requests, _replies) = connection();
+    for arguments in [json!({"targetRef":"ct-1"}), json!({})] {
+        let activation = call(tidebreak_core::CHROME_ACTIVATE_TAB_TOOL, arguments);
+        let result = service.dispatch(&scope, &activation).await.result;
+        assert_eq!(result.outcome, ComputerUseOutcome::Rejected);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("independent_input_unavailable")
+        );
+        assert!(
+            requests.try_recv().is_err(),
+            "activation issued a protocol command"
+        );
+    }
 }
 
 #[tokio::test]
@@ -442,7 +409,13 @@ fn page_reply(request: &Value) -> Scripted {
         }
         "Runtime.evaluate" => {
             let expression = request["params"]["expression"].as_str().unwrap_or("");
-            let value = if expression.contains("title:document.title") {
+            let value = if expression.contains("io.brightwave.tidebreak.chrome.agent-cursor") {
+                if expression.contains("\"clear\":true") {
+                    json!("cleared")
+                } else {
+                    json!("shown")
+                }
+            } else if expression.contains("title:document.title") {
                 json!({"title":"Fixture","width":800.0,"height":600.0,"scrollX":0.0,"scrollY":0.0})
             } else if expression == "({width:innerWidth,height:innerHeight})" {
                 json!({"width":400.0,"height":400.0})
@@ -546,6 +519,18 @@ async fn logged(log: &Arc<Mutex<Vec<Value>>>, matches: impl Fn(&Value) -> bool) 
             .map(|request| request["method"].clone())
             .collect::<Vec<_>>()
     );
+}
+
+fn cursor_payload(request: &Value) -> Option<Value> {
+    if request["method"] != "Runtime.evaluate" {
+        return None;
+    }
+    let prefix = format!("({})(", super::runtime::CHROME_CURSOR_SCRIPT);
+    let payload = request["params"]["expression"]
+        .as_str()?
+        .strip_prefix(&prefix)?
+        .strip_suffix(')')?;
+    serde_json::from_str(payload).ok()
 }
 
 fn key_event(request: &Value, kind: &str) -> bool {
@@ -1040,6 +1025,7 @@ async fn background_input_scopes_page_focus_without_browser_activation() {
         })
         .collect::<Vec<_>>();
     assert_eq!(sequence, ["enable", "keyDown", "keyUp", "disable"]);
+    assert!(entries.iter().all(|entry| cursor_payload(entry).is_none()));
     assert!(!entries.iter().any(|request| matches!(
         request["method"].as_str(),
         Some("Page.bringToFront" | "Target.activateTarget")
@@ -1172,7 +1158,7 @@ async fn page_focus_reset_failure_disconnects_before_more_input() {
 }
 
 #[tokio::test]
-async fn dropped_action_restores_page_focus_before_next_input() {
+async fn dropped_action_restores_page_focus_before_next_snapshot_and_input() {
     let (service, scope, requests, replies) = connection();
     let inject = replies.clone();
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -1212,28 +1198,17 @@ async fn dropped_action_restores_page_focus_before_next_input() {
             && request["params"]["enabled"] == false
     })
     .await;
-    let snapshot = service
-        .dispatch(
-            &scope,
-            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
-        )
-        .await
-        .result;
-    assert_eq!(snapshot.outcome, ComputerUseOutcome::Completed);
-    let mut next = dispatched(
+    let mut snapshot_task = dispatched(
         &service,
         &scope,
-        act(
-            &target,
-            snapshot.data["snapshotId"].as_str().unwrap(),
-            "n-0-0",
-            json!({"type":"press","key":"Enter"}),
-        ),
+        call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
     )
     .await;
-    assert!(tokio::time::timeout(Duration::from_millis(30), &mut next)
-        .await
-        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut snapshot_task)
+            .await
+            .is_err()
+    );
     {
         let entries = log.lock().unwrap();
         assert_eq!(
@@ -1259,6 +1234,22 @@ async fn dropped_action_restores_page_focus_before_next_input() {
             json!({"id":reset["id"],"result":{}}).to_string(),
         ))
         .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(1), snapshot_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.outcome, ComputerUseOutcome::Completed);
+    let next = dispatched(
+        &service,
+        &scope,
+        act(
+            &target,
+            snapshot.data["snapshotId"].as_str().unwrap(),
+            "n-0-0",
+            json!({"type":"press","key":"Enter"}),
+        ),
+    )
+    .await;
     let result = tokio::time::timeout(Duration::from_secs(1), next)
         .await
         .unwrap()
@@ -1328,4 +1319,318 @@ async fn disconnect_during_page_input_refuses_further_commands() {
             "{end} sent a command after disconnect"
         );
     }
+}
+
+#[tokio::test]
+async fn pointer_cursor_matches_input_and_clears_before_the_next_snapshot() {
+    for action in [
+        json!({"type":"click"}),
+        json!({"type":"hover"}),
+        json!({"type":"scroll","y":30.0}),
+        json!({"type":"drag","to_ref":"n-0-0"}),
+    ] {
+        let (service, scope, log) = scripted_connection(page_reply);
+        let (target, snapshot) = controlled_tab(&service, &scope).await;
+        let result = service
+            .dispatch(&scope, &act(&target, &snapshot, "n-0-0", action.clone()))
+            .await
+            .result;
+        assert_eq!(
+            result.outcome,
+            ComputerUseOutcome::Completed,
+            "{action}: {}",
+            result.text
+        );
+        let before_observation = log.lock().unwrap().len();
+        let observed = service
+            .dispatch(
+                &scope,
+                &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+            )
+            .await
+            .result;
+        assert_eq!(observed.outcome, ComputerUseOutcome::Completed);
+        let entries = log.lock().unwrap();
+        let mut last_cursor = None;
+        let mut clear_index = None;
+        let mut mouse_count = 0;
+        for (index, entry) in entries.iter().enumerate() {
+            assert!(!matches!(
+                entry["method"].as_str(),
+                Some("Page.bringToFront" | "Target.activateTarget")
+            ));
+            if let Some(payload) = cursor_payload(entry) {
+                assert_eq!(entry["sessionId"], "S1");
+                assert!(entry["params"]["contextId"].is_i64());
+                if payload["clear"] == true {
+                    clear_index = Some(index);
+                    last_cursor = None;
+                } else {
+                    last_cursor = Some(payload);
+                }
+            }
+            if entry["method"] == "Input.dispatchMouseEvent" {
+                mouse_count += 1;
+                let cursor = last_cursor
+                    .as_ref()
+                    .expect("mouse input needs a visible independent cursor");
+                assert_eq!(cursor["x"], entry["params"]["x"]);
+                assert_eq!(cursor["y"], entry["params"]["y"]);
+            }
+        }
+        assert!(mouse_count > 0);
+        assert!(clear_index.unwrap() < before_observation);
+        assert!(entries[before_observation..]
+            .iter()
+            .all(|entry| cursor_payload(entry).is_none()));
+    }
+}
+
+#[tokio::test]
+async fn stopped_or_revoked_pointer_action_waits_for_cursor_cleanup() {
+    for end in ["stop", "revoke", "cancel"] {
+        let (service, scope, requests, replies) = connection();
+        let inject = replies.clone();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        respond(requests, replies, log.clone(), |request| {
+            if mouse_event(request, "mouseMoved")
+                || cursor_payload(request).is_some_and(|p| p["clear"] == true)
+            {
+                Scripted::Hold
+            } else {
+                page_reply(request)
+            }
+        });
+        let (target, snapshot) = controlled_tab(&service, &scope).await;
+        let mut task = dispatched(
+            &service,
+            &scope,
+            act(&target, &snapshot, "n-0-0", json!({"type":"hover"})),
+        )
+        .await;
+        logged(&log, |request| mouse_event(request, "mouseMoved")).await;
+        match end {
+            "stop" => service.ownership().trip(),
+            "revoke" => service.revoke_session(&scope.session),
+            _ => scope.cancel.cancel(),
+        }
+        let clear = logged(&log, |request| {
+            cursor_payload(request).is_some_and(|p| p["clear"] == true)
+        })
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut task)
+                .await
+                .is_err(),
+            "{end} returned before cursor cleanup"
+        );
+        inject
+            .send(CdpFrame::Text(
+                json!({"id":clear["id"],"result":{"result":{"value":"cleared"}}}).to_string(),
+            ))
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    }
+}
+
+#[tokio::test]
+async fn stale_cursor_geometry_refuses_before_pointer_input() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if cursor_payload(request).is_some_and(|p| p["clear"] != true) {
+            Scripted::Result(json!({"result":{"value":"stale"}}))
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    assert!(result.text.contains("cursor target changed"));
+    let entries = log.lock().unwrap();
+    assert!(!entries
+        .iter()
+        .any(|entry| entry["method"] == "Input.dispatchMouseEvent"));
+    assert!(entries
+        .iter()
+        .any(|entry| cursor_payload(entry).is_some_and(|p| p["clear"] == true)));
+}
+
+#[tokio::test]
+async fn navigation_after_cursor_preparation_refuses_before_pointer_input() {
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (service, scope, log) = scripted_connection(move |request| {
+        if cursor_payload(request).is_some_and(|p| p["clear"] != true) {
+            changed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if request["method"] == "Page.getFrameTree"
+            && changed.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Scripted::Result(
+                json!({"frameTree":{"frame":{"id":"F1","loaderId":"L2","url":PAGE_URL}}}),
+            );
+        }
+        page_reply(request)
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    assert!(result.text.contains("document or frame changed"));
+    let entries = log.lock().unwrap();
+    assert!(!entries
+        .iter()
+        .any(|entry| entry["method"] == "Input.dispatchMouseEvent"));
+    assert!(entries
+        .iter()
+        .any(|entry| cursor_payload(entry).is_some_and(|p| p["clear"] == true)));
+}
+
+#[tokio::test]
+async fn failed_cursor_cleanup_disconnects_before_another_observation() {
+    let (service, scope, log) = scripted_connection(|request| {
+        if cursor_payload(request).is_some_and(|p| p["clear"] == true) {
+            Scripted::Error("cursor cleanup unavailable")
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"hover"})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Unknown);
+    assert!(!service.state(&scope).available);
+    let count = log.lock().unwrap().len();
+    let result = service
+        .dispatch(
+            &scope,
+            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Rejected);
+    assert_eq!(log.lock().unwrap().len(), count);
+}
+
+#[tokio::test]
+async fn dropped_pointer_action_drains_cursor_before_a_snapshot() {
+    let (service, scope, requests, replies) = connection();
+    let inject = replies.clone();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    respond(requests, replies, log.clone(), |request| {
+        if mouse_event(request, "mouseMoved")
+            || cursor_payload(request).is_some_and(|p| p["clear"] == true)
+        {
+            Scripted::Hold
+        } else {
+            page_reply(request)
+        }
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let task = dispatched(
+        &service,
+        &scope,
+        act(&target, &snapshot, "n-0-0", json!({"type":"hover"})),
+    )
+    .await;
+    logged(&log, |request| mouse_event(request, "mouseMoved")).await;
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    let clear = logged(&log, |request| {
+        cursor_payload(request).is_some_and(|p| p["clear"] == true)
+    })
+    .await;
+    let before_snapshot = log.lock().unwrap().len();
+    let mut observation = dispatched(
+        &service,
+        &scope,
+        call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut observation)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        log.lock().unwrap().len(),
+        before_snapshot,
+        "snapshot ran before cursor cleanup"
+    );
+    inject
+        .send(CdpFrame::Text(
+            json!({"id":clear["id"],"result":{"result":{"value":"cleared"}}}).to_string(),
+        ))
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), observation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+}
+
+#[tokio::test]
+async fn completed_navigation_does_not_require_the_destroyed_cursor_world() {
+    let replaced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (service, scope, _log) = scripted_connection(move |request| {
+        if cursor_payload(request).is_some_and(|p| p["clear"] == true) {
+            replaced.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Scripted::Error("Cannot find context with specified id");
+        }
+        if request["method"] == "Page.getFrameTree"
+            && replaced.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Scripted::Result(
+                json!({"frameTree":{"frame":{"id":"F1","loaderId":"L2","url":PAGE_URL}}}),
+            );
+        }
+        page_reply(request)
+    });
+    let (target, snapshot) = controlled_tab(&service, &scope).await;
+    let result = service
+        .dispatch(
+            &scope,
+            &act(&target, &snapshot, "n-0-0", json!({"type":"click"})),
+        )
+        .await
+        .result;
+    assert_eq!(
+        result.outcome,
+        ComputerUseOutcome::Completed,
+        "{}",
+        result.text
+    );
+    assert!(service.state(&scope).available);
+    let result = service
+        .dispatch(
+            &scope,
+            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef":target})),
+        )
+        .await
+        .result;
+    assert_eq!(result.outcome, ComputerUseOutcome::Completed);
 }

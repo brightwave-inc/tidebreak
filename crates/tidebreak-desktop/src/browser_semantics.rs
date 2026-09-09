@@ -1352,12 +1352,11 @@ pub(crate) async fn browser_native_act(
         }
     }
 
-    if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background
-        && !background_action_supported(&arguments.action)
-    {
+    if let Some(message) = independent_browser_action_refusal(&arguments) {
         return Ok(act_result(
-            &arguments, BrowserActStatus::RequiresForeground,
-            "This action needs foreground native input. Request foreground mode and approve keyboard focus before retrying.",
+            &arguments,
+            BrowserActStatus::UnsupportedNative,
+            message,
         ));
     }
 
@@ -1475,6 +1474,12 @@ pub(crate) async fn browser_native_act(
     let dispatch_registry = registry.clone();
     let browser_id = arguments.browser_id.clone();
     let dispatch_origin = origin.clone();
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    let independent_native = qualified_independent_host_action(
+        &arguments.action,
+        &target.fingerprint.tag,
+        target.fingerprint.input_type.as_deref(),
+    );
     registry
         .dispatch_agent(
             capability_id,
@@ -1486,6 +1491,30 @@ pub(crate) async fn browser_native_act(
             effect,
             confirmation_id,
             move || async move {
+                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background
+                    && independent_native
+                {
+                    let label = browser_label(&arguments.browser_id)?;
+                    if let Some(webview) = app.get_webview(&label) {
+                        if crate::agent_browser_host::has_host(&webview)? {
+                            return execute_native_action(
+                                app,
+                                dispatch_registry,
+                                capability_id,
+                                workspace_id,
+                                dispatch_origin,
+                                fence,
+                                arguments,
+                            )
+                            .await
+                            .map(|mut result| {
+                                result.input_method = tidebreak_core::BrowserInputMethod::Native;
+                                result
+                            });
+                        }
+                    }
+                }
                 if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background {
                     execute_background_action(
                         app,
@@ -1518,13 +1547,34 @@ pub(crate) async fn browser_native_act(
         .await
 }
 
+// Keep legacy wire values readable, but reject them before target lookup,
+// approval, or dispatch. No browser action may acquire native focus.
+fn independent_browser_action_refusal(
+    arguments: &tidebreak_core::BrowserActArgs,
+) -> Option<&'static str> {
+    if arguments.execution_mode != tidebreak_core::BrowserExecutionMode::Background {
+        return Some("Browser actions preserve your pointer and keyboard focus. Foreground input is unavailable.");
+    }
+    if !background_action_supported(&arguments.action) {
+        return Some("This action cannot preserve your keyboard focus. No input was sent.");
+    }
+    None
+}
+
 fn background_action_ghost_point(
     resolution: &NativeActionResolution,
     action: &tidebreak_core::BrowserAction,
 ) -> Option<tidebreak_core::BrowserPoint> {
     match action {
         tidebreak_core::BrowserAction::Click { at }
-        | tidebreak_core::BrowserAction::Hover { at } => native_css_point(resolution, *at).ok(),
+        | tidebreak_core::BrowserAction::Hover { at }
+        | tidebreak_core::BrowserAction::RightClick { at }
+        | tidebreak_core::BrowserAction::DoubleClick { at } => {
+            native_css_point(resolution, *at).ok()
+        }
+        tidebreak_core::BrowserAction::Drag { to, .. } => {
+            native_css_point(resolution, Some(*to)).ok()
+        }
         _ => None,
     }
 }
@@ -1540,6 +1590,21 @@ fn browser_input_method(
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+fn qualified_independent_host_action(
+    action: &tidebreak_core::BrowserAction,
+    tag: &str,
+    input_type: Option<&str>,
+) -> bool {
+    match action {
+        tidebreak_core::BrowserAction::Fill { .. } => {
+            tag == "textarea"
+                || (tag == "input" && matches!(input_type, Some("text" | "search" | "url" | "tel")))
+        }
+        _ => false,
+    }
+}
+
 fn background_action_supported(action: &tidebreak_core::BrowserAction) -> bool {
     matches!(
         action,
@@ -1550,6 +1615,11 @@ fn background_action_supported(action: &tidebreak_core::BrowserAction) -> bool {
             | tidebreak_core::BrowserAction::Hover { .. }
             | tidebreak_core::BrowserAction::Scroll { .. }
             | tidebreak_core::BrowserAction::ScrollIntoView
+            | tidebreak_core::BrowserAction::Press { .. }
+            | tidebreak_core::BrowserAction::KeyChord { .. }
+            | tidebreak_core::BrowserAction::RightClick { .. }
+            | tidebreak_core::BrowserAction::DoubleClick { .. }
+            | tidebreak_core::BrowserAction::Drag { .. }
     )
 }
 
@@ -1625,7 +1695,7 @@ async fn execute_background_action(
         NativeActionResolutionStatus::UnsupportedNative
             | NativeActionResolutionStatus::PendingNativeInput
     ) {
-        tidebreak_core::BrowserActStatus::RequiresForeground
+        tidebreak_core::BrowserActStatus::UnsupportedNative
     } else {
         native_resolution_status(raw.status)
     };
@@ -1897,7 +1967,8 @@ async fn execute_native_action(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
-    let resolution_script = native_action_resolution_script(&target, &arguments.action)?;
+    let resolution_script =
+        native_script_for_arguments(&target, &arguments, NativeActionDispatchPhase::Initial)?;
     let (resolution, dispatch_error) = match resolve_and_dispatch_native_action(
         &webview,
         registry.clone(),
@@ -1923,14 +1994,32 @@ async fn execute_native_action(
                 target_error_message(error),
             ));
         }
-        Err(failure) => return Ok(native_failure_result(arguments, failure, None, false)),
+        Err(failure) => {
+            let requires_resnapshot =
+                arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
+            if requires_resnapshot {
+                registry.invalidate_semantic_snapshot(
+                    &arguments.browser_id,
+                    &workspace_id,
+                    &arguments.snapshot_id,
+                );
+            }
+            return Ok(native_failure_result(
+                arguments,
+                failure,
+                None,
+                requires_resnapshot,
+            ));
+        }
     };
 
     let resolution = *resolution;
     let status = native_resolution_status(resolution.status);
     let performed = resolution.status == NativeActionResolutionStatus::Ready;
     if let Some(failure) = dispatch_error {
-        let requires_resnapshot = failure.requires_resnapshot();
+        let requires_resnapshot = failure.requires_resnapshot()
+            || resolution.input_dispatched
+            || arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
         if requires_resnapshot {
             registry.invalidate_semantic_snapshot(
                 &arguments.browser_id,
@@ -1945,12 +2034,14 @@ async fn execute_native_action(
             requires_resnapshot,
         ));
     }
-    if performed {
+    if performed || resolution.input_dispatched {
         registry.invalidate_semantic_snapshot(
             &arguments.browser_id,
             &workspace_id,
             &arguments.snapshot_id,
         );
+    }
+    if performed {
         if let Err(failure) = wait_for_native_action_processing(
             &webview,
             &arguments.action,
@@ -2001,7 +2092,9 @@ async fn execute_native_action(
         } else {
             resolution.message
         },
-        requires_resnapshot: performed || status == BrowserActStatus::StaleTarget,
+        requires_resnapshot: performed
+            || resolution.input_dispatched
+            || status == BrowserActStatus::StaleTarget,
         url: Some(resolution.url),
         title: Some(resolution.title),
     })
@@ -2277,7 +2370,45 @@ async fn resolve_and_dispatch_native_action(
     let target_ref = arguments.target_ref.clone();
     let action = arguments.action.clone();
     let ghost_webview = webview.clone();
+    let independent = arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background;
     with_browser_webview(webview, move |view| unsafe {
+        // Independent fill prepares DOM focus. Do not submit that mutation after
+        // cancellation, even if this main-thread callback waited in the queue.
+        let Ok(queued_state) = callback_state.lock() else {
+            return;
+        };
+        if queued_state.cancelled || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        drop(queued_state);
+        let preflight = registry
+            .authorize_native_action_phase(
+                capability_id,
+                &browser_id,
+                &workspace_id,
+                &origin,
+                fence,
+            )
+            .map_err(NativeInputFailure::Engine)
+            .and_then(|()| {
+                authorize_independent_native_input(
+                    independent,
+                    &ghost_webview,
+                    view,
+                    &registry,
+                    capability_id,
+                    &workspace_id,
+                    fence,
+                )
+            });
+        if let Err(error) = preflight {
+            if let Ok(mut state) = callback_state.lock() {
+                if let Some(sender) = state.sender.take() {
+                    let _ = sender.send(Err(error));
+                }
+            }
+            return;
+        }
         let retained_view = view.retain();
         let content_world = match browser_semantics_content_world() {
             Ok(content_world) => content_world,
@@ -2290,6 +2421,7 @@ async fn resolve_and_dispatch_native_action(
                 return;
             }
         };
+        let submission_state = Arc::clone(&callback_state);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
             let Ok(mut state) = callback_state.lock() else {
                 return;
@@ -2329,6 +2461,15 @@ async fn resolve_and_dispatch_native_action(
                         fence,
                     )
                     .map_err(NativeInputFailure::Engine)?;
+                authorize_independent_native_input(
+                    independent,
+                    &ghost_webview,
+                    &retained_view,
+                    &registry,
+                    capability_id,
+                    &workspace_id,
+                    fence,
+                )?;
                 if resolution.status == NativeActionResolutionStatus::NoOp
                     && matches!(action, tidebreak_core::BrowserAction::Focus)
                 {
@@ -2369,7 +2510,13 @@ async fn resolve_and_dispatch_native_action(
                         if tokio::time::Instant::now() >= deadline {
                             return Err(native_input_deadline_failure(phase, phase_deadline));
                         }
-                        dispatch_native_action(&retained_view, &resolution, &action, phase)?;
+                        dispatch_native_action(
+                            &retained_view,
+                            &resolution,
+                            &action,
+                            phase,
+                            independent,
+                        )?;
                         if let Some(point) = native_action_ghost_point(&resolution, &action, phase)
                         {
                             let ghost_id = Uuid::new_v4().to_string();
@@ -2410,6 +2557,13 @@ async fn resolve_and_dispatch_native_action(
             }
         });
         let script = NSString::from_str(&script);
+        let Ok(submission) = submission_state.lock() else {
+            return;
+        };
+        if submission.cancelled || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        // Preserve the cancellation fence until WebKit accepts the focus script.
         view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
             &script,
             None,
@@ -2697,8 +2851,9 @@ async fn finish_native_action(
     initial_resolution: &NativeActionResolution,
     target: &BrowserTargetRecord,
 ) -> Result<(), NativeInputFailure> {
-    let resolution_script = native_action_resolution_script(target, &arguments.action)
-        .map_err(NativeInputFailure::Engine)?;
+    let resolution_script =
+        native_script_for_arguments(target, arguments, NativeActionDispatchPhase::Initial)
+            .map_err(NativeInputFailure::Engine)?;
     match &arguments.action {
         tidebreak_core::BrowserAction::Focus
         | tidebreak_core::BrowserAction::Press { .. }
@@ -2708,9 +2863,8 @@ async fn finish_native_action(
             } else {
                 NativeActionDispatchPhase::PressKey
             };
-            let script =
-                native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                    .map_err(NativeInputFailure::Engine)?;
+            let script = native_script_for_arguments(target, arguments, phase)
+                .map_err(NativeInputFailure::Engine)?;
             let resolution = wait_for_native_action_phase(
                 phase,
                 std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -2745,9 +2899,8 @@ async fn finish_native_action(
                 NativeActionDispatchPhase::FillInsert,
                 NativeActionDispatchPhase::FillVerify,
             ] {
-                let script =
-                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                        .map_err(NativeInputFailure::Engine)?;
+                let script = native_script_for_arguments(target, arguments, phase)
+                    .map_err(NativeInputFailure::Engine)?;
                 let resolution = wait_for_native_action_phase(
                     phase,
                     std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -2781,9 +2934,9 @@ async fn finish_native_action(
             ))
         }
         tidebreak_core::BrowserAction::Select { .. } => {
-            let resolution_script = native_action_resolution_script_for_phase(
+            let resolution_script = native_script_for_arguments(
                 target,
-                &arguments.action,
+                arguments,
                 NativeActionDispatchPhase::SelectInitialStep,
             )
             .map_err(NativeInputFailure::Engine)?;
@@ -2833,9 +2986,8 @@ async fn finish_native_action(
                     previous_selected_index: selected_index,
                     previous_distance: distance,
                 };
-                let script =
-                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
-                        .map_err(NativeInputFailure::Engine)?;
+                let script = native_script_for_arguments(target, arguments, phase)
+                    .map_err(NativeInputFailure::Engine)?;
                 let resolution = wait_for_native_action_phase(
                     phase,
                     std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -3007,14 +3159,116 @@ async fn finish_native_action(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn dispatch_native_action(
+#[allow(clippy::too_many_arguments)]
+fn authorize_independent_native_input(
+    independent: bool,
+    webview: &Webview,
+    view: &objc2_web_kit::WKWebView,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: &str,
+    fence: BrowserObservationFence,
+) -> Result<(), NativeInputFailure> {
+    if !independent {
+        return Ok(());
+    }
+    #[cfg(feature = "independent-wk-host")]
+    {
+        crate::agent_browser_host::authorize_input(
+            webview,
+            registry,
+            capability_id,
+            workspace_id,
+            fence.instance_id,
+        )
+        .map_err(NativeInputFailure::Engine)?;
+        crate::agent_browser_host::verify_native_window(view).map_err(NativeInputFailure::Engine)
+    }
+    #[cfg(not(feature = "independent-wk-host"))]
+    {
+        let _ = (webview, view, registry, capability_id, workspace_id, fence);
+        Err(NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "Independent native browser input is not enabled.".to_owned(),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn dispatch_independent_host_action(
     view: &objc2_web_kit::WKWebView,
     resolution: &NativeActionResolution,
     action: &tidebreak_core::BrowserAction,
     phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
+    #[cfg(not(feature = "independent-wk-host"))]
+    {
+        let _ = (view, resolution, action, phase);
+        Err(NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "Independent native browser input is not enabled.".to_owned(),
+        })
+    }
+    #[cfg(feature = "independent-wk-host")]
+    {
+        use objc2::{msg_send, sel};
+        use objc2_foundation::{NSNotFound, NSRange, NSString};
+
+        crate::agent_browser_host::verify_native_window(view)
+            .map_err(NativeInputFailure::Engine)?;
+        match action {
+            tidebreak_core::BrowserAction::Fill { value } => {
+                if !resolution.target_dom_focused {
+                    return Err(NativeInputFailure::Typed {
+                        status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                        message: "The field lost focus in the agent browser. No text was inserted."
+                            .to_owned(),
+                    });
+                }
+                match phase {
+                    NativeActionDispatchPhase::Initial
+                    | NativeActionDispatchPhase::FillSelectAll => Ok(()),
+                    NativeActionDispatchPhase::FillInsert => {
+                        let supported: bool =
+                            msg_send![view, respondsToSelector: sel!(insertText:replacementRange:)];
+                        if !supported {
+                            return Err(NativeInputFailure::Typed {
+                                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                                message: "The agent browser does not support text insertion."
+                                    .to_owned(),
+                            });
+                        }
+                        let text = NSString::from_str(value);
+                        let _: () = msg_send![view, insertText: &*text, replacementRange: NSRange::new(NSNotFound as usize, 0)];
+                        Ok(())
+                    }
+                    _ => Err(NativeInputFailure::Engine(
+                        "browser fill reached an invalid native input phase".to_owned(),
+                    )),
+                }
+            }
+            _ => Err(NativeInputFailure::Typed {
+                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                message: "This action has not qualified for independent native browser input."
+                    .to_owned(),
+            }),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn dispatch_native_action(
+    view: &objc2_web_kit::WKWebView,
+    resolution: &NativeActionResolution,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+    independent: bool,
+) -> Result<(), NativeInputFailure> {
     use objc2_app_kit::NSView;
 
+    if independent {
+        return dispatch_independent_host_action(view, resolution, action, phase);
+    }
     let native_view: &NSView = &*(view as *const _ as *const NSView);
     let window = native_view
         .window()
@@ -4073,14 +4327,45 @@ fn native_action_resolution_script_for_phase(
     action_resolution_script(target, action, phase, false)
 }
 
+fn native_script_for_arguments(
+    target: &BrowserTargetRecord,
+    arguments: &tidebreak_core::BrowserActArgs,
+    phase: NativeActionDispatchPhase,
+) -> Result<String, String> {
+    action_resolution_script_for_input(
+        target,
+        &arguments.action,
+        phase,
+        if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background {
+            "independent_native"
+        } else {
+            "native"
+        },
+    )
+}
+
 fn action_resolution_script(
     target: &BrowserTargetRecord,
     action: &tidebreak_core::BrowserAction,
     phase: NativeActionDispatchPhase,
     background: bool,
 ) -> Result<String, String> {
+    action_resolution_script_for_input(
+        target,
+        action,
+        phase,
+        if background { "dom" } else { "native" },
+    )
+}
+
+fn action_resolution_script_for_input(
+    target: &BrowserTargetRecord,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+    input_method: &str,
+) -> Result<String, String> {
     let payload = serde_json::json!({
-        "inputMethod": if background { "dom" } else { "native" },
+        "inputMethod": input_method,
         "previousSelectedIndex": match phase {
             NativeActionDispatchPhase::SelectFollowUp { previous_selected_index, .. } => Some(previous_selected_index),
             _ => None,
@@ -4134,8 +4419,8 @@ fn action_resolution_script(
             tidebreak_core::BrowserAction::Press { key } => {
                 serde_json::json!({ "type": "press", "key": key })
             }
-            tidebreak_core::BrowserAction::KeyChord { key, .. } => {
-                serde_json::json!({ "type": "key_chord", "key": key })
+            tidebreak_core::BrowserAction::KeyChord { key, modifiers } => {
+                serde_json::json!({ "type": "key_chord", "key": key, "modifiers": modifiers })
             }
             tidebreak_core::BrowserAction::ScrollIntoView => {
                 serde_json::json!({ "type": "scroll_into_view" })
@@ -4147,7 +4432,7 @@ fn action_resolution_script(
         "points": action_hit_points(action),
     });
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
-    let script = if background {
+    let script = if input_method == "dom" {
         NATIVE_ACTION_RESOLUTION_SCRIPT
             .replace("/*__RESOLVED_ACTION__*/", BACKGROUND_DOM_ACTION_SCRIPT)
     } else {
@@ -5291,6 +5576,52 @@ const BACKGROUND_DOM_ACTION_SCRIPT: &str = r#"
     element.dispatchEvent(mouseEvent("click"));
     return complete("Synthetic DOM click dispatched. Inspect the page to confirm its effect.");
   }
+  if (action.type === "press" || action.type === "key_chord") {
+    const modifiers = new Set(action.modifiers || []);
+    const options = {
+      key: action.key, bubbles: true, composed: true, cancelable: true,
+      shiftKey: modifiers.has("shift"), ctrlKey: modifiers.has("control"),
+      altKey: modifiers.has("alt"), metaKey: modifiers.has("meta"),
+    };
+    element.dispatchEvent(new view.KeyboardEvent("keydown", options));
+    element.dispatchEvent(new view.KeyboardEvent("keyup", options));
+    return complete("Synthetic DOM key events dispatched to the target. Browser default editing, tab navigation, and shortcuts are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "right_click" || action.type === "double_click") {
+    const options = {
+      bubbles: true, composed: true, cancelable: true, view,
+      clientX: point.x, clientY: point.y,
+      button: action.type === "right_click" ? 2 : 0,
+      detail: action.type === "double_click" ? 2 : 1,
+    };
+    element.dispatchEvent(new view.MouseEvent(action.type === "right_click" ? "contextmenu" : "dblclick", options));
+    return complete("Synthetic DOM mouse event dispatched. Native menus and default selection are not applied; inspect the page to confirm its effect.");
+  }
+  if (action.type === "drag") {
+    if (typeof view.PointerEvent !== "function") {
+      return result("unsupported_native", "This page cannot receive independent pointer events. No input was sent.");
+    }
+    const destination = requestedPoints[1];
+    if (!destination) return result("invalid_value", "The drag has no destination. No input was sent.");
+    const pointer = (type, at, buttons) => new view.PointerEvent(type, {
+      bubbles: true, composed: true, cancelable: true, view,
+      clientX: at.x, clientY: at.y, button: type === "pointermove" ? -1 : 0,
+      buttons, pointerId: 2147483001, pointerType: "mouse", isPrimary: false,
+      pressure: buttons ? 0.5 : 0,
+    });
+    element.dispatchEvent(pointer("pointerdown", point, 1));
+    try {
+      for (let step = 1; step <= 8; step += 1) {
+        element.dispatchEvent(pointer("pointermove", {
+          x: point.x + (destination.x - point.x) * step / 8,
+          y: point.y + (destination.y - point.y) * step / 8,
+        }, 1));
+      }
+    } finally {
+      element.dispatchEvent(pointer("pointerup", destination, 0));
+    }
+    return complete("Synthetic DOM pointer drag dispatched inside the target. Native drag-and-drop and trusted pointer behavior are not applied; inspect the page to confirm its effect.");
+  }
   if (action.type === "check") {
     const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "checked")?.set;
     if (!setter) return result("unsupported_native", "This checkbox does not support background input.");
@@ -5319,7 +5650,7 @@ const BACKGROUND_DOM_ACTION_SCRIPT: &str = r#"
     element.dispatchEvent(mouseEvent("mouseover"));
     element.dispatchEvent(mouseEvent("mouseenter", false));
     element.dispatchEvent(mouseEvent("mousemove"));
-    return complete("Synthetic DOM hover events dispatched. CSS hover and trusted pointer events require foreground input.");
+    return complete("Synthetic DOM hover events dispatched. CSS hover and trusted pointer behavior are not applied; inspect the page to confirm its effect.");
   }
   if (action.type === "scroll_into_view") {
     element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -5338,7 +5669,7 @@ const BACKGROUND_DOM_ACTION_SCRIPT: &str = r#"
     });
     return complete("Page scrolled through the DOM without taking keyboard focus.");
   }
-  return result("unsupported_native", "This action needs foreground native input.");
+  return result("unsupported_native", "This action cannot run without taking native focus. No input was sent.");
 "#;
 
 const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
@@ -5523,8 +5854,8 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
   const action = payload.action;
   const targetDomFocused = doc.activeElement === element
     && frameChain.every((entry) => entry.doc.activeElement === entry.frame);
-  const targetFocused = targetDomFocused && doc.hasFocus()
-    && frameChain.every((entry) => entry.doc.hasFocus());
+  const targetFocused = targetDomFocused && (payload.inputMethod === "independent_native"
+    || (doc.hasFocus() && frameChain.every((entry) => entry.doc.hasFocus())));
   let pendingFillInput = null;
   if (["verify", "required"].includes(payload.focusStage) && !targetFocused) {
     pendingFillInput = "Waiting for the target to receive native keyboard focus.";
@@ -5767,6 +6098,30 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
         return result("target_obscured", "Another element is covering the target frame.");
       }
     }
+  }
+
+  if (payload.inputMethod === "independent_native" && action.type !== "fill") {
+    return result("unsupported_native", "Independent native input supports text insertion only. Use DOM pointer actions or managed Chrome for browser drag behavior.");
+  }
+
+  if (payload.inputMethod === "independent_native" && action.type === "fill"
+      && payload.fillStage === "focus") {
+    // The host proves this document lives in an agent-owned never-key window
+    // before submitting this script. Never run this preparation on a shared tab.
+    element.focus({ preventScroll: true });
+    if (!element.isConnected || doc.querySelector(payload.selector) !== element) {
+      return result("stale_target", "The target changed during page focus preparation.", { inputDispatched: true });
+    }
+    element.setSelectionRange(0, String(element.value || "").length);
+    const preparedFocus = doc.activeElement === element
+      && frameChain.every((entry) => entry.doc.activeElement === entry.frame);
+    return result("ready", "The agent-owned field is prepared for text input.", {
+      x: offsetX + rect.x, y: offsetY + rect.y, width: rect.width, height: rect.height,
+      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      targetFocused: preparedFocus,
+      targetDomFocused: preparedFocus,
+      inputDispatched: true,
+    });
   }
 
   /*__RESOLVED_ACTION__*/
@@ -6423,10 +6778,14 @@ mod tests {
             browser_input_method(BrowserExecutionMode::Foreground),
             BrowserInputMethod::Native
         );
+        assert!(!background_action_supported(&BrowserAction::Focus));
         for action in [
-            BrowserAction::Focus,
             BrowserAction::Press {
                 key: "Enter".to_owned(),
+            },
+            BrowserAction::KeyChord {
+                key: "a".to_owned(),
+                modifiers: vec![tidebreak_core::BrowserModifier::Meta],
             },
             BrowserAction::Drag {
                 from: None,
@@ -6434,10 +6793,6 @@ mod tests {
             },
             BrowserAction::DoubleClick { at: None },
             BrowserAction::RightClick { at: None },
-        ] {
-            assert!(!background_action_supported(&action));
-        }
-        for action in [
             BrowserAction::Click { at: None },
             BrowserAction::Hover { at: None },
             BrowserAction::Fill {
@@ -6455,6 +6810,27 @@ mod tests {
         ] {
             assert!(background_action_supported(&action));
         }
+    }
+
+    #[test]
+    fn independent_browser_input_refuses_foreground_before_dispatch() {
+        let mut arguments = tidebreak_core::BrowserActArgs {
+            browser_id: "browser-1".to_owned(),
+            snapshot_id: "snapshot-1".to_owned(),
+            document_epoch: 1,
+            target_ref: "@e1".to_owned(),
+            action: tidebreak_core::BrowserAction::Click { at: None },
+            execution_mode: tidebreak_core::BrowserExecutionMode::Foreground,
+        };
+        assert!(independent_browser_action_refusal(&arguments)
+            .unwrap()
+            .contains("Foreground input is unavailable"));
+        arguments.execution_mode = tidebreak_core::BrowserExecutionMode::Background;
+        assert!(independent_browser_action_refusal(&arguments).is_none());
+        arguments.action = tidebreak_core::BrowserAction::Focus;
+        assert!(independent_browser_action_refusal(&arguments)
+            .unwrap()
+            .contains("No input was sent"));
     }
 
     #[test]
@@ -7442,6 +7818,47 @@ mod tests {
             ),
             NativePendingEventKind::Presentation
         );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[test]
+    fn independent_host_promotes_only_qualified_actions() {
+        use tidebreak_core::BrowserAction;
+        let fill = BrowserAction::Fill {
+            value: "text".to_owned(),
+        };
+        assert!(qualified_independent_host_action(
+            &fill,
+            "input",
+            Some("text")
+        ));
+        assert!(qualified_independent_host_action(&fill, "textarea", None));
+        assert!(!qualified_independent_host_action(
+            &fill,
+            "input",
+            Some("number")
+        ));
+        let drag = BrowserAction::Drag {
+            from: None,
+            to: tidebreak_core::BrowserPoint { x: 20.0, y: 20.0 },
+        };
+        assert!(!qualified_independent_host_action(&drag, "canvas", None));
+        for tag in ["a", "img", "div", "input"] {
+            assert!(!qualified_independent_host_action(&drag, tag, None));
+        }
+        for action in [
+            BrowserAction::Press {
+                key: "Tab".to_owned(),
+            },
+            BrowserAction::KeyChord {
+                key: "a".to_owned(),
+                modifiers: vec![tidebreak_core::BrowserModifier::Meta],
+            },
+            BrowserAction::Hover { at: None },
+            BrowserAction::Focus,
+        ] {
+            assert!(!qualified_independent_host_action(&action, "canvas", None));
+        }
     }
 
     #[test]

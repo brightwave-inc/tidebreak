@@ -173,10 +173,9 @@ use tidebreak_core::{
     ask_user_questions_tool_spec, browser_act_tool_spec, browser_list_tool_spec,
     browser_navigate_tool_spec, browser_screenshot_tool_spec, browser_snapshot_tool_spec,
     browser_upload_tool_spec, browser_wait_tool_spec, computer_capture_screen_tool_spec,
-    computer_click_tool_spec, computer_drag_tool_spec, computer_focus_window_tool_spec,
-    computer_hover_tool_spec, computer_key_press_tool_spec, computer_launch_app_tool_spec,
-    computer_list_windows_tool_spec, computer_read_app_content_tool_spec,
-    computer_resize_window_tool_spec, computer_return_to_tidebreak_tool_spec,
+    computer_click_tool_spec, computer_drag_tool_spec, computer_hover_tool_spec,
+    computer_key_press_tool_spec, computer_launch_app_tool_spec, computer_list_windows_tool_spec,
+    computer_read_app_content_tool_spec, computer_resize_window_tool_spec,
     computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
     exit_plan_mode_tool_spec, import_connected_file_tool_spec, list_connected_folders_tool_spec,
     list_folder_tool_spec, read_connected_file_tool_spec, request_folder_access_tool_spec,
@@ -185,11 +184,10 @@ use tidebreak_core::{
     validate_browser_screenshot_arguments, validate_browser_snapshot_arguments,
     validate_browser_upload_arguments, validate_browser_wait_arguments,
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
-    validate_computer_drag_arguments, validate_computer_focus_window_arguments,
-    validate_computer_hover_arguments, validate_computer_key_press_arguments,
-    validate_computer_launch_app_arguments, validate_computer_list_windows_arguments,
-    validate_computer_read_app_content_arguments, validate_computer_resize_window_arguments,
-    validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
+    validate_computer_drag_arguments, validate_computer_hover_arguments,
+    validate_computer_key_press_arguments, validate_computer_launch_app_arguments,
+    validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
+    validate_computer_resize_window_arguments, validate_computer_scroll_arguments,
     validate_computer_type_text_arguments, validate_computer_wait_arguments,
     validate_exit_plan_mode_arguments, validate_import_connected_file_arguments,
     validate_list_connected_folders_arguments, validate_list_folder_arguments,
@@ -2069,18 +2067,14 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             computer_read_app_content_tool_spec(),
             validate_computer_read_app_content_arguments,
         ),
-        (
-            computer_return_to_tidebreak_tool_spec(),
-            validate_computer_return_to_tidebreak_arguments,
-        ),
         (computer_wait_tool_spec(), validate_computer_wait_arguments),
     ] {
         tools.register_validated_client(spec, ApprovalClass::ReadOnly, validate);
     }
     // The acting tools are Sensitive, resolving to `ComputerMayControlApp`
-    // through `ToolApprovalKind::for_tool_name`. Scroll and focus act too —
-    // they synthesize input, warp the cursor, and raise windows — so they are
-    // not read-only and plan mode refuses them.
+    // through `ToolApprovalKind::for_tool_name`. Independent input still changes
+    // the target app, so plan mode refuses it. Focus-changing compatibility
+    // operations are not registered.
     for (spec, validate) in [
         (
             computer_click_tool_spec(),
@@ -2097,10 +2091,6 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
         (
             computer_scroll_tool_spec(),
             validate_computer_scroll_arguments,
-        ),
-        (
-            computer_focus_window_tool_spec(),
-            validate_computer_focus_window_arguments,
         ),
         (
             computer_launch_app_tool_spec(),
@@ -2278,7 +2268,8 @@ mod computer_use_registration_tests {
         register_computer_use_tools(&mut tools);
         let names: std::collections::BTreeSet<_> =
             tools.specs().into_iter().map(|spec| spec.name).collect();
-        for name in tidebreak_core::COMPUTER_USE_TOOLS {
+        let expected = tidebreak_core::computer_use_tool_specs();
+        for name in expected.iter().map(|spec| spec.name.as_str()) {
             assert!(names.contains(name), "missing native tool: {name}");
             let expected = if tidebreak_core::is_computer_use_control_tool(name) {
                 ApprovalClass::Sensitive
@@ -2287,7 +2278,17 @@ mod computer_use_registration_tests {
             };
             assert_eq!(tools.registered_class(name), Some(expected), "{name}");
         }
-        assert_eq!(names.len(), tidebreak_core::COMPUTER_USE_TOOLS.len());
+        assert_eq!(names.len(), expected.len());
+        for name in [
+            tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL,
+            tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+        ] {
+            assert!(
+                !names.contains(name),
+                "focus-changing tool remains exposed: {name}"
+            );
+            assert_eq!(tools.registered_class(name), None);
+        }
     }
 }
 

@@ -55,7 +55,7 @@ launching:
 Run with an explicit fixture directory (or a directory inside `TMPDIR`):
 
 ```sh
-open /tmp/tidebreak-cu-fixture/ComputerUseFixture.app --args --fixture-dir /tmp/tidebreak-cu-fixture/state
+open -g /tmp/tidebreak-cu-fixture/ComputerUseFixture.app --args --background --record-input --fixture-dir /tmp/tidebreak-cu-fixture/state
 ```
 
 The fixture directory may also be provided as
@@ -94,7 +94,7 @@ fixture_dir=$(mktemp -d)/tidebreak-cu-fixture
 scripts/computer-use-fixture/build.sh "$fixture_dir"
 run_id="smoke-$(uuidgen)"
 
-open "$fixture_dir/ComputerUseFixture.app" --args \
+open -g "$fixture_dir/ComputerUseFixture.app" --args --background --record-input \
   --fixture-dir "$fixture_dir/state" --run-id "$run_id"
 
 node scripts/computer-use-native-smoke.mjs \
@@ -104,12 +104,19 @@ node scripts/computer-use-native-smoke.mjs \
   --app-path "$fixture_dir/ComputerUseFixture.app"
 ```
 
-The runner explicitly requests foreground mode for launch, focus, clicks, typing,
-keys, hover, drag, scroll, and resize. Review the normal per-app control and
-foreground prompts before approving each scope. A refusal, Stop, or
-`requires_foreground` result ends the run without retrying. Reads and captures
-keep their separate grants. This smoke does not qualify background focus or
-pointer retention.
+The runner requests background mode for every action. Launch the fixture with
+`--background --record-input`; the runner checks both flags in its `launch_ready` evidence before
+sending input. A refusal or Stop ends the run without retrying. Reads and captures
+keep their separate grants. Observe pointer position, the foreground app, and
+editor focus independently; fixture state alone does not prove input isolation.
+
+Use `--record-input` to log up to 400 received events per run, including their
+window, coordinates, and app activation state. The equivalent environment flags
+are `TIDEBREAK_CU_FIXTURE_BACKGROUND=1` and
+`TIDEBREAK_CU_FIXTURE_RECORD_INPUT=1`. Background launch keeps both fixture windows
+inactive. The smoke confirms receipt of independent movement separately from
+tracking-area hover. Tracking-area enter/exit remains an explicit qualification gap; receiving
+a move does not establish that a hover menu or tooltip appears.
 
 The runner uses `computer <tool> --json '<arguments>'`. For capture, it adds
 `--output` and checks the returned `image_file`, fresh PNG bytes, and metadata.
@@ -119,7 +126,8 @@ Code session before running the command. Do not create a replacement capability.
 The runner never infers a pass from compile, from a helper success string, or
 from a screenshot that happens to exist. Each act is followed by the fixture's
 own atomic JSON evidence: exactly one submission record, a dropdown and
-checkbox transition, hover and drag state, scroll offset, delayed transition,
+checkbox transition, received independent pointer movement, drag state, scroll
+offset, delayed transition,
 and window geometry after resize. The runner checks every native result for
 failure, waits for the actual text and scroll changes, and requires the before
 and after screenshots to differ. Screenshots are saved as PNG files under

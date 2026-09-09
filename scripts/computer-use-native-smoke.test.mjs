@@ -31,6 +31,7 @@ function makeState(overrides = {}) {
     dropdown: "First",
     checkbox: false,
     hovered: false,
+    independent_pointer_moves: 0,
     drag_dropped: false,
     drag_target: "none",
     delayed_status: "idle",
@@ -113,20 +114,18 @@ function nativeFixture(options = {}) {
     events.push({ event, run_id: RUN_ID, sequence, payload });
   };
   const writeSnapshot = () => writeEvent("state_snapshot", { ...state });
-  writeEvent("launch_ready", { app_id: APP_ID });
+  writeEvent("launch_ready", { app_id: APP_ID, background: options.background !== false, record_input: options.recordInput !== false });
   writeSnapshot();
 
   const originalCall = async (name, args) => {
     calls.push([name, args]);
     switch (name) {
       case "computer_launch_app":
-        assert.deepEqual(args, { execution_mode: "foreground", app_id: APP_ID }, "launch requests foreground control of the registered fixture");
+        assert.deepEqual(args, { execution_mode: "background", app_id: APP_ID }, "launch preserves independent input for the registered fixture");
         if (options.failLaunch) throw new Error("launch rejected");
         return { outcome: "completed" };
       case "computer_list_windows":
         return { outcome: "completed", data: { windows: [{ window_id: 1, bundle_id: APP_ID, title: options.omitWindowTitle ? null : "Computer Use Fixture", visible: true }] } };
-      case "computer_focus_window":
-        return { outcome: "completed" };
       case "computer_read_app_content": {
         let nodes = tree();
         if (options.missingCheckbox) {
@@ -175,9 +174,9 @@ function nativeFixture(options = {}) {
         }
         return { outcome: "completed" };
       case "computer_hover":
-        state.hovered = true;
-        writeEvent("hover_status", { hovered: true });
-        writeSnapshot();
+        state.independent_pointer_moves += 1;
+        writeEvent("independent_mouse_moved", { app_active: false, window_key: false });
+                writeSnapshot();
         return { outcome: "completed" };
       case "computer_drag":
         assert.ok(args.from?.element_id && args.to?.element_id, "drag uses from/to targets");
@@ -244,6 +243,29 @@ function smokeOptions(fixture, extra = {}) {
     ...extra,
   };
 }
+
+test("acceptance uses only background actions and rejects a foreground fixture", async () => {
+  const fixture = nativeFixture();
+  await runNativeSmoke(smokeOptions(fixture));
+  for (const [name, args] of fixture.calls) {
+    assert.notEqual(name, "computer_focus_window");
+    assert.notEqual(name, "computer_return_control");
+    if (args.execution_mode !== undefined) assert.equal(args.execution_mode, "background");
+  }
+  const foreground = nativeFixture({ background: false });
+  await assert.rejects(runNativeSmoke(smokeOptions(foreground)), /must launch with --background/);
+  assert.ok(!foreground.calls.some(([name]) => name === "computer_click"));
+});
+
+test("acceptance requires receiver input records without claiming tracking hover", async () => {
+  const unrecorded = nativeFixture({ recordInput: false });
+  await assert.rejects(runNativeSmoke(smokeOptions(unrecorded)), /must launch with --background --record-input/);
+  assert.ok(!unrecorded.calls.some(([name]) => name === "computer_click"));
+  const fixture = nativeFixture();
+  const report = await runNativeSmoke(smokeOptions(fixture));
+  assert.ok(report.remainingGates.includes("native_tracking_hover"));
+  assert.ok(!fixture.events.some((event) => event.event === "hover_status"));
+});
 
 test("one owned untitled native window can complete acceptance", async () => {
   const fixture = nativeFixture({ omitWindowTitle: true });
@@ -366,17 +388,17 @@ test("CLI screenshot files qualify only after their bytes and fixture change are
   assert.notEqual(report.screenshots[0].sha256, report.screenshots[1].sha256);
 });
 
-test("every acting request chooses foreground while reads omit execution mode", async () => {
+test("every acting request chooses background while reads omit execution mode", async () => {
   const fixture = nativeFixture();
   const report = await runNativeSmoke(smokeOptions(fixture));
   const reads = new Set(["computer_list_windows", "computer_read_app_content", "computer_capture_screen", "computer_wait"]);
   for (const [name, args] of fixture.calls) {
-    assert.equal(args.execution_mode, reads.has(name) ? undefined : "foreground", name);
+    assert.equal(args.execution_mode, reads.has(name) ? undefined : "background", name);
   }
-  assert.equal(report.execution_mode, "foreground");
+  assert.equal(report.execution_mode, "background");
 });
 
-for (const errorCode of ["requires_foreground", "denied", "stopped_by_user"]) {
+for (const errorCode of ["independent_input_unavailable", "denied", "stopped_by_user"]) {
   test(errorCode + " stops the smoke without retrying or continuing", async () => {
     const fixture = nativeFixture();
     const original = fixture.call;
@@ -424,7 +446,6 @@ test("the adapter emits the expected shared tool names", async () => {
   const names = new Set(fixture.calls.map(([name]) => name));
   for (const name of [
     "computer_launch_app",
-    "computer_focus_window",
     "computer_list_windows",
     "computer_read_app_content",
     "computer_capture_screen",

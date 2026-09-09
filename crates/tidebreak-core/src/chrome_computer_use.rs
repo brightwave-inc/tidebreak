@@ -854,10 +854,10 @@ pub fn validate_chrome_computer_use_arguments(name: &str, arguments: &Value) -> 
         }
         CHROME_NEW_TAB_TOOL => serde_json::from_value::<ChromeNewTabArgs>(arguments.clone())
             .is_ok_and(|args| valid_chrome_url(&args.url)),
-        CHROME_CLOSE_TAB_TOOL | CHROME_ACTIVATE_TAB_TOOL => {
-            serde_json::from_value::<ChromeTabRefArgs>(arguments.clone())
-                .is_ok_and(|args| valid_chrome_target_ref(&args.target_ref))
-        }
+        CHROME_CLOSE_TAB_TOOL => serde_json::from_value::<ChromeTabRefArgs>(arguments.clone())
+            .is_ok_and(|args| valid_chrome_target_ref(&args.target_ref)),
+        // Keep the legacy name recognizable without changing the user's active tab.
+        CHROME_ACTIVATE_TAB_TOOL => false,
         CHROME_NAVIGATE_TOOL => serde_json::from_value::<ChromeNavigateArgs>(arguments.clone())
             .is_ok_and(|args| args.is_well_formed()),
         CHROME_SNAPSHOT_TOOL => serde_json::from_value::<ChromeSnapshotArgs>(arguments.clone())
@@ -920,7 +920,7 @@ pub fn chrome_close_tab_tool_spec() -> ToolSpec {
 pub fn chrome_activate_tab_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ChromeTabRefArgs>(
         CHROME_ACTIVATE_TAB_TOOL,
-        "Bring one Chrome tab in the approved connection to the front for the user to see before continuing.",
+        "Unavailable: this compatibility operation changes the user's active tab. Read, capture, or act on the target tab independently without bringing it to the front.",
     )
 }
 
@@ -986,7 +986,6 @@ pub fn chrome_computer_use_tool_specs() -> Vec<ToolSpec> {
         chrome_list_tabs_tool_spec(),
         chrome_new_tab_tool_spec(),
         chrome_close_tab_tool_spec(),
-        chrome_activate_tab_tool_spec(),
         chrome_navigate_tool_spec(),
         chrome_snapshot_tool_spec(),
         chrome_screenshot_tool_spec(),
@@ -1005,11 +1004,15 @@ mod tests {
     #[test]
     fn shared_transport_surface_uses_canonical_specs_and_validation() {
         let specs = chrome_computer_use_tool_specs();
-        assert_eq!(specs.len(), CHROME_USE_TOOLS.len());
-        for (spec, name) in specs.iter().zip(CHROME_USE_TOOLS) {
-            assert_eq!(spec.name, name);
+        let expected: Vec<_> = CHROME_USE_TOOLS
+            .into_iter()
+            .filter(|name| *name != CHROME_ACTIVATE_TAB_TOOL)
+            .collect();
+        assert_eq!(specs.len(), expected.len());
+        for (spec, name) in specs.iter().zip(&expected) {
+            assert_eq!(spec.name, *name);
         }
-        for name in CHROME_USE_TOOLS {
+        for name in expected {
             assert!(is_chrome_computer_use_tool(name));
             assert_eq!(specs.iter().filter(|spec| spec.name == name).count(), 1);
         }
@@ -1018,6 +1021,25 @@ mod tests {
         assert!(!validate_chrome_computer_use_arguments(
             CHROME_ACT_TOOL,
             &json!({})
+        ));
+    }
+
+    #[test]
+    fn legacy_tab_activation_is_recognized_but_unavailable() {
+        assert!(is_chrome_computer_use_tool(CHROME_ACTIVATE_TAB_TOOL));
+        assert!(!chrome_computer_use_tool_specs()
+            .iter()
+            .any(|spec| spec.name == CHROME_ACTIVATE_TAB_TOOL));
+        let payload = json!({"targetRef": "ct-2"});
+        let args: ChromeTabRefArgs = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(args).unwrap(), payload);
+        assert!(!validate_chrome_computer_use_arguments(
+            CHROME_ACTIVATE_TAB_TOOL,
+            &payload
+        ));
+        assert!(validate_chrome_computer_use_arguments(
+            CHROME_CLOSE_TAB_TOOL,
+            &payload
         ));
     }
 

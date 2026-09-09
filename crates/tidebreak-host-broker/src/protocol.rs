@@ -220,6 +220,10 @@ pub struct CuGrantAppRequest {
     /// it into a standing grant. Absent on the wire means standing (`false`).
     #[serde(default)]
     pub single_use: bool,
+    /// Explicitly remember this exact app capability for every local task.
+    /// Invalid for one-shot grants or whole-display capture.
+    #[serde(default)]
+    pub all_sessions: bool,
 }
 
 /// Idempotent computer-use grant withdrawal for one exact capability + scope.
@@ -976,6 +980,8 @@ pub struct RootSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantStatementSummary {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_app_all_sessions: bool,
     pub grant_id: GrantId,
     pub subject: GrantSubject,
     pub capability: Capability,
