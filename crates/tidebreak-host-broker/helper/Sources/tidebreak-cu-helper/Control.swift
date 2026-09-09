@@ -661,15 +661,24 @@ enum Control {
     }
 
     /// Release at the last delivered point even when a later guard refuses.
+    /// After the press, any failure has an uncertain outcome: releasing may
+    /// complete a drop, so it must never be reported as a refusal before input.
     static func deliverDrag(
         count: Int, press: () -> Void, move: (Int) throws -> Void,
         release: () -> Void, pause: () -> Void
-    ) rethrows {
+    ) throws {
         press()
         defer { release() }
-        for index in 0..<count {
-            pause()
-            try move(index)
+        do {
+            for index in 0..<count {
+                pause()
+                try move(index)
+            }
+        } catch {
+            let detail = (error as? HelperError)?.message ?? String(describing: error)
+            throw HelperError(
+                code: .operationFailed,
+                message: "The drag stopped after input was sent: \(detail)")
         }
     }
 

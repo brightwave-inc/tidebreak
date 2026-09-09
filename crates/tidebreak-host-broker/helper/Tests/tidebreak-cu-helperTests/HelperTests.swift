@@ -9,7 +9,9 @@ struct HelperTests {
         print("PASS testTextFieldDecodesForTypingAndWaits")
         suite.testDragAlwaysReleasesAfterMoveFailure()
         print("PASS testDragAlwaysReleasesAfterMoveFailure")
-        suite.testSuccessfulDragReleasesExactlyOnce()
+        suite.testPartialDragReportsUncertainOutcome()
+        print("PASS testPartialDragReportsUncertainOutcome")
+        try suite.testSuccessfulDragReleasesExactlyOnce()
         print("PASS testSuccessfulDragReleasesExactlyOnce")
         suite.testDragPointsBoundStepsAndReachExactEndpoint()
         print("PASS testDragPointsBoundStepsAndReachExactEndpoint")
@@ -39,7 +41,7 @@ struct HelperTests {
         print("PASS testExecutionModeIsExplicitInControlResults")
         suite.testBackgroundScrollClampsAtEachEnd()
         print("PASS testBackgroundScrollClampsAtEachEnd")
-        print("17 helper regression tests passed")
+        print("18 helper regression tests passed")
     }
 
     func testScrollDirectionMatchesAPI() {
@@ -122,9 +124,29 @@ struct HelperTests {
         expectEqual(events, ["press", "pause", "move0", "pause", "move1", "release"])
     }
 
-    func testSuccessfulDragReleasesExactlyOnce() {
+    func testPartialDragReportsUncertainOutcome() {
+        for code in [HelperErrorCode.targetOutsideApp, .yielded, .invalidRequest] {
+            var events: [String] = []
+            expectError(
+                try Control.deliverDrag(
+                    count: 3,
+                    press: { events.append("press") },
+                    move: { index in
+                        if index == 1 {
+                            throw HelperError(code: code, message: "fixture guard refused")
+                        }
+                        events.append("move\(index)")
+                    },
+                    release: { events.append("release") }, pause: {})) { error in
+                expectEqual((error as? HelperError)?.code, .operationFailed)
+            }
+            expectEqual(events, ["press", "move0", "release"])
+        }
+    }
+
+    func testSuccessfulDragReleasesExactlyOnce() throws {
         var events: [String] = []
-        Control.deliverDrag(
+        try Control.deliverDrag(
             count: 2, press: { events.append("press") },
             move: { events.append("move\($0)") }, release: { events.append("release") },
             pause: { events.append("pause") })
@@ -170,7 +192,7 @@ struct HelperTests {
                     try Data("stopped".utf8).write(to: file, options: .atomic)
                 }, release: { releases += 1 }, pause: {})
         ) { error in
-            expectEqual((error as? HelperError)?.code, .yielded)
+            expectEqual((error as? HelperError)?.code, .operationFailed)
         }
         expectEqual(moves, 1)
         expectEqual(releases, 1)
