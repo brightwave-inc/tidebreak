@@ -76,17 +76,13 @@ impl CodeRuntime {
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let id = WorkspaceId::new();
-        let branch = branch_name(&repo.branch_prefix, &title, id.as_uuid());
-        let existing = list_workspaces(&self.db, owner, Some(repo.id)).await?;
-        if existing
-            .iter()
-            .any(|workspace| workspace.branch_name == branch)
-        {
-            return Err(ServerError::conflict_kind(
-                "branch_collision",
-                format!("branch {branch} already exists on this repository"),
-            ));
-        }
+        // A sandbox has no local branch creation to arbitrate collisions. Include
+        // the workspace id so repeated prompts and concurrent starts stay distinct.
+        let branch = format!(
+            "{}-{}",
+            branch_name(&repo.branch_prefix, &title, id.as_uuid()),
+            id
+        );
         Ok(CodeWorkspace {
             id,
             owner: owner.clone(),
@@ -195,7 +191,7 @@ impl CodeRuntime {
         grant_id: tidebreak_core::CodeGrantId,
         channel_kind: &str,
         external_key: &str,
-        repo_id: RepoId,
+        repo_id: impl Into<Option<RepoId>>,
         title: Option<String>,
         harness: HarnessKind,
         settings: NewSessionSettings,
@@ -214,7 +210,13 @@ impl CodeRuntime {
                 "a binding needs a channel kind and a conversation key",
             ));
         }
-        let delegated = if self.external_execution_location() == ExecutionLocation::Machine {
+        let repo_id = repo_id.into();
+        let location = if repo_id.is_none() {
+            ExecutionLocation::Machine
+        } else {
+            self.external_execution_location()
+        };
+        let delegated = if location == ExecutionLocation::Machine {
             match self
                 .harness_llm
                 .as_ref()
@@ -271,8 +273,6 @@ impl CodeRuntime {
                 identity,
             ));
         }
-        let repo = self.get_repo(owner, repo_id).await?;
-        Self::refuse_removed_repo(&repo)?;
         let workspace_grant =
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?
@@ -286,10 +286,64 @@ impl CodeRuntime {
             .as_ref()
             .map(|gateway| gateway.as_ref() as &dyn crate::obo_gateway::GitCredentialLender)
             .or_else(|| self.git_credentials().map(|lender| lender.as_ref()));
-        let identity = self
-            .decide_external_acts_as(owner, owner_kind, requested_acts_as, lender)
+        // A conversation needs no forge connection until it chooses a
+        // repository. Its identity is still fixed before the first turn.
+        let identity = if repo_id.is_none() {
+            ExternalActsAsView {
+                acts_as: if workspace_grant || owner_kind == Some("service") {
+                    tidebreak_core::ActsAs::Bot
+                } else {
+                    requested_acts_as.unwrap_or(tidebreak_core::ActsAs::Person)
+                },
+                acting_login: None,
+                app_name: None,
+                connect_url: None,
+            }
+        } else {
+            self.decide_external_acts_as(owner, owner_kind, requested_acts_as, lender)
+                .await?
+        };
+        let Some(repo_id) = repo_id else {
+            let policy = self.external_permission;
+            let mode = requested_mode.unwrap_or(policy.default_mode);
+            if mode > policy.ceiling {
+                return Err(ServerError::conflict_kind(
+                    "permission_mode_above_ceiling",
+                    format!("This deployment allows channel sessions up to {}. To allow {mode}, raise TIDEBREAK_EXTERNAL_PERMISSION_CEILING.", policy.ceiling),
+                ));
+            }
+            let session = self
+                .build_internal_session(
+                    owner,
+                    owner_kind,
+                    NewSessionSettings {
+                        permission_mode: mode,
+                        permission_mode_ceiling: Some(policy.ceiling),
+                        acts_as: Some(identity.acts_as),
+                        ..settings
+                    },
+                )
+                .await?;
+            let resolution = tidebreak_core::db::code::resolve_external_machine_session(
+                &self.db,
+                owner,
+                grant_id,
+                channel_kind,
+                external_key,
+                &session,
+            )
             .await?;
-        match self.external_execution_location() {
+            if matches!(
+                resolution,
+                tidebreak_core::ExternalSessionResolution::Created(_)
+            ) {
+                self.attach_and_spawn_worker(session).await?;
+            }
+            return Ok((resolution, identity));
+        };
+        let repo = self.get_repo(owner, repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
+        match location {
             ExecutionLocation::Sandbox => {
                 if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {
                     return Err(ServerError::conflict_kind(
@@ -754,7 +808,7 @@ impl CodeRuntime {
     /// way it does after any turn, and this waits briefly for the head to
     /// become a turn so the channel hears `new_turn` rather than `queued`
     /// for an idle session.
-    async fn promote_external_head(
+    pub(crate) async fn promote_external_head(
         &self,
         session: Session,
         turn_id: tidebreak_core::TurnId,

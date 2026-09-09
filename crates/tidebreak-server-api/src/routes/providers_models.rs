@@ -75,7 +75,7 @@ pub(crate) async fn resolve_executable_chat_model(
     validate_execution_selection(state, &executable, true, caller_gateway.as_ref()).await
 }
 
-async fn validate_execution_selection(
+pub(crate) async fn validate_execution_selection(
     state: &AppState,
     value: &str,
     allow_legacy_custom: bool,

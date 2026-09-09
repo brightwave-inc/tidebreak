@@ -1919,7 +1919,7 @@ mod remote_pr_tests {
         use tidebreak_core::PullRequestCommentKind;
         type Seen = Arc<Mutex<Vec<String>>>;
         async fn forge(
-            State(seen): State<Seen>,
+            State((seen, branch)): State<(Seen, String)>,
             uri: Uri,
             headers: HeaderMap,
         ) -> axum::Json<serde_json::Value> {
@@ -1934,13 +1934,13 @@ mod remote_pr_tests {
                     assert!(uri
                         .query()
                         .unwrap_or_default()
-                        .contains("head=acme:tidebreak/remote-delivery"));
+                        .contains(&format!("head=acme:{branch}")));
                     serde_json::json!([{
                         "number": 17,
                         "html_url": "https://github.com/acme/tools/pull/17",
                         "title": "Fresh title",
                         "state": "open",
-                        "head": {"ref": "tidebreak/remote-delivery", "sha": "feedfeed"},
+                        "head": {"ref": branch, "sha": "feedfeed"},
                         "base": {"ref": "main"}
                     }])
                 }
@@ -1951,7 +1951,7 @@ mod remote_pr_tests {
                     "state": "open",
                     "draft": false,
                     "user": {"login": "author"},
-                    "head": {"ref": "tidebreak/remote-delivery", "sha": "feedfeed"},
+                    "head": {"ref": branch, "sha": "feedfeed"},
                     "base": {"ref": "main"},
                     "merged": false,
                     "mergeable": true,
@@ -1983,13 +1983,15 @@ mod remote_pr_tests {
             };
             axum::Json(value)
         }
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
         let seen: Seen = Arc::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let app = axum::Router::new().fallback(forge).with_state(seen.clone());
+        let app = axum::Router::new()
+            .fallback(forge)
+            .with_state((seen.clone(), workspace.branch_name.clone()));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let dir = tempfile::tempdir().unwrap();
-        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
         workspace.pr = None;
         save_workspace(&runtime.db, &workspace).await.unwrap();
         runtime.set_forge_api_base(Some(base));

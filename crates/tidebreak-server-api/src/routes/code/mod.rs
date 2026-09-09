@@ -18,6 +18,8 @@ mod approvals;
 mod browser;
 mod delivery;
 mod external;
+#[cfg(test)]
+pub(crate) use external::resolve_external_model;
 mod git;
 mod grants;
 mod harnesses;

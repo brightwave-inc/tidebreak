@@ -1335,9 +1335,24 @@ impl LegDriver {
         // (decision 62). A snapshot that cannot be resolved reads as `None`
         // and fails the gateway-bound paths closed.
         let owner = self.store.chat_owner(chat.id).await.unwrap_or_default();
-        let caller_gateway = match (self.on_behalf_of.as_ref(), owner.as_ref()) {
-            (Some(gateway), Some(owner)) => gateway.snapshot_for(owner).await.ok().flatten(),
-            _ => None,
+        let caller_gateway = match self
+            .resolver
+            .session_gateway_snapshot(owner.as_ref(), chat.id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self
+                    .record_failure(
+                        &turn,
+                        lease_token,
+                        total_model_steps,
+                        total_usage,
+                        "external_connection_unavailable",
+                        &error.to_string(),
+                    )
+                    .await
+            }
         };
         let model_policy = if self.resolver.enforces_model_registry() {
             crate::providers::resolve_model_policy(
@@ -1566,7 +1581,10 @@ impl LegDriver {
             // ignored; on one that resolves them per caller, an owner that
             // cannot be named yields no route and fails the turn closed
             // rather than running it on somebody else's authority.
-            let provider = self.resolver.resolve_for(owner.as_ref()).await;
+            let provider = self
+                .resolver
+                .resolve_for_session(owner.as_ref(), chat.id)
+                .await;
             let steer = active.steer_inbox();
             let mut agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)
                 .with_approvals(self.approvals.clone())
