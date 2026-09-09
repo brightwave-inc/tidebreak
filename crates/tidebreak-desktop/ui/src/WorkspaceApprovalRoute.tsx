@@ -146,8 +146,10 @@ export function WorkspaceApprovalView({
                 <p className="text-sm leading-relaxed">
                   Run channel sessions for {channelLabel(page.channel_kind)}{" "}
                   workspace {page.workspace_name} as {page.display_name}? The
-                  shared identity&apos;s forge credential is the ceiling; you
-                  still confirm each channel&apos;s repository.
+                  shared GitHub identity must have access to each repository. In
+                  Settings → Channels, approve the repositories each channel can
+                  use. Agents can then choose any approved repository and work
+                  across them.
                 </p>
                 <div className="flex gap-2">
                   <Button

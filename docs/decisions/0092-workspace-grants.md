@@ -16,9 +16,13 @@ Adapter grants have a kind, `person` or `workspace`. Existing rows are person gr
 
 A workspace grant is owned by a service-kind principal and covers one Slack workspace. A service principal starts the handshake (`POST /code/grants/workspace`). On a gateway-authenticated machine the machine enrolls the gateway delegation at start with the service's own lease, because that identity never has a browser. An admin approves (`POST /deployment/code/grants/workspace/{id}/approve`). The adapter completes as for a person handshake. The handshake records `approved_by` as the admin's owner id.
 
-Under a workspace grant, external get-or-create requires a `channel_id`. An unconfirmed `(channel, repository)` pair is refused (`409 repository_unconfirmed`) and recorded as pending with the body's `set_by`. An admin confirms. A later different repository supersedes the pending row. Person grants are unchanged.
+Under a workspace grant, external get-or-create requires a `channel_id`. An unconfirmed `(channel, repository)` pair is refused (`409 repository_unconfirmed`) and recorded as pending with the body's `set_by`. An administrator approves the channel’s repository scope in Settings > Channels. The scope can contain several explicit repositories and can be approved before the first task. Each approval persists for that channel and grant. Additional requests remain pending independently so a task can select several repositories. Person grants are unchanged.
 
-The shared identity's forge credential is the ceiling. The admin's confirmation per channel and repository is the gate.
+The shared identity's forge credential is the ceiling. The channel’s approved repository scope is the gate. Approval never grants GitHub access that the shared identity lacks.
+
+`POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/approve` adds a batch of explicit repositories to that scope. The endpoint requires administrator authority, validates and canonicalizes the entire batch before writing, and commits all approvals together. Existing single-repository confirmations remain supported. Revoking the workspace grant removes its authority.
+
+The scope flow replaces the original rule that a later request supersedes an earlier pending repository. Existing superseded requests can be approved explicitly or become pending again when retried.
 
 Messages under a workspace grant take the actor from the body. `PUT /external/code/sessions/{id}/access` replaces that session's `external:<channel kind>:<user id>` contribute rows with the adapter's list. Revoking the workspace grant fences every channel session it tagged.
 
@@ -40,7 +44,9 @@ Revisit this if a workspace grant must cover more than one Slack workspace, or i
 
 - A service principal starts a workspace handshake; a person cannot.
 - A non-admin cannot approve; an admin can, and the adapter completes.
-- A channel session refuses until the repository is confirmed, then runs.
+- An administrator approves several repositories before a task starts; the channel can then use each repository without another confirmation.
+- Requests for several repositories remain pending together; an invalid batch changes nothing.
+- Another channel or grant cannot reuse the scope. Revoked and person grants cannot receive a channel scope.
 - The actor from the body lands on the turn; a person grant refuses a body actor.
 - Access rows are replaced by the adapter's list.
 - Revoking the workspace grant fences every channel session at once.

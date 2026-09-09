@@ -1,10 +1,13 @@
-//! Per-channel repository confirmation under a workspace grant.
+//! The repository scope an administrator approves for each channel.
 
+use sea_orm::sea_query::{Expr, ExprTrait, Func};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
-use crate::code::{CodeChannelRepositoryConfirm, CodeChannelRepositoryState, CodeGrantId};
+use crate::code::{
+    CodeChannelRepositoryConfirm, CodeChannelRepositoryState, CodeGrantId, CodeGrantKind,
+};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -24,6 +27,27 @@ async fn grant_owned_by(
             .map_err(store_err)?
             .is_some(),
     )
+}
+
+/// Serialize scope changes with grant revocation on both SQLite and PostgreSQL.
+async fn lock_live_workspace_grant(
+    conn: &impl sea_orm::ConnectionTrait,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+) -> Result<bool> {
+    let locked = entities::code_external_grant::Entity::update_many()
+        .col_expr(
+            entities::code_external_grant::Column::Id,
+            sea_orm::sea_query::Expr::col(entities::code_external_grant::Column::Id),
+        )
+        .filter(entities::code_external_grant::Column::Id.eq(grant_id.0))
+        .filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_grant::Column::Kind.eq(CodeGrantKind::Workspace.as_str()))
+        .filter(entities::code_external_grant::Column::RevokedAt.is_null())
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(locked.rows_affected == 1)
 }
 
 fn confirm_from_model(
@@ -81,7 +105,13 @@ pub async fn channel_repository_is_confirmed(
     Ok(entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
         .filter(entities::code_channel_repository_confirm::Column::ChannelId.eq(channel_id))
-        .filter(entities::code_channel_repository_confirm::Column::Repository.eq(repository))
+        // Older approvals can retain the forge's mixed-case spelling.
+        .filter(
+            Func::lower(Expr::col(
+                entities::code_channel_repository_confirm::Column::Repository,
+            ))
+            .eq(repository.to_ascii_lowercase()),
+        )
         .filter(
             entities::code_channel_repository_confirm::Column::State
                 .eq(CodeChannelRepositoryState::Confirmed.as_str()),
@@ -92,8 +122,8 @@ pub async fn channel_repository_is_confirmed(
         .is_some())
 }
 
-/// Record a pending confirmation. A different pending repository for the same
-/// channel is superseded. Returns the pending row.
+/// Record a repository request without replacing other requests in the channel.
+/// An approval that wins a concurrent request stays confirmed.
 pub async fn ensure_pending_channel_repository(
     store: &DbStore,
     owner: &OwnerId,
@@ -104,38 +134,48 @@ pub async fn ensure_pending_channel_repository(
     set_by_display: &str,
 ) -> Result<CodeChannelRepositoryConfirm> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !grant_owned_by(&transaction, owner, grant_id).await? {
+    if !lock_live_workspace_grant(&transaction, owner, grant_id).await? {
         transaction.commit().await.map_err(store_err)?;
-        return Err(AgentError::Store("grant not found".into()));
+        return Err(AgentError::Store("live workspace grant not found".into()));
     }
-    let now = database_now(&transaction).await?;
-    let pending = entities::code_channel_repository_confirm::Entity::find()
+    let existing = entities::code_channel_repository_confirm::Entity::find()
         .filter(entities::code_channel_repository_confirm::Column::GrantId.eq(grant_id.0))
         .filter(entities::code_channel_repository_confirm::Column::ChannelId.eq(channel_id))
         .filter(
-            entities::code_channel_repository_confirm::Column::State
-                .eq(CodeChannelRepositoryState::Pending.as_str()),
+            Func::lower(Expr::col(
+                entities::code_channel_repository_confirm::Column::Repository,
+            ))
+            .eq(repository.to_ascii_lowercase()),
         )
-        .all(&transaction)
+        .one(&transaction)
         .await
         .map_err(store_err)?;
-    for row in pending {
-        if row.repository == repository {
+    if let Some(row) = existing {
+        if row.state != CodeChannelRepositoryState::Superseded.as_str() {
             let confirm = confirm_from_model(row)?;
             transaction.commit().await.map_err(store_err)?;
             return Ok(confirm);
         }
-        entities::code_channel_repository_confirm::ActiveModel {
+        // Older releases superseded the first request when a second repository
+        // was selected. A retry must revive that request instead of colliding
+        // with its primary key.
+        let updated = entities::code_channel_repository_confirm::ActiveModel {
             grant_id: Set(row.grant_id),
-            channel_id: Set(row.channel_id.clone()),
-            repository: Set(row.repository.clone()),
-            state: Set(CodeChannelRepositoryState::Superseded.as_str().to_owned()),
+            channel_id: Set(row.channel_id),
+            repository: Set(row.repository),
+            state: Set(CodeChannelRepositoryState::Pending.as_str().to_owned()),
+            set_by_identity: Set(set_by_identity.to_owned()),
+            set_by_display: Set(set_by_display.to_owned()),
+            confirmed_by: Set(None),
             ..Default::default()
         }
         .update(&transaction)
         .await
         .map_err(store_err)?;
+        transaction.commit().await.map_err(store_err)?;
+        return confirm_from_model(updated);
     }
+    let now = database_now(&transaction).await?;
     let model = entities::code_channel_repository_confirm::ActiveModel {
         grant_id: Set(grant_id.0),
         channel_id: Set(channel_id.to_owned()),
@@ -151,6 +191,81 @@ pub async fn ensure_pending_channel_repository(
     confirm_from_model(inserted)
 }
 
+/// Approve an explicit repository scope before or after a channel requests it.
+/// The caller validates canonical repository names and administrator authority.
+/// Existing approvals remain valid; the whole batch commits together.
+pub async fn approve_channel_repositories(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_id: &str,
+    repositories: &[String],
+    admin: &OwnerId,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !lock_live_workspace_grant(&transaction, owner, grant_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let now = database_now(&transaction).await?;
+    for repository in repositories {
+        use entities::code_channel_repository_confirm::{ActiveModel, Column, Entity};
+        let aliases = Entity::find()
+            .filter(Column::GrantId.eq(grant_id.0))
+            .filter(Column::ChannelId.eq(channel_id))
+            .filter(Func::lower(Expr::col(Column::Repository)).eq(repository))
+            .order_by_asc(Column::CreatedAt)
+            .order_by_asc(Column::Repository)
+            .all(&transaction)
+            .await
+            .map_err(store_err)?;
+        let previous = aliases
+            .iter()
+            .find(|row| row.repository == *repository)
+            .or_else(|| aliases.first());
+        Entity::insert(ActiveModel {
+            grant_id: Set(grant_id.0),
+            channel_id: Set(channel_id.to_owned()),
+            repository: Set(repository.clone()),
+            set_by_identity: Set(previous.map_or_else(
+                || admin.as_str().to_owned(),
+                |row| row.set_by_identity.clone(),
+            )),
+            set_by_display: Set(previous.map_or_else(
+                || "Administrator".to_owned(),
+                |row| row.set_by_display.clone(),
+            )),
+            state: Set(CodeChannelRepositoryState::Confirmed.as_str().to_owned()),
+            confirmed_by: Set(Some(admin.as_str().to_owned())),
+            created_at: Set(previous.map_or(now, |row| row.created_at)),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([
+                Column::GrantId,
+                Column::ChannelId,
+                Column::Repository,
+            ])
+            .update_columns([Column::State, Column::ConfirmedBy])
+            .to_owned(),
+        )
+        .exec_without_returning(&transaction)
+        .await
+        .map_err(store_err)?;
+        // Collapse historical casing aliases so a completed approval cannot
+        // leave the same repository displayed as pending.
+        Entity::delete_many()
+            .filter(Column::GrantId.eq(grant_id.0))
+            .filter(Column::ChannelId.eq(channel_id))
+            .filter(Func::lower(Expr::col(Column::Repository)).eq(repository))
+            .filter(Column::Repository.ne(repository))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
 /// An admin confirms a pending `(grant, channel, repository)` pair.
 pub async fn confirm_channel_repository(
     store: &DbStore,
@@ -161,7 +276,7 @@ pub async fn confirm_channel_repository(
     admin: &OwnerId,
 ) -> Result<Option<CodeChannelRepositoryConfirm>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !grant_owned_by(&transaction, owner, grant_id).await? {
+    if !lock_live_workspace_grant(&transaction, owner, grant_id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }

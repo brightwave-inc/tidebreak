@@ -921,3 +921,24 @@ checks workspace membership before calling; attachment does not change the
 session's access rows. Each bound thread reads the same event stream with its
 own cursor. Snapshots expose `external_origins` and preserve `external_origin`
 as the first thread for older clients. Decision 93 records the boundary.
+
+### Approve a channel’s repository scope
+
+After connecting the Slack workspace, open Tidebreak **Settings > Channels** as
+an administrator. Add the Slack channel ID and the GitHub repositories that the
+channel may use, then approve them together. You can do this before anyone starts
+a task. You can also approve the repositories that a task has already requested
+together from the channel’s pending list.
+
+The agent can choose any repository in that channel’s approved scope and work
+across several repositories without asking for the same approval again. The
+GitHub connection must still permit each repository. Approvals apply only to the
+selected channel and workspace grant; revoking the grant cuts off that scope.
+Adding repositories preserves existing approvals. A chat answer does not grant
+access: after the administrator saves the scope, retry the waiting task.
+
+Administrators can also add scope through
+`POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/approve`
+with `{"repositories":["acme/frontend","acme/backend"]}`. The endpoint accepts
+1–100 explicit repository names or GitHub URLs, canonicalizes them, and commits
+the whole batch together. Wildcards are not accepted.

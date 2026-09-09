@@ -411,3 +411,24 @@ pub async fn confirm_workspace_channel_repository(
         .ok_or_else(|| ServerError::not_found("repository confirmation not found"))?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveRepositoriesBody {
+    pub repositories: Vec<String>,
+}
+
+/// `POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/approve`
+pub async fn approve_workspace_channel_repositories(
+    code: ScopedCode,
+    Path((id, channel_id)): Path<(tidebreak_core::CodeGrantId, String)>,
+    Json(body): Json<ApproveRepositoriesBody>,
+) -> Result<StatusCode, ServerError> {
+    if !code
+        .approve_workspace_channel_repositories(id, &channel_id, &body.repositories)
+        .await?
+    {
+        return Err(ServerError::not_found("workspace grant not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}

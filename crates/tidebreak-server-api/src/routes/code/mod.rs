@@ -67,9 +67,10 @@ pub(crate) use git::{
     write_workspace_check_logs,
 };
 pub(crate) use grants::{
-    approve_workspace_grant, confirm_workspace_channel_repository, connect_approve,
-    connect_complete, connect_probe, connect_start, connect_status, connect_view, list_grants,
-    revoke_grant, revoke_workspace_grants, start_workspace_grant, view_workspace_grant,
+    approve_workspace_channel_repositories, approve_workspace_grant,
+    confirm_workspace_channel_repository, connect_approve, connect_complete, connect_probe,
+    connect_start, connect_status, connect_view, list_grants, revoke_grant,
+    revoke_workspace_grants, start_workspace_grant, view_workspace_grant,
 };
 pub(crate) use harnesses::{
     check_harness_updates, install_harness, list_harness_models, list_harnesses, refresh_harnesses,
