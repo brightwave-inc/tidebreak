@@ -33,12 +33,15 @@ terminal, **(repo)** = already done in this repository.
 - `.gitignore` — refuses `.p8`/`.p12`/keystores; EAS holds the real
   copies.
 
-## Apple-side prep, already done (web)
+## Apple/Expo-side prep, already done (web/cli)
 
 - Bundle id `inc.brightwave.tidebreak` registered under team
   `CUURNS78Y4`.
 - App Store Connect app record created; numeric Apple ID `6810344419`
   (already in `eas.json`).
+- EAS project `@brightwave/tidebreak-mobile` created via `eas init`;
+  its id is hardcoded as `EAS_PROJECT_ID` in `app.config.ts` (eas-cli
+  cannot write into a dynamic TS config).
 
 ## Remaining one-time setup, in order
 
@@ -46,19 +49,16 @@ terminal, **(repo)** = already done in this repository.
    `brightwave` Expo org. No Apple ID is needed for any step below: the
    Admin App Store Connect API key Tidewatch uploaded to EAS is
    team-scoped and is reused from EAS's credential store.
-2. **(cli)** `eas init` in `mobile/` — creates the EAS project. eas-cli
-   cannot write into a dynamic TS config, so paste the printed project
-   id into `EAS_PROJECT_ID` in `app.config.ts`.
-3. **(cli)** `APP_VARIANT=production eas credentials --platform ios` —
+2. **(cli)** `APP_VARIANT=production eas credentials --platform ios` —
    choose App Store Connect API Key → use existing. EAS mints and
    stores the distribution certificate and provisioning profile;
    submits are forever non-interactive.
-4. **(cli)** Skippable for a brand-new record (EAS starts at 1);
+3. **(cli)** Skippable for a brand-new record (EAS starts at 1);
    mandatory if this bundle id ever uploaded before:
    `eas build:version:set --platform ios --profile production`.
-5. **(cli)** `eas build --profile production --platform ios
+4. **(cli)** `eas build --profile production --platform ios
    --auto-submit`.
-6. **(web)** After the build reaches TestFlight (~5–15 min after
+5. **(web)** After the build reaches TestFlight (~5–15 min after
    processing): TestFlight → Internal Testing → create a group and add
    testers. Internal testers need no Beta App Review.
 

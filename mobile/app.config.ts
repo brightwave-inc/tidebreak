@@ -15,11 +15,11 @@ const SCHEME: Record<AppVariant, string> = {
   development: "tidebreak-dev",
 };
 
-// Printed by `eas init`; see mobile/DEPLOYING.md. eas-cli cannot write into a
-// dynamic (TS) config, so the id is pasted here by hand. While it is empty the
-// EAS/updates fields are omitted entirely — a placeholder value makes
-// `eas init` believe the project is already linked and fail.
-const EAS_PROJECT_ID = "";
+// Printed by `eas init` (project @brightwave/tidebreak-mobile); eas-cli cannot
+// write into a dynamic (TS) config, so the id is pasted here by hand. If it is
+// ever emptied, the EAS/updates fields are omitted entirely — a placeholder
+// value makes `eas init` believe the project is already linked and fail.
+const EAS_PROJECT_ID = "af9811ba-f747-44e9-b5cd-c1fe33b4c6e9";
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
