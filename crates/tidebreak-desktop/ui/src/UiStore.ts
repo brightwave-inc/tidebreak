@@ -118,7 +118,7 @@ export type UiStore = {
    */
   modelMenuNotConnectedCollapsed: boolean;
   toggleModelMenuNotConnected: () => void;
-  /** What Enter and the single composer action do while a response is running. */
+  /** What Enter and the single composer action do while a response is running. Cmd/Ctrl+Enter always steers. */
   activeTurnSendMode: ActiveTurnSendMode;
   setActiveTurnSendMode: (mode: ActiveTurnSendMode) => void;
   /**

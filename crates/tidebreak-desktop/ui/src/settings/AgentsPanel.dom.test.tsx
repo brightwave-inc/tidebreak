@@ -66,6 +66,7 @@ describe("AgentsPanel", () => {
 
     render(<AgentsPanel client={client} />);
     await screen.findByText("Active background agents per work");
+    expect(screen.getByText(/always steers immediately/)).toBeVisible();
     expect(screen.getByRole("radio", { name: "Queue" })).toBeChecked();
     fireEvent.click(screen.getByRole("radio", { name: "Steer" }));
     expect(useUiStore.getState().activeTurnSendMode).toBe("steer");

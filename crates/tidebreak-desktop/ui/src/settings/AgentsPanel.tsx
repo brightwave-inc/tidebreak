@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
+import { usesCommandModifier } from "../ShellShortcuts";
 import { useUiStore, type ActiveTurnSendMode } from "../UiStore";
 import {
   SettingsError,
@@ -26,6 +27,11 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
   const setActiveTurnSendMode = useUiStore(
     (state) => state.setActiveTurnSendMode,
   );
+  const modEnter = usesCommandModifier(
+    typeof navigator === "undefined" ? "" : navigator.userAgent,
+  )
+    ? "⌘Enter"
+    : "Ctrl+Enter";
   const [limit, setLimit] = useState("");
   const [checkinSteps, setCheckinSteps] = useState("");
   const [errorCheckin, setErrorCheckin] = useState("");
@@ -136,7 +142,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     >
       <SettingsSection
         title="While an agent is responding"
-        description="Choose what the single composer action does when you type during a running response."
+        description={`Choose what Enter and the composer action do during a running response. ${modEnter} always steers immediately.`}
       >
         <RadioGroup
           aria-label="Default action while an agent is responding"
