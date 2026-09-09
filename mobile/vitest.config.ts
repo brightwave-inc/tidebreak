@@ -9,6 +9,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      "expo-crypto": path.resolve(__dirname, "src/test/expoCryptoStub.ts"),
     },
   },
 });
