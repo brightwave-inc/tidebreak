@@ -1,12 +1,6 @@
 import { useEffect, useState, type ComponentProps } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import {
-  Archive,
-  BarChart3,
-  FolderPlus,
-  GitPullRequest,
-  Plus,
-} from "lucide-react";
+import { Archive, BarChart3, GitPullRequest } from "lucide-react";
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
@@ -28,22 +22,24 @@ import {
   useWorkspaceDigests,
   watchChildren,
 } from "./CodeUpdatesStore";
-import { FOCUS_RING, HOVER_TINT, RAIL_ICON_BUTTON } from "./interactive";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { findCodeTerminalTab } from "./codeChrome";
 import { canOpenLocalCodeWorktree } from "./codeWorktreeHost";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { WorkspaceLessSessionRow } from "./WorkspaceLessSessionRow";
-import { RailSettingsMenu } from "./RailSettingsMenu";
+import { WorkspaceRailToolbar } from "./WorkspaceRailToolbar";
+import { WorkspaceRailGroups } from "./WorkspaceRailGroups";
 import {
   useWorkspaceCardCommands,
   workspaceBulkCommands,
   workspaceCommands,
 } from "./workspaceActions";
-import { WorkspaceCard, WorkspaceStatusMark } from "./WorkspaceCard";
+import { WorkspaceCard } from "./WorkspaceCard";
 import {
-  arrangeWorkspaces,
+  arrangeWorkspaceSections,
+  visibleWorkspaceGroups,
+  workspaceCollapseKeys,
   isPutAway,
-  isWorkspaceStatusRank,
   workspaceStackParent,
 } from "./workspaceCards";
 import {
@@ -69,7 +65,7 @@ import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
  * what later convergence merges rather than translates.
  *
  * The rail spends no section on the repo catalog: workspaces are the only
- * list, and by-repo group headers are labels rather than links. What each card
+ * list. Source and repository/status headers fold their own rows. What each card
  * draws is the reader's `railPrefs` choice; what each card *says* (the
  * aria-label) never shrinks with those choices.
  *
@@ -112,6 +108,13 @@ export function CodeSidebar() {
   );
   const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
   const prefs = useCodeUiStore((state) => state.railPrefs);
+  const collapsedKeys = useCodeUiStore(
+    (state) => state.collapsedWorkspaceGroups,
+  );
+  const setCollapsedKeys = useCodeUiStore(
+    (state) => state.setCollapsedWorkspaceGroups,
+  );
+  const toggleGroup = useCodeUiStore((state) => state.toggleWorkspaceGroup);
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
   const { run, runBulk, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
@@ -136,13 +139,19 @@ export function CodeSidebar() {
 
   useEffect(() => connectCodeUpdates(client), [client]);
 
-  const groups = arrangeWorkspaces(
+  const sections = arrangeWorkspaceSections(
     prefs.sortMode,
     repos,
     workspaces,
     digests,
     sessions,
   );
+  const groups = visibleWorkspaceGroups(
+    sections,
+    prefs.sortMode,
+    collapsedKeys,
+  );
+  const collapseKeys = workspaceCollapseKeys(sections, prefs.sortMode);
   const canOpenWorktree = canOpenLocalCodeWorktree();
   const selectedWorkspaceIds = useCodeUiStore(
     (state) => state.selectedWorkspaceIds,
@@ -162,8 +171,21 @@ export function CodeSidebar() {
     (workspace) =>
       selectedWorkspaceIds.includes(workspace.id) &&
       workspace.status !== "creating" &&
-      !isPutAway(workspace),
+      !isPutAway(workspace) &&
+      selectableIds.includes(workspace.id),
   );
+
+  useEffect(() => {
+    const visibleSelection = selectedWorkspaceIds.filter((id) =>
+      selectableIds.includes(id),
+    );
+    if (visibleSelection.length === selectedWorkspaceIds.length) return;
+    const anchor = useCodeUiStore.getState().selectionAnchorId;
+    replaceWorkspaceSelection(
+      visibleSelection,
+      anchor && selectableIds.includes(anchor) ? anchor : null,
+    );
+  }, [selectedWorkspaceIds, selectableIds, replaceWorkspaceSelection]);
 
   function applyPointerSelect(
     workspaceId: string,
@@ -223,7 +245,13 @@ export function CodeSidebar() {
         />
       </nav>
 
-      <div className="flex shrink-0 items-center gap-0.5 px-1 pt-1 pb-1.5">
+      <WorkspaceRailToolbar
+        collapseKeys={collapseKeys}
+        collapsedKeys={collapsedKeys}
+        onCollapsedChange={setCollapsedKeys}
+        onAddRepo={() => setAddRepoOpen(true)}
+        onNewWorkspace={() => startNewWorkspace()}
+      >
         <button
           type="button"
           className={cn(
@@ -239,24 +267,7 @@ export function CodeSidebar() {
         >
           Workspaces
         </button>
-        <RailSettingsMenu />
-        <button
-          type="button"
-          className={RAIL_ICON_BUTTON}
-          aria-label="Add repo"
-          onClick={() => setAddRepoOpen(true)}
-        >
-          <FolderPlus size={15} />
-        </button>
-        <button
-          type="button"
-          className={RAIL_ICON_BUTTON}
-          aria-label="New workspace"
-          onClick={() => startNewWorkspace()}
-        >
-          <Plus size={15} />
-        </button>
-      </div>
+      </WorkspaceRailToolbar>
 
       <div
         className="flex min-h-0 flex-col gap-1"
@@ -297,241 +308,183 @@ export function CodeSidebar() {
             ))}
           </section>
         )}
-        {groups.map((group) => (
-          <div
-            key={group.key}
-            className="flex flex-col gap-1"
-            data-testid={
-              group.key === "local" || group.key.includes(":")
-                ? "rail-origin-group"
-                : undefined
-            }
-            data-origin={
-              group.key === "local" || group.key.includes(":")
-                ? group.key
-                : undefined
-            }
-          >
-            {group.label &&
-              (isWorkspaceStatusRank(group.key) ? (
-                <div className="flex items-center gap-1.5 px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90">
-                  <WorkspaceStatusMark rank={group.key} />
-                  <span className="min-w-0 truncate" title={group.label}>
-                    {group.label} · {group.workspaces.length}
-                  </span>
-                </div>
-              ) : (
-                <div
-                  className="truncate px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90"
-                  title={group.label}
-                >
-                  {group.key === "archived"
-                    ? `${group.label} · ${group.workspaces.length}`
-                    : group.label}
-                </div>
-              ))}
-            {group.workspaces.map((workspace) => {
-              const digest = digests[workspace.id];
-              const pr = digest?.pr_state ?? workspace.pr;
-              const creating = workspace.status === "creating";
-              const selected = selectedWorkspaceIds.includes(workspace.id);
-              const bulk = selected && selectedWorkspaces.length > 1;
-              return (
-                <LiveWorkspaceCard
-                  key={workspace.id}
-                  workspace={workspace}
-                  digest={digest}
-                  session={sessions[workspace.id]}
-                  repoName={
-                    repos.find((repo) => repo.id === workspace.repo_id)
-                      ?.display_name ?? workspace.repo_id
-                  }
-                  active={pathname === `/code/w/${workspace.id}`}
-                  selected={selected}
-                  terminalOpen={
-                    terminalOpen && viewedWorkspaceId === workspace.id
-                  }
-                  density={prefs.density}
-                  visibleMeta={{
-                    // The group header already names the repo in by-repo
-                    // order; the chip would say it twice on every row.
-                    repoChip:
-                      prefs.showRepoChip && prefs.sortMode !== "by-repo",
-                    branch: prefs.showBranch && !creating,
-                  }}
-                  contextMenuLabel={bulk ? "Workspace" : undefined}
-                  commands={
-                    creating
-                      ? []
-                      : bulk
-                        ? workspaceBulkCommands(selectedWorkspaces.length)
-                        : workspaceCommands({
-                            hasPr: Boolean(pr),
-                            archived: isPutAway(workspace),
-                            hasSession: Boolean(sessions[workspace.id]),
-                            attentionPinned:
-                              (
-                                digest?.attention ??
-                                sessions[workspace.id]?.attention
-                              )?.state.type === "manual",
-                            canOpenWorktree,
-                            setupFailed: workspace.status === "setup_failed",
-                          })
-                  }
-                  childSessions={watchChildren(
-                    { childrenByWorkspace },
-                    workspace.id,
-                  )}
-                  stackParent={workspaceStackParent(workspace, workspaces)}
-                  onOpenStackParent={(workspaceId) =>
-                    void navigate({
-                      to: "/code/w/$workspaceId",
-                      params: { workspaceId },
-                      search: workspacePanelSearch(workspaceId),
-                    })
-                  }
-                  onOpen={() => {
-                    if (creating) return;
-                    clearWorkspaceSelection();
-                    void navigate({
-                      to: "/code/w/$workspaceId",
-                      params: { workspaceId: workspace.id },
-                      search: workspacePanelSearch(workspace.id),
+        <WorkspaceRailGroups
+          sections={sections}
+          mode={prefs.sortMode}
+          collapsedKeys={collapsedKeys}
+          onToggle={toggleGroup}
+          renderWorkspace={(workspace) => {
+            const digest = digests[workspace.id];
+            const pr = digest?.pr_state ?? workspace.pr;
+            const creating = workspace.status === "creating";
+            const selected = selectedWorkspaceIds.includes(workspace.id);
+            const bulk = selected && selectedWorkspaces.length > 1;
+            return (
+              <LiveWorkspaceCard
+                key={workspace.id}
+                workspace={workspace}
+                digest={digest}
+                session={sessions[workspace.id]}
+                repoName={
+                  repos.find((repo) => repo.id === workspace.repo_id)
+                    ?.display_name ?? workspace.repo_id
+                }
+                active={pathname === `/code/w/${workspace.id}`}
+                selected={selected}
+                terminalOpen={
+                  terminalOpen && viewedWorkspaceId === workspace.id
+                }
+                density={prefs.density}
+                visibleMeta={{
+                  // The group header already names the repo in by-repo
+                  // order; the chip would say it twice on every row.
+                  repoChip: prefs.showRepoChip && prefs.sortMode !== "by-repo",
+                  branch: prefs.showBranch && !creating,
+                }}
+                contextMenuLabel={bulk ? "Workspace" : undefined}
+                commands={
+                  creating
+                    ? []
+                    : bulk
+                      ? workspaceBulkCommands(selectedWorkspaces.length)
+                      : workspaceCommands({
+                          hasPr: Boolean(pr),
+                          archived: isPutAway(workspace),
+                          hasSession: Boolean(sessions[workspace.id]),
+                          attentionPinned:
+                            (
+                              digest?.attention ??
+                              sessions[workspace.id]?.attention
+                            )?.state.type === "manual",
+                          canOpenWorktree,
+                          setupFailed: workspace.status === "setup_failed",
+                        })
+                }
+                childSessions={watchChildren(
+                  { childrenByWorkspace },
+                  workspace.id,
+                )}
+                stackParent={workspaceStackParent(workspace, workspaces)}
+                onOpenStackParent={(workspaceId) =>
+                  void navigate({
+                    to: "/code/w/$workspaceId",
+                    params: { workspaceId },
+                    search: workspacePanelSearch(workspaceId),
+                  })
+                }
+                onOpen={() => {
+                  if (creating) return;
+                  clearWorkspaceSelection();
+                  void navigate({
+                    to: "/code/w/$workspaceId",
+                    params: { workspaceId: workspace.id },
+                    search: workspacePanelSearch(workspace.id),
+                  });
+                }}
+                onSelectPointer={(event) =>
+                  applyPointerSelect(workspace.id, event)
+                }
+                onMenuOpen={() => {
+                  if (selectedWorkspaceIds.includes(workspace.id)) return;
+                  replaceWorkspaceSelection([workspace.id], workspace.id);
+                }}
+                onOpenChildSession={(sessionId) =>
+                  void navigate({
+                    to: "/code/w/$workspaceId",
+                    params: { workspaceId: workspace.id },
+                    search: {
+                      ...workspacePanelSearch(workspace.id),
+                      task: sessionId,
+                    },
+                  })
+                }
+                onOpenSubagent={(callId) =>
+                  void navigate({
+                    to: "/code/w/$workspaceId",
+                    params: { workspaceId: workspace.id },
+                    search: {
+                      ...workspacePanelSearch(workspace.id),
+                      subagent: callId,
+                    },
+                  })
+                }
+                onWorkflowAction={(
+                  action: WorkspaceWorkflowAction,
+                  currentPr,
+                ) => {
+                  const pr = currentPr;
+                  if (action === "open_pr") {
+                    run("open-pr", {
+                      workspace,
+                      title: digest?.title ?? workspace.title,
+                      pr,
+                      session: sessions[workspace.id],
                     });
-                  }}
-                  onSelectPointer={(event) =>
-                    applyPointerSelect(workspace.id, event)
+                    return;
                   }
-                  onMenuOpen={() => {
-                    if (selectedWorkspaceIds.includes(workspace.id)) return;
-                    replaceWorkspaceSelection([workspace.id], workspace.id);
-                  }}
-                  onOpenChildSession={(sessionId) =>
+                  if (action === "archive") {
+                    run("archive", {
+                      workspace,
+                      title: digest?.title ?? workspace.title,
+                      pr,
+                      session: sessions[workspace.id],
+                    });
+                    return;
+                  }
+                  if (
+                    action === "compose_pr" ||
+                    action === "update_pr" ||
+                    action === "follow_up_pr" ||
+                    action === "sync_branch" ||
+                    action === "resolve_divergence" ||
+                    action === "resolve_local_conflicts"
+                  ) {
+                    const prompt = workspaceActionPrompt(
+                      action,
+                      pr,
+                      workspace.base_ref,
+                    );
+                    if (prompt && !runComposerPrompt(workspace.id, prompt)) {
+                      toast.error("Another agent action is already running");
+                      return;
+                    }
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
-                      search: {
-                        ...workspacePanelSearch(workspace.id),
-                        task: sessionId,
-                      },
-                    })
+                    });
+                    return;
                   }
-                  onOpenSubagent={(callId) =>
+                  if (
+                    action === "open_source" ||
+                    action === "push" ||
+                    action === "create_pr" ||
+                    action === "merge" ||
+                    action === "mark_ready"
+                  ) {
+                    // Local-git stages never arise from the digest-only
+                    // model; the workspace page is where they resolve.
+                    // Merging and readying go there too: decision 42 makes
+                    // both the reader's call, and a card in a rail is the
+                    // wrong place to land a shared branch or open work for
+                    // review from — the header puts the pull request in
+                    // front of them first.
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
-                      search: {
-                        ...workspacePanelSearch(workspace.id),
-                        subagent: callId,
-                      },
-                    })
+                    });
+                    return;
                   }
-                  onWorkflowAction={(
-                    action: WorkspaceWorkflowAction,
-                    currentPr,
-                  ) => {
-                    const pr = currentPr;
-                    if (action === "open_pr") {
-                      run("open-pr", {
-                        workspace,
-                        title: digest?.title ?? workspace.title,
-                        pr,
-                        session: sessions[workspace.id],
-                      });
-                      return;
-                    }
-                    if (action === "archive") {
-                      run("archive", {
-                        workspace,
-                        title: digest?.title ?? workspace.title,
-                        pr,
-                        session: sessions[workspace.id],
-                      });
-                      return;
-                    }
+                  if (!pr) return;
+                  // Same prepared prompt the header control composes; the
+                  // navigation makes the started turn visible.
+                  //
+                  // Fix-errors downloads the failing jobs' logs first, and
+                  // that read takes a second or two the rail cannot show —
+                  // so it navigates first and the turn starts on the
+                  // workspace the reader is already looking at.
+                  if (action === "fix_errors") {
                     if (
-                      action === "compose_pr" ||
-                      action === "update_pr" ||
-                      action === "follow_up_pr" ||
-                      action === "sync_branch" ||
-                      action === "resolve_divergence" ||
-                      action === "resolve_local_conflicts"
-                    ) {
-                      const prompt = workspaceActionPrompt(
-                        action,
-                        pr,
-                        workspace.base_ref,
-                      );
-                      if (prompt && !runComposerPrompt(workspace.id, prompt)) {
-                        toast.error("Another agent action is already running");
-                        return;
-                      }
-                      void navigate({
-                        to: "/code/w/$workspaceId",
-                        params: { workspaceId: workspace.id },
-                      });
-                      return;
-                    }
-                    if (
-                      action === "open_source" ||
-                      action === "push" ||
-                      action === "create_pr" ||
-                      action === "merge" ||
-                      action === "mark_ready"
-                    ) {
-                      // Local-git stages never arise from the digest-only
-                      // model; the workspace page is where they resolve.
-                      // Merging and readying go there too: decision 42 makes
-                      // both the reader's call, and a card in a rail is the
-                      // wrong place to land a shared branch or open work for
-                      // review from — the header puts the pull request in
-                      // front of them first.
-                      void navigate({
-                        to: "/code/w/$workspaceId",
-                        params: { workspaceId: workspace.id },
-                      });
-                      return;
-                    }
-                    if (!pr) return;
-                    // Same prepared prompt the header control composes; the
-                    // navigation makes the started turn visible.
-                    //
-                    // Fix-errors downloads the failing jobs' logs first, and
-                    // that read takes a second or two the rail cannot show —
-                    // so it navigates first and the turn starts on the
-                    // workspace the reader is already looking at.
-                    if (action === "fix_errors") {
-                      if (
-                        useCodeUiStore.getState().composerActionScope !== null
-                      ) {
-                        toast.error("Another agent action is already running");
-                        return;
-                      }
-                      void navigate({
-                        to: "/code/w/$workspaceId",
-                        params: { workspaceId: workspace.id },
-                      });
-                      void fetchFixErrorsLogs(client, workspace.id).then(
-                        (logs) => {
-                          if (
-                            !runComposerPrompt(
-                              workspace.id,
-                              prWorkflowPrompt(action, pr, logs),
-                            )
-                          ) {
-                            toast.error(
-                              "Another agent action is already running",
-                            );
-                          }
-                        },
-                      );
-                      return;
-                    }
-                    if (
-                      !runComposerPrompt(
-                        workspace.id,
-                        prWorkflowPrompt(action, pr),
-                      )
+                      useCodeUiStore.getState().composerActionScope !== null
                     ) {
                       toast.error("Another agent action is already running");
                       return;
@@ -540,40 +493,67 @@ export function CodeSidebar() {
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
                     });
-                  }}
-                  onCommand={(command) => {
-                    if (
-                      bulk &&
-                      (command === "archive" || command === "force-archive")
-                    ) {
-                      runBulk(command, selectedWorkspaces);
-                      return;
-                    }
-                    run(command, {
-                      workspace,
-                      title: digest?.title ?? workspace.title,
-                      pr,
-                      session: sessions[workspace.id],
-                    });
-                  }}
-                />
-              );
-            })}
-          </div>
-        ))}
+                    void fetchFixErrorsLogs(client, workspace.id).then(
+                      (logs) => {
+                        if (
+                          !runComposerPrompt(
+                            workspace.id,
+                            prWorkflowPrompt(action, pr, logs),
+                          )
+                        ) {
+                          toast.error(
+                            "Another agent action is already running",
+                          );
+                        }
+                      },
+                    );
+                    return;
+                  }
+                  if (
+                    !runComposerPrompt(
+                      workspace.id,
+                      prWorkflowPrompt(action, pr),
+                    )
+                  ) {
+                    toast.error("Another agent action is already running");
+                    return;
+                  }
+                  void navigate({
+                    to: "/code/w/$workspaceId",
+                    params: { workspaceId: workspace.id },
+                  });
+                }}
+                onCommand={(command) => {
+                  if (
+                    bulk &&
+                    (command === "archive" || command === "force-archive")
+                  ) {
+                    runBulk(command, selectedWorkspaces);
+                    return;
+                  }
+                  run(command, {
+                    workspace,
+                    title: digest?.title ?? workspace.title,
+                    pr,
+                    session: sessions[workspace.id],
+                  });
+                }}
+              />
+            );
+          }}
+        />
         {repos.length === 0 && (
           <SidebarEmptyAction
             label="Add a repo"
             onClick={() => setAddRepoOpen(true)}
           />
         )}
-        {repos.length > 0 &&
-          groups.every((group) => group.workspaces.length === 0) && (
-            <SidebarEmptyAction
-              label="New workspace"
-              onClick={() => startNewWorkspace()}
-            />
-          )}
+        {repos.length > 0 && sections.length === 0 && (
+          <SidebarEmptyAction
+            label="New workspace"
+            onClick={() => startNewWorkspace()}
+          />
+        )}
       </div>
 
       {dialogs}

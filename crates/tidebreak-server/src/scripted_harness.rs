@@ -100,6 +100,7 @@ struct ScriptedWrite {
 pub struct ScriptedAdapter {
     kind: HarnessKind,
     events: Vec<HarnessEvent>,
+    fresh_approval_refs: bool,
     delay: Duration,
     mid_turn_steering: CapLevel,
     steering_delay: Duration,
@@ -168,6 +169,7 @@ impl ScriptedAdapter {
         Self {
             kind: HarnessKind::ClaudeCode,
             events,
+            fresh_approval_refs: false,
             delay: Duration::ZERO,
             mid_turn_steering: CapLevel::Unsupported,
             steering_delay: Duration::ZERO,
@@ -518,6 +520,7 @@ impl HarnessAdapter for ScriptedAdapter {
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),
+            fresh_approval_refs: self.fresh_approval_refs,
             delay: self.delay,
             mid_turn_steering: self.mid_turn_steering,
             steering_delay: self.steering_delay,
@@ -554,6 +557,7 @@ impl HarnessAdapter for ScriptedAdapter {
 struct ScriptedSession {
     sink: Arc<dyn HarnessEventSink>,
     events: Vec<HarnessEvent>,
+    fresh_approval_refs: bool,
     delay: Duration,
     mid_turn_steering: CapLevel,
     steering_delay: Duration,
@@ -601,6 +605,23 @@ pub struct ScriptedTurnInput {
     pub fast_mode: bool,
     /// How many images rode the protocol.
     pub images: usize,
+}
+
+/// Environment scripts repeat across turns; native request IDs must not.
+fn fresh_approval_events(events: &[HarnessEvent]) -> Vec<HarnessEvent> {
+    let suffix = uuid::Uuid::new_v4();
+    events
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            if let HarnessEvent::ApprovalRequested { harness_ref, .. }
+            | HarnessEvent::ApprovalResolved { harness_ref, .. } = &mut event
+            {
+                harness_ref.call_id = format!("{}-{suffix}", harness_ref.call_id);
+            }
+            event
+        })
+        .collect()
 }
 
 impl ScriptedSession {
@@ -695,9 +716,16 @@ impl HarnessSession for ScriptedSession {
         // idle park timer (decision 0064).
         self.pid
             .set(self.child_pid.map(|pid| pid as u32).filter(|pid| *pid != 0));
+        let turn_events;
+        let events = if self.fresh_approval_refs {
+            turn_events = fresh_approval_events(&self.events);
+            &turn_events
+        } else {
+            &self.events
+        };
         let outcome = if let Some((split, park_ref, waiting_on)) = &self.park_after {
-            let split = (*split).min(self.events.len());
-            match self.play_script(&self.events[..split]).await {
+            let split = (*split).min(events.len());
+            match self.play_script(&events[..split]).await {
                 TurnOutcome::Clean if !self.interrupt.load(Ordering::SeqCst) => {
                     TurnOutcome::Parked {
                         park_ref: park_ref.clone(),
@@ -707,7 +735,7 @@ impl HarnessSession for ScriptedSession {
                 other => other,
             }
         } else {
-            self.play_script(&self.events).await
+            self.play_script(events).await
         };
         if !self.session_long_child {
             self.pid.clear();
@@ -883,6 +911,7 @@ pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
         AgentError::config(format!("{SCRIPT_VAR} is not a valid script: {error}"))
     })?;
     let mut adapter = ScriptedAdapter::new(parsed.events);
+    adapter.fresh_approval_refs = true;
     if parsed.delay_ms > 0 {
         adapter = adapter.with_delay(Duration::from_millis(parsed.delay_ms));
     }
@@ -1095,5 +1124,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, HarnessError::DecisionUnsupported(_)));
+    }
+}
+
+#[cfg(test)]
+mod repeated_script_tests {
+    use super::*;
+    use tidebreak_harness::{ApprovalDecision, HarnessApprovalRef};
+
+    #[test]
+    fn repeated_scripts_use_distinct_matching_approval_refs() {
+        let events = vec![
+            HarnessEvent::ApprovalRequested {
+                harness_ref: HarnessApprovalRef::engine("same-call"),
+                raw: serde_json::Value::Null,
+                kind: None,
+            },
+            HarnessEvent::ApprovalResolved {
+                harness_ref: HarnessApprovalRef::engine("same-call"),
+                decision: ApprovalDecision::Approve,
+            },
+        ];
+        let first = fresh_approval_events(&events);
+        let second = fresh_approval_events(&events);
+        let ids = |events: &[HarnessEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    HarnessEvent::ApprovalRequested { harness_ref, .. }
+                    | HarnessEvent::ApprovalResolved { harness_ref, .. } => {
+                        Some(harness_ref.call_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first_ids = ids(&first);
+        assert_eq!(first_ids[0], first_ids[1]);
+        assert_ne!(first_ids[0], ids(&second)[0]);
+        assert_eq!(ids(&events), ["same-call", "same-call"]);
     }
 }

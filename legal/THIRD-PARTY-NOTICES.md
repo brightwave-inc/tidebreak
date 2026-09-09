@@ -27,9 +27,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 851
-- Desktop UI production packages: 535
-- Distinct license texts: 590
+- Rust crates: 853
+- Desktop UI production packages: 536
+- Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -2000,19 +2000,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/chanced/jsonptr
 - License text: `LICENSE-APACHE` ([L-ae8de7e1b783](#l-ae8de7e1b783)), `LICENSE-MIT` ([L-055a17110636](#l-055a17110636))
 
-### jsonschema 0.52.0
+### jsonschema 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: `LICENSE` ([L-19c8b10a10ca](#l-19c8b10a10ca))
 
-### jsonschema-regex 0.52.1
+### jsonschema-regex 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: not distributed with this package
 
-### jsonschema-value 0.52.1
+### jsonschema-value 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -2982,7 +2982,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/ref-cast
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### referencing 0.52.1
+### referencing 0.53.0
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -3672,7 +3672,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Brendonovich/swift-rs
 - License text: `LICENSE-APACHE` ([L-caeafacc0eaf](#l-caeafacc0eaf)), `LICENSE-MIT` ([L-7593ea50d2d4](#l-7593ea50d2d4))
 
-### symphonia 0.6.0
+### symphonia 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
@@ -3708,7 +3708,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-format-mkv 0.6.0
+### symphonia-format-mkv 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
@@ -3749,6 +3749,18 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/mystor/synstructure
 - License text: `LICENSE` ([L-3a036676ec8c](#l-3a036676ec8c))
+
+### system-configuration 0.7.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/mullvad/system-configuration-rs
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-eefdbe714980](#l-eefdbe714980))
+
+### system-configuration-sys 0.6.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/mullvad/system-configuration-rs
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-eefdbe714980](#l-eefdbe714980))
 
 ### system-deps 6.2.2
 
@@ -3816,43 +3828,43 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/tauri
 - License text: not distributed with this package
 
-### tauri-plugin-deep-link 2.4.9
+### tauri-plugin-deep-link 2.4.10
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-dialog 2.7.2
+### tauri-plugin-dialog 2.7.3
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-fs 2.5.1
+### tauri-plugin-fs 2.5.2
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-notification 2.3.3
+### tauri-plugin-notification 2.4.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-shell 2.3.5
+### tauri-plugin-shell 2.3.6
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-single-instance 2.4.3
+### tauri-plugin-single-instance 2.4.4
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-b7f455413bfe](#l-b7f455413bfe))
 
-### tauri-plugin-updater 2.10.1
+### tauri-plugin-updater 2.11.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
@@ -4031,7 +4043,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml 1.1.4+spec-1.1.0
+### toml 1.1.5+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
@@ -4097,7 +4109,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tower-rs/tower-http
 - License text: `LICENSE` ([L-edd4b164997f](#l-edd4b164997f))
 
-### tower-http 0.7.0
+### tower-http 0.7.1
 
 - License: `MIT`
 - Repository: https://github.com/tower-rs/tower-http
@@ -4145,7 +4157,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tracing
 - License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
 
-### trash 5.2.6
+### trash 5.2.7
 
 - License: `MIT`
 - Repository: https://github.com/ArturKovacs/trash
@@ -5364,19 +5376,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @extend-ai/react-docx 0.8.4
+### @extend-ai/react-docx 0.9.1
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-docx.git
 - License text: `LICENSE` ([L-24fdfac792e0](#l-24fdfac792e0))
 
-### @extend-ai/react-pptx 0.1.2
+### @extend-ai/react-pptx 0.2.0
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-pptx.git
 - License text: `LICENSE` ([L-89aba894e358](#l-89aba894e358))
 
-### @extend-ai/react-xlsx 0.16.2
+### @extend-ai/react-xlsx 0.16.3
 
 - License: `MIT`
 - Repository: git+https://github.com/extend-hq/react-xlsx.git
@@ -5442,7 +5454,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/jridgewell/resolve-uri
 - License text: `LICENSE` ([L-b8778b155bfd](#l-b8778b155bfd))
 
-### @jridgewell/sourcemap-codec 1.5.5
+### @jridgewell/sourcemap-codec 1.6.0
 
 - License: `MIT`
 - Repository: git+https://github.com/jridgewell/sourcemaps.git
@@ -5868,12 +5880,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/virtual-core 3.17.7
-
-- License: `MIT`
-- Repository: git+https://github.com/TanStack/virtual.git
-- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
-
 ### @tanstack/virtual-core 3.17.8
 
 - License: `MIT`
@@ -5940,7 +5946,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react-dom 19.2.5
+### @types/react-dom 19.2.7
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
@@ -6946,6 +6952,12 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/comma-separated-tokens
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
 
+### commander 15.0.0
+
+- License: `MIT`
+- Repository: git+https://github.com/tj/commander.js.git
+- License text: `LICENSE` ([L-4cc9c2af4eb0](#l-4cc9c2af4eb0))
+
 ### commander 2.20.3
 
 - License: `MIT`
@@ -7186,7 +7198,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/101arrowz/fflate
 - License text: `LICENSE` ([L-0a1df3a083d0](#l-0a1df3a083d0))
 
-### framer-motion 13.1.1
+### framer-motion 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion/
@@ -7271,6 +7283,12 @@ License identifiers named across all declared expressions:
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
 ### highlight.js 11.11.1
+
+- License: `BSD-3-Clause`
+- Repository: git://github.com/highlightjs/highlight.js.git
+- License text: `LICENSE` ([L-eabb8d3cadaf](#l-eabb8d3cadaf))
+
+### highlight.js 11.12.0
 
 - License: `BSD-3-Clause`
 - Repository: git://github.com/highlightjs/highlight.js.git
@@ -7384,7 +7402,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/KaTeX/KaTeX.git
 - License text: `LICENSE` ([L-d3c8c167dfa0](#l-d3c8c167dfa0))
 
-### katex 0.18.4
+### katex 0.18.6
 
 - License: `MIT`
 - Repository: https://github.com/KaTeX/KaTeX.git
@@ -7456,7 +7474,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.37.0
+### lucide-react 1.41.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7756,13 +7774,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/monaco-editor
 - License text: `LICENSE` ([L-806766baa900](#l-806766baa900))
 
-### motion 13.1.1
+### motion 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
 - License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
 
-### motion-dom 13.1.1
+### motion-dom 13.2.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
@@ -7954,7 +7972,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/theKashey/react-remove-scroll-bar
 - License text: not distributed with this package
 
-### react-resizable-panels 4.12.3
+### react-resizable-panels 4.12.4
 
 - License: `MIT`
 - Repository: https://github.com/bvaughn/react-resizable-panels.git
@@ -37829,6 +37847,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-eefdbe714980
+
+```
+Copyright (c) 2024 Mullvad VPN AB
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-efbbbcefb4b8

@@ -46,7 +46,7 @@ axum = { workspace = true }
 # driver features come from `tidebreak-core`.
 sea-orm = { workspace = true }
 tokio = { workspace = true }
-tower-http = { version = "=0.7.0", features = ["cors", "fs", "limit"] }
+tower-http = { version = "=0.7.1", features = ["cors", "fs", "limit"] }
 # Chrome computer use: direct CDP over the already-locked workspace websocket stack.
 # `futures-util` reuses futures 0.3.34 from the lockfile and keeps the driver's
 # stream plumbing explicit without pulling a second futures graph.

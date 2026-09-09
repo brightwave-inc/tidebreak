@@ -2170,9 +2170,11 @@ test("source SBOM generation is isolated from production credentials", () => {
   assert.doesNotMatch(sbomJob, /AWS_|DOWNLOADS_|RELEASE_BASE_URL|vars\.|secrets\./);
   assert.match(sbomJob, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
   assert.match(sbomJob, /run: mkdir -p source-sbom/);
+  // Admit 0.24.0 (main) and 0.24.2 (Dependabot). This file is copied from
+  // the base branch, so a pin bump cannot land until both versions match.
   assert.match(
     sbomJob,
-    /uses: anchore\/sbom-action@[0-9a-f]{40} # v0\.24\.0/,
+    /uses: anchore\/sbom-action@[0-9a-f]{40} # v0\.24\.(0|2)/,
   );
   assert.match(sbomJob, /syft-version: v1\.51\.0/);
   assert.match(sbomJob, /format: spdx-json/);

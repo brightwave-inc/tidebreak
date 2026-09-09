@@ -9,6 +9,14 @@ import type {
 } from "../api/types";
 import {
   arrangeWorkspaces,
+  arrangeWorkspaceSections,
+  isWorkspaceSortMode,
+  visibleWorkspaceGroups,
+  workspaceCollapseKeys,
+  workspaceGroupCollapseKey,
+  workspaceSourceCollapseKey,
+  WORKSPACE_SORT_MODES,
+  WORKSPACE_SORT_MODE_LABELS,
   formatCompactAge,
   groupWorkspacesByRepo,
   listArchivedWorkspaces,
@@ -298,7 +306,7 @@ describe("arrangeWorkspaces", () => {
     ).toEqual(["needs_you", "idle"]);
   });
 
-  it("groups Slack DM and channel sessions apart from local ones", () => {
+  it("keeps subgroup metadata when flattening Local and Slack sources", () => {
     const rows = [
       workspace("ws-local", "app", "active", "2026-08-14T00:00:00.000Z"),
       workspace("ws-dm", "app", "active", "2026-08-16T00:00:00.000Z"),
@@ -322,10 +330,286 @@ describe("arrangeWorkspaces", () => {
         group.workspaces.map((item) => item.id),
       ]),
     ).toEqual([
-      ["local", "Local", ["ws-local"]],
-      ["slack:channel", "Slack channel", ["ws-channel"]],
-      ["slack:dm", "Slack DM", ["ws-dm"]],
+      ["created", null, ["ws-local"]],
+      ["created", null, ["ws-channel", "ws-dm"]],
     ]);
+  });
+});
+
+describe("arrangeWorkspaceSections", () => {
+  const repos = [repo("lib"), repo("app")];
+  const rows = [
+    workspace("ws-channel", "app", "active", "2026-08-17T00:00:00.000Z"),
+    workspace("ws-local-new", "app", "active", "2026-08-17T00:00:00.000Z"),
+    workspace("ws-dm", "lib", "active", "2026-08-16T00:00:00.000Z"),
+    workspace("ws-local-old", "app", "active", "2026-08-14T00:00:00.000Z"),
+    workspace("ws-dm-old", "app", "active", "2026-08-14T00:00:00.000Z"),
+    workspace("ws-archived", "app", "archived"),
+    workspace("ws-released", "lib", "released"),
+  ];
+  const sessions = {
+    "ws-channel": sessionOn("ws-channel", {
+      channel_kind: "slack",
+      external_key: "T0400000:C0812345:1724900000.123456",
+    }),
+    "ws-dm": sessionOn("ws-dm", {
+      channel_kind: "slack",
+      external_key: "T0400000:D0898765:dm2",
+    }),
+    "ws-dm-old": sessionOn("ws-dm-old", {
+      channel_kind: "slack",
+      external_key: "T0400000:D0898765:dm1",
+    }),
+    "ws-archived": sessionOn("ws-archived", {
+      channel_kind: "another_source",
+      external_key: "archived",
+    }),
+  };
+  const digests = {
+    "ws-local-new": digest("ws-local-new", { lifecycle: "running" }),
+    "ws-dm": digest("ws-dm", { lifecycle: "running" }),
+  };
+
+  it("keeps repository headings inside Local and a shared Slack section", () => {
+    const sections = arrangeWorkspaceSections(
+      "by-repo",
+      repos,
+      rows,
+      {},
+      sessions,
+    );
+    expect(
+      sections.map((section) => [
+        section.key,
+        section.label,
+        section.groups.map((group) => [
+          group.key,
+          group.label,
+          group.repoId,
+          idsOf([group]),
+        ]),
+      ]),
+    ).toEqual([
+      [
+        "local",
+        "Local",
+        [["app", "app", "app", ["ws-local-old", "ws-local-new"]]],
+      ],
+      [
+        "slack",
+        "Slack",
+        [
+          ["lib", "lib", "lib", ["ws-dm"]],
+          ["app", "app", "app", ["ws-dm-old", "ws-channel"]],
+        ],
+      ],
+    ]);
+    expect(arrangeWorkspaces("by-repo", repos, rows, {}, sessions)).toEqual(
+      sections.flatMap((section) => section.groups),
+    );
+  });
+
+  it("keeps status headings and rank order inside each source", () => {
+    const sections = arrangeWorkspaceSections(
+      "by-status",
+      repos,
+      rows,
+      digests,
+      sessions,
+    );
+    expect(
+      sections.map((section) => [
+        section.label,
+        section.groups.map((group) => [group.label, idsOf([group])]),
+      ]),
+    ).toEqual([
+      [
+        "Local",
+        [
+          ["Running", ["ws-local-new"]],
+          ["Idle", ["ws-local-old"]],
+        ],
+      ],
+      [
+        "Slack",
+        [
+          ["Running", ["ws-dm"]],
+          ["Idle", ["ws-channel", "ws-dm-old"]],
+        ],
+      ],
+    ]);
+  });
+
+  it("keeps row order when catalog and session insertion order changes", () => {
+    for (const mode of ["by-repo", "by-status"] as const) {
+      const original = arrangeWorkspaceSections(
+        mode,
+        repos,
+        rows,
+        digests,
+        sessions,
+      );
+      const reordered = arrangeWorkspaceSections(
+        mode,
+        repos,
+        [...rows].reverse(),
+        Object.fromEntries(Object.entries(digests).reverse()),
+        Object.fromEntries(Object.entries(sessions).reverse()),
+      );
+      expect(reordered).toEqual(original);
+    }
+  });
+
+  it("omits empty and archived-only sources", () => {
+    for (const mode of ["by-repo", "by-status", "by-created"] as const) {
+      expect(arrangeWorkspaceSections(mode, repos, [], {}, sessions)).toEqual(
+        [],
+      );
+      expect(
+        arrangeWorkspaceSections(
+          mode,
+          repos,
+          rows.filter(
+            (row) => row.status === "archived" || row.status === "released",
+          ),
+          {},
+          sessions,
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  it("labels future source kinds without exposing identifier separators", () => {
+    const sections = arrangeWorkspaceSections(
+      "by-repo",
+      repos,
+      [workspace("ws-other", "app")],
+      {},
+      {
+        "ws-other": sessionOn("ws-other", {
+          channel_kind: "team_chat",
+          external_key: "thread",
+        }),
+      },
+    );
+    expect(sections.map(({ key, label }) => ({ key, label }))).toEqual([
+      { key: "team_chat", label: "Team chat" },
+    ]);
+  });
+
+  it("collapses each source and subgroup independently", () => {
+    const sections = arrangeWorkspaceSections(
+      "by-repo",
+      repos,
+      rows,
+      {},
+      sessions,
+    );
+    const localGroup = workspaceGroupCollapseKey("local", "by-repo", "app");
+    const slackGroup = workspaceGroupCollapseKey("slack", "by-repo", "app");
+    const slackSource = workspaceSourceCollapseKey("slack");
+    expect(workspaceCollapseKeys(sections, "by-repo")).toEqual([
+      "source:local",
+      "local:by-repo:app",
+      "source:slack",
+      "slack:by-repo:lib",
+      "slack:by-repo:app",
+    ]);
+    expect(
+      idsOf(visibleWorkspaceGroups(sections, "by-repo", [localGroup])),
+    ).toEqual(["ws-dm", "ws-dm-old", "ws-channel"]);
+    expect(
+      idsOf(visibleWorkspaceGroups(sections, "by-repo", [slackGroup])),
+    ).toEqual(["ws-local-old", "ws-local-new", "ws-dm"]);
+    const collapsed = [slackGroup, slackSource];
+    expect(
+      idsOf(visibleWorkspaceGroups(sections, "by-repo", collapsed)),
+    ).toEqual(["ws-local-old", "ws-local-new"]);
+    expect(
+      idsOf(
+        visibleWorkspaceGroups(
+          sections,
+          "by-repo",
+          collapsed.filter((key) => key !== slackSource),
+        ),
+      ),
+    ).toEqual(["ws-local-old", "ws-local-new", "ws-dm"]);
+    expect(
+      visibleWorkspaceGroups(
+        sections,
+        "by-repo",
+        workspaceCollapseKeys(sections, "by-repo"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not apply a repository collapse choice to a status group", () => {
+    const statusSections = arrangeWorkspaceSections(
+      "by-status",
+      repos,
+      rows,
+      digests,
+      sessions,
+    );
+    expect(
+      visibleWorkspaceGroups(statusSections, "by-status", [
+        workspaceGroupCollapseKey("slack", "by-repo", "idle"),
+      ]),
+    ).toEqual(statusSections.flatMap((section) => section.groups));
+  });
+
+  it("ignores a saved source collapse when only one source remains", () => {
+    const slackRows = rows.filter(
+      (row) =>
+        sessions[row.id as keyof typeof sessions]?.external_origin
+          ?.channel_kind === "slack",
+    );
+    const sections = arrangeWorkspaceSections(
+      "by-repo",
+      repos,
+      slackRows,
+      {},
+      sessions,
+    );
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.key).toBe("slack");
+    expect(workspaceCollapseKeys(sections, "by-repo")).toEqual([
+      "slack:by-repo:lib",
+      "slack:by-repo:app",
+    ]);
+    expect(
+      idsOf(visibleWorkspaceGroups(sections, "by-repo", ["source:slack"])),
+    ).toEqual(["ws-dm", "ws-dm-old", "ws-channel"]);
+  });
+
+  it("does not collapse compatibility groups without a heading", () => {
+    const sections = arrangeWorkspaceSections(
+      "by-created",
+      repos,
+      rows,
+      {},
+      sessions,
+    );
+    expect(workspaceCollapseKeys(sections, "by-created")).toEqual([
+      "source:local",
+      "source:slack",
+    ]);
+    expect(
+      visibleWorkspaceGroups(sections, "by-created", [
+        "local:by-created:created",
+      ]),
+    ).toEqual(sections.flatMap((section) => section.groups));
+  });
+});
+
+describe("workspace grouping settings", () => {
+  it("offers only Repository and Status and rejects a saved Created setting", () => {
+    expect(
+      WORKSPACE_SORT_MODES.map((mode) => WORKSPACE_SORT_MODE_LABELS[mode]),
+    ).toEqual(["Repository", "Status"]);
+    expect(isWorkspaceSortMode("by-repo")).toBe(true);
+    expect(isWorkspaceSortMode("by-status")).toBe(true);
+    expect(isWorkspaceSortMode("by-created")).toBe(false);
   });
 });
 

@@ -8,10 +8,6 @@ import type {
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
 import {
-  sessionOriginGroupLabel,
-  slackConversationKind,
-} from "./SessionOriginBanner";
-import {
   prCompactStatusLabel,
   pullRequestLifecycle,
   type PrStateInput,
@@ -79,13 +75,12 @@ export type WorkspaceSortMode = "by-repo" | "by-status" | "by-created";
 export const WORKSPACE_SORT_MODES: readonly WorkspaceSortMode[] = [
   "by-repo",
   "by-status",
-  "by-created",
 ];
 
 export const WORKSPACE_SORT_MODE_LABELS: Record<WorkspaceSortMode, string> = {
-  "by-repo": "By repo",
-  "by-status": "By status",
-  "by-created": "By created",
+  "by-repo": "Repository",
+  "by-status": "Status",
+  "by-created": "Created",
 };
 
 export function isWorkspaceSortMode(value: string): value is WorkspaceSortMode {
@@ -302,15 +297,41 @@ export type ArrangedWorkspaceGroup = {
   workspaces: CodeWorkspaceSnapshot[];
 };
 
+export type WorkspaceSourceSection = {
+  key: string;
+  label: string;
+  groups: ArrangedWorkspaceGroup[];
+};
+
 /**
- * The one function the rail reads. Ordering is a pure function of created_at,
- * repo catalog order, and status rank — never catalog array order or digest
- * insertion order.
- *
- * Archived workspaces are always off the rail. Their full catalog lives on
- * the dedicated Archive page, so put-away work never interleaves with live
- * triage.
+ * Group live workspaces by source, then by repository or status. Local comes
+ * first; Slack channels and DMs share one source. Each source keeps the same
+ * repository, status, and creation order as a rail with only local work.
  */
+export function arrangeWorkspaceSections(
+  mode: WorkspaceSortMode,
+  repos: readonly CodeRepoSnapshot[],
+  workspaces: readonly CodeWorkspaceSnapshot[],
+  digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
+  sessions: Readonly<Record<string, CodeSessionSnapshot | undefined>> = {},
+): WorkspaceSourceSection[] {
+  const buckets = new Map<string, CodeWorkspaceSnapshot[]>();
+  for (const workspace of workspaces) {
+    if (isPutAway(workspace)) continue;
+    const key =
+      sessions[workspace.id]?.external_origin?.channel_kind ?? "local";
+    const listed = buckets.get(key);
+    if (listed) listed.push(workspace);
+    else buckets.set(key, [workspace]);
+  }
+  return orderedSourceKeys(buckets.keys()).map((key) => ({
+    key,
+    label: sourceLabel(key),
+    groups: arrangeLiveWorkspaces(mode, repos, buckets.get(key) ?? [], digests),
+  }));
+}
+
+/** Flatten sources in display order while preserving their group metadata. */
 export function arrangeWorkspaces(
   mode: WorkspaceSortMode,
   repos: readonly CodeRepoSnapshot[],
@@ -318,56 +339,72 @@ export function arrangeWorkspaces(
   digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
   sessions: Readonly<Record<string, CodeSessionSnapshot | undefined>> = {},
 ): ArrangedWorkspaceGroup[] {
-  const live = workspaces.filter((workspace) => !isPutAway(workspace));
-  const originKeys = new Set(
-    live.map((workspace) => originGroupKey(sessions[workspace.id])),
-  );
-  const usesOriginGroups =
-    originKeys.size > 1 || (originKeys.size === 1 && !originKeys.has("local"));
-  if (!usesOriginGroups) {
-    return arrangeLiveWorkspaces(mode, repos, workspaces, digests);
-  }
-  const buckets = new Map<string, CodeWorkspaceSnapshot[]>();
-  for (const workspace of live) {
-    const key = originGroupKey(sessions[workspace.id]);
-    const listed = buckets.get(key);
-    if (listed) listed.push(workspace);
-    else buckets.set(key, [workspace]);
-  }
-  const groups: ArrangedWorkspaceGroup[] = [];
-  for (const key of orderedOriginKeys(buckets.keys())) {
-    const listed = buckets.get(key);
-    if (!listed || listed.length === 0) continue;
-    groups.push({
-      key,
-      label: originGroupHeader(key, sessions[listed[0]!.id]),
-      workspaces: arrangeLiveWorkspaces(mode, repos, listed, digests).flatMap(
-        (group) => group.workspaces,
-      ),
-    });
-  }
-  return groups;
+  return arrangeWorkspaceSections(
+    mode,
+    repos,
+    workspaces,
+    digests,
+    sessions,
+  ).flatMap((section) => section.groups);
 }
 
-function originGroupKey(session: CodeSessionSnapshot | undefined): string {
-  const origin = session?.external_origin;
-  if (!origin) return "local";
-  return `${origin.channel_kind}:${slackConversationKind(origin.external_key)}`;
+export function workspaceSourceCollapseKey(sectionKey: string): string {
+  return `source:${sectionKey}`;
 }
 
-function originGroupHeader(
-  key: string,
-  session: CodeSessionSnapshot | undefined,
+export function workspaceGroupCollapseKey(
+  sectionKey: string,
+  mode: WorkspaceSortMode,
+  groupKey: string,
 ): string {
-  if (key === "local") return "Local";
-  if (session?.external_origin) {
-    return sessionOriginGroupLabel(session.external_origin);
-  }
-  return key;
+  return `${sectionKey}:${mode}:${groupKey}`;
 }
 
-function orderedOriginKeys(keys: Iterable<string>): string[] {
+/** Only visible headings participate in collapse-all and expand-all. */
+export function workspaceCollapseKeys(
+  sections: readonly WorkspaceSourceSection[],
+  mode: WorkspaceSortMode,
+): string[] {
+  return sections.flatMap((section) => [
+    ...(sections.length > 1 ? [workspaceSourceCollapseKey(section.key)] : []),
+    ...section.groups
+      .filter((group) => group.label !== null)
+      .map((group) => workspaceGroupCollapseKey(section.key, mode, group.key)),
+  ]);
+}
+
+/** Match visible rows for rendering, selection, and keyboard navigation. */
+export function visibleWorkspaceGroups(
+  sections: readonly WorkspaceSourceSection[],
+  mode: WorkspaceSortMode,
+  collapsedKeys: readonly string[],
+): ArrangedWorkspaceGroup[] {
+  const collapsed = new Set(collapsedKeys);
+  return sections.flatMap((section) => {
+    if (
+      sections.length > 1 &&
+      collapsed.has(workspaceSourceCollapseKey(section.key))
+    ) {
+      return [];
+    }
+    return section.groups.filter(
+      (group) =>
+        group.label === null ||
+        !collapsed.has(workspaceGroupCollapseKey(section.key, mode, group.key)),
+    );
+  });
+}
+
+function sourceLabel(key: string): string {
+  if (key === "local") return "Local";
+  if (key === "slack") return "Slack";
+  const words = key.replace(/[-_:]+/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function orderedSourceKeys(keys: Iterable<string>): string[] {
   return [...keys].sort((left, right) => {
+    if (left === right) return 0;
     if (left === "local") return -1;
     if (right === "local") return 1;
     return left.localeCompare(right);

@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
@@ -145,6 +145,10 @@ const app: AppContextValue = {
   restartForUpdate: async () => {},
 };
 
+beforeEach(() => {
+  useCodeUiStore.setState({ collapsedWorkspaceGroups: [] });
+});
+
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
@@ -155,6 +159,9 @@ afterEach(() => {
     railPrefs: DEFAULT_RAIL_PREFS,
     selectedWorkspaceIds: [],
     selectionAnchorId: null,
+    addRepoOpen: false,
+    newWorkspaceOpen: false,
+    newWorkspaceRepoId: undefined,
   });
   window.localStorage.clear();
 });
@@ -253,8 +260,7 @@ describe("CodeSidebar", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Work" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
-    // One header over one list: the by-repo group header is a label, and the
-    // three actions beside "Workspaces" are the whole toolbar.
+    // The repository heading remains below the workspace action toolbar.
     expect(await screen.findByTitle("app")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Workspaces" }),
@@ -306,6 +312,34 @@ describe("CodeSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["Add repo", "Add a repo"],
+    ["New workspace", "New workspace"],
+  ])(
+    "opens the %s dialog from the workspace toolbar",
+    async (buttonName, dialogName) => {
+      await renderWithRouter(
+        <AppContextProvider value={app}>
+          <CodeSidebar />
+        </AppContextProvider>,
+        { initialUrl: "/code" },
+      );
+      await screen.findByRole("button", { name: /^Fix login/ });
+      const toolbar = screen.getByRole("toolbar", {
+        name: "Workspace actions",
+      });
+      const button = within(toolbar).getByRole("button", { name: buttonName });
+      expect(button).toBeVisible();
+      fireEvent.click(button);
+      const dialog = await screen.findByRole("dialog", { name: dialogName });
+      expect(dialog).toBeVisible();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: dialogName })).toBeNull(),
+      );
+    },
+  );
+
   it("re-sorts and persists from the settings popover", async () => {
     await renderWithRouter(
       <AppContextProvider value={app}>
@@ -318,18 +352,29 @@ describe("CodeSidebar", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Workspace list settings" }),
     );
-    fireEvent.click(await screen.findByRole("radio", { name: "By created" }));
+    const grouping = await screen.findByRole("radiogroup", {
+      name: "Group workspaces",
+    });
+    expect(
+      within(grouping)
+        .getAllByRole("radio")
+        .map((radio) => radio.textContent),
+    ).toEqual(["Repository", "Status"]);
+    fireEvent.click(within(grouping).getByRole("radio", { name: "Status" }));
 
-    // By-created has no group headers, so the repo label goes away and the
-    // card grows its repo chip back.
     await waitFor(() =>
-      expect(screen.queryByTitle("app")).not.toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: "Idle, 1 workspace" }),
+      ).toBeInTheDocument(),
     );
+    expect(
+      screen.queryByRole("button", { name: "app, 1 workspace" }),
+    ).not.toBeInTheDocument();
     expect(
       JSON.parse(
         window.localStorage.getItem("tidebreak.code-rail-prefs") ?? "{}",
       ),
-    ).toMatchObject({ sortMode: "by-created" });
+    ).toMatchObject({ sortMode: "by-status" });
   });
 
   it("opens the workspace context menu from the keyboard and gives focus back", async () => {
@@ -656,94 +701,138 @@ describe("CodeSidebar", () => {
     );
   });
 
-  it("groups local, Slack DM, and Slack channel sessions as three named origins", async () => {
-    client.listCodeWorkspaces.mockResolvedValueOnce([
-      {
-        id: "ws-local",
-        repo_id: "repo-1",
-        title: "Local thread",
-        worktree_path: "/tmp/app/.worktrees/local",
-        branch_name: "tidebreak/local",
-        base_ref: "main",
-        status: "active" as const,
-        created_at: "2026-08-15T00:00:00.000Z",
-      },
-      {
-        id: "ws-dm",
-        repo_id: "repo-1",
-        title: "Slack DM thread",
-        worktree_path: "/tmp/app/.worktrees/dm",
-        branch_name: "tidebreak/dm",
-        base_ref: "main",
-        status: "active" as const,
-        created_at: "2026-08-16T00:00:00.000Z",
-      },
-      {
-        id: "ws-channel",
-        repo_id: "repo-1",
-        title: "Slack channel thread",
-        worktree_path: "/tmp/app/.worktrees/channel",
-        branch_name: "tidebreak/channel",
-        base_ref: "main",
-        status: "active" as const,
-        created_at: "2026-08-17T00:00:00.000Z",
-      },
-    ]);
-    const idle = {
-      visibility: "private" as const,
-      kind: "interactive" as const,
-      harness_kind: "claude_code" as const,
-      execution_location: "machine" as const,
-      permission_mode: "ask" as const,
-      fast_mode: false,
-      lifecycle: "idle" as const,
-      attention: {
-        state: { type: "working" as const },
-        source: "lifecycle" as const,
-      },
-      unrecognized_event_count: 0,
-      created_at: "2026-08-15T00:00:00.000Z",
-    };
-    useCodeCatalogStore.getState().rememberSession({
-      ...idle,
-      id: "sess-local",
-      workspace_id: "ws-local",
-    });
-    useCodeCatalogStore.getState().rememberSession({
-      ...idle,
-      id: "sess-dm",
-      workspace_id: "ws-dm",
-      external_origin: {
-        channel_kind: "slack",
-        external_key: "T0400000:D0898765:dm2",
-      },
-    });
-    useCodeCatalogStore.getState().rememberSession({
-      ...idle,
-      id: "sess-channel",
-      workspace_id: "ws-channel",
-      external_origin: {
-        channel_kind: "slack",
-        external_key: "T0400000:C0812345:1724900000.123456",
-      },
-    });
-
+  it("keeps repository and status headings within Local and Slack", async () => {
+    seedMixedSources();
     await renderWithRouter(
       <AppContextProvider value={app}>
         <CodeSidebar />
       </AppContextProvider>,
       { initialUrl: "/code" },
     );
+    const local = await screen.findByRole("region", { name: "Local" });
+    const slack = screen.getByRole("region", { name: "Slack" });
+    expect(local).toHaveAttribute("data-rail-section", "source:local");
+    expect(slack).toHaveAttribute("data-rail-section", "source:slack");
+    expect(
+      within(local)
+        .getByRole("button", { name: "app, 1 workspace" })
+        .closest("h3"),
+    ).toBeInTheDocument();
+    expect(
+      within(local).getByRole("button", { name: "app, 1 workspace" }),
+    ).toBeInTheDocument();
+    expect(
+      within(local).getByRole("button", { name: "lib, 1 workspace" }),
+    ).toBeInTheDocument();
+    expect(
+      within(slack).getByRole("button", { name: "app, 2 workspaces" }),
+    ).toBeInTheDocument();
+    expect(
+      within(slack).getByRole("button", { name: /^Slack DM thread/ }),
+    ).toBeVisible();
+    expect(
+      within(slack).getByRole("button", { name: /^Slack channel thread/ }),
+    ).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Slack DM" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Slack channel" })).toBeNull();
 
-    const groups = await screen.findAllByTestId("rail-origin-group");
-    expect(groups.map((group) => group.getAttribute("data-origin"))).toEqual([
-      "local",
-      "slack:channel",
-      "slack:dm",
+    fireEvent.click(
+      screen.getByRole("button", { name: "Workspace list settings" }),
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: "Status" }));
+    expect(
+      within(local).getByRole("button", { name: "Idle, 2 workspaces" }),
+    ).toBeInTheDocument();
+    expect(
+      within(slack).getByRole("button", { name: "Idle, 2 workspaces" }),
+    ).toBeInTheDocument();
+    expect(
+      within(local).queryByRole("button", { name: "app, 1 workspace" }),
+    ).toBeNull();
+    expect(
+      within(slack).queryByRole("button", { name: "app, 2 workspaces" }),
+    ).toBeNull();
+  });
+
+  it("preserves a folded child when its source reopens and supports expand all", async () => {
+    seedMixedSources();
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    const slack = await screen.findByRole("region", { name: "Slack" });
+    const subgroup = within(slack).getByRole("button", {
+      name: "app, 2 workspaces",
+    });
+    const source = within(slack).getByRole("button", {
+      name: "Slack, 2 workspaces",
+    });
+    fireEvent.click(subgroup);
+    expect(subgroup).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("button", { name: /^Slack DM thread/ }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: /^Local thread/ })).toBeVisible();
+    fireEvent.click(source);
+    expect(source).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(source);
+    expect(source).toHaveAttribute("aria-expanded", "true");
+    expect(subgroup).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("button", { name: /^Slack DM thread/ }),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse all groups" }),
+    );
+    expect(screen.queryByRole("button", { name: /^Local thread/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Expand all groups" }));
+    expect(screen.getByRole("button", { name: /^Local thread/ })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /^Slack DM thread/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /^Slack channel thread/ }),
+    ).toBeVisible();
+    expect(useCodeUiStore.getState().collapsedWorkspaceGroups).toEqual([]);
+  });
+
+  it("skips folded workspaces in select all and shift-click ranges", async () => {
+    seedMixedSources();
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    const local = await screen.findByRole("region", { name: "Local" });
+    fireEvent.click(
+      within(local).getByRole("button", { name: "lib, 1 workspace" }),
+    );
+    const first = screen.getByRole("button", { name: /^Local thread/ });
+    const last = screen.getByRole("button", { name: /^Slack channel thread/ });
+    expect(
+      screen.queryByRole("button", { name: /^Hidden local thread/ }),
+    ).toBeNull();
+
+    fireEvent.keyDown(first, { key: "a", ctrlKey: true });
+    expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([
+      "ws-local",
+      "ws-dm",
+      "ws-channel",
     ]);
-    expect(screen.getByText("Local")).toBeInTheDocument();
-    expect(screen.getByText("Slack DM")).toBeInTheDocument();
-    expect(screen.getByText("Slack channel")).toBeInTheDocument();
+    fireEvent.keyDown(first, { key: "Escape" });
+    expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([]);
+    fireEvent.click(first, { metaKey: true });
+    fireEvent.click(last, { shiftKey: true });
+    expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([
+      "ws-local",
+      "ws-dm",
+      "ws-channel",
+    ]);
+    expect(router.state.location.pathname).toBe("/code");
   });
 
   it("opens and clears selection on an unmodified click", async () => {
@@ -763,3 +852,84 @@ describe("CodeSidebar", () => {
     expect(card).not.toHaveAttribute("aria-selected");
   });
 });
+
+function seedMixedSources() {
+  const repos = [
+    {
+      id: "repo-1",
+      root_path: "/tmp/app",
+      display_name: "app",
+      default_base_ref: "main",
+      branch_prefix: "tidebreak",
+      quick_actions: [],
+      created_at: "2026-08-15T00:00:00.000Z",
+    },
+    {
+      id: "repo-2",
+      root_path: "/tmp/lib",
+      display_name: "lib",
+      default_base_ref: "main",
+      branch_prefix: "tidebreak",
+      quick_actions: [],
+      created_at: "2026-08-15T00:00:00.000Z",
+    },
+  ];
+  client.listCodeRepos.mockResolvedValueOnce(repos);
+  client.listCodeWorkspaces.mockResolvedValueOnce(
+    [
+      {
+        id: "ws-local",
+        repo_id: "repo-1",
+        title: "Local thread",
+        branch_name: "tidebreak/local",
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-hidden",
+        repo_id: "repo-2",
+        title: "Hidden local thread",
+        branch_name: "tidebreak/hidden",
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-dm",
+        repo_id: "repo-1",
+        title: "Slack DM thread",
+        branch_name: "tidebreak/dm",
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+      {
+        id: "ws-channel",
+        repo_id: "repo-1",
+        title: "Slack channel thread",
+        branch_name: "tidebreak/channel",
+        created_at: "2026-08-17T00:00:00.000Z",
+      },
+    ].map((workspace) => ({
+      ...workspace,
+      worktree_path: `/tmp/${workspace.id}`,
+      base_ref: "main",
+      status: "active" as const,
+    })),
+  );
+  for (const [workspaceId, externalKey] of [
+    ["ws-dm", "T0400000:D0898765:dm2"],
+    ["ws-channel", "T0400000:C0812345:1724900000.123456"],
+  ] as const) {
+    useCodeCatalogStore.getState().rememberSession({
+      visibility: "private",
+      id: `sess-${workspaceId}`,
+      workspace_id: workspaceId,
+      kind: "interactive",
+      harness_kind: "claude_code",
+      execution_location: "machine",
+      permission_mode: "ask",
+      fast_mode: false,
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+      external_origin: { channel_kind: "slack", external_key: externalKey },
+    });
+  }
+}

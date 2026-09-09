@@ -19,14 +19,7 @@ import {
   WORKSPACE_SORT_MODES,
 } from "./workspaceCards";
 
-/**
- * The rail's one settings surface: order, density, and card metadata.
- *
- * A popover with real controls, not a menu: sort and density are radio
- * choices and the meta rows are switches, none of which a `DropdownMenu`
- * models without faking. Every control writes through `setRailPrefs`, so a
- * choice made here is the choice every window opens with.
- */
+/** Grouping, density, and card metadata share one settings popover. */
 
 const SORT_OPTIONS: readonly SegmentedOption<CodeRailPrefs["sortMode"]>[] =
   WORKSPACE_SORT_MODES.map((mode) => ({
@@ -40,9 +33,17 @@ const DENSITY_OPTIONS: readonly SegmentedOption<CodeRailPrefs["density"]>[] =
     label: CARD_DENSITY_LABELS[density],
   }));
 
-export function RailSettingsMenu() {
-  const prefs = useCodeUiStore((state) => state.railPrefs);
-  const setRailPrefs = useCodeUiStore((state) => state.setRailPrefs);
+export function RailSettingsMenu({
+  prefs: suppliedPrefs,
+  onPrefsChange,
+}: {
+  prefs?: CodeRailPrefs;
+  onPrefsChange?: (patch: Partial<CodeRailPrefs>) => void;
+} = {}) {
+  const storedPrefs = useCodeUiStore((state) => state.railPrefs);
+  const setStoredPrefs = useCodeUiStore((state) => state.setRailPrefs);
+  const prefs = suppliedPrefs ?? storedPrefs;
+  const setRailPrefs = onPrefsChange ?? setStoredPrefs;
 
   return (
     <Popover>
@@ -63,10 +64,10 @@ export function RailSettingsMenu() {
       >
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-muted-foreground">
-            Sort
+            Group by
           </span>
           <SegmentedControl
-            aria-label="Sort workspaces"
+            aria-label="Group workspaces"
             value={prefs.sortMode}
             onValueChange={(sortMode) => setRailPrefs({ sortMode })}
             options={SORT_OPTIONS}
