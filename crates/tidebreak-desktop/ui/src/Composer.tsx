@@ -89,6 +89,7 @@ import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import type { ImportedDocument } from "@/documents";
 import type { PluginInfo } from "./api";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
+import { usesCommandModifier } from "./ShellShortcuts";
 import { useUiStore } from "./UiStore";
 import type { ConnectedFolder } from "./host";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
@@ -118,16 +119,26 @@ type ComposerKeyEvent = Pick<
   | "shiftKey"
 >;
 
-export function shouldSubmitComposerKey(event: ComposerKeyEvent): boolean {
+function isComposerEnter(event: ComposerKeyEvent): boolean {
   return (
     event.key === "Enter" &&
     !event.shiftKey &&
-    !event.ctrlKey &&
     !event.altKey &&
-    !event.metaKey &&
     !event.isComposing &&
     event.keyCode !== 229
   );
+}
+
+export function shouldSubmitComposerKey(event: ComposerKeyEvent): boolean {
+  return isComposerEnter(event) && !event.ctrlKey && !event.metaKey;
+}
+
+/**
+ * Cmd/Ctrl+Enter steers an active turn immediately, even when Enter queues.
+ * Either modifier is accepted on every platform so the chord cannot miss.
+ */
+export function shouldSteerComposerKey(event: ComposerKeyEvent): boolean {
+  return isComposerEnter(event) && (event.metaKey || event.ctrlKey);
 }
 
 export function shouldRestoreComposerFocus(
@@ -382,7 +393,8 @@ export type ComposerProps = {
   /**
    * Queue the draft to run as its own turn after the active one finishes.
    * Absent when the surface has no queue (e.g. a chat that does not exist
-   * yet); then a mid-turn Enter steers as before.
+   * yet); then a mid-turn Enter steers as before. Cmd/Ctrl+Enter always
+   * steers when a turn is active, even when this is present.
    */
   onQueue?: () => Promise<void>;
   onStop: () => Promise<void>;
@@ -476,6 +488,11 @@ export function Composer({
   const active = busy && activeTurnId !== null;
   const sendMode = useUiStore((state) => state.activeTurnSendMode);
   const queueAvailable = onQueue !== undefined;
+  const willQueue = queueAvailable && sendMode === "queue";
+  const command = usesCommandModifier(
+    typeof navigator === "undefined" ? "" : navigator.userAgent,
+  );
+  const modEnter = command ? "⌘Enter" : "Ctrl+Enter";
   const submissionText = messageWithPastedText(draft, pastedTexts?.items ?? []);
   const hasDraft = Boolean(submissionText.trim());
   const steerHasUnsupportedCharacter = active && submissionText.includes("\0");
@@ -672,7 +689,13 @@ export function Composer({
       setMentionHighlight(moved);
       return true;
     }
-    if (event.key === "Enter" || event.key === "Tab") {
+    if (
+      event.key === "Tab" ||
+      (event.key === "Enter" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey)
+    ) {
       const row = mentionMatches[mentionIndex];
       if (row && mentionToken) {
         setMentionToken(null);
@@ -811,7 +834,13 @@ export function Composer({
       setSlashHighlight(moved);
       return true;
     }
-    if (event.key === "Enter" || event.key === "Tab") {
+    if (
+      event.key === "Tab" ||
+      (event.key === "Enter" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey)
+    ) {
       const option = slashMatches[slashIndex];
       // A row that cannot be picked keeps the list up instead of closing on a
       // key that did nothing, so the reason stays in front of the reader.
@@ -824,23 +853,22 @@ export function Composer({
     return false;
   }
 
-  async function submit(): Promise<void> {
+  async function submit(
+    intent: "default" | "steer" = "default",
+  ): Promise<void> {
     if (!canSubmit) return;
     // A line that names a command is not a message: it runs here, and the draft
     // it came from goes away like a sent one would. Checked before the send so
     // a command is never posted to the model as prose.
-    const command = slash?.onCommand ? parseSlashCommand(draft) : null;
-    if (command) {
+    const parsedCommand = slash?.onCommand ? parseSlashCommand(draft) : null;
+    if (parsedCommand) {
       onDraftChange("");
-      slash?.onCommand?.(command.command.name, command.argument);
+      slash?.onCommand?.(parsedCommand.command.name, parsedCommand.argument);
       return;
     }
     const submissionKey = resetKey;
-    await (active
-      ? queueAvailable && sendMode === "queue"
-        ? onQueue()
-        : onSteer()
-      : onSend());
+    const queueing = willQueue && intent !== "steer";
+    await (active ? (queueing ? onQueue() : onSteer()) : onSend());
     historyIndexRef.current = null;
 
     // Restore focus after accepted guidance or a failed request. A new chat or
@@ -1254,6 +1282,15 @@ export function Composer({
             event.preventDefault();
             return;
           }
+          // Cmd/Ctrl+Enter steers only while a turn is active. When idle the
+          // chord is left alone so ordinary Enter remains the sole send key.
+          if (shouldSteerComposerKey(event.nativeEvent)) {
+            if (active) {
+              event.preventDefault();
+              void submit("steer");
+            }
+            return;
+          }
           if (!shouldSubmitComposerKey(event.nativeEvent)) return;
           event.preventDefault();
           void submit();
@@ -1344,24 +1381,35 @@ export function Composer({
           {active ? (
             <>
               {(hasDraft || steerPending) && (
-                <Button
-                  type="submit"
-                  variant="default"
-                  size="xs"
-                  className="h-8 min-w-[5rem] px-3 text-sm"
-                  aria-label={
-                    queueAvailable && sendMode === "queue"
-                      ? "Queue message for after this response"
-                      : "Steer active response"
+                <WithTooltip
+                  label={
+                    willQueue ? (
+                      <>
+                        Queue · Enter
+                        <span className="mt-1 block font-normal text-primary-foreground/80">
+                          Steer · {modEnter}
+                        </span>
+                      </>
+                    ) : (
+                      "Steer · Enter"
+                    )
                   }
-                  disabled={!canSubmit}
                 >
-                  {steerPending
-                    ? "Sending…"
-                    : queueAvailable && sendMode === "queue"
-                      ? "Queue"
-                      : "Steer"}
-                </Button>
+                  <Button
+                    type="submit"
+                    variant="default"
+                    size="xs"
+                    className="h-8 min-w-[5rem] px-3 text-sm"
+                    aria-label={
+                      willQueue
+                        ? "Queue message for after this response"
+                        : "Steer active response"
+                    }
+                    disabled={!canSubmit}
+                  >
+                    {steerPending ? "Sending…" : willQueue ? "Queue" : "Steer"}
+                  </Button>
+                </WithTooltip>
               )}
               <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
                 <Button

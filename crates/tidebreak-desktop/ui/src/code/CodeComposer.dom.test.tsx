@@ -449,6 +449,74 @@ describe("CodeComposer", () => {
     expect(box).toHaveValue("");
   });
 
+  it("steers immediately on Cmd+Enter while queueing is the default", async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onSend = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={onSend}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "try the other file" } });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("try the other file"),
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("steers immediately on Ctrl+Enter while queueing is the default", async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onSend = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={onSend}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "narrow the scope" } });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("narrow the scope"),
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("leaves Cmd+Enter alone when the session is not running", async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onSend = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "start when ready" } });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(onSteer).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("accepts guidance once a pending submit becomes an active turn", async () => {
     let resolveSend!: () => void;
     const onSend = vi.fn(

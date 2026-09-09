@@ -7,6 +7,7 @@ import {
   imageSendBlocker,
   MAX_COMPOSER_LINES,
   shouldRestoreComposerFocus,
+  shouldSteerComposerKey,
   shouldSubmitComposerKey,
   type ComposerFolders,
   type ComposerImages,
@@ -112,6 +113,35 @@ describe("Composer", () => {
         }),
       ).toBe(false);
     }
+  });
+
+  it("steers on Cmd or Ctrl+Enter outside IME composition", () => {
+    const unmodified = {
+      key: "Enter",
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      isComposing: false,
+      keyCode: 13,
+    };
+    expect(shouldSteerComposerKey({ ...unmodified, metaKey: true })).toBe(true);
+    expect(shouldSteerComposerKey({ ...unmodified, ctrlKey: true })).toBe(true);
+    expect(shouldSteerComposerKey(unmodified)).toBe(false);
+    expect(
+      shouldSteerComposerKey({ ...unmodified, metaKey: true, shiftKey: true }),
+    ).toBe(false);
+    expect(
+      shouldSteerComposerKey({ ...unmodified, metaKey: true, altKey: true }),
+    ).toBe(false);
+    expect(
+      shouldSteerComposerKey({
+        ...unmodified,
+        metaKey: true,
+        isComposing: true,
+        keyCode: 229,
+      }),
+    ).toBe(false);
   });
 
   it("caps auto-grow at six lines while retaining a one-line minimum", () => {
