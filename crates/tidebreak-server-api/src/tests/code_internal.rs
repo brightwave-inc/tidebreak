@@ -26,6 +26,65 @@ use tidebreak_harness::AdapterRegistry;
 use crate::code::CodeRuntime;
 use crate::engine::internal::InternalAdapter;
 
+/// A small, genuinely decodable, multicolor PNG used as the screenshot
+/// fixture. Generated here with the standard `image` encoder so the bytes are
+/// real pixels, not a header-only stub: the tool-result path validates and
+/// later hydrates exact bytes, so a fake signature or an empty `IDAT` would
+/// not prove screenshot transport.
+fn screenshot_fixture_png() -> Vec<u8> {
+    let mut image = image::DynamicImage::new_rgb8(2, 2);
+    let rgb = image.as_mut_rgb8().expect("rgb8 fixture");
+    rgb.put_pixel(0, 0, image::Rgb([255, 0, 0]));
+    rgb.put_pixel(1, 0, image::Rgb([0, 255, 0]));
+    rgb.put_pixel(0, 1, image::Rgb([0, 0, 255]));
+    rgb.put_pixel(1, 1, image::Rgb([255, 255, 0]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("fixture PNG encodes");
+    bytes
+}
+
+/// A ReadOnly screenshot-shaped tool that returns real PNG pixels as an
+/// image block, exactly like the internal browser/native screenshot tools.
+struct ScreenshotFixtureTool;
+
+#[async_trait::async_trait]
+impl Tool for ScreenshotFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: tidebreak_core::BROWSER_SCREENSHOT_TOOL.into(),
+            description: "Return a deterministic screenshot fixture".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolCtx,
+        _args: serde_json::Value,
+    ) -> tidebreak_core::Result<ToolOutput> {
+        let bytes = screenshot_fixture_png();
+        let blob = tidebreak_core::DocumentBlob::from_bytes(&bytes);
+        let image = tidebreak_core::ImageRef {
+            blob_id: blob.id,
+            media_type: tidebreak_core::ImageMediaType::Png,
+            width: 2,
+            height: 2,
+            byte_len: bytes.len() as u64,
+        };
+        image.validate().expect("fixture image is valid");
+        Ok(ToolOutput::text("captured fixture").with_images(vec![(
+            image,
+            tidebreak_core::ImageData::new(tidebreak_core::ImageMediaType::Png, bytes),
+        )]))
+    }
+}
+
 /// One model completion the scripted provider answers with.
 enum Step {
     Tool {
