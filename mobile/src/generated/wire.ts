@@ -1871,13 +1871,17 @@ export type ConsentMethodSnapshot = "approval_card" | "folder_picker" | "trusted
 /**
  * What a consent statement's verb is allowed to touch.
  */
-export type ConsentResource = { "kind": "action_scope", scope: GrantScope, } | { "kind": "host_subject" } | { "kind": "host_root", root_id: string, display_name: string | null, } | { "kind": "host_path_subtree", root_id: string, display_name: string | null, relative: string, };
+export type ConsentResource = { "kind": "action_scope", scope: GrantScope, } | { "kind": "host_subject" } | { "kind": "host_app", bundle_id: string, display_name: string | null, } | { "kind": "host_screen" } | { "kind": "host_root", root_id: string, display_name: string | null, } | { "kind": "host_path_subtree", root_id: string, display_name: string | null, relative: string, };
 
 /**
  * One statement of consent the agent currently holds, whatever store it
  * lives in.
  */
 export type ConsentStatementSnapshot = {
+/**
+ * Exact native app consent shared by all local tasks in this profile.
+ */
+native_app_all_sessions?: boolean,
 /**
  * What a revocation of this statement names, and where to send it.
  */
@@ -2909,7 +2913,7 @@ export type HarnessUpdateChannel = "pinned" | "latest";
  * restated here for the wire; the desktop maps the broker's own enum into
  * this one when it assembles capability statements.
  */
-export type HostCapability = "list_roots" | "read_files" | "write_files" | "execute_commands";
+export type HostCapability = "list_roots" | "read_files" | "write_files" | "execute_commands" | "capture_screen" | "read_app_content" | "control_app";
 
 /**
  * Opaque identifier for a folder registered with a host broker.
