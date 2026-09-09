@@ -1369,9 +1369,9 @@ describe("HarnessModelMenu", () => {
     );
     await user.keyboard("z.ai");
 
-    expect(screen.getByRole("searchbox", { name: "Search models" })).toHaveValue(
-      "z.ai",
-    );
+    expect(
+      screen.getByRole("searchbox", { name: "Search models" }),
+    ).toHaveValue("z.ai");
     expect(screen.getByRole("menuitem", { name: /GLM 5.2/ })).toBeTruthy();
     expect(
       screen.queryByRole("menuitem", { name: /Claude Sonnet 4/ }),
