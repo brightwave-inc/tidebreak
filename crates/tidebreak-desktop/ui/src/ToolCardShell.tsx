@@ -66,7 +66,7 @@ export function ToolCardShell({
 
   return (
     <section
-      className={cn("max-w-prose [overflow-anchor:none]", className)}
+      className={cn("tool-card-shell w-full min-w-0 [overflow-anchor:none]", className)}
       aria-label={label}
       role={announce ? "status" : undefined}
       aria-live={announce ? "polite" : undefined}
@@ -75,7 +75,7 @@ export function ToolCardShell({
       <button
         type="button"
         className={cn(
-          "-mx-1.5 flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-md hover:bg-muted/50",
+          "relative flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md py-1 text-left text-sm hover:bg-muted/50",
           FOCUS_RING_TIGHT,
           HOVER_TINT,
         )}
@@ -83,7 +83,7 @@ export function ToolCardShell({
         aria-controls={bodyId}
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="text-muted-foreground shrink-0 [&>svg]:size-3.5">
+        <span className="tool-card-icon text-muted-foreground mt-0.5 shrink-0 [&>svg]:size-3.5" aria-hidden="true">
           {icon}
         </span>
         <span className={cn("min-w-0 flex-1", titleClassName)}>
@@ -98,7 +98,7 @@ export function ToolCardShell({
             title
           )}
         </span>
-        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-xs tabular-nums">
+        <span className="text-muted-foreground ml-auto flex h-4 shrink-0 items-center gap-1.5 text-xs tabular-nums">
           {trailing}
           <ChevronDown
             className={cn(
@@ -110,7 +110,7 @@ export function ToolCardShell({
         </span>
       </button>
       {expanded && (
-        <div id={bodyId} className={cn("mt-1.5", bodyClassName)}>
+        <div id={bodyId} className={cn("mt-1.5 min-w-0", bodyClassName)}>
           {badge && (
             <div className="mb-1.5 flex flex-wrap items-center gap-1">
               {badge}

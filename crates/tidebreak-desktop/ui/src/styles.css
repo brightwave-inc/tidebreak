@@ -578,6 +578,12 @@ body {
     flex-direction: column;
     gap: 0.5rem;
     padding-block: 1.5rem;
+    padding-inline-start: 1.5rem;
+  }
+
+  .messages-column .tool-card-icon {
+    position: absolute;
+    inset-inline-start: -1.5rem;
   }
 
   /* The column's base rhythm is the tight intra-exchange gap; a user message opens
@@ -840,7 +846,8 @@ body {
   }
 
   .message-assistant {
-    align-self: flex-start;
+    width: 100%;
+    min-width: 0;
     padding: 0.1rem 0;
     background: transparent;
   }

@@ -10,6 +10,8 @@ type ToolOutputPreviewProps = {
   text: string;
   /** Lines shown before the expander takes over. */
   collapsedLines?: number;
+  startLine?: number;
+  followTail?: boolean;
   /** What this block is, for the copy control and assistive technology. */
   label?: string;
   /**
@@ -37,6 +39,8 @@ type ToolOutputPreviewProps = {
 export function ToolOutputPreview({
   text,
   collapsedLines = DEFAULT_COLLAPSED_LINES,
+  startLine = 0,
+  followTail = false,
   label = "Output",
   bare = false,
   onToggle,
@@ -46,16 +50,19 @@ export function ToolOutputPreview({
   // A trailing newline is punctuation, not a line worth offering to expand.
   const lines = useMemo(() => text.replace(/\n+$/, "").split("\n"), [text]);
   const hiddenCount = Math.max(0, lines.length - collapsedLines);
+  const firstLine = followTail
+    ? Math.max(0, lines.length - collapsedLines)
+    : Math.max(0, Math.min(startLine, lines.length - collapsedLines));
   const body =
     hiddenCount > 0 && !expanded
-      ? lines.slice(0, collapsedLines).join("\n")
+      ? lines.slice(firstLine, firstLine + collapsedLines).join("\n")
       : lines.join("\n");
 
   if (text.trim().length === 0) return null;
 
   return (
-    <div className="flex flex-col items-start gap-1">
-      <div className="group relative w-full">
+    <div className="flex w-full min-w-0 flex-col items-start gap-1">
+      <div className="group relative w-full min-w-0">
         <pre
           id={bodyId}
           // A bare `aria-label` on a `pre` names nothing: the element is
@@ -65,7 +72,7 @@ export function ToolOutputPreview({
           aria-label={label}
           className={
             bare
-              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-md break-words whitespace-pre-wrap [overflow-anchor:none]"
+              ? `text-muted-foreground max-h-80 overflow-auto pr-7 font-mono text-sm whitespace-pre [overflow-anchor:none] ${followTail && !expanded ? "h-[6em]" : ""}`
               : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
           }
         >
@@ -97,7 +104,7 @@ export function ToolOutputPreview({
           {expanded
             ? "Show less"
             : bare
-              ? `· · · ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`
+              ? `Show all ${lines.length} lines`
               : `Show ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`}
         </button>
       )}

@@ -336,7 +336,7 @@ export function ToolCommandCard({
   const tabbed = running || output !== null;
 
   return (
-    <div className="flex max-w-prose flex-col gap-1.5">
+    <div className="flex w-full min-w-0 flex-col gap-1.5">
       <ToolCardShell
         label={`${presentation.label}: ${presentation.statusLabel}`}
         icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
