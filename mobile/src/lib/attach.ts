@@ -6,6 +6,8 @@ import { fetchRefusingRedirects, type HttpFetch, type HttpResponse } from "./htt
 import { urlsMatch, validatedBaseUrl } from "./url";
 import type { AuthDiscovery } from "./types";
 
+export const DISCOVERY_TIMEOUT_MS = 10_000;
+
 export const REASON_UNREACHABLE = "unreachable";
 export const REASON_NOT_A_MACHINE = "not_a_machine";
 export const REASON_GATEWAY_MISMATCH = "gateway_mismatch";
@@ -52,18 +54,37 @@ export async function discoverMachine(
   }
   const derived = tidebreakMachineResource(baseUrl);
   let response: HttpResponse;
+  // A machine on a private network (VPN-only hosted deployments) often drops
+  // packets instead of refusing the connection, so the fetch would hang
+  // forever. Race it against a deadline; the abort signal is best-effort for
+  // transports that honor it.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
   try {
-    response = await fetchRefusingRedirects(
-      `${baseUrl}/auth/discovery`,
-      undefined,
-      fetchImpl,
-    );
+    response = await Promise.race([
+      fetchRefusingRedirects(
+        `${baseUrl}/auth/discovery`,
+        { signal: controller.signal },
+        fetchImpl,
+      ),
+      new Promise<never>((_, reject) => {
+        controller.signal.addEventListener("abort", () => {
+          reject(
+            new Error(
+              `No response after ${DISCOVERY_TIMEOUT_MS / 1000} seconds.`,
+            ),
+          );
+        });
+      }),
+    ]);
   } catch (error) {
     throw new AttachError(
       "discover",
       REASON_UNREACHABLE,
       error instanceof Error ? error.message : "The machine did not respond.",
     );
+  } finally {
+    clearTimeout(timer);
   }
   if (!response.ok) {
     throw new AttachError(
