@@ -1017,6 +1017,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_blob),
         )
         .route(
+            "/code/workspaces/{id}/file",
+            get(routes::code::get_workspace_file),
+        )
+        .route(
             "/code/workspaces/{id}/diff",
             get(routes::code::get_workspace_diff),
         )

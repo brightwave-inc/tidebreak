@@ -3,8 +3,10 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspaceBlob } from "../api/types";
+import { ImageViewer } from "@/components/document/image-viewer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import type { FileBytesSource } from "@/document/useFileDownload";
 import { useTheme } from "@/theme";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
 import { MiddleTruncate } from "./MiddleTruncate";
@@ -23,7 +25,7 @@ export function FileViewer({
   revealRevision = 0,
   onOpenInEditor,
 }: {
-  client: Pick<ApiClient, "getCodeWorkspaceBlob">;
+  client: Pick<ApiClient, "getCodeWorkspaceBlob" | "getCodeWorkspaceFile">;
   workspaceId: string;
   path: string;
   contentRevision?: number;
@@ -87,6 +89,9 @@ export function FileViewer({
       )}
       {data && (
         <BlobBody
+          client={client}
+          workspaceId={workspaceId}
+          contentRevision={contentRevision}
           blob={data}
           theme={resolvedTheme}
           revealLine={revealLine}
@@ -98,11 +103,17 @@ export function FileViewer({
 }
 
 function BlobBody({
+  client,
+  workspaceId,
+  contentRevision,
   blob,
   theme,
   revealLine,
   revealRevision,
 }: {
+  client: Pick<ApiClient, "getCodeWorkspaceFile">;
+  workspaceId: string;
+  contentRevision: number;
   blob: CodeWorkspaceBlob;
   theme: "light" | "dark";
   revealLine?: number;
@@ -151,6 +162,20 @@ function BlobBody({
     reveal(revealLine);
   }, [reveal, revealLine, revealRevision]);
 
+  if (blob.binary && imageMediaTypeForPath(blob.path)) {
+    return (
+      <ImageViewer
+        source={workspaceFileSource(
+          client,
+          workspaceId,
+          blob.path,
+          contentRevision,
+        )}
+        className="bg-page-background min-h-0 flex-1"
+      />
+    );
+  }
+
   if (blob.binary) {
     return (
       <p className="text-muted-foreground px-3 py-6 text-sm">
@@ -194,4 +219,35 @@ function BlobBody({
       </div>
     </>
   );
+}
+
+const IMAGE_MEDIA_TYPES = new Map([
+  ["avif", "image/avif"],
+  ["bmp", "image/bmp"],
+  ["gif", "image/gif"],
+  ["ico", "image/x-icon"],
+  ["jpeg", "image/jpeg"],
+  ["jpg", "image/jpeg"],
+  ["png", "image/png"],
+  ["svg", "image/svg+xml"],
+  ["webp", "image/webp"],
+]);
+
+export function imageMediaTypeForPath(path: string): string | null {
+  const extension = path.toLowerCase().split(".").pop();
+  return extension ? (IMAGE_MEDIA_TYPES.get(extension) ?? null) : null;
+}
+
+function workspaceFileSource(
+  client: Pick<ApiClient, "getCodeWorkspaceFile">,
+  workspaceId: string,
+  path: string,
+  contentRevision: number,
+): FileBytesSource {
+  return {
+    id: `${workspaceId}/${path}`,
+    cacheKey: `workspace/${workspaceId}/${path}/${contentRevision}`,
+    fetch: (signal, onProgress) =>
+      client.getCodeWorkspaceFile(workspaceId, path, signal, onProgress),
+  };
 }

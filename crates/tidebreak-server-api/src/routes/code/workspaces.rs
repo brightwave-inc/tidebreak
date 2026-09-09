@@ -1,12 +1,14 @@
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
+use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 
 use super::types::{
@@ -271,6 +273,29 @@ pub async fn get_workspace_blob(
         truncated: blob.truncated,
         binary: blob.binary,
     }))
+}
+
+pub async fn get_workspace_file(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+    Query(query): Query<WorkspaceBlobQuery>,
+) -> Result<Response, ServerError> {
+    let file = code.workspace_file(id, &query.path).await?;
+    let content_length = u64::try_from(file.bytes.len())
+        .map_err(|_| ServerError::internal("workspace file length exceeds u64"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, file.media_type)
+        .header(header::CONTENT_LENGTH, content_length.to_string())
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, SERVED_BYTES_CONTENT_POLICY)
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::CONTENT_DISPOSITION, "inline")
+        .body(Body::from(file.bytes))
+        .map_err(|error| {
+            ServerError::internal(format!("failed to build workspace file response: {error}"))
+        })
 }
 
 pub async fn list_workspace_files(

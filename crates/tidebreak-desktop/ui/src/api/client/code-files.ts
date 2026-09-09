@@ -3,6 +3,7 @@ import type {
   CodeWorkspaceFiles,
   CodeWorkspaceSearch,
   CodeWorkspaceTree,
+  FileDownloadProgress,
 } from "../types";
 import {
   parseCodeWorkspaceBlob,
@@ -91,6 +92,20 @@ export function withCodeFilesApi<TBase extends Constructor<HttpCore>>(
           ),
         ),
         "code workspace blob",
+      );
+    }
+
+    async getCodeWorkspaceFile(
+      workspaceId: string,
+      path: string,
+      signal?: AbortSignal,
+      onProgress?: (progress: FileDownloadProgress) => void,
+    ): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+      const params = new URLSearchParams({ path });
+      return this.streamBytes(
+        `/code/workspaces/${encodeURIComponent(workspaceId)}/file?${params}`,
+        signal,
+        onProgress,
       );
     }
   };

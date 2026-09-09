@@ -377,6 +377,59 @@ async fn workspace_tree_is_bounded_ignores_and_never_returns_contents() {
     assert_eq!(bounded_search["truncated"], true);
 }
 
+#[tokio::test]
+async fn workspace_file_serves_original_image_bytes_with_safe_headers() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+    std::fs::write(worktree.join("preview.png"), png).unwrap();
+
+    let response = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/file",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .query(&[("path", "preview.png")])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "image/png"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::CACHE_CONTROL],
+        "no-store"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::X_CONTENT_TYPE_OPTIONS],
+        "nosniff"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_DISPOSITION],
+        "inline"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::REFERRER_POLICY],
+        "no-referrer"
+    );
+    assert!(response
+        .headers()
+        .contains_key(reqwest::header::CONTENT_SECURITY_POLICY));
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_LENGTH],
+        png.len().to_string()
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), png);
+}
+
 /// Archive keeps the branch; restore puts a checkout back under the same
 /// workspace row. Committed work returns, force-discarded work stays gone,
 /// and restoring an already-active workspace is a no-op.
