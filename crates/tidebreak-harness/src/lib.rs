@@ -798,10 +798,10 @@ pub struct SessionSpec {
     /// Environment variable name in `extra_env` that carries the session
     /// inference relay key, when the caller wired one ([`crate::wiring`],
     /// decision 71). Adapters let exactly this key survive the
-    /// reserved-namespace strip — or, for an engine that reads credentials
-    /// from a file, consume the value under this name instead of passing it
-    /// through. `None` means no relay is wired and the whole reserved
-    /// namespace is stripped.
+    /// reserved-namespace strip so shell tools can also borrow forge
+    /// credentials. Engines that read inference credentials from a file
+    /// additionally copy the value there. `None` means no relay is wired
+    /// and the whole reserved namespace is stripped.
     pub relay_key_env: Option<String>,
     /// Shell-resolved environment captured by the probe. Children run under
     /// the [`filter_child_env`] allowlist subset of this snapshot, not the

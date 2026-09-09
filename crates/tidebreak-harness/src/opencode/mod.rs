@@ -436,16 +436,17 @@ mod tests {
 
     #[test]
     fn launch_plan_never_includes_bypass_or_auto() {
-        let plan = compose_serve_plan(
-            Path::new("/usr/bin/opencode"),
-            &[],
-            Path::new("/workspace"),
-            &[],
-            &[],
-            4096,
-            None,
-            None,
-        )
+        let plan = compose_serve_plan(crate::opencode::session::ServeLaunch {
+            binary: Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            relay_key_env: None,
+        })
         .unwrap();
         assert!(!plan
             .argv

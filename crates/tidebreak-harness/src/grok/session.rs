@@ -181,11 +181,10 @@ impl GrokSession {
     /// key, or `None` on a machine whose spawn wiring carried no key.
     ///
     /// The wiring hands the key over under the environment name
-    /// [`crate::SessionSpec::relay_key_env`]; the adapter consumes it here
-    /// and [`compose_print_plan`] keeps that variable out of the child's
-    /// environment. The Grok CLI reads credentials only from an auth file,
-    /// so the key travels the last hop inside a session-scoped 0600 file
-    /// pointed at by `GROK_AUTH_PATH`.
+    /// [`crate::SessionSpec::relay_key_env`]. The Grok CLI reads inference
+    /// credentials from a session-scoped 0600 file at `GROK_AUTH_PATH`.
+    /// [`compose_print_plan`] also retains the wired variable so shell
+    /// tools can borrow forge credentials through the host.
     ///
     /// Grok 1.0.4 refuses to start a headless child without a credential in
     /// its auth file and presents that credential as the bearer on every
@@ -333,9 +332,8 @@ pub(crate) struct PrintLaunch<'a> {
     /// machine whose spawn wiring carried no key.
     pub relay_auth: Option<&'a Path>,
     /// Environment variable name the spawn wiring used to carry the relay
-    /// key ([`crate::SessionSpec::relay_key_env`]). The adapter consumed
-    /// the key into `relay_auth`, so the variable is stripped from the
-    /// child's environment here.
+    /// key ([`crate::SessionSpec::relay_key_env`]). The child also retains
+    /// this key so its git helper can borrow the session's forge credential.
     pub relay_key_env: Option<&'a str>,
     /// An existing engine session to `--resume`.
     pub resume_ref: Option<&'a str>,
@@ -422,13 +420,10 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
     env.retain(|(key, _)| {
-        !BrowserChannelSpec::is_reserved_env_key(key)
-            && launch.relay_key_env != Some(key.as_str())
-            && key != "PWD"
+        !BrowserChannelSpec::is_reserved_env_key_except(key, launch.relay_key_env) && key != "PWD"
     });
-    // The relay key itself was consumed into `relay_auth` and the retain
-    // above stripped its variable; the child learns only where the file is
-    // and which issuer scope it names.
+    // Grok reads inference credentials from its auth file. Shell tools also
+    // need the wired relay key to borrow forge credentials through the host.
     if let Some(auth) = launch.relay_auth {
         env.push(("GROK_AUTH_PATH".into(), auth.to_string_lossy().into_owned()));
         env.push(("GROK_OAUTH2_ISSUER".into(), RELAY_ISSUER.into()));
@@ -887,8 +882,8 @@ mod tests {
         assert!(!plan.argv.iter().any(|arg| arg == "xhigh"));
     }
 
-    #[test]
-    fn relay_wiring_moves_the_key_into_an_auth_file_and_points_the_env_at_it() {
+    #[tokio::test]
+    async fn relay_wiring_keeps_the_key_for_forge_tools_and_configures_the_auth_file() {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("auth.json");
         let plan = compose_print_plan(PrintLaunch {
@@ -897,6 +892,11 @@ mod tests {
             cwd: dir.path(),
             extra_env: &[
                 ("TIDEBREAK_LLM_KEY".to_owned(), "tbreak_hl_k".to_owned()),
+                ("tidebreak_llm_key".to_owned(), "untrusted".to_owned()),
+                (
+                    "TIDEBREAK_BROWSER_CAPFILE".to_owned(),
+                    "untrusted".to_owned(),
+                ),
                 (
                     "GROK_MODELS_BASE_URL".to_owned(),
                     "http://127.0.0.1:1/code/llm/openai/v1".to_owned(),
@@ -913,6 +913,24 @@ mod tests {
             effort_ladder: crate::grok::EFFORT_LADDER_1_0_4,
         })
         .unwrap();
+
+        #[cfg(unix)]
+        {
+            let mut shell = tokio::process::Command::new("/bin/sh");
+            shell.args(["-c", r#"test "$TIDEBREAK_LLM_KEY" = tbreak_hl_k"#]);
+            apply_child_env_tokio(
+                &mut shell,
+                HarnessKind::Grok,
+                Vec::new(),
+                &plan.env,
+                None,
+                None,
+            );
+            assert!(
+                shell.status().await.unwrap().success(),
+                "shell tools need the relay key"
+            );
+        }
 
         let env: std::collections::HashMap<_, _> = plan.env.into_iter().collect();
         assert_eq!(
@@ -933,11 +951,13 @@ mod tests {
             env.get("GROK_MODELS_BASE_URL").map(String::as_str),
             Some("http://127.0.0.1:1/code/llm/openai/v1")
         );
-        assert!(
-            !env.contains_key("TIDEBREAK_LLM_KEY"),
-            "the relay key never reaches the child's environment: {:?}",
-            env
+        assert_eq!(
+            env.get("TIDEBREAK_LLM_KEY").map(String::as_str),
+            Some("tbreak_hl_k"),
+            "git and gh borrow forge credentials under the wired session key"
         );
+        assert!(!env.contains_key("tidebreak_llm_key"));
+        assert!(!env.contains_key("TIDEBREAK_BROWSER_CAPFILE"));
     }
 
     #[test]
