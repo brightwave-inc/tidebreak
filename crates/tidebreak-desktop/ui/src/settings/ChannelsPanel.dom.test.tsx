@@ -180,13 +180,11 @@ describe("ChannelsPanel", () => {
       />,
     );
     const channel = await screen.findByRole("region", { name: "Channel C1" });
-    await userEvent
-      .setup()
-      .click(
-        within(channel).getByRole("button", {
-          name: "Approve all pending repositories",
-        }),
-      );
+    await userEvent.setup().click(
+      within(channel).getByRole("button", {
+        name: "Approve all pending repositories",
+      }),
+    );
     await waitFor(() =>
       expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledWith(
         workspace.id,
@@ -380,15 +378,13 @@ describe("ChannelsPanel", () => {
 
   it("keeps revoked workspace scopes visible without offering approval controls", async () => {
     const client = {
-      listCodeGrants: vi
-        .fn()
-        .mockResolvedValue([
-          {
-            ...workspace,
-            revoked_at: "2026-09-09T10:00:00Z",
-            revoked_reason: "Administrator revoked access",
-          },
-        ]),
+      listCodeGrants: vi.fn().mockResolvedValue([
+        {
+          ...workspace,
+          revoked_at: "2026-09-09T10:00:00Z",
+          revoked_reason: "Administrator revoked access",
+        },
+      ]),
     } as unknown as ApiClient;
     render(<ChannelsPanel client={client} />);
     await screen.findByRole("region", { name: "Channel C1" });
