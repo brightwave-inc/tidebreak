@@ -257,6 +257,21 @@ pub struct Config {
     pub runtime_profile: Option<String>,
     /// Engine packaged in a supervised sandbox profile, when explicitly declared.
     pub runtime_engine: Option<crate::HarnessKind>,
+    /// Further engines the supervised image runs, one chosen per session,
+    /// when the gateway registers each sandbox's installed engine
+    /// (`TIDEBREAK_RUNTIME_ENGINES`). Read only with
+    /// [`Config::runtime_embedded_engine_registration`]; otherwise
+    /// [`Config::runtime_engine`] remains the only choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_engines: Vec<crate::HarnessKind>,
+    /// Whether spawns authenticate this machine's add-on identity and name
+    /// the session's engine, so the gateway binds the sandbox's installed
+    /// engine and pairs the caller's subscription for it (gateway decision
+    /// 118). Managed provisioning sets
+    /// `TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION=true`; a custom
+    /// profile that omits it keeps its existing exchange and spawn shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_embedded_engine_registration: bool,
     /// The permission mode an external (channel-bound) session starts in
     /// when it runs on this machine's own engine and the channel names none
     /// (decision 88). `ask` unless the operator says otherwise: an unattended
@@ -414,6 +429,8 @@ impl Config {
             runtime_endpoint: None,
             runtime_profile: None,
             runtime_engine: None,
+            runtime_engines: Vec::new(),
+            runtime_embedded_engine_registration: false,
             external_permission_mode: crate::PermissionMode::DEFAULT,
             external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
@@ -494,6 +511,12 @@ impl Config {
             config.with_runtime_engine_var(std::env::var("TIDEBREAK_RUNTIME_ENGINE").ok())
         })
         .and_then(|config| {
+            config.with_runtime_embedded_engine_vars(
+                std::env::var("TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION").ok(),
+                std::env::var("TIDEBREAK_RUNTIME_ENGINES").ok(),
+            )
+        })
+        .and_then(|config| {
             config.with_external_permission_vars(
                 std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_MODE").ok(),
                 std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_CEILING").ok(),
@@ -518,6 +541,60 @@ impl Config {
                 AgentError::config("TIDEBREAK_RUNTIME_ENGINE must name a supported external engine")
             })?;
         self.runtime_engine = Some(engine);
+        Ok(self)
+    }
+
+    /// Apply `TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION` and
+    /// `TIDEBREAK_RUNTIME_ENGINES`.
+    ///
+    /// Registration needs a sandbox runtime profile to register against.
+    /// The engine list is read only under registration, because without it
+    /// the gateway never learns which engine a sandbox runs and
+    /// `TIDEBREAK_RUNTIME_ENGINE` remains the only choice.
+    pub fn with_runtime_embedded_engine_vars(
+        mut self,
+        registration: Option<String>,
+        engines: Option<String>,
+    ) -> Result<Self> {
+        let registration = match registration
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            None => false,
+            Some(value) => value.parse::<bool>().map_err(|_| {
+                AgentError::config(format!(
+                    "invalid TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION: {value}"
+                ))
+            })?,
+        };
+        if registration && self.runtime_profile.is_none() {
+            return Err(AgentError::config(
+                "TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION requires a sandbox runtime profile",
+            ));
+        }
+        let mut parsed = Vec::new();
+        if registration {
+            for token in engines
+                .as_deref()
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+            {
+                let kind = crate::HarnessKind::from_str(token)
+                    .filter(|kind| !kind.is_in_process())
+                    .ok_or_else(|| {
+                        AgentError::config(format!(
+                            "TIDEBREAK_RUNTIME_ENGINES names an unsupported engine: {token}"
+                        ))
+                    })?;
+                if !parsed.contains(&kind) {
+                    parsed.push(kind);
+                }
+            }
+        }
+        self.runtime_embedded_engine_registration = registration;
+        self.runtime_engines = parsed;
         Ok(self)
     }
 
@@ -684,6 +761,8 @@ impl Config {
             runtime_endpoint,
             runtime_profile,
             runtime_engine: None,
+            runtime_engines: Vec::new(),
+            runtime_embedded_engine_registration: false,
             external_permission_mode: crate::PermissionMode::DEFAULT,
             external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
@@ -1071,6 +1150,46 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
         assert_eq!(config.runtime_profile.as_deref(), Some("tidebreak-remote"));
+    }
+
+    #[test]
+    fn embedded_engine_registration_needs_a_profile_and_gates_the_engine_list() {
+        let config = Config::desktop("/data");
+        assert!(config
+            .clone()
+            .with_runtime_embedded_engine_vars(Some("true".into()), None)
+            .is_err());
+        assert!(config
+            .clone()
+            .with_runtime_embedded_engine_vars(Some("yes".into()), None)
+            .is_err());
+        // Without registration the list is not a choice the gateway can
+        // honor, so it is not read.
+        let ignored = config
+            .clone()
+            .with_runtime_embedded_engine_vars(None, Some("claude_code,codex".into()))
+            .unwrap();
+        assert!(!ignored.runtime_embedded_engine_registration);
+        assert!(ignored.runtime_engines.is_empty());
+
+        let mut configured = config;
+        configured.runtime_endpoint = Some("tidebreak".into());
+        configured.runtime_profile = Some("tidebreak".into());
+        let registered = configured
+            .clone()
+            .with_runtime_embedded_engine_vars(
+                Some("true".into()),
+                Some(" claude_code, codex ,claude_code".into()),
+            )
+            .unwrap();
+        assert!(registered.runtime_embedded_engine_registration);
+        assert_eq!(
+            registered.runtime_engines,
+            vec![crate::HarnessKind::ClaudeCode, crate::HarnessKind::Codex]
+        );
+        assert!(configured
+            .with_runtime_embedded_engine_vars(Some("true".into()), Some("internal".into()))
+            .is_err());
     }
 
     #[test]

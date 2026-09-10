@@ -726,6 +726,8 @@ mod tests {
                     super::super::remote::driver::RemoteSpawnSettings {
                         profile: "test-confined".into(),
                         engine: Some(HarnessKind::ClaudeCode),
+                        engines: Vec::new(),
+                        embedded_engine_registration: false,
                         incarnation_cap: 8,
                         spend_ceiling_microusd: None,
                         session_spend_ceiling_microusd: None,

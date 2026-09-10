@@ -121,6 +121,8 @@ fn remote_settings() -> crate::code::remote::driver::RemoteSpawnSettings {
     crate::code::remote::driver::RemoteSpawnSettings {
         profile: "tidebreak-remote".to_owned(),
         engine: None,
+        engines: Vec::new(),
+        embedded_engine_registration: false,
         incarnation_cap: 2,
         spend_ceiling_microusd: None,
         session_spend_ceiling_microusd: None,
