@@ -720,14 +720,19 @@ export function CodeSessionPane({
 }
 
 export function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
-  const registrationRef = useRef<{
+  type Registration = {
     sessionId: string;
     client: ApiClient;
     store: ReturnType<typeof acquireCodeSessionFromClient>;
-  } | null>(null);
+  };
+  const registrationRef = useRef<Registration | null>(null);
+  // Acquire during render so the first paint already has the store. Every
+  // acquire is released exactly once by the effect cleanup that closes over
+  // it below, so a key change never releases the registration that replaced
+  // it, and StrictMode's simulated unmount/remount (release, then rerun)
+  // reacquires instead of rendering from a disposed controller.
   const current = registrationRef.current;
   if (current?.sessionId !== sessionId || current.client !== client) {
-    if (current) releaseCodeSession(current.sessionId);
     registrationRef.current = {
       sessionId,
       client,
@@ -735,12 +740,24 @@ export function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
     };
   }
   useEffect(() => {
+    let registration = registrationRef.current;
+    if (
+      registration === null ||
+      registration.sessionId !== sessionId ||
+      registration.client !== client
+    ) {
+      registration = {
+        sessionId,
+        client,
+        store: acquireCodeSessionFromClient(sessionId, client),
+      };
+      registrationRef.current = registration;
+    }
+    const owned = registration;
     return () => {
-      const registration = registrationRef.current;
-      if (!registration) return;
-      releaseCodeSession(registration.sessionId);
-      registrationRef.current = null;
+      releaseCodeSession(owned.sessionId);
+      if (registrationRef.current === owned) registrationRef.current = null;
     };
-  }, []);
+  }, [sessionId, client]);
   return registrationRef.current!.store;
 }

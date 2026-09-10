@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode } from "react";
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
@@ -106,6 +107,37 @@ describe("CodeSessionRegistry", () => {
       store: hook.result.current,
       refCount: 1,
     });
+  });
+  it("keeps one live registration through StrictMode's unmount and remount", () => {
+    const client = {
+      listCodeSessionTurns: vi.fn(async () => []),
+      openCodeEvents: vi.fn(
+        (
+          _sessionId: string,
+          after: number,
+          onFrame: (frame: SequencedCodeEventFrame) => void,
+        ) => new FakeSocket(after, onFrame) as unknown as WebSocket,
+      ),
+    };
+    // StrictMode runs the mount effect, its cleanup, and the effect again on
+    // one mounted tree. The cleanup releases the render-time acquire; the
+    // rerun has to reacquire, or the pane renders from a disposed controller.
+    const hook = renderHook(
+      ({ sessionId }) => useRegisteredCodeSession(sessionId, client as never),
+      { initialProps: { sessionId: "s1" }, wrapper: StrictMode },
+    );
+    const store = hook.result.current;
+    expect(peekCodeSession("s1")).toMatchObject({ store, refCount: 1 });
+
+    hook.rerender({ sessionId: "s2" });
+    expect(peekCodeSession("s1")?.refCount).toBe(0);
+    expect(peekCodeSession("s2")).toMatchObject({
+      store: hook.result.current,
+      refCount: 1,
+    });
+
+    hook.unmount();
+    expect(peekCodeSession("s2")?.refCount).toBe(0);
   });
   it("does not let old session hydration populate a replacement client", async () => {
     const staleTurns = deferred<CodeTurnSnapshot[]>();
