@@ -133,7 +133,10 @@ pub(super) async fn snapshot_with_origin(
     session: tidebreak_core::Session,
 ) -> Result<SessionSnapshot, ServerError> {
     let bindings = code.external_bindings_for_sessions(&[session.id]).await?;
+    let access = code.session_access(session.id).await?;
     let mut snapshot = SessionSnapshot::from(session);
+    snapshot.access = Some(access.level);
+    snapshot.is_owner = Some(access.owner);
     snapshot.set_external_origins(bindings);
     Ok(snapshot)
 }
@@ -150,26 +153,11 @@ async fn snapshots_with_origins(
     code: &ScopedCode,
     sessions: Vec<tidebreak_core::Session>,
 ) -> Result<Vec<SessionSnapshot>, ServerError> {
-    let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
-    let mut bindings: std::collections::HashMap<
-        SessionId,
-        Vec<tidebreak_core::CodeExternalBinding>,
-    > = std::collections::HashMap::new();
-    for binding in code.external_bindings_for_sessions(&ids).await? {
-        bindings
-            .entry(binding.session_id)
-            .or_default()
-            .push(binding);
+    let mut snapshots = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        snapshots.push(snapshot_with_origin(code, session).await?);
     }
-    Ok(sessions
-        .into_iter()
-        .map(|session| {
-            let origins = bindings.remove(&session.id).unwrap_or_default();
-            let mut snapshot = SessionSnapshot::from(session);
-            snapshot.set_external_origins(origins);
-            snapshot
-        })
-        .collect())
+    Ok(snapshots)
 }
 
 /// `GET /sessions` — the owner's conversations that bind no

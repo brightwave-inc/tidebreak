@@ -26,9 +26,14 @@ import {
   reorderEditorTab,
   splitCodeChromeLayout,
 } from "./codeChrome";
-import type { PermissionMode } from "../api/types";
+import type {
+  CodeWorkspaceSnapshot,
+  CodeSessionSnapshot,
+  PermissionMode,
+} from "../api/types";
 import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { CodeQuickOpen } from "./CodeQuickOpen";
+import { CodeSessionContent } from "./CodeSessionPage";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
 import { CodeSidebar } from "./CodeSidebar";
 import {
@@ -86,7 +91,8 @@ import {
 } from "./workspaceActions";
 import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
 import { canOpenInExternalEditor } from "./codeWorktreeHost";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { codeClientGeneration } from "./CodeClientGeneration";
 import { findEditorPanel, offersSplitDrop } from "./editorDrag";
 import { fenceReasonText } from "./labels";
 import { forkTranscriptFile } from "./fork";
@@ -130,13 +136,105 @@ const TerminalPane = lazy(async () => {
  * walking skeleton.
  */
 export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
+  const { client } = useApp();
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Reset workspace-scoped state without remounting the shared rail. */}
-        <CodeWorkspaceBody key={workspaceId} workspaceId={workspaceId} />
+        <CodeWorkspaceAccess
+          key={`${codeClientGeneration(client)}:${workspaceId}`}
+          workspaceId={workspaceId}
+        />
       </div>
     </RouteFrame>
+  );
+}
+
+/** Resolve read authority before mounting workspace controls or restoring terminals. */
+function CodeWorkspaceAccess({ workspaceId }: { workspaceId: string }) {
+  const { client, models, defaultModelKey } = useApp();
+  const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setWorkspace(null);
+    setError(null);
+    void client
+      .getCodeWorkspace(workspaceId)
+      .then((next) => {
+        if (!cancelled) setWorkspace(next);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled)
+          setError(friendlyErrorMessage(err, "Could not open this workspace"));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId, attempt]);
+  if (!workspace)
+    return (
+      <CodeSessionContent
+        title="Workspace"
+        session={null}
+        error={error}
+        client={client}
+        models={models}
+        defaultModelKey={defaultModelKey}
+        onRetry={() => setAttempt((value) => value + 1)}
+      />
+    );
+  if (workspace.read_only)
+    return <SharedWorkspaceSession workspace={workspace} />;
+  return <CodeWorkspaceBody workspaceId={workspaceId} />;
+}
+
+function SharedWorkspaceSession({
+  workspace,
+}: {
+  workspace: CodeWorkspaceSnapshot;
+}) {
+  const { client, models, defaultModelKey } = useApp();
+  const { task } = useSearch({ strict: false }) as { task?: string };
+  const [sessions, setSessions] = useState<CodeSessionSnapshot[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setSessions(null);
+    setError(null);
+    void client
+      .listCodeWorkspaceSessions(workspace.id)
+      .then((next) => {
+        if (!cancelled) setSessions(next);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled)
+          setError(
+            friendlyErrorMessage(err, "Could not open this conversation"),
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspace.id, attempt]);
+  const selected =
+    sessions?.find((candidate) => !task || candidate.id === task) ?? null;
+  return (
+    <CodeSessionContent
+      title={workspace.title}
+      session={selected}
+      error={
+        error ??
+        (sessions && !selected ? "This conversation is unavailable." : null)
+      }
+      client={client}
+      models={models}
+      defaultModelKey={defaultModelKey}
+      onRetry={() => setAttempt((value) => value + 1)}
+    />
   );
 }
 

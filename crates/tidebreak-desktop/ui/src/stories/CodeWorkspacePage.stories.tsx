@@ -62,6 +62,7 @@ type SubagentScenario =
 
 type WorkspaceScenario =
   | "active"
+  | "shared"
   | "nested"
   | "start"
   | "workspace-starting"
@@ -593,7 +594,9 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
 function storyClient(scenario: WorkspaceScenario): ApiClient {
   const currentWorkspace = isWorkspaceStartupScenario(scenario)
     ? startupWorkspace
-    : workspace;
+    : scenario === "shared"
+      ? { ...workspace, read_only: true }
+      : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
     ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
     : prSnapshot;
@@ -605,7 +608,11 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     scenario === "loading" ||
     scenario === "failure"
       ? []
-      : [session];
+      : [
+          scenario === "shared"
+            ? { ...session, access: "view" as const, is_owner: false }
+            : session,
+        ];
   const firstTurnFails =
     scenario === "first-turn-failure" || scenario === "fork-first-turn-failure";
   const sessionCreateFails = scenario === "session-create-failure";
@@ -1335,3 +1342,5 @@ export const CompactSubagentTranscript: Story = {
   },
   globals: { viewport: { value: "compact", isRotated: false } },
 };
+
+export const SharedTask: Story = { args: { scenario: "shared" } };
