@@ -92,7 +92,8 @@ pub async fn query_runs(
             let _guard = read.lock().await;
             if let Some(cached) = runtime.delivery_cache().runs(&cache_key) {
                 if !force_refresh || cached.fetched_at >= request_started {
-                    return run_page(capability, cached, &query);
+                    return page_with_deployment_statuses(&reader, capability, cached, &query)
+                        .await;
                 }
             }
             let workspace_index = workspace_index(runtime, owner, force_refresh).await?;
@@ -143,7 +144,88 @@ pub async fn query_runs(
             }
         }
     };
-    run_page(capability, aggregate, &query)
+    page_with_deployment_statuses(&reader, capability, aggregate, &query).await
+}
+
+async fn page_with_deployment_statuses(
+    reader: &DeliveryReaderHandle,
+    capability: CodeGitHubCapability,
+    aggregate: CachedAggregate<CodeDeliveryRunSummary>,
+    query: &CodeDeliveryRunQuery,
+) -> Result<CodeDeliveryRunsPage, ServerError> {
+    let mut page = run_page(capability, aggregate, query)?;
+    attach_latest_deployment_statuses(reader, &mut page.items).await;
+    Ok(page)
+}
+
+/// Latest status for each deployment on the current page. Failures, including
+/// a closed host gate, leave the row as `unknown` rather than blocking the list.
+pub(super) async fn attach_latest_deployment_statuses(
+    reader: &DeliveryReaderHandle,
+    items: &mut [CodeDeliveryRunSummary],
+) {
+    let updates = stream::iter(0..items.len())
+        .map(|index| {
+            let reader = reader.clone();
+            let item = items[index].clone();
+            async move {
+                if item.kind != CodeDeliveryRunKind::Deployment {
+                    return None;
+                }
+                let target = CodeGitHubRepositoryTarget {
+                    host: item.repository.host.clone(),
+                    owner: item.repository.owner.clone(),
+                    name: item.repository.name.clone(),
+                };
+                let api = reader.api(&target).await.ok()?;
+                let endpoint = api_endpoint(
+                    &target,
+                    &format!("deployments/{}/statuses?per_page=1", item.github_id),
+                );
+                let status = latest_deployment_status_from_get(api.get(&endpoint).await)?;
+                Some((index, status))
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for (index, status) in updates.into_iter().flatten() {
+        apply_latest_deployment_status(&mut items[index], &status);
+    }
+}
+
+pub(super) fn latest_deployment_status_from_get(
+    result: Result<Value, String>,
+) -> Option<CodeDeliveryDeploymentStatus> {
+    result.ok().and_then(|value| {
+        value
+            .as_array()
+            .and_then(|statuses| statuses.first())
+            .and_then(parse_deployment_status)
+    })
+}
+
+pub(super) fn apply_latest_deployment_status(
+    item: &mut CodeDeliveryRunSummary,
+    latest_status: &CodeDeliveryDeploymentStatus,
+) {
+    let status = latest_status.state.clone();
+    let conclusion = (!matches!(
+        status.as_str(),
+        "unknown" | "pending" | "queued" | "in_progress"
+    ))
+    .then_some(status.clone());
+    if let Some(url) = latest_status
+        .environment_url
+        .clone()
+        .or_else(|| latest_status.log_url.clone())
+    {
+        item.url = url;
+    }
+    item.status = status;
+    item.conclusion = conclusion.clone();
+    item.attention_reasons = run_attention(conclusion.as_deref());
+    item.updated_at = latest_status.created_at;
 }
 
 pub(super) fn run_page(

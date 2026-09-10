@@ -744,7 +744,7 @@ fn pull_request_files_drop_the_shapes_the_panel_cannot_draw() {
 }
 
 #[test]
-fn deployment_lists_do_not_claim_an_unknown_status_is_pending() {
+fn deployment_lists_use_the_fetched_latest_status() {
     let value: Value = serde_json::from_str(
         r#"{
             "id": 88,
@@ -756,7 +756,40 @@ fn deployment_lists_do_not_claim_an_unknown_status_is_pending() {
         }"#,
     )
     .unwrap();
-    let deployment = parse_deployment(&repository_ref(), &value, None, &[]).unwrap();
+    let status_value: Value = serde_json::from_str(
+        r#"{
+            "id": 1,
+            "state": "success",
+            "description": "deployed",
+            "environment_url": "https://staging.example",
+            "log_url": "https://github.com/acme/tools/deployments/88",
+            "created_at": "2026-08-22T12:02:00Z"
+        }"#,
+    )
+    .unwrap();
+    let latest = parse_deployment_status(&status_value).unwrap();
+    let deployment = parse_deployment(&repository_ref(), &value, Some(&latest), &[]).unwrap();
+    assert_eq!(deployment.status, "success");
+    assert_eq!(deployment.conclusion.as_deref(), Some("success"));
+    assert!(deployment.attention_reasons.is_empty());
+    assert_eq!(deployment.url, "https://staging.example");
+}
+
+#[test]
+fn deployment_status_stays_unknown_when_the_host_gate_is_closed() {
+    let value: Value = serde_json::from_str(
+        r#"{
+            "id": 88,
+            "ref": "main",
+            "sha": "abcdef",
+            "environment": "staging",
+            "created_at": "2026-08-22T12:00:00Z",
+            "updated_at": "2026-08-22T12:01:00Z"
+        }"#,
+    )
+    .unwrap();
+    let latest = latest_deployment_status_from_get(Err("the host is parked for 30s".into()));
+    let deployment = parse_deployment(&repository_ref(), &value, latest.as_ref(), &[]).unwrap();
     assert_eq!(deployment.status, "unknown");
     assert_eq!(deployment.conclusion, None);
     assert!(deployment.attention_reasons.is_empty());
