@@ -289,6 +289,35 @@ impl CodeRuntime {
             })
         }))
         .await;
+        match (
+            list_workspaces_all_owners(&self.db).await,
+            list_sessions_all_owners(&self.db).await,
+        ) {
+            (Ok(workspaces), Ok(sessions)) => {
+                crate::code::scratch::sweep_orphan_private_roots(
+                    &self.data_dir,
+                    &workspaces
+                        .into_iter()
+                        .map(|workspace| workspace.id)
+                        .collect(),
+                    &sessions.into_iter().map(|session| session.id).collect(),
+                );
+            }
+            (workspaces, sessions) => {
+                if let Err(error) = workspaces {
+                    tracing::warn!(
+                        %error,
+                        "code-mode: could not list workspaces for the private-root sweep"
+                    );
+                }
+                if let Err(error) = sessions {
+                    tracing::warn!(
+                        %error,
+                        "code-mode: could not list sessions for the private-root sweep"
+                    );
+                }
+            }
+        }
         Ok(actions)
     }
 }
