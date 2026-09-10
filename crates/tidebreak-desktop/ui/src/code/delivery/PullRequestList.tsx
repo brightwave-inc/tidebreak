@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import type { CodeDeliveryPullRequestSummary } from "../../api/types";
-import { CornerDownRight, LoaderCircle, MessageSquare } from "lucide-react";
+import { CornerDownRight, MessageSquare } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { GithubAvatar } from "../GithubAvatar";
 import {
   PR_GRID,
@@ -465,7 +466,7 @@ function PullRequestRow({
               onMerge();
             }}
           >
-            {busy && <LoaderCircle className="animate-spin" />}
+            {busy && <Spinner />}
             {mergeAction.label}
           </Button>
         ) : null}

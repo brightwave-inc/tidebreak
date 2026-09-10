@@ -252,14 +252,13 @@ function CustomWidthField({
   const [draft, setDraft] = useState(String(viewport.customWidth));
   const [error, setError] = useState<string | null>(null);
 
-  // Keep the draft in sync when the viewport changes externally (preset switch).
+  // Keep the draft in sync when customWidth changes externally.
   useEffect(() => {
     setDraft(String(viewport.customWidth));
     setError(null);
   }, [viewport.customWidth]);
 
-  function commit(event: FormEvent) {
-    event.preventDefault();
+  function commitDraft(focusAfter = false) {
     const parsed = Number.parseInt(draft, 10);
     if (!Number.isFinite(parsed)) {
       setError("Enter a number");
@@ -275,7 +274,12 @@ function CustomWidthField({
     setError(null);
     onViewportChange({ preset: "custom", customWidth: clamped });
     setDraft(String(clamped));
-    inputRef.current?.focus();
+    if (focusAfter) inputRef.current?.focus();
+  }
+
+  function commit(event: FormEvent) {
+    event.preventDefault();
+    commitDraft(true);
   }
 
   return (
@@ -314,6 +318,7 @@ function CustomWidthField({
             setDraft(event.target.value);
             if (error) setError(null);
           }}
+          onBlur={() => commitDraft()}
           onFocus={(event) => event.currentTarget.select()}
         />
         <span className="text-2xs text-muted-foreground/70">px</span>

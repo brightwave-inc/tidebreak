@@ -60,7 +60,7 @@ run-name: >-
 #
 # The final manifest-list digests land in the run summary, and the `pin` job
 # proposes the follow-up PR that records the documents digest as the local
-# backend's verified pin (see `sandbox_docker` in tidebreak-server), as the
+# backend's verified pin (see `docker` in tidebreak-sandbox-runtime), as the
 # ref the Daytona provider registers as a snapshot (see `daytona` in
 # tidebreak-code-execution), and as the base of the E2B template definition
 # (see `crates/tidebreak-sandbox-agent/e2b/`, whose alias is version-suffixed
@@ -445,7 +445,7 @@ jobs:
             echo
             echo "The \`pin\` job proposes the follow-up PR that records the"
             echo "documents digest as \`PUBLISHED_IMAGE_DIGEST\` in"
-            echo "\`crates/tidebreak-server/src/sandbox_docker.rs\`."
+            echo "\`crates/tidebreak-sandbox-runtime/src/docker.rs\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Closes the pin loop: after a successful publish, propose (or refresh) the
@@ -496,7 +496,7 @@ jobs:
           import sys
 
           digest = sys.argv[1]
-          path = "crates/tidebreak-server/src/sandbox_docker.rs"
+          path = "crates/tidebreak-sandbox-runtime/src/docker.rs"
           with open(path) as handle:
               source = handle.read()
 

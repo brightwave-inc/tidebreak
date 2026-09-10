@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Ban,
@@ -498,6 +498,12 @@ function WorkspaceSubagentRows({
 }) {
   const running = subagents.filter((entry) => entry.status === "running");
   const [expanded, setExpanded] = useState(running.length > 0);
+  const wasEmpty = useRef(running.length === 0);
+  useEffect(() => {
+    const empty = running.length === 0;
+    if (wasEmpty.current && !empty) setExpanded(true);
+    wasEmpty.current = empty;
+  }, [running.length]);
   // A count, not a state: the session line above already says how many are
   // working, and the rows below say which.
   const summary =

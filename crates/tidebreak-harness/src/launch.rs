@@ -28,7 +28,7 @@ const DENIED_EXACT: &[&str] = &[
 ];
 
 /// Bypass mode values that can appear as a `--permission-mode` argument.
-const DENIED_VALUES: &[&str] = &["bypassPermissions"];
+const DENIED_VALUES: &[&str] = &["bypasspermissions"];
 
 /// Whether a composed launch plan may include the engine's bypass flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,7 @@ pub fn validate_launch_plan_with(
         return Ok(());
     }
     for arg in &plan.argv {
-        if DENIED_VALUES.contains(&arg.as_str()) {
+        if DENIED_VALUES.contains(&arg.to_ascii_lowercase().as_str()) {
             return Err(BypassFlagError(arg.clone()));
         }
         if arg.starts_with('-') && is_bypass_flag(arg) {
@@ -71,7 +71,7 @@ fn is_bypass_flag(arg: &str) -> bool {
         return true;
     }
     if let Some((_, value)) = arg.split_once('=') {
-        if DENIED_VALUES.contains(&value) {
+        if DENIED_VALUES.contains(&value.to_ascii_lowercase().as_str()) {
             return true;
         }
     }
@@ -122,13 +122,14 @@ mod tests {
             "--always-approve",
             "--yolo",
             "bypassPermissions",
+            "--permission-mode=BypassPermissions",
         ] {
             let err = validate_launch_plan(&plan(&["claude", flag])).unwrap_err();
             assert!(
                 err.0.contains("dangerous")
                     || err.0.contains("always-approve")
                     || err.0.contains("yolo")
-                    || err.0.contains("bypassPermissions"),
+                    || err.0.to_ascii_lowercase().contains("bypasspermissions"),
                 "{flag} => {err}"
             );
         }

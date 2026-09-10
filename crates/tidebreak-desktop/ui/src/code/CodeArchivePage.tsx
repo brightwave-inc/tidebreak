@@ -6,7 +6,6 @@ import {
   ExternalLink,
   GitBranch,
   GitPullRequest,
-  LoaderCircle,
   MessageSquareText,
   RefreshCw,
   RotateCcw,
@@ -32,6 +31,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { RouteFrame } from "@/RouteFrame";
@@ -324,7 +324,7 @@ function CodeArchiveBody() {
               role="status"
               className="flex items-center gap-1.5 text-muted-foreground"
             >
-              <LoaderCircle className="size-3.5 animate-spin" />
+              <Spinner className="size-3.5" />
               Searching conversations…
             </span>
           )}
@@ -364,7 +364,7 @@ function CodeArchiveBody() {
           <Empty className="min-h-72">
             <EmptyHeader>
               <EmptyMedia variant="icon">
-                <LoaderCircle className="animate-spin" />
+                <Spinner />
               </EmptyMedia>
               <EmptyTitle>Searching conversations</EmptyTitle>
               <EmptyDescription>
@@ -481,11 +481,7 @@ function CodeArchiveBody() {
                       disabled={Boolean(restoring)}
                       onClick={() => void restore(workspace.id)}
                     >
-                      {restoring === workspace.id ? (
-                        <LoaderCircle className="animate-spin" />
-                      ) : (
-                        <RotateCcw />
-                      )}
+                      {restoring === workspace.id ? <Spinner /> : <RotateCcw />}
                       Restore
                     </Button>
                     <Button

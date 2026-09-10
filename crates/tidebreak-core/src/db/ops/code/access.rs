@@ -48,12 +48,12 @@ pub struct ResolvedSessionAccess {
 }
 
 /// The subject that names one principal.
-pub fn principal_subject(owner: &OwnerId) -> String {
+fn principal_subject(owner: &OwnerId) -> String {
     format!("principal:{}", owner.as_str())
 }
 
 /// The subject that names one channel identity.
-pub fn external_subject(channel_kind: &str, external_identity: &str) -> String {
+fn external_subject(channel_kind: &str, external_identity: &str) -> String {
     format!("external:{channel_kind}:{external_identity}")
 }
 
@@ -301,9 +301,12 @@ pub async fn grant_session_access(
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
-    Ok(Some(access_from_row(
-        model.try_into_model().map_err(store_err)?,
-    )?))
+    let row = entities::session_access::Entity::find_by_id((id.0, subject.to_owned()))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store("session access disappeared after grant".into()))?;
+    Ok(Some(access_from_row(row)?))
 }
 
 /// Replace every `external:<channel_kind>:` contribute row on the session
@@ -335,7 +338,7 @@ pub async fn replace_external_session_contributors(
         }
     }
     let mut kept = Vec::new();
-    for identity in identities {
+    for identity in dedupe_identities(identities) {
         let subject = external_subject(channel_kind, identity);
         if !valid_access_subject(&subject) {
             return Err(AgentError::InvalidRequest(format!(
@@ -430,6 +433,14 @@ pub fn valid_access_subject(subject: &str) -> bool {
     })
 }
 
+fn dedupe_identities(identities: &[String]) -> Vec<&String> {
+    let mut seen = std::collections::HashSet::new();
+    identities
+        .iter()
+        .filter(|identity| seen.insert(identity.as_str()))
+        .collect()
+}
+
 fn access_level(value: &str) -> Result<SessionAccessLevel> {
     SessionAccessLevel::from_token(value)
         .ok_or_else(|| AgentError::Store(format!("session access row has unknown level {value}")))
@@ -443,4 +454,19 @@ fn access_from_row(row: entities::session_access::Model) -> Result<SessionAccess
         granted_by: OwnerId::new(&row.granted_by)?,
         created_at: row.created_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dedupe_identities;
+
+    #[test]
+    fn duplicate_external_identities_are_kept_once_in_input_order() {
+        let identities = vec!["alice".to_owned(), "bob".to_owned(), "alice".to_owned()];
+        let kept: Vec<_> = dedupe_identities(&identities)
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(kept, ["alice", "bob"]);
+    }
 }

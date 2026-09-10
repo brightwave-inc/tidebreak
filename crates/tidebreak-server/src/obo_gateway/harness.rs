@@ -466,7 +466,7 @@ mod tests {
                     .bearer_for_harness(&owner, &harness)
                     .await
                     .unwrap_err();
-                assert!(error.to_string().contains("did not confirm"));
+                assert!(error.to_string().contains("did not acknowledge"));
             }
             assert_eq!(
                 recorded.lock().unwrap().len(),

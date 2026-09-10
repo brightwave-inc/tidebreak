@@ -172,7 +172,7 @@ export const ConnectedAppsMcpImportSummary: Story = {
 
 export const ConnectedAppsMcpImportSummaryCompact: Story = {
   args: { panel: "connected-apps", state: "empty" },
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 export const ConnectedAppsFailure: Story = {

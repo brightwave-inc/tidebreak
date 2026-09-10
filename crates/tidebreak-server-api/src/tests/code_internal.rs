@@ -254,7 +254,6 @@ async fn internal_engine_app_with_location(
     runtime.adapters.register(Arc::new(InternalAdapter::new(
         state.clone(),
         runtime.db.clone(),
-        runtime.bus.clone(),
         execution_location,
     )));
     state.events.mirror_into(runtime.bus.clone());
@@ -1986,7 +1985,6 @@ fn screenshot_internal_app(
     runtime.adapters.register(Arc::new(InternalAdapter::new(
         state.clone(),
         runtime.db.clone(),
-        runtime.bus.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
     state.events.mirror_into(runtime.bus.clone());
@@ -2178,9 +2176,6 @@ async fn assert_internal_screenshot_hydrates_pixels(name: &'static str) {
         "{name} must not recapture during recovery"
     );
 }
-
-#[allow(dead_code)]
-fn _db_type_is_used(_: &DbStore) {}
 
 #[tokio::test]
 async fn external_conversation_needs_no_repository_and_reuses_its_binding() {

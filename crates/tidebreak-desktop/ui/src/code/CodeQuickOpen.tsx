@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { fuzzyTokenScore, queryTokens } from "@/fuzzy";
+import { fuzzyScore, queryTokens } from "@/fuzzy";
 import { friendlyErrorMessage } from "@/lib/utils";
 
 const QUICK_OPEN_LIMIT = 5000;
@@ -49,6 +49,7 @@ export function CodeQuickOpen({
   const [openWorkspaceId, setOpenWorkspaceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
+  const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
@@ -67,6 +68,7 @@ export function CodeQuickOpen({
   useEffect(() => {
     loadedKeyRef.current = null;
     setPaths([]);
+    setTruncated(false);
     setLoading(false);
     setError(null);
     setQuery("");
@@ -90,6 +92,7 @@ export function CodeQuickOpen({
       .then((tree) => {
         if (cancelled) return;
         setPaths(tree.paths);
+        setTruncated(tree.truncated);
         loadedKeyRef.current = treeKey;
         setLoading(false);
       })
@@ -160,8 +163,17 @@ export function CodeQuickOpen({
           <CommandList className="max-h-[min(55vh,30rem)] min-h-20 p-1.5">
             {error ? (
               <p className="text-critical px-3 py-5 text-sm">{error}</p>
+            ) : loading ? (
+              <p className="text-muted-foreground px-3 py-5 text-sm">
+                Loading files…
+              </p>
             ) : (
               <>
+                {truncated && (
+                  <p className="text-muted-foreground px-3 py-2 text-xs">
+                    File list was truncated. Add a file filter to narrow it.
+                  </p>
+                )}
                 <CommandEmpty className="text-muted-foreground px-3 py-5 text-sm">
                   No filenames match{" "}
                   {query ? (
@@ -222,10 +234,7 @@ export function rankQuickOpenPaths(
   return paths
     .map((path) => {
       const target = pathQuery ? path.replace(/\\/g, "/") : fileName(path);
-      const score = tokens.reduce((total, token) => {
-        const next = fuzzyTokenScore(target.toLocaleLowerCase(), token);
-        return total < 0 || next < 0 ? -1 : total + next;
-      }, 0);
+      const score = fuzzyScore(target, query);
       return { path, score };
     })
     .filter((entry) => entry.score >= 0)

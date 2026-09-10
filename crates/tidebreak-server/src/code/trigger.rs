@@ -1158,10 +1158,6 @@ fn linked_workspaces(
         .collect()
 }
 
-/// The bulk summary read as the digest the classifier is written against.
-///
-/// Both paths lowercase their host tokens already — `normalized_optional` here
-/// and `lower_token` in `gh.rs` — so the tokens pass straight through.
 /// Abort the trigger sweep when the runtime is dropped.
 ///
 /// The loop holds a [`Weak`] runtime handle: an `Arc` would keep the runtime

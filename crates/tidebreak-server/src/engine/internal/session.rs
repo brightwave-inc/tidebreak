@@ -25,20 +25,15 @@ use tidebreak_harness::{
     NativeChannelSpec, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 
-use crate::code::bus::CodeEventBus;
 use crate::engine::internal::leg::{LegDriver, LegDriverOutcome};
 use crate::state::AppState;
 
 pub(super) struct InternalSession {
     state: AppState,
     db: Arc<DbStore>,
-    #[allow(dead_code)]
-    bus: Arc<CodeEventBus>,
     concurrency: Arc<Semaphore>,
     driver: LegDriver,
     owner: OwnerId,
-    #[allow(dead_code)]
-    session_id: SessionId,
     chat_id: SessionId,
     /// Session-scoped computer-use tools built from the session's capability
     /// files (decision 94): the native channel's tools followed by the in-app
@@ -91,7 +86,6 @@ impl InternalSession {
     pub(super) async fn launch(
         state: AppState,
         db: Arc<DbStore>,
-        bus: Arc<CodeEventBus>,
         concurrency: Arc<Semaphore>,
         driver: LegDriver,
         spec: SessionSpec,
@@ -144,11 +138,9 @@ impl InternalSession {
         let session = Self {
             state,
             db,
-            bus,
             concurrency,
             driver,
             owner: spec.owner,
-            session_id: spec.session_id,
             chat_id,
             session_tools,
             active: Mutex::new(None),
@@ -166,7 +158,7 @@ impl InternalSession {
     /// so you do not replay the park that already landed.
     async fn restore_parked_turn(&self) -> Result<(), HarnessError> {
         let Some(turn) =
-            tidebreak_core::db::code::get_open_turn(&self.db, &self.owner, self.session_id)
+            tidebreak_core::db::code::get_open_turn(&self.db, &self.owner, self.chat_id)
                 .await
                 .map_err(store_error)?
         else {

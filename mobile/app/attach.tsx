@@ -1,29 +1,34 @@
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useMemo, useState } from "react";
 import { Pressable, Text, TextInput } from "react-native";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
 import {
-  AttachError,
-  REASON_UNREACHABLE,
-  discoverMachine,
-  probePolicy,
-} from "../src/lib/attach";
+  attachFailureFromParams,
+  attachMachine,
+  describeAttachFailure,
+  type AttachFailure,
+  type AttachStage,
+} from "../src/lib/autoAttach";
 import { tokenStore } from "../src/session/runtime";
 import { useSessionStore } from "../src/session/store";
 
-type Stage = "idle" | "discover" | "verify" | "probe";
-
-type Failure =
-  | { kind: "unreachable"; detail: string }
-  | { kind: "error"; message: string };
+type Stage = "idle" | AttachStage;
 
 export default function AttachScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{
+    failure?: string | string[];
+    detail?: string | string[];
+  }>();
   const session = useSessionStore((state) => state.session);
   const setSession = useSessionStore((state) => state.setSession);
   const [url, setUrl] = useState(session?.machinePrefillUrl ?? "");
   const [stage, setStage] = useState<Stage>("idle");
-  const [failure, setFailure] = useState<Failure | null>(null);
+  // Auto-attach hands its failure over in route params. Read once: a retry
+  // owns the error state from then on, so the params must not resurrect it.
+  const [failure, setFailure] = useState<AttachFailure | null>(() =>
+    attachFailureFromParams(params),
+  );
 
   const hint = useMemo(() => {
     switch (stage) {
@@ -44,32 +49,16 @@ export default function AttachScreen() {
       return;
     }
     setFailure(null);
-    setStage("discover");
     try {
-      const discovered = await discoverMachine(url, session.gatewayUrl);
-      setStage("verify");
-      setStage("probe");
-      const token = await tokenStore.getAccessToken(discovered.resource);
-      await probePolicy(discovered.baseUrl, token);
-      await tokenStore.update({
-        machine: {
-          baseUrl: discovered.baseUrl,
-          resource: discovered.resource,
-        },
+      const machine = await attachMachine(url, session.gatewayUrl, {
+        getAccessToken: (resource) => tokenStore.getAccessToken(resource),
+        onStage: setStage,
       });
+      await tokenStore.update({ machine });
       setSession(tokenStore.snapshot());
       router.replace("/home");
     } catch (err) {
-      if (err instanceof AttachError && err.reason === REASON_UNREACHABLE) {
-        setFailure({ kind: "unreachable", detail: err.message });
-      } else if (err instanceof AttachError) {
-        setFailure({ kind: "error", message: `${err.stage}: ${err.message}` });
-      } else {
-        setFailure({
-          kind: "error",
-          message: err instanceof Error ? err.message : "Attach failed.",
-        });
-      }
+      setFailure(describeAttachFailure(err));
     } finally {
       setStage("idle");
     }

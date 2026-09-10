@@ -1,4 +1,7 @@
-//! The repository scope an administrator approves for each channel.
+//! Channel repository-confirm rows kept for older clients.
+//!
+//! Decision 0096 removed the administrator repository-scope gate. These
+//! rows no longer authorize anything.
 
 use sea_orm::sea_query::{Expr, ExprTrait, Func};
 use sea_orm::{

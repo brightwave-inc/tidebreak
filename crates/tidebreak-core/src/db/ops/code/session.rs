@@ -236,6 +236,10 @@ where
         .exec(connection)
         .await
         .map_err(store_err)?;
+    entities::setting::Entity::delete_by_id(format!("sessions.{id}.queue_paused"))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
 
     blob_ids.sort_unstable();
     blob_ids.dedup();

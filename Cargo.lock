@@ -7507,7 +7507,6 @@ dependencies = [
  "chrono",
  "futures",
  "image",
- "libc",
  "reqwest",
  "sea-orm",
  "serde",
@@ -7530,8 +7529,6 @@ dependencies = [
  "unicode-general-category",
  "url",
  "uuid",
- "windows-sys 0.61.2",
- "winreg 0.56.0",
  "zip 8.6.0",
 ]
 

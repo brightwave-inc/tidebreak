@@ -37,7 +37,14 @@ type MonitorBatch<T> = {
 };
 
 /** Shell-level delivery polling for GitHub notifications. */
-export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
+export function CodeDeliveryMonitor({
+  client,
+  maxPagesPerPass = MAX_MONITOR_PAGES,
+}: {
+  client: ApiClient;
+  /** Test seam for exercising continuation without changing production bounds. */
+  maxPagesPerPass?: number;
+}) {
   const wakeRef = useRef<(() => void) | null>(null);
   const deliveryRevision = useCodeUpdatesStore(
     (state) => state.deliveryRevision,
@@ -57,6 +64,17 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     let rerunRequested = false;
     let timer: number | null = null;
     let queryController: AbortController | null = null;
+    let continuation: {
+      startedAt: string;
+      targetKey: string;
+      since: string;
+      pullRequests: CodeDeliveryPullRequestSummary[];
+      runs: CodeDeliveryRunSummary[];
+      pullRequestCursor?: string;
+      runCursor?: string;
+      pullRequestsComplete: boolean;
+      runsComplete: boolean;
+    } | null = null;
     const isCurrent = () =>
       !cancelled && isCodeClientGenerationActive(clientGeneration);
 
@@ -86,7 +104,10 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       initial.setPollState(true, null);
       try {
         const discovered = await initial.loadRepositories(client);
-        if (!isCurrent()) return;
+        if (!isCurrent()) {
+          initial.setPollState(false);
+          return;
+        }
         const current = useCodeDeliveryStore.getState();
         if (
           !discovered.capability.found ||
@@ -110,7 +131,10 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
               errors: discovered.errors,
             },
           );
-          if (!isCurrent()) return;
+          if (!isCurrent()) {
+            initial.setPollState(false);
+            return;
+          }
           if (migrationComplete) {
             useCodeDeliveryStore
               .getState()
@@ -120,64 +144,93 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
 
         const targets = repositories.map(codeDeliveryRepositoryTarget);
         if (targets.length === 0) {
+          continuation = null;
           current.completeDeliveryPoll([], [], startedAt);
           return;
         }
 
-        queryController = new AbortController();
-        const since = monitorSince(current.lastPollAt, Date.parse(startedAt));
-        const pullRequests: CodeDeliveryPullRequestSummary[] = [];
-        const runs: CodeDeliveryRunSummary[] = [];
-        let pullRequestCursor: string | undefined;
-        let runCursor: string | undefined;
-        let pullRequestsComplete = false;
-        let runsComplete = false;
-
-        while (!pullRequestsComplete || !runsComplete) {
-          const batches: [
-            MonitorBatch<CodeDeliveryPullRequestSummary>,
-            MonitorBatch<CodeDeliveryRunSummary>,
-          ] = await Promise.all([
-            pullRequestsComplete
-              ? Promise.resolve<MonitorBatch<CodeDeliveryPullRequestSummary>>({
-                  items: [],
-                  complete: true,
-                })
-              : monitorPullRequests(
-                  client,
-                  targets,
-                  since,
-                  pullRequestCursor,
-                  queryController.signal,
-                ),
-            runsComplete
-              ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
-                  items: [],
-                  complete: true,
-                })
-              : monitorRuns(
-                  client,
-                  targets,
-                  since,
-                  runCursor,
-                  queryController.signal,
-                ),
-          ]);
-          const [pullRequestBatch, runBatch] = batches;
-          pullRequests.push(...pullRequestBatch.items);
-          runs.push(...runBatch.items);
-          pullRequestsComplete = pullRequestBatch.complete;
-          runsComplete = runBatch.complete;
-          pullRequestCursor = pullRequestBatch.nextCursor;
-          runCursor = runBatch.nextCursor;
+        const targetKey = JSON.stringify(targets);
+        if (!continuation || continuation.targetKey !== targetKey) {
+          continuation = {
+            startedAt,
+            targetKey,
+            since: monitorSince(current.lastPollAt, Date.parse(startedAt)),
+            pullRequests: [],
+            runs: [],
+            pullRequestsComplete: false,
+            runsComplete: false,
+          };
         }
+        const pending = continuation;
+        queryController = new AbortController();
+        const batches: [
+          MonitorBatch<CodeDeliveryPullRequestSummary>,
+          MonitorBatch<CodeDeliveryRunSummary>,
+        ] = await Promise.all([
+          pending.pullRequestsComplete
+            ? Promise.resolve<MonitorBatch<CodeDeliveryPullRequestSummary>>({
+                items: [],
+                complete: true,
+              })
+            : monitorPullRequests(
+                client,
+                targets,
+                pending.since,
+                pending.pullRequestCursor,
+                queryController.signal,
+                maxPagesPerPass,
+              ),
+          pending.runsComplete
+            ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
+                items: [],
+                complete: true,
+              })
+            : monitorRuns(
+                client,
+                targets,
+                pending.since,
+                pending.runCursor,
+                queryController.signal,
+                maxPagesPerPass,
+              ),
+        ]);
+        const [pullRequestBatch, runBatch] = batches;
+        continuation = {
+          ...pending,
+          pullRequests: [...pending.pullRequests, ...pullRequestBatch.items],
+          runs: [...pending.runs, ...runBatch.items],
+          pullRequestsComplete: pullRequestBatch.complete,
+          runsComplete: runBatch.complete,
+          pullRequestCursor: pullRequestBatch.nextCursor,
+          runCursor: runBatch.nextCursor,
+        };
+        const nextPending = continuation;
 
-        if (!isCurrent()) return;
+        if (!isCurrent()) {
+          initial.setPollState(false);
+          return;
+        }
+        if (!nextPending.pullRequestsComplete || !nextPending.runsComplete) {
+          // Keep one pass bounded. Very large aggregates continue immediately
+          // from these cursors and refresh across several passes.
+          rerunRequested = true;
+          initial.setPollState(false);
+          return;
+        }
+        continuation = null;
         useCodeDeliveryStore
           .getState()
-          .completeDeliveryPoll(pullRequests, runs, startedAt);
+          .completeDeliveryPoll(
+            nextPending.pullRequests,
+            nextPending.runs,
+            nextPending.startedAt,
+          );
       } catch (error) {
-        if (!isCurrent() || isAbortError(error)) return;
+        continuation = null;
+        if (!isCurrent() || isAbortError(error)) {
+          initial.setPollState(false);
+          return;
+        }
         useCodeDeliveryStore
           .getState()
           .setPollState(false, deliveryErrorMessage(error));
@@ -202,7 +255,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       if (timer !== null) window.clearTimeout(timer);
       queryController?.abort();
     };
-  }, [client]);
+  }, [client, maxPagesPerPass]);
 
   return null;
 }
@@ -274,10 +327,11 @@ export async function monitorPullRequests(
   updatedAfter: string,
   initialCursor?: string,
   signal?: AbortSignal,
+  maxPages = MAX_MONITOR_PAGES,
 ): Promise<MonitorBatch<CodeDeliveryPullRequestSummary>> {
   const items: CodeDeliveryPullRequestSummary[] = [];
   let cursor = initialCursor;
-  for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const page = await client.queryCodeDeliveryPullRequests(
       {
         repositories,
@@ -307,10 +361,11 @@ export async function monitorRuns(
   createdAfter: string,
   initialCursor?: string,
   signal?: AbortSignal,
+  maxPages = MAX_MONITOR_PAGES,
 ): Promise<MonitorBatch<CodeDeliveryRunSummary>> {
   const items: CodeDeliveryRunSummary[] = [];
   let cursor = initialCursor;
-  for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const page = await client.queryCodeDeliveryRuns(
       {
         repositories,

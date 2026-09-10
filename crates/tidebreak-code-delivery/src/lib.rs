@@ -41,8 +41,8 @@ use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
     CodePullRequestRelation, CodePullRequestState, CodeRepo, CodeWorkflowRunFact,
     CodeWorkflowRunId, CodeWorkspace, CodeWorkspaceStatus, OwnerId, PullRequestCheck,
-    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, PullRequestDigest, RepoId,
-    WorkspaceId,
+    PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind,
+    PullRequestDigest, RepoId, WorkspaceId,
 };
 
 mod api;

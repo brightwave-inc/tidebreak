@@ -158,10 +158,9 @@ impl super::runtime::CodeRuntime {
     /// already holds a live grant — revoke first, so a re-link is an
     /// explicit replacement.
     ///
-    /// Production minting is not wired yet; tests (including
-    /// `src/tests/code_external.rs`) drive the token pair through this
-    /// helper. Keep it compiled only in tests until a connect-approval
-    /// path calls it.
+    /// Production minting goes through [`Self::complete_connect_handshake`].
+    /// This helper stays test-only (`src/tests/code_external.rs` drives the
+    /// token pair through it).
     #[cfg(any(test, feature = "test-support"))]
     pub async fn mint_adapter_grant(
         &self,
@@ -516,9 +515,10 @@ impl super::runtime::CodeRuntime {
         )
     }
 
-    /// An admin confirms a pending channel repository on a workspace grant.
-    /// The grant is owned by the service principal; this path resolves that
-    /// owner and then uses the owner-scoped store.
+    /// Record a channel-repository confirm for older clients. Decision 0096
+    /// removed the gate: these rows authorize nothing. The grant is owned by
+    /// the service principal; this path resolves that owner and then uses
+    /// the owner-scoped store.
     pub async fn confirm_workspace_channel_repository_as_admin(
         &self,
         admin: &OwnerId,
@@ -543,7 +543,8 @@ impl super::runtime::CodeRuntime {
         .await?)
     }
 
-    /// Add exact repositories to one channel's approved scope before a session starts.
+    /// Record exact repositories on one channel for older clients. Decision
+    /// 0096 removed the gate: these confirms authorize nothing.
     pub async fn approve_workspace_channel_repositories_as_admin(
         &self,
         admin: &OwnerId,
@@ -649,7 +650,7 @@ impl super::runtime::CodeRuntime {
         .await?;
         for grant in &revoked {
             self.grant_revocations().publish(grant.id);
-            self.revoke_gateway_delegation(owner, grant.id).await;
+            self.revoke_gateway_delegation(&grant.owner, grant.id).await;
         }
         Ok(revoked)
     }

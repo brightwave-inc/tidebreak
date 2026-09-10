@@ -653,26 +653,6 @@ pub fn gh_shim_script(real_gh: &Path, loopback_base: &str, origin_host: &str) ->
     )
 }
 
-/// Whether the on-behalf-of relay can carry this engine's inference.
-///
-/// Exactly the engines [`spawn_wiring`] points at the relay. The doctor reads
-/// this on a gateway-hosted machine, where a covered engine needs no local
-/// sign-in and an uncovered one cannot run at all; everywhere else the local
-/// probe decides, and this answer does not matter.
-pub fn relay_covered(kind: HarnessKind) -> bool {
-    match kind {
-        HarnessKind::ClaudeCode
-        | HarnessKind::Codex
-        | HarnessKind::Opencode
-        | HarnessKind::Grok => true,
-        // The in-process engine never reaches the relay: it resolves
-        // inference through the server's own provider resolution, which on
-        // a hosted machine is the same gateway. Covered, in the sense the
-        // doctor asks about — it needs no local sign-in.
-        HarnessKind::Internal => true,
-    }
-}
-
 fn generate_key() -> String {
     format!("tbreak_hl_{}", uuid::Uuid::new_v4())
 }

@@ -552,13 +552,15 @@ async fn a_claude_turn_skips_the_fallback_recap() {
     )
     .await
     .unwrap();
-    let digest =
-        crate::code::attention::list_digests(&runtime.db, &tidebreak_core::OwnerId::local())
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|digest| digest.session == session_id)
-            .expect("the Claude session stays listed");
+    let digest = crate::code::attention::list_accessible_digests(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|digest| digest.session == session_id)
+    .expect("the Claude session stays listed");
     assert!(digest.recap.is_none());
 }
 

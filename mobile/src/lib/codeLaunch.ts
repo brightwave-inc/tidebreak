@@ -64,9 +64,6 @@ export function defaultCreatePermissionMode(
 export function harnessUnavailableReason(
   harness: CodeHarnessOption,
 ): string | null {
-  if (harness.auth_mode === "hosted_unavailable") {
-    return "Not available on hosted machines.";
-  }
   if (!harness.found) {
     return harness.installable
       ? "Install this harness from Tidebreak desktop first."

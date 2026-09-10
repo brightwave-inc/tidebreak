@@ -732,13 +732,22 @@ impl GrokSession {
             let mut chunks_this_tick = 0;
             let mut eof = false;
             while chunks_this_tick < budget.max_chunks_per_tick {
-                match reader.read(&mut chunk).await? {
-                    0 => {
+                match reader.read(&mut chunk).await {
+                    Err(error) => {
+                        if let Some(mut child) = self.child.lock().await.take() {
+                            let _ = child.terminate().await;
+                        }
+                        self.pid.clear();
+                        let _ = stderr_task.await;
+                        return Err(error.into());
+                    }
+                    Ok(0) => {
                         eof = true;
                         break;
                     }
-                    n => {
+                    Ok(n) => {
                         let tick = lines.push(&chunk[..n], budget);
+
                         if tick.overflow_chunks > 0 {
                             warn!(
                                 overflow_chunks = tick.overflow_chunks,
@@ -760,7 +769,7 @@ impl GrokSession {
             tokio::task::yield_now().await;
         }
         if !lines.pending().is_empty() {
-            let pending = lines.pending().to_owned();
+            let pending = lines.pending().into_owned();
             if emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await {
                 saw_terminal = true;
             }

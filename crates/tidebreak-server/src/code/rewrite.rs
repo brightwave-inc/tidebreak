@@ -226,6 +226,7 @@ impl TurnRewriter {
             return Ok(Outcome::Declined);
         };
         if !set_turn_rewrite(&self.db, owner, turn_id, &rewrite).await? {
+            self.announce(owner, session_id, turn_id, TurnRewriteState::Failed, None);
             return Ok(Outcome::NotApplicable);
         }
         self.announce(
@@ -310,7 +311,7 @@ impl TurnRewrite for TurnRewriter {
                         tracing::info!("tidebreak: rewrote code turn {turn_id}");
                     }
                     Ok(Outcome::Declined) => {
-                        tracing::warn!("tidebreak: left code turn {turn_id} without a rewrite");
+                        tracing::debug!("tidebreak: left code turn {turn_id} without a rewrite");
                     }
                     Ok(Outcome::NotApplicable) => {}
                     Err(error) => {

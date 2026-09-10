@@ -4,8 +4,11 @@
 - Date: 2026-08-12
 - Owners: desktop / agent core
 - Related: [`docs/deferred.md`](../deferred.md) (browser surface), permission
-  modes and approval classes in `openwave-core/src/approval.rs`, host
-  capability grants in `openwave-host-broker/src/capability.rs`
+  modes and approval classes in `crates/tidebreak-core/src/approval.rs`, host
+  capability grants in `crates/tidebreak-host-broker/src/capability.rs`
+- Amended by: [`0095-computer-use-for-coding-harnesses.md`](0095-computer-use-for-coding-harnesses.md)
+  — the foreground-only, development-app blocklist, and screenshot-redaction
+  limits; the rest of this record stands
 
 ## Context
 

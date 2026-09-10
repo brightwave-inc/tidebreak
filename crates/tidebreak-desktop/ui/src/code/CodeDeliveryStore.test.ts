@@ -13,7 +13,6 @@ import {
   rememberedPullRequestPage,
   resetCodeDeliveryHostState,
   trackedCodeDeliveryRepositories,
-  unreadCodeDeliveryNotifications,
   useCodeDeliveryStore,
 } from "./CodeDeliveryStore";
 
@@ -87,11 +86,22 @@ function run(
 
 beforeEach(() => {
   window.localStorage.clear();
-  useCodeDeliveryStore.getState().reset();
+  useCodeDeliveryStore.setState({
+    manualRepositories: [],
+    excludedRegisteredRepoIds: [],
+    pinnedRepositoryKeys: [],
+    savedViews: [],
+    lastPollAt: null,
+    knownAuthors: [],
+    legacyNotificationRules: null,
+    notificationRulesMigrated: false,
+    persistenceError: null,
+  });
+  resetCodeDeliveryHostState();
 });
 
 afterEach(() => {
-  useCodeDeliveryStore.getState().reset();
+  resetCodeDeliveryHostState();
   window.localStorage.clear();
 });
 
@@ -188,88 +198,6 @@ describe("trackedCodeDeliveryRepositories", () => {
       excludedRegisteredRepoIds: ["repo-zeta"],
       pinnedRepositoryKeys: ["github.com/other-org/beta"],
     });
-  });
-});
-
-describe("delivery notifications", () => {
-  it("deduplicates a poll fingerprint and preserves explicit read state", () => {
-    const repo = repository("brightwave-inc", "tidebreak", "repo-1");
-    const store = useCodeDeliveryStore.getState();
-    const item = pullRequest(2248, repo);
-
-    expect(store.ingestDeliveryPoll([item], [], NOW)).toBe(1);
-    expect(
-      useCodeDeliveryStore.getState().ingestDeliveryPoll([item], [], NOW),
-    ).toBe(0);
-    expect(useCodeDeliveryStore.getState().notifications).toHaveLength(1);
-    expect(
-      unreadCodeDeliveryNotifications(useCodeDeliveryStore.getState()),
-    ).toBe(1);
-
-    const notificationId = useCodeDeliveryStore.getState().notifications[0]!.id;
-    useCodeDeliveryStore.getState().markNotificationRead(notificationId);
-    expect(
-      unreadCodeDeliveryNotifications(useCodeDeliveryStore.getState()),
-    ).toBe(0);
-
-    useCodeDeliveryStore.getState().markNotificationRead(notificationId, false);
-    expect(
-      unreadCodeDeliveryNotifications(useCodeDeliveryStore.getState()),
-    ).toBe(1);
-
-    useCodeDeliveryStore.getState().markAllNotificationsRead();
-    expect(
-      unreadCodeDeliveryNotifications(useCodeDeliveryStore.getState()),
-    ).toBe(0);
-  });
-
-  it("keeps the client-side feed after rule evaluation moves to the server", () => {
-    const alpha = repository("brightwave-inc", "alpha", "repo-alpha");
-    const beta = repository("brightwave-inc", "beta", "repo-beta");
-    const linked = pullRequest(3, alpha, {
-      workspace_links: [
-        {
-          workspace_id: "ws-3",
-          repo_id: "repo-alpha",
-          title: "Fix alpha",
-          branch_name: "feature/3",
-          status: "active",
-          exact: true,
-        },
-      ],
-    });
-    expect(
-      useCodeDeliveryStore
-        .getState()
-        .ingestDeliveryPoll([pullRequest(1, beta), linked], [], NOW),
-    ).toBe(2);
-    expect(useCodeDeliveryStore.getState().notifications).toHaveLength(2);
-    expect(
-      useCodeDeliveryStore
-        .getState()
-        .notifications.find(
-          (notification) => notification.workspaceId === "ws-3",
-        ),
-    ).toBeDefined();
-  });
-
-  it("keeps at most 500 notifications and drops events older than 30 days", () => {
-    const repo = repository("brightwave-inc", "tidebreak", "repo-1");
-    const recent = Array.from({ length: 506 }, (_, index) =>
-      run(index + 1, repo),
-    );
-    const old = run(999, repo, {
-      created_at: "2026-07-20T11:59:59.000Z",
-      updated_at: "2026-07-20T11:59:59.000Z",
-    });
-
-    expect(
-      useCodeDeliveryStore.getState().ingestDeliveryPoll([], [old], NOW),
-    ).toBe(0);
-    expect(
-      useCodeDeliveryStore.getState().ingestDeliveryPoll([], recent, NOW),
-    ).toBe(506);
-    expect(useCodeDeliveryStore.getState().notifications).toHaveLength(500);
   });
 });
 

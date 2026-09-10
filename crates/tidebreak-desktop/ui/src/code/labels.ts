@@ -164,7 +164,6 @@ export function isHarnessReady(entry: {
   const mode = entry.auth_mode ?? "local_sign_in";
   if (mode === "gateway_relay" || mode === "gateway_managed")
     return entry.found;
-  if (mode === "hosted_unavailable") return false;
   return entry.found && entry.authenticated === true;
 }
 
@@ -202,9 +201,6 @@ export function harnessUnusableReason(entry: {
   caps: ModeCaps;
 }): string | null {
   const mode = entry.auth_mode ?? "local_sign_in";
-  if (mode === "hosted_unavailable") {
-    return "Not available on hosted machines yet";
-  }
   if (!entry.found && !entry.installable) return "Not installed";
   // A relay-covered engine needs no sign-in on a hosted machine, and a
   // gateway-managed one holds credentials its login check cannot see, so the

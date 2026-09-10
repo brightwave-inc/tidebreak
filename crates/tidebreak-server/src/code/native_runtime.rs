@@ -56,13 +56,6 @@ pub enum NativeRuntimeError {
     Failed(String),
 }
 
-/// Cancellation handle for one native operation.
-#[async_trait]
-pub trait NativeOperationHandle: Send + Sync {
-    /// Cancel the pending input and release the session's exclusive ownership.
-    async fn cancel(&self) -> Result<(), String>;
-}
-
 /// The server's contract with a desktop native computer-use adapter.
 ///
 /// Every method receives a [`NativeRuntimeScope`] derived from a validated

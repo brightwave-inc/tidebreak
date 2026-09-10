@@ -184,24 +184,6 @@ impl BrowserTokenRegistry {
         )
     }
 
-    /// Mint a channel and record whether its runtime supports native actions.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn issue_with_semantic_actions(
-        &self,
-        subject: BrowserSubject,
-        bridge_command: &Path,
-        semantic_actions: bool,
-    ) -> Result<BrowserChannelSpec, String> {
-        self.issue_with_capabilities(
-            subject,
-            bridge_command,
-            BrowserChannelCapabilities {
-                semantic_actions,
-                ..BrowserChannelCapabilities::default()
-            },
-        )
-    }
-
     /// Mint a channel and record the exact tool capabilities its runtime
     /// reports, so the bridge's advertised tool set stays honest.
     pub fn issue_with_capabilities(
@@ -703,20 +685,6 @@ mod tests {
         assert!(!spec.semantic_actions);
         assert!(!spec.lifecycle);
         assert!(!spec.developer_diagnostics);
-    }
-
-    #[test]
-    fn capfile_advertises_semantic_actions_only_when_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let reg = seeded(dir.path());
-        let spec = reg
-            .issue_with_semantic_actions(subject("actions"), &test_bridge_command(), true)
-            .unwrap();
-        let contents = std::fs::read_to_string(&spec.capability_file).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
-
-        assert_eq!(value["semantic_actions"], true);
-        assert!(spec.semantic_actions);
     }
 
     #[test]

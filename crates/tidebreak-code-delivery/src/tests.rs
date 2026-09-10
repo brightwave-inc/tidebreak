@@ -1009,3 +1009,48 @@ fn cursors_are_bounded_offsets() {
     assert_eq!(page, vec![3]);
     assert_eq!(next, None);
 }
+
+#[test]
+fn a_list_read_without_a_rollup_does_not_claim_to_know_the_checks() {
+    // The reconcile sweep lists every state, and that plan skips
+    // `statusCheckRollup`. Its empty check list means "not asked": the
+    // observation says so, and the live-tier digest carries `None` so the
+    // write keeps the rollup the conditional fetcher stored.
+    let without = serde_json::json!({
+        "number": 2801,
+        "title": "Sweep read",
+        "state": "OPEN",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/2801",
+        "headRefName": "thet/sweep",
+        "baseRefName": "main"
+    });
+    let parsed = parse_pull_request(&repository_ref(), &without, &[]).unwrap();
+    assert!(!parsed.checks_loaded);
+    assert!(parsed.summary.checks.is_empty());
+
+    let with = serde_json::json!({
+        "number": 2801,
+        "title": "Sweep read",
+        "state": "OPEN",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/2801",
+        "headRefName": "thet/sweep",
+        "baseRefName": "main",
+        "statusCheckRollup": []
+    });
+    let parsed = parse_pull_request(&repository_ref(), &with, &[]).unwrap();
+    assert!(parsed.checks_loaded, "an empty rollup was still loaded");
+
+    // Both live-tier writers derive the summary and counts from the same
+    // check list, so an unchanged rollup compares equal whoever wrote it.
+    let digest = digest_from_summary(&parsed.summary);
+    assert_eq!(digest.checks.as_ref().map(Vec::len), Some(0));
+    assert_eq!(
+        digest.checks_summary.as_deref(),
+        Some(
+            PullRequestCheckCounts::from_checks(&[])
+                .summary_line()
+                .as_str()
+        )
+    );
+    assert!(digest.check_counts.is_some());
+}

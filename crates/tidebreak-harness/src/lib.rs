@@ -49,9 +49,9 @@ pub use pin::{
 };
 pub use probe::{
     capture_login_env, display_model_label, env_value, filter_child_env, filter_engine_child_env,
-    infer_listed_default, list_cli_models, observe_version, prefer_gateway_models, probe_shell,
-    resolve_binary, resolve_command_on_path, with_reasoning_efforts, DeclaredBinary, HostEnv,
-    ListedHarnessModel, ProbeCapture, ProbeError,
+    list_cli_models, observe_version, prefer_gateway_models, probe_shell, resolve_binary,
+    resolve_command_on_path, with_reasoning_efforts, DeclaredBinary, HostEnv, ListedHarnessModel,
+    ProbeCapture, ProbeError,
 };
 
 /// Whether some auth mode besides the vendor login a probe observes could
@@ -1420,7 +1420,16 @@ mod tests {
                 for capture in read_dir_sorted(&version.path()) {
                     let path = capture.path();
                     if path.extension().is_some_and(|ext| ext == "ndjson") {
-                        streams.push((name.clone(), path));
+                        // Grok ACP captures are bidirectional JSON-RPC frames, not the
+                        // print-mode stream consumed by `GrokStreamParser`. ACP replay
+                        // coverage lives in `grok::acp_tests`.
+                        let framed_acp = name == "grok"
+                            && path
+                                .file_name()
+                                .is_some_and(|file| file.to_string_lossy().starts_with("acp-"));
+                        if !framed_acp {
+                            streams.push((name.clone(), path));
+                        }
                     }
                 }
             }

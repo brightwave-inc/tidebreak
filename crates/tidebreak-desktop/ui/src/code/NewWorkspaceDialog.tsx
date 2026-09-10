@@ -1139,7 +1139,7 @@ export function NewWorkspaceDialog({
                 onRemove={removeImage}
               />
               {imageError && (
-                <p className="text-destructive text-xs" role="alert">
+                <p className="text-critical text-xs" role="alert">
                   {imageError}
                 </p>
               )}

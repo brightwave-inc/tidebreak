@@ -222,3 +222,8 @@ record names. It is the bridge, not the end state: the entity merge
 retires those tables, and the engine writes the journal natively.
 
 The rest of this record stands.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

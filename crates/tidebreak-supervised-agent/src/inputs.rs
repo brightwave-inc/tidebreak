@@ -576,6 +576,47 @@ mod tests {
         assert_eq!(resolve(raw).unwrap().engine, HarnessKind::Codex);
     }
 
+    /// The admitted identity is honored only when it names the engine the
+    /// agent drives and a real session UUID.
+    #[test]
+    fn an_admitted_engine_identity_must_match_the_driven_engine() {
+        let session = "018f0000-0000-7000-8000-000000000001";
+        let raw = RawInputs {
+            engine: Some("codex".to_owned()),
+            embedded_engine: Some(format!(
+                r#"{{"engine":"codex","engine_session_id":"{session}"}}"#
+            )),
+            ..minimal()
+        };
+        assert_eq!(
+            resolve(raw).unwrap().embedded_engine,
+            Some(crate::wire::EmbeddedEngine {
+                engine: HarnessKind::Codex,
+                engine_session_id: serde_json::from_value(serde_json::json!(session)).unwrap(),
+            })
+        );
+        assert_eq!(resolve(minimal()).unwrap().embedded_engine, None);
+
+        for declared in [
+            format!(r#"{{"engine":"claude_code","engine_session_id":"{session}"}}"#),
+            r#"{"engine":"codex","engine_session_id":"00000000-0000-0000-0000-000000000000"}"#
+                .to_owned(),
+            "not json".to_owned(),
+        ] {
+            let raw = RawInputs {
+                engine: Some("codex".to_owned()),
+                embedded_engine: Some(declared.clone()),
+                ..minimal()
+            };
+            let error = resolve(raw).unwrap_err();
+            assert!(
+                error.message.contains(EMBEDDED_ENGINE_VARIABLE),
+                "{declared}: {}",
+                error.message
+            );
+        }
+    }
+
     /// A typo must not silently drive the default engine for the whole run.
     #[test]
     fn an_unknown_engine_fails_naming_the_variable_and_the_tokens() {

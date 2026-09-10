@@ -16,13 +16,8 @@ const MAX_RPC_LINE: usize = 16 * 1_024 * 1_024;
 
 /// Enable only the version whose bidirectional protocol has captured fixtures.
 pub(crate) fn supports_version(version: &str) -> bool {
-    version
-        .trim()
-        .strip_prefix("grok ")
-        .unwrap_or(version.trim())
-        .split_whitespace()
-        .next()
-        == Some("1.0.13")
+    crate::probe::version_patch_line(Some(version))
+        .is_some_and(|(major, minor, patch)| major == 1 && minor == 0 && patch >= 13)
 }
 
 #[derive(Default)]
@@ -300,6 +295,19 @@ impl GrokSession {
         result
     }
 
+    fn map_resume_error(resuming: bool, error: HarnessError) -> HarnessError {
+        if resuming
+            && (error.to_string().contains("not found")
+                || error.to_string().contains("Failed to restore session"))
+        {
+            HarnessError::ResumeLost(format!(
+                "Grok ACP could not load the stored session: {error}"
+            ))
+        } else {
+            error
+        }
+    }
+
     async fn drive_acp(
         &self,
         input: &TurnInput,
@@ -323,18 +331,7 @@ impl GrokSession {
         let response = self
             .acp_rpc(2, method, params, reader, parser, true)
             .await
-            .map_err(|error| {
-                if resume.is_some()
-                    && (error.to_string().contains("not found")
-                        || error.to_string().contains("Failed to restore session"))
-                {
-                    HarnessError::ResumeLost(format!(
-                        "Grok ACP could not load the stored session: {error}"
-                    ))
-                } else {
-                    error
-                }
-            })?;
+            .map_err(|error| Self::map_resume_error(resume.is_some(), error))?;
         let session_id = match resume {
             Some(id) => id,
             None => response

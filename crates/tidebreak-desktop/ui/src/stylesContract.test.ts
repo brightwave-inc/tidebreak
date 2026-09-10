@@ -53,8 +53,9 @@ function offenders(pattern: RegExp, skip?: ReadonlySet<string>): string[] {
   return hits;
 }
 
-/** RefreshCw / RotateCw JSX that also carries animate-spin. */
-const SPINNING_LUCIDE_REFRESH = /<(RefreshCw|RotateCw)\b[^>]*animate-spin/;
+/** RefreshCw / RotateCw / Loader2 / LoaderCircle JSX that also carries animate-spin. */
+const SPINNING_LUCIDE_REFRESH =
+  /<(RefreshCw|RotateCw|Loader2|LoaderCircle)\b[^>]*animate-spin/;
 
 function spinningRefreshIcons(): string[] {
   const hits: string[] = [];
@@ -88,7 +89,7 @@ describe("styles contract (see DESIGN.md)", () => {
     expect(
       spinningRefreshIcons(),
       "Busy refresh controls swap to Spinner from components/ui/spinner.tsx. " +
-        "Lucide RefreshCw and RotateCw orbit under animate-spin. See DESIGN.md.",
+        "Lucide RefreshCw, RotateCw, Loader2, and LoaderCircle orbit under animate-spin. See DESIGN.md.",
     ).toEqual([]);
   });
 });

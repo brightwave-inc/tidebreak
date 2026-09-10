@@ -30,32 +30,29 @@ function legacyState() {
         tidebreakLinkedOnly: false,
       },
     ],
-    notifications: [
-      {
-        id: "run-failure:1",
-        fingerprint: "run-failure:1",
-        rule: "run_failure",
-        title: "CI failed",
-        detail: "failure",
-        repositoryName: "brightwave-inc/tidebreak",
-        occurredAt: "2026-08-28T12:00:00Z",
-        receivedAt: "2026-08-28T12:00:01Z",
-        url: "https://github.com/brightwave-inc/tidebreak/actions/runs/1",
-        target: {
-          kind: "run",
-          repository: {
-            host: "github.com",
-            owner: "brightwave-inc",
-            name: "tidebreak",
-          },
-          runKind: "workflow_run",
-          id: 1,
-        },
-      },
-    ],
-    seenFingerprints: { "run-failure:1": "2026-08-28T12:00:01Z" },
+    notifications: [{ id: "legacy-client-row" }],
+    seenFingerprints: { "legacy-client-row": "2026-08-28T12:00:01Z" },
     lastPollAt: "2026-08-28T12:00:01Z",
     knownAuthors: [{ login: "mara" }],
+  };
+}
+
+function pullRequestView(id: string) {
+  return {
+    id,
+    kind: "pull_requests",
+    name: `View ${id}`,
+    createdAt: "2026-08-28T12:00:00Z",
+    filters: {
+      search: "",
+      repositoryKeys: [],
+      states: ["open"],
+      reviewStates: [],
+      checkStates: [],
+      authors: [],
+      attentionOnly: false,
+      readyOnly: false,
+    },
   };
 }
 
@@ -80,16 +77,18 @@ describe("delivery notification rule migration storage", () => {
     const rules = useCodeDeliveryStore.getState().legacyNotificationRules;
 
     expect(rules).toHaveLength(3);
-    useCodeDeliveryStore.getState().markAllNotificationsRead();
+    useCodeDeliveryStore
+      .getState()
+      .rememberDeliveryAuthors([{ login: "devon" }]);
     expect(
       JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}"),
-    ).toMatchObject({
-      notificationRules: legacyState().notificationRules,
-      notifications: [{ id: "run-failure:1" }],
-      seenFingerprints: {
-        "run-failure:1": "2026-08-28T12:00:01Z",
-      },
-    });
+    ).toMatchObject({ notificationRules: legacyState().notificationRules });
+    expect(
+      JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}"),
+    ).not.toHaveProperty("notifications");
+    expect(
+      JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}"),
+    ).not.toHaveProperty("seenFingerprints");
 
     expect(rules).not.toBeNull();
     useCodeDeliveryStore.getState().completeNotificationRuleMigration(rules!);
@@ -98,10 +97,6 @@ describe("delivery notification rule migration storage", () => {
     );
     expect(migrated.notificationRulesMigrated).toBe(true);
     expect(migrated).not.toHaveProperty("notificationRules");
-    expect(migrated.notifications[0].id).toBe("run-failure:1");
-    expect(migrated.seenFingerprints).toEqual({
-      "run-failure:1": "2026-08-28T12:00:01Z",
-    });
 
     const reloaded = await loadStore();
     expect(
@@ -109,15 +104,74 @@ describe("delivery notification rule migration storage", () => {
     ).toBeNull();
   });
 
-  it("does not invent legacy rules when no saved state exists", async () => {
+  it("does not invent migration completion when no saved state exists", async () => {
     const { useCodeDeliveryStore } = await loadStore();
 
     expect(useCodeDeliveryStore.getState().legacyNotificationRules).toBeNull();
-    useCodeDeliveryStore.getState().finishPoll("2026-08-29T12:00:00Z");
+    useCodeDeliveryStore
+      .getState()
+      .completeDeliveryPoll([], [], "2026-08-29T12:00:00Z");
     const persisted = JSON.parse(
       window.localStorage.getItem(STORAGE_KEY) ?? "{}",
     );
-    expect(persisted.notificationRulesMigrated).toBe(true);
+    expect(persisted).not.toHaveProperty("notificationRulesMigrated");
     expect(persisted).not.toHaveProperty("notificationRules");
+  });
+
+  it("drops one bad saved-view row while keeping every other field", async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...legacyState(),
+        manualRepositories: [
+          {
+            host: "github.com",
+            owner: "brightwave-inc",
+            name: "tidebreak",
+            name_with_owner: "brightwave-inc/tidebreak",
+            url: "https://github.com/brightwave-inc/tidebreak",
+          },
+        ],
+        pinnedRepositoryKeys: ["github.com/brightwave-inc/tidebreak"],
+        savedViews: [
+          pullRequestView("kept"),
+          { ...pullRequestView("bad"), filters: null },
+        ],
+      }),
+    );
+
+    const { useCodeDeliveryStore } = await loadStore();
+    const state = useCodeDeliveryStore.getState();
+    expect(state.savedViews.map((view) => view.id)).toEqual(["kept"]);
+    expect(state.manualRepositories).toHaveLength(1);
+    expect(state.pinnedRepositoryKeys).toEqual([
+      "github.com/brightwave-inc/tidebreak",
+    ]);
+    expect(state.knownAuthors).toEqual([{ login: "mara" }]);
+    expect(state.legacyNotificationRules).toHaveLength(3);
+  });
+
+  it("ignores a corrupt notification row without marking migration complete", async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...legacyState(),
+        notifications: [{ id: null }],
+      }),
+    );
+
+    const { useCodeDeliveryStore } = await loadStore();
+    const rules = useCodeDeliveryStore.getState().legacyNotificationRules;
+    expect(rules).toHaveLength(3);
+
+    useCodeDeliveryStore
+      .getState()
+      .rememberDeliveryAuthors([{ login: "devon" }]);
+    const persisted = JSON.parse(
+      window.localStorage.getItem(STORAGE_KEY) ?? "{}",
+    );
+    expect(persisted).not.toHaveProperty("notificationRulesMigrated");
+    expect(persisted.notificationRules).toHaveLength(3);
+    expect(persisted).not.toHaveProperty("notifications");
   });
 });

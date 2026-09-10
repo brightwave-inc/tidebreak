@@ -112,7 +112,7 @@ pub async fn save_workflow_run_fact(
 }
 
 /// Load one observed workflow run by identity.
-pub async fn get_workflow_run_fact(
+async fn get_workflow_run_fact(
     store: &DbStore,
     owner: &OwnerId,
     host: &str,

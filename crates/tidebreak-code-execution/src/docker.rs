@@ -343,6 +343,7 @@ impl DockerExecutionProvider {
     }
 
     /// Run containers on a different Docker-CLI-compatible binary (`podman`).
+    #[cfg(test)]
     #[must_use]
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
         self.binary = binary.into();
@@ -397,6 +398,7 @@ impl DockerExecutionProvider {
     /// default has — see [`Self::verifies_image_integrity`] — and an image
     /// without the document tooling degrades the document skills to whatever
     /// it happens to contain.
+    #[cfg(test)]
     #[must_use]
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();

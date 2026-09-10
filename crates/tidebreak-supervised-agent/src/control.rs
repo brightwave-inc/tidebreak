@@ -28,11 +28,14 @@ pub const MAX_BATCH_BYTES: usize = 192 * 1024;
 /// Each one means this agent built a request the endpoint will never accept:
 /// a schema it does not speak, an event kind the stream refuses, a payload
 /// over the ceiling, or more deliverables than one poll may carry.
-const FATAL_REJECTIONS: [&str; 4] = [
+const FATAL_REJECTIONS: [&str; 5] = [
     "supervisor_poll_schema_unsupported",
     "sandbox_event_invalid",
     "sandbox_event_too_large",
     "sandbox_event_flood",
+    // The admitted identity, image, or lease does not match what this agent
+    // registers; no retry changes any of those.
+    "sandbox_embedded_engine_rejected",
 ];
 
 /// One poll's outcome, when it is not instructions.

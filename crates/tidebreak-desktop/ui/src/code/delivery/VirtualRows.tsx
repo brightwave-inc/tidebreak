@@ -60,6 +60,7 @@ export function VirtualRows<T extends { id: string }>({
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     if (scrollRef.current) observer.observe(scrollRef.current);
+    if (listRef.current) observer.observe(listRef.current);
     return () => observer.disconnect();
   }, [scrollRef, items.length]);
 

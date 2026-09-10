@@ -10,9 +10,10 @@
 //!
 //! The pin is rewritten by the job in
 //! `.github/workflows/publish-sandbox-image.yml` after every image publish,
-//! alongside `PUBLISHED_IMAGE_DIGEST` in `tidebreak-server`'s `sandbox_docker`
-//! and the E2B template definition. That job matches on the constant names
-//! below, so renaming one means editing the workflow in the same change.
+//! alongside `PUBLISHED_IMAGE_DIGEST` in `tidebreak-sandbox-runtime`'s
+//! `docker` module and the E2B template definition. That job matches on the
+//! constant names below, so renaming one means editing the workflow in the
+//! same change.
 
 /// The official documents image, pinned by manifest-list digest. A
 /// `repository@sha256:…` ref is content-addressed: the runtime resolves

@@ -2841,7 +2841,7 @@ async fn drive_turn_inner(
         )
         .await
         {
-            Ok(memory_dir) => Some(memory_dir),
+            Ok(memory_dir) => memory_dir,
             Err(err) => {
                 tracing::warn!(
                     "tidebreak: could not materialize memory for code session {}: {err}",

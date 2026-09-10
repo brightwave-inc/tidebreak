@@ -22,7 +22,10 @@ import type {
 import { CodeArchivePage } from "@/code/CodeArchivePage";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { CodeDeliveryPage } from "@/code/CodeDeliveryPage";
-import { useCodeDeliveryStore } from "@/code/CodeDeliveryStore";
+import {
+  resetCodeDeliveryHostState,
+  useCodeDeliveryStore,
+} from "@/code/CodeDeliveryStore";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "@/code/CodeUiStore";
 import {
   disconnectCodeUpdates,
@@ -435,7 +438,7 @@ function resetStoryState(_scenario: DeliveryScenario): void {
   disconnectCodeUpdates();
   useCodeCatalogStore.getState().reset();
   useCodeUpdatesStore.getState().reset();
-  useCodeDeliveryStore.getState().reset();
+  resetCodeDeliveryHostState();
   useCodeUiStore.setState({
     railPrefs: DEFAULT_RAIL_PREFS,
     reviewSidebarOpen: false,
@@ -473,7 +476,7 @@ function DeliveryCenterStory({
   useEffect(
     () => () => {
       useCodeCatalogStore.getState().reset();
-      useCodeDeliveryStore.getState().reset();
+      resetCodeDeliveryHostState();
       useCodeUpdatesStore.getState().reset();
     },
     [],
@@ -694,7 +697,7 @@ export const ArchiveEmpty: Story = {
 };
 
 export const NarrowPullRequestDetail: Story = {
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 /**

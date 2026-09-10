@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Check,
   CircleCheck,
@@ -588,13 +594,17 @@ export function PrTab({
     (prResource ? prResource.busy !== null || prResource.refreshing : false) ||
     localMerging !== null;
 
+  const commentsRequestId = useRef(0);
   const loadComments = useCallback(async () => {
     if (prNumber === undefined) return;
+    const requestId = ++commentsRequestId.current;
     try {
       const snapshot = await client.getCodePrComments(workspaceId);
+      if (requestId !== commentsRequestId.current) return;
       setComments(snapshot.comments);
       setCommentsError(null);
     } catch (err) {
+      if (requestId !== commentsRequestId.current) return;
       setCommentsError(
         friendlyErrorMessage(err, "Could not load review comments"),
       );
@@ -1161,6 +1171,12 @@ function CheckList({
   };
 }) {
   const [open, setOpen] = useState(checks.length > 0);
+  const wasEmpty = useRef(checks.length === 0);
+  useEffect(() => {
+    const empty = checks.length === 0;
+    if (wasEmpty.current && !empty) setOpen(true);
+    wasEmpty.current = empty;
+  }, [checks.length]);
   return (
     <div className="flex flex-col gap-1">
       <button

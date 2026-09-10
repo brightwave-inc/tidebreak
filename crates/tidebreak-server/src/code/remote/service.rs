@@ -128,6 +128,8 @@ impl RemoteSessions {
     /// Whether promotion for `session` is inside a refusal hold.
     pub(crate) fn promotion_held(&self, session: SessionId) -> bool {
         let mut holds = self.promotion_holds.lock().expect("promotion holds");
+        let now = std::time::Instant::now();
+        holds.retain(|_, until| *until > now);
         match holds.get(&session) {
             Some(until) if *until > std::time::Instant::now() => true,
             Some(_) => {
@@ -140,18 +142,18 @@ impl RemoteSessions {
 
     /// Hold promotion for `session` for [`PROMOTION_RETRY_HOLD`].
     pub(crate) fn hold_promotion(&self, session: SessionId) {
-        self.promotion_holds
-            .lock()
-            .expect("promotion holds")
-            .insert(session, std::time::Instant::now() + PROMOTION_RETRY_HOLD);
+        let mut holds = self.promotion_holds.lock().expect("promotion holds");
+        let now = std::time::Instant::now();
+        holds.retain(|_, until| *until > now);
+        holds.insert(session, now + PROMOTION_RETRY_HOLD);
     }
 
     /// Clear a hold after a promotion that went through.
     pub(crate) fn clear_promotion_hold(&self, session: SessionId) {
-        self.promotion_holds
-            .lock()
-            .expect("promotion holds")
-            .remove(&session);
+        let mut holds = self.promotion_holds.lock().expect("promotion holds");
+        let now = std::time::Instant::now();
+        holds.retain(|_, until| *until > now);
+        holds.remove(&session);
     }
 
     /// Make sure `session` has a pump task, spawning one when it has none.

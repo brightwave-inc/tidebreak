@@ -1280,13 +1280,6 @@ impl ScopedCode {
             .await
     }
 
-    // ------------------------------------------------------------------
-    // Harness discovery. Probes describe the machine's binaries rather than
-    // any owner's rows, so they are the same answer for every principal; the
-    // per-harness unrecognized-event counts beside them are summed over the
-    // principal's own sessions.
-    // ------------------------------------------------------------------
-
     /// Reserve a validated image for a session the principal may drive.
     ///
     /// Publication is a write: it is what a later turn attachment is checked
@@ -1337,6 +1330,13 @@ impl ScopedCode {
     ) -> Result<Arc<dyn tidebreak_harness::HarnessAdapter>, ServerError> {
         self.runtime.adapter(kind)
     }
+
+    // ------------------------------------------------------------------
+    // Harness discovery. Probes describe the machine's binaries rather than
+    // any owner's rows, so they are the same answer for every principal; the
+    // per-harness unrecognized-event counts beside them are summed over the
+    // principal's own sessions.
+    // ------------------------------------------------------------------
 
     pub async fn probe(
         &self,

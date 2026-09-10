@@ -333,47 +333,6 @@ pub mod operation_log {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-#[allow(dead_code)]
-pub mod message_attachment {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "message_attachment")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub message_id: Uuid,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub ordinal: i32,
-        pub chat_id: Uuid,
-        pub blob_id: Uuid,
-        pub media_type: String,
-        pub width: i32,
-        pub height: i32,
-        pub byte_len: i64,
-        pub created_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(
-            belongs_to = "super::message::Entity",
-            from = "Column::MessageId",
-            to = "super::message::Column::Id",
-            on_update = "NoAction",
-            on_delete = "Restrict"
-        )]
-        Message,
-    }
-
-    impl Related<super::message::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::Message.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod chat_image_publication {
     use sea_orm::entity::prelude::*;
 
@@ -449,57 +408,6 @@ pub mod exec_file_change {
     impl Related<super::session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-#[allow(dead_code)]
-pub mod message_document_attachment {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "message_document_attachment")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub message_id: Uuid,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub ordinal: i32,
-        pub chat_id: Uuid,
-        pub document_id: Uuid,
-        pub created_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(
-            belongs_to = "super::message::Entity",
-            from = "Column::MessageId",
-            to = "super::message::Column::Id",
-            on_update = "NoAction",
-            on_delete = "Cascade"
-        )]
-        Message,
-        #[sea_orm(
-            belongs_to = "super::document::Entity",
-            from = "Column::DocumentId",
-            to = "super::document::Column::Id",
-            on_update = "NoAction",
-            on_delete = "Cascade"
-        )]
-        Document,
-    }
-
-    impl Related<super::message::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::Message.def()
-        }
-    }
-
-    impl Related<super::document::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::Document.def()
         }
     }
 

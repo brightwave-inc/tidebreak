@@ -9,7 +9,6 @@ import {
   initialCodeSessionState,
   mainAgentTranscriptItems,
   markCodeSessionHydrated,
-  reconcileCodeTurnSnapshot,
   reconcilePendingCodeTurns,
   reduceCodeSessionEvent,
   subagentTranscriptItems,
@@ -192,6 +191,28 @@ describe("seq cursor", () => {
     ).toHaveLength(1);
   });
 
+  it("appends a capped-window notice after retained history on reconnect", () => {
+    const existing = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "assistant_delta", text: "Existing history" },
+    ]).state;
+    const reconnected = reduceCodeSessionEvent(
+      existing,
+      {
+        seq: existing.lastSeq + 1,
+        event: { type: "turn_started", turn_id: "t2" },
+        replayed: true,
+        truncated: true,
+      },
+      deps(),
+    );
+
+    expect(reconnected.state.items.at(-1)).toMatchObject({
+      id: "notice:truncated-replay",
+      kind: "notice",
+    });
+  });
+
   it("advances the cursor for unknown event kinds", () => {
     const { state, effects } = reduceCodeSessionEvent(
       initialCodeSessionState(),
@@ -294,7 +315,6 @@ describe("turn lifecycle", () => {
     expect(state.busy).toBe(false);
     expect(state.activeTurnId).toBeNull();
     expect(state.lifecycle).toBe("idle");
-    expect(state.harnessKind).toBe("claude_code");
     expect(state.lastUsage).toEqual(NO_USAGE);
     expect(effects.at(-1)).toEqual({ type: "turn_resolved" });
     const kinds = state.items.map((item) => item.kind);
@@ -765,11 +785,13 @@ describe("hydrate then replay", () => {
       durationMs: null,
     });
 
-    const reconciled = reconcileCodeTurnSnapshot(completed.state, {
-      ...SNAPSHOT_TURN,
-      started_at: LONG_TURN_START,
-      ended_at: LONG_TURN_END,
-    });
+    const reconciled = reconcilePendingCodeTurns(completed.state, [
+      {
+        ...SNAPSHOT_TURN,
+        started_at: LONG_TURN_START,
+        ended_at: LONG_TURN_END,
+      },
+    ]);
     expect(reconciled).toMatchObject({
       busy: false,
       activeTurnId: null,
@@ -1546,11 +1568,21 @@ describe("hydrate then replay", () => {
       deps(),
     );
 
-    const reconciled = reconcileCodeTurnSnapshot(t2Started.state, {
-      ...SNAPSHOT_TURN,
-      started_at: LONG_TURN_START,
-      ended_at: LONG_TURN_END,
-    });
+    const reconciled = reconcilePendingCodeTurns(t2Started.state, [
+      {
+        ...SNAPSHOT_TURN,
+        started_at: LONG_TURN_START,
+        ended_at: LONG_TURN_END,
+      },
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        ended_at: undefined,
+      },
+    ]);
 
     expect(reconciled).toMatchObject({
       busy: true,
@@ -2264,6 +2296,16 @@ describe("applyTurnRewrite", () => {
     rewrite: "The turn added three tools.",
     rewriteState: "rewritten" as const,
   };
+
+  it("returns the original items when the rewrite is already current", () => {
+    const items = [closing];
+    expect(
+      applyTurnRewrite(items, "t1", {
+        rewrite: "The turn added three tools.",
+        rewriteState: "rewritten",
+      }),
+    ).toBe(items);
+  });
 
   it("does not let a rewriting notice clear a stored rewrite", () => {
     const next = applyTurnRewrite([closing], "t1", {

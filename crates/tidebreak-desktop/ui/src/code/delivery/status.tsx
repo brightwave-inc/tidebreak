@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { humanize, runTone } from "./helpers";
 import { relativeTime } from "../PullRequestDetail";
+import { STATUS_CHIP, STATUS_TEXT } from "../statusTone";
 
 /**
  * How many rows there are, how old they are, and a way to reread them.
@@ -221,13 +222,7 @@ export function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
     <span
       className={cn(
         "rounded-md px-2 py-1 text-xs font-medium",
-        tone === "success" &&
-          "bg-success-background text-success-foreground-muted",
-        tone === "critical" &&
-          "bg-critical-background text-critical-foreground-muted",
-        tone === "warning" &&
-          "bg-warning-background text-warning-foreground-muted",
-        tone === "muted" && "bg-muted text-muted-foreground",
+        STATUS_CHIP[tone],
       )}
     >
       {humanize(value)}
@@ -238,15 +233,7 @@ export function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
 export function RunStateText({ value }: { value: string }) {
   const tone = runTone(value);
   return (
-    <span
-      className={cn(
-        "text-xs font-medium",
-        tone === "success" && "text-success",
-        tone === "critical" && "text-critical",
-        tone === "warning" && "text-warning",
-        tone === "muted" && "text-muted-foreground",
-      )}
-    >
+    <span className={cn("text-xs font-medium", STATUS_TEXT[tone])}>
       {humanize(value)}
     </span>
   );

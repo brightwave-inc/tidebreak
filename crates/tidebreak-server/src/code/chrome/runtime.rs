@@ -32,17 +32,11 @@ pub struct ChromeConnectionSpec {
     pub grant: ChromeConnectionGrant,
     pub managed_isolated: bool,
 }
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct ChromeAdapterState {
     pub available: bool,
     pub connection_id: Option<String>,
-    pub connection_label: Option<String>,
-    pub grant: Option<String>,
-    pub managed_isolated: bool,
-    pub approved_existing_profile: bool,
     pub tab_count: usize,
-    pub last_error: Option<String>,
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChromeDiscoveredTab {
@@ -54,18 +48,31 @@ pub struct ChromeDiscoveredTab {
 pub struct ChromeOwnership {
     paused: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
+    changed: Arc<tokio::sync::Notify>,
 }
 impl ChromeOwnership {
     pub fn trip(&self) {
         self.paused.store(true, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
     }
     pub fn resume(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
+        self.changed.notify_waiters();
     }
     pub fn is_tripped(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_change(&self, generation: u64) {
+        loop {
+            let notified = self.changed.notified();
+            if self.is_tripped() || self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 #[derive(Clone)]
@@ -175,6 +182,9 @@ const DEFAULT_CHROME_SCREENSHOT_DIMENSION: f64 = 1440.0;
 /// Bounded number of capture attempts while fitting the shared transport's
 /// per-image byte budget.
 const SCREENSHOT_FIT_ATTEMPTS: usize = 4;
+/// Maximum total frames accumulated across the root tree and attached iframe
+/// sessions. Per-tree and per-session caps still bound individual walks.
+const MAX_CHROME_TOTAL_FRAMES: usize = 512;
 /// The cursor lives only for one action in a dedicated isolated world.
 struct CursorDecoration {
     context: i64,
@@ -501,11 +511,7 @@ impl Access {
                     _ = self.fence.connection.cancelled() => "Chrome connection revoked",
                     _ = self.fence.session.cancelled() => "Chrome session revoked",
                     _ = self.fence.call.cancelled() => "Chrome call cancelled",
-                    _ = async {
-                        while self.fence.live() {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    } => "Chrome control stopped",
+                    _ = self.fence.ownership.wait_for_change(self.fence.generation) => "Chrome control stopped",
                 }
             } => {
                 Err(reason.into())
@@ -631,6 +637,9 @@ impl Access {
                         }
                         *old = frame;
                     } else {
+                        if frames.len() >= MAX_CHROME_TOTAL_FRAMES {
+                            return Err("Chrome page has too many total frames".into());
+                        }
                         frames.push(frame);
                     }
                 }
@@ -640,6 +649,24 @@ impl Access {
         Ok(frames)
     }
 }
+
+/// Validate the host-derived debugger endpoint before any network connection.
+pub fn validate_websocket_endpoint(endpoint: &str) -> Result<(), String> {
+    let endpoint = url::Url::parse(endpoint).map_err(|_| "invalid Chrome endpoint")?;
+    if endpoint.scheme() != "ws"
+        || !matches!(
+            endpoint.host_str(),
+            Some("127.0.0.1" | "localhost" | "[::1]")
+        )
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.port().is_none()
+    {
+        return Err("Chrome requires a host-derived loopback WebSocket endpoint".into());
+    }
+    Ok(())
+}
+
 impl ChromeComputerUseService {
     pub fn new() -> Self {
         Self::default()
@@ -652,19 +679,7 @@ impl ChromeComputerUseService {
         spec: ChromeConnectionSpec,
         cdp: CdpSession,
     ) -> Result<(), String> {
-        let endpoint =
-            url::Url::parse(&spec.websocket_endpoint).map_err(|_| "invalid Chrome endpoint")?;
-        if endpoint.scheme() != "ws"
-            || !matches!(
-                endpoint.host_str(),
-                Some("127.0.0.1" | "localhost" | "[::1]")
-            )
-            || !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.port().is_none()
-        {
-            return Err("Chrome requires a host-derived loopback WebSocket endpoint".into());
-        }
+        validate_websocket_endpoint(&spec.websocket_endpoint)?;
         let mut inner = self.inner.lock().unwrap();
         if inner.connections.contains_key(&spec.connection_id)
             || inner
@@ -716,13 +731,6 @@ impl ChromeComputerUseService {
                 && !scope.cancel.is_cancelled()
                 && !self.ownership.is_tripped(),
             connection_id: connection.map(|c| c.spec.connection_id.clone()),
-            connection_label: connection.map(|c| c.spec.endpoint_label.clone()),
-            grant: connection.map(|c| match c.spec.grant {
-                ChromeConnectionGrant::Origin(_) => "origin".into(),
-                ChromeConnectionGrant::DeveloperAllSites => "developer_all_sites".into(),
-            }),
-            managed_isolated: connection.is_some_and(|c| c.spec.managed_isolated),
-            approved_existing_profile: connection.is_some_and(|c| !c.spec.managed_isolated),
             tab_count: inner
                 .tabs
                 .values()
@@ -732,10 +740,6 @@ impl ChromeComputerUseService {
                         && t.session == scope.session
                 })
                 .count(),
-            last_error: self
-                .ownership
-                .is_tripped()
-                .then(|| "Chrome control is paused".into()),
         }
     }
     fn access(&self, scope: &ChromeScope, connection: Option<&str>) -> Result<Access, String> {
@@ -899,7 +903,18 @@ impl ChromeComputerUseService {
             active: false,
         };
         access.fence.check()?;
-        self.inner.lock().unwrap().tabs.insert(
+        let mut inner = self.inner.lock().unwrap();
+        if inner.revoked.contains(&scope.session) {
+            return Err("Chrome session is revoked".into());
+        }
+        if inner
+            .tabs
+            .values()
+            .any(|tab| tab.connection == access.connection && tab.target_id == target)
+        {
+            return Err("Chrome tab is already controlled by a session".into());
+        }
+        inner.tabs.insert(
             summary.target_ref.clone(),
             Tab {
                 connection: access.connection.clone(),
@@ -1154,11 +1169,14 @@ impl ChromeComputerUseService {
                     return Err(format!("Chrome navigation failed: {}", result["errorText"]));
                 }
                 tab.snapshot = None;
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .tabs
-                    .insert(args.target_ref.clone(), tab.clone());
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    let stored = inner
+                        .tabs
+                        .get_mut(&args.target_ref)
+                        .ok_or("Chrome tab was revoked")?;
+                    *stored = tab.clone();
+                }
                 let deadline = tokio::time::Instant::now()
                     + Duration::from_millis(
                         args.timeout_ms
@@ -1240,9 +1258,14 @@ impl ChromeComputerUseService {
                 });
                 continue;
             };
-            let context = context["executionContextId"]
-                .as_i64()
-                .ok_or("Chrome isolated world returned no context")?;
+            let Some(context) = context["executionContextId"].as_i64() else {
+                frames.push(ChromeSemanticFrame {
+                    name: frame.name.clone(),
+                    url: frame.url.clone(),
+                    status: ChromeFrameStatus::UnsupportedFrame,
+                });
+                continue;
+            };
             let options = json!({"max":args.bounded_max_nodes().saturating_sub(nodes.len()),"prefix":format!("n-{index}"),"snapshot":snapshot_id,"frame":frame.id});
             let result = access
                 .eval(
@@ -1250,7 +1273,15 @@ impl ChromeComputerUseService {
                     Some(context),
                     format!("({SNAPSHOT_SCRIPT})({options})"),
                 )
-                .await?;
+                .await;
+            let Ok(result) = result else {
+                frames.push(ChromeSemanticFrame {
+                    name: frame.name.clone(),
+                    url: frame.url.clone(),
+                    status: ChromeFrameStatus::UnsupportedFrame,
+                });
+                continue;
+            };
             truncated |= result["truncated"].as_bool().unwrap_or(false);
             let projected: Vec<ChromeSemanticNode> =
                 serde_json::from_value(result["nodes"].clone())
@@ -1300,11 +1331,12 @@ impl ChromeComputerUseService {
             nodes: references,
         });
         access.fence.check()?;
-        self.inner
-            .lock()
-            .unwrap()
+        let mut inner = self.inner.lock().unwrap();
+        let stored = inner
             .tabs
-            .insert(args.target_ref.clone(), tab.clone());
+            .get_mut(&args.target_ref)
+            .ok_or("Chrome tab was revoked")?;
+        *stored = tab.clone();
         Ok(ChromePageSnapshot {
             target_ref: args.target_ref.clone(),
             snapshot_id,
@@ -1378,7 +1410,8 @@ impl ChromeComputerUseService {
         // re-captures at a smaller clip scale; the native wrapper still
         // enforces the same ceiling as defense in depth.
         use base64::Engine;
-        for _ in 0..SCREENSHOT_FIT_ATTEMPTS {
+        let minimum_scale = (16.0 / width).max(16.0 / height).min(scale);
+        for attempt in 0..SCREENSHOT_FIT_ATTEMPTS {
             let image=access.command(Some(&tab.cdp_session),"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false,"clip":{"x":viewport["pageX"].as_f64().unwrap_or(0.0),"y":viewport["pageY"].as_f64().unwrap_or(0.0),"width":width,"height":height,"scale":scale}})).await?;
             self.checked_snapshot(&access, &tab, &args.snapshot_id, args.document_epoch)
                 .await?;
@@ -1388,12 +1421,11 @@ impl ChromeComputerUseService {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|_| "Chrome screenshot has invalid encoding")?;
-            if bytes.len() > MAX_CHROME_SCREENSHOT_PNG_BYTES
-                || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-            {
-                return Err("Chrome screenshot is invalid or exceeds its size limit".into());
+            if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Err("Chrome screenshot has invalid PNG data".into());
             }
-            if bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES
+            if bytes.len() <= MAX_CHROME_SCREENSHOT_PNG_BYTES
+                && bytes.len() <= MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES
                 && encoded.len() <= MAX_BROWSER_SCREENSHOT_FRAME_BYTES
             {
                 let (delivered_width, delivered_height) = ::image::ImageReader::with_format(
@@ -1413,14 +1445,21 @@ impl ChromeComputerUseService {
                     }],
                 ));
             }
-            // PNG size tracks pixel area, so shrink toward the byte budget
-            // with a margin; the floor keeps one attempt from collapsing.
-            let ratio =
-                (MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES as f64 / bytes.len() as f64).sqrt();
-            scale = (scale * ratio * 0.9).max(scale * 0.25);
-            if width * scale < 16.0 || height * scale < 16.0 {
+            // PNG size tracks pixel area, so shrink toward both byte budgets
+            // with a margin. Force the final attempt to the minimum useful scale.
+            if scale <= minimum_scale {
                 break;
             }
+            let byte_budget = MAX_CHROME_SCREENSHOT_PNG_BYTES
+                .min(MAX_BROWSER_SCREENSHOT_IMAGE_BLOCK_BYTES) as f64;
+            let raw_ratio = byte_budget / bytes.len() as f64;
+            let frame_ratio = MAX_BROWSER_SCREENSHOT_FRAME_BYTES as f64 / encoded.len() as f64;
+            let ratio = raw_ratio.min(frame_ratio).sqrt();
+            scale = if attempt + 2 == SCREENSHOT_FIT_ATTEMPTS {
+                minimum_scale
+            } else {
+                (scale * ratio * 0.9).max(minimum_scale).min(scale * 0.9)
+            };
         }
         Err("Chrome screenshot could not be reduced to the transport image budget".into())
     }
@@ -1481,10 +1520,19 @@ impl ChromeComputerUseService {
                 .await?;
             (x, y) = map_frame_point(&bounds["model"]["content"], &viewport, x, y)?;
             if index + 1 < offsets.len() {
+                let context = access
+                    .command(
+                        Some(owner_session),
+                        "Page.createIsolatedWorld",
+                        json!({"frameId":owner_frame,"worldName":"tidebreak-computer-use-geometry","grantUniveralAccess":false}),
+                    )
+                    .await?["executionContextId"]
+                    .as_i64()
+                    .ok_or("Chrome frame geometry world is unavailable")?;
                 viewport = access
                     .eval(
                         owner_session,
-                        None,
+                        Some(context),
                         "({width:innerWidth,height:innerHeight})".into(),
                     )
                     .await?;
@@ -1660,7 +1708,7 @@ impl ChromeComputerUseService {
         }
         let mut console = Vec::new();
         let mut network: HashMap<String, ChromeNetworkEntry> = HashMap::new();
-        for event in access.cdp.recent_events() {
+        for event in access.cdp.recent_events_for_session(&tab.cdp_session) {
             match event {
                 CdpEvent::Console {
                     session_id,
@@ -1922,6 +1970,38 @@ fn data(value: impl serde::Serialize) -> Result<(Value, Vec<ComputerUseImage>), 
 pub struct ChromeCallOutcome {
     pub result: ComputerUseResult,
 }
+
+fn refusal_code(text: &str) -> &'static str {
+    let text = text.to_ascii_lowercase();
+    if text.contains("invalid chrome") || text.contains("unknown chrome tool") {
+        "invalid_arguments"
+    } else if text.contains("revoked") {
+        "revoked"
+    } else if text.contains("snapshot is stale")
+        || text.contains("take a fresh snapshot")
+        || text.contains("document or frame changed")
+    {
+        "stale_snapshot"
+    } else if text.contains("occluded") {
+        "occluded_target"
+    } else if text.contains("not connected")
+        || text.contains("no approved chrome connection")
+        || text.contains("connection is closed")
+        || text.contains("connection is gone")
+        || text.contains("protocol session closed")
+        || text.contains("protocol task is closed")
+        || text.contains("transport closed")
+    {
+        "not_connected"
+    } else if text.contains("cancelled") {
+        "cancelled"
+    } else if text.contains("control stopped") || text.contains("control paused") {
+        "stopped"
+    } else {
+        "chrome_failed"
+    }
+}
+
 fn outcome(
     call: &ComputerUseCall,
     status: ComputerUseOutcome,
@@ -1937,7 +2017,7 @@ fn outcome(
             error_code: if status == ComputerUseOutcome::Completed {
                 None
             } else {
-                Some("chrome_failed".into())
+                Some(refusal_code(text).into())
             },
             images: Vec::new(),
         },
@@ -1947,6 +2027,24 @@ fn outcome(
 #[cfg(test)]
 mod frame_geometry_tests {
     use super::*;
+
+    #[test]
+    fn refusal_codes_distinguish_common_chrome_failures() {
+        for (message, expected) in [
+            ("Invalid Chrome tool arguments", "invalid_arguments"),
+            ("Chrome session is revoked", "revoked"),
+            (
+                "Chrome snapshot is stale; take a fresh snapshot",
+                "stale_snapshot",
+            ),
+            ("Chrome target refused: occluded", "occluded_target"),
+            ("chrome transport closed", "not_connected"),
+            ("Chrome control stopped", "stopped"),
+            ("some other failure", "chrome_failed"),
+        ] {
+            assert_eq!(refusal_code(message), expected);
+        }
+    }
 
     #[test]
     fn scaled_and_rotated_frames_map_viewport_points_through_the_content_quad() {

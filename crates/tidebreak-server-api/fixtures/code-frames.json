@@ -295,7 +295,7 @@
           "version": "2.0.14"
         },
         {
-          "auth_mode": "hosted_unavailable",
+          "auth_mode": "gateway_relay",
           "caps": {
             "allow_mode": "supported",
             "auto_mode": "supported",
