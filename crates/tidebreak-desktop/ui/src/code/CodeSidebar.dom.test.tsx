@@ -205,7 +205,7 @@ describe("CodeSidebar", () => {
       }),
     );
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/c/internal-1"),
+      expect(router.state.location.pathname).toBe("/code/s/internal-1"),
     );
   });
 

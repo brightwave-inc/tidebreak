@@ -927,7 +927,13 @@ impl ScopedCode {
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        let owner = self.session_owner_for_contribute(id).await?;
+        // Model and effort overrides persist as session settings. A contributor
+        // may submit work but cannot change the owner's execution settings.
+        let owner = if model.is_some() || reasoning_effort.is_some() {
+            self.require_session_owner(id).await?.owner
+        } else {
+            self.session_owner_for_contribute(id).await?
+        };
         // The turn records who sent it, not whose session it ran under
         // (decision 0086). On a shared session those differ.
         let actor = tidebreak_core::TurnActor::principal(&self.owner);

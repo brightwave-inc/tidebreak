@@ -273,6 +273,17 @@ impl CodeRuntime {
                 identity,
             ));
         }
+        if repo_id.is_none()
+            && harness != HarnessKind::Internal
+            && self.external_execution_location() == ExecutionLocation::Sandbox
+        {
+            return Err(ServerError::conflict_kind(
+                "repositoryless_harness_requires_machine",
+                "This deployment requires sandbox execution for the selected harness. \
+                 Sessions without a repository cannot use that harness in a sandbox yet. \
+                 Choose a repository or use the internal engine.",
+            ));
+        }
         let workspace_grant =
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?

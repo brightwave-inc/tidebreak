@@ -643,6 +643,35 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
     )
     .await;
 
+    // Submit overrides persist settings, so contribution alone cannot supply them.
+    let before_settings: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session}"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for override_body in [
+        serde_json::json!({"message": "change model", "model": "other-model"}),
+        serde_json::json!({"message": "change effort", "reasoning_effort": "high"}),
+        serde_json::json!({"message": "clear effort", "reasoning_effort": null}),
+    ] {
+        assert_eq!(
+            post_status(
+                &client,
+                addr,
+                BOB_TOKEN,
+                &format!("/sessions/{session}/turns"),
+                override_body
+            )
+            .await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a contributor cannot override session settings in a turn"
+        );
+    }
+
     // A contributor submits.
     let submitted = client
         .post(format!("http://{addr}/sessions/{session}/turns"))
@@ -662,6 +691,21 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
         turn["actor"]["principal"].as_str(),
         Some("user:bob"),
         "the submitted turn names its actor"
+    );
+
+    let after_settings: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session}"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_settings["model"], before_settings["model"]);
+    assert_eq!(
+        after_settings["reasoning_effort"],
+        before_settings["reasoning_effort"]
     );
 
     // A contributor publishes an image and attaches it. The publication row
