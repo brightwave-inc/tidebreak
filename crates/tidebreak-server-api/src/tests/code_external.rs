@@ -518,6 +518,7 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
     let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
         session: session_id,
+        engine: None,
     });
     let route = format!(
         "http://{addr}{}",
@@ -566,6 +567,7 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
     let bot_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
         session: bot_session.id,
+        engine: None,
     });
     let bot_lent = ask(
         "protocol=https\nhost=github.com\npath=acme/tools.git\n",
@@ -656,10 +658,12 @@ async fn a_sessions_git_borrows_the_standalone_deployment_token_from_the_loopbac
     let bot_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
         session: session_id,
+        engine: None,
     });
     let person_key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
         owner: owner.clone(),
         session: person_session.id,
+        engine: None,
     });
     let route = format!(
         "http://{addr}{}",
@@ -2557,6 +2561,7 @@ async fn a_refused_borrow_answers_the_helper_and_journals_the_reason() {
         let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
             owner: owner.clone(),
             session: session_id,
+            engine: None,
         });
         let refused = client
             .post(format!(
