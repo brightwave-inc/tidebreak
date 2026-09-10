@@ -6472,7 +6472,6 @@ async fn external_context_cannot_follow_a_message_that_was_retracted() {
     ));
 }
 
-
 /// Conversation-tool requests are durable, idempotent per call key, and
 /// scoped to the exact live owner/session/grant/binding that created them.
 #[tokio::test]
@@ -6487,10 +6486,11 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
     let session_id = seed_external_session(&store, &owner, "conversation-requests").await;
-    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
-        .await
-        .unwrap()
-        .unwrap();
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
+            .await
+            .unwrap()
+            .unwrap();
     let grant = binding.grant_id;
 
     let request = create_conversation_request(
@@ -6532,14 +6532,7 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         ("read", serde_json::json!({"count": 1, "channel": "C1"})),
     ] {
         let error = create_conversation_request(
-            &store,
-            &owner,
-            session_id,
-            grant,
-            binding.id,
-            operation,
-            &arguments,
-            "call-1",
+            &store, &owner, session_id, grant, binding.id, operation, &arguments, "call-1",
         )
         .await
         .unwrap_err();
@@ -6557,20 +6550,18 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         duplicate
     );
     let other_grant = CodeGrantId::new();
-    assert!(get_conversation_request(&store, &owner, session_id, other_grant, request.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(get_conversation_request(
-        &store,
-        &owner,
-        SessionId::new(),
-        grant,
-        request.id,
-    )
-    .await
-    .unwrap()
-    .is_none());
+    assert!(
+        get_conversation_request(&store, &owner, session_id, other_grant, request.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_conversation_request(&store, &owner, SessionId::new(), grant, request.id,)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let pending = list_pending_conversation_requests(&store, &owner, session_id, grant)
         .await
@@ -6592,34 +6583,24 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         "truncated": true,
         "source": "slack"
     });
-    let completed = complete_conversation_request(
-        &store,
-        &owner,
-        session_id,
-        grant,
-        request.id,
-        &result,
-    )
-    .await
-    .unwrap()
-    .expect("the pending request completes");
+    let completed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("the pending request completes");
     assert_eq!(completed.result.as_ref(), Some(&result));
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    let replayed = complete_conversation_request(
-        &store,
-        &owner,
-        session_id,
-        grant,
-        request.id,
-        &result,
-    )
-    .await
-    .unwrap()
-    .expect("an equal replay is idempotent");
+    let replayed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("an equal replay is idempotent");
     assert_eq!(replayed.result.as_ref(), Some(&result));
 
     let conflict = complete_conversation_request(
@@ -6648,7 +6629,8 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
     .unwrap()
     .is_none());
 
-    let oversized = serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
+    let oversized =
+        serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
     let error = create_conversation_request(
         &store,
         &owner,
@@ -6678,10 +6660,11 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
     let session_id = seed_external_session(&store, &owner, "conversation-ttl").await;
-    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
-        .await
-        .unwrap()
-        .unwrap();
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
+            .await
+            .unwrap()
+            .unwrap();
     let grant = binding.grant_id;
     let request = create_conversation_request(
         &store,
@@ -6710,10 +6693,31 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
         .exec(&store.conn)
         .await
         .unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(crate::db::code::get_conversation_request(
+        &store, &owner, session_id, grant, request.id
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let expired_replay = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count":1}),
+        "ttl-call",
+    )
+    .await
+    .unwrap_err();
+    assert!(expired_replay.to_string().contains("expired"));
     let error = complete_conversation_request(
         &store,
         &owner,
@@ -6743,11 +6747,13 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     crate::db::code::revoke_external_grant(&store, &owner, grant, "revoked for test")
         .await
         .unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("grant"));
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("grant")
+    );
     assert!(complete_conversation_request(
         &store,
         &owner,
@@ -6785,12 +6791,16 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
         .unwrap()
         .unwrap();
     stored.lifecycle = SessionLifecycle::Ended;
-    crate::db::code::save_session(&store, &stored).await.unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+    crate::db::code::save_session(&store, &stored)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("session"));
+        .unwrap();
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session")
+    );
     assert!(complete_conversation_request(
         &store,
         &owner,
@@ -6803,4 +6813,125 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     .unwrap_err()
     .to_string()
     .contains("session"));
+}
+
+#[tokio::test]
+async fn conversation_requests_concurrent_calls_and_completion_preserve_first_result() {
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request, get_conversation_request,
+    };
+    let (_dir, store) = super::temp_store_with_max_connections(4).await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "conversation-concurrent").await;
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-concurrent")
+            .await
+            .unwrap()
+            .unwrap();
+    let args = serde_json::json!({"limit":1,"max_bytes":1024});
+    let (left, right) = tokio::join!(
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "same-call"
+        ),
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "same-call"
+        )
+    );
+    let request = left.unwrap();
+    assert_eq!(request.id, right.unwrap().id);
+    let first = serde_json::json!({"error":{"code":"first","message":"first result"}});
+    let second = serde_json::json!({"error":{"code":"second","message":"second result"}});
+    let (left, right) = tokio::join!(
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &first
+        ),
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &second
+        )
+    );
+    let winner = match (left, right) {
+        (Ok(Some(row)), Err(crate::AgentError::ConversationRequestConflict(_)))
+        | (Err(crate::AgentError::ConversationRequestConflict(_)), Ok(Some(row))) => row,
+        unexpected => panic!("exactly one completion must win: {unexpected:?}"),
+    };
+    assert_eq!(
+        get_conversation_request(&store, &owner, session, binding.grant_id, request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .result,
+        winner.result
+    );
+    let result = winner.result.unwrap();
+    let (left, right) = tokio::join!(
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &result
+        ),
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &result
+        )
+    );
+    assert_eq!(left.unwrap(), right.unwrap());
+    let other_args = serde_json::json!({"limit":2,"max_bytes":1024});
+    let (left, right) = tokio::join!(
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "different-call"
+        ),
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &other_args,
+            "different-call"
+        )
+    );
+    assert!(matches!(
+        (left, right),
+        (Ok(_), Err(crate::AgentError::InvalidTarget(_)))
+            | (Err(crate::AgentError::InvalidTarget(_)), Ok(_))
+    ));
 }
