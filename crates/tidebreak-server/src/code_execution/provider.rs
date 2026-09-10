@@ -1092,7 +1092,12 @@ impl ConfiguredExecProvider {
                     RejectedChangeReason::TrashUnavailable => {
                         ExecFileRejectionReason::TrashUnavailable
                     }
-                    RejectedChangeReason::Unavailable => ExecFileRejectionReason::Unavailable,
+                    // The record's vocabulary is a stable wire shape; a walk
+                    // that stopped short is, to the user, a path that could
+                    // not be used safely.
+                    RejectedChangeReason::Unavailable | RejectedChangeReason::WalkLimit => {
+                        ExecFileRejectionReason::Unavailable
+                    }
                 },
             })
             .collect::<Vec<_>>();

@@ -77,6 +77,45 @@ const MAX_OVERLAY_DEPTH: usize = 24;
 /// Ceiling on one staged file's size when it is written back.
 const MAX_STAGED_FILE_BYTES: u64 = 64 * 1_024 * 1_024;
 
+/// The bounds one overlay walk honors. Staging and write-back share the same
+/// ceilings, so a tree that staged also writes back in full, and a tree the
+/// agent grew past them at write-back stops where staging would have.
+#[derive(Clone, Copy)]
+struct WalkLimits {
+    entries: usize,
+    depth: usize,
+}
+
+const WALK_LIMITS: WalkLimits = WalkLimits {
+    entries: MAX_OVERLAY_ENTRIES,
+    depth: MAX_OVERLAY_DEPTH,
+};
+
+/// What the write-back walk saw, and where it could not look.
+///
+/// Deletion is judged against this rather than against the manifest alone:
+/// a manifest file the walk never observed is not evidence the agent removed
+/// it. Any prefix the walk could not list, open, or reach within its bounds
+/// is unobservable, and nothing under it is a deletion candidate. An empty
+/// prefix covers the whole slot.
+#[derive(Default)]
+struct Observed {
+    files: std::collections::HashSet<String>,
+    unobservable: Vec<String>,
+}
+
+impl Observed {
+    fn unobservable(&self, relative: &str) -> bool {
+        self.unobservable.iter().any(|prefix| {
+            prefix.is_empty()
+                || relative == prefix
+                || relative
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+}
+
 /// Maximum paths included in one model-visible overlay note.
 const MAX_REPORTED_INERT_PATHS: usize = 8;
 
@@ -200,6 +239,9 @@ pub enum RejectedChangeReason {
     TrashUnavailable,
     /// A filesystem operation failed or found an unsupported entry.
     Unavailable,
+    /// The write-back walk stopped at its entry or depth ceiling before
+    /// reaching this path, so what the overlay holds there was never read.
+    WalkLimit,
 }
 
 /// What the destination must contain when one file is materialized.
@@ -473,21 +515,41 @@ impl WriteOverlay {
         snapshots: Option<&dyn WriteSnapshotSink>,
         trash: &dyn TrashSink,
     ) -> OverlayOutcome {
+        self.materialize_within(snapshots, trash, WALK_LIMITS).await
+    }
+
+    async fn materialize_within(
+        self,
+        snapshots: Option<&dyn WriteSnapshotSink>,
+        trash: &dyn TrashSink,
+        limits: WalkLimits,
+    ) -> OverlayOutcome {
         let mut outcome = OverlayOutcome::default();
         let trash_staging = self.home.join(".trash-staging");
         for slot in &self.slots {
-            let mut seen = Vec::new();
+            let mut observed = Observed::default();
+            let mut entry_count = 0;
             apply_directory(
                 slot,
                 "",
                 &slot.overlay_dir,
                 snapshots,
-                &mut seen,
+                &mut observed,
+                &mut entry_count,
                 0,
+                limits,
                 &mut outcome,
             )
             .await;
-            apply_deletions(slot, snapshots, trash, &trash_staging, &seen, &mut outcome).await;
+            apply_deletions(
+                slot,
+                snapshots,
+                trash,
+                &trash_staging,
+                &observed,
+                &mut outcome,
+            )
+            .await;
         }
         self.discard().await;
         outcome
@@ -782,27 +844,47 @@ fn quoted(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<unprintable>\"".to_owned())
 }
 
+/// Walk one overlay directory, writing back what changed. Returns `false`
+/// when the walk hit its entry ceiling, which stops every caller up the
+/// stack: past that point nothing is observed, and the slot is marked so
+/// that [`apply_deletions`] removes nothing.
+#[allow(clippy::too_many_arguments)]
 async fn apply_directory(
     slot: &OverlaySlot,
     prefix: &str,
     directory: &ScratchDir,
     snapshots: Option<&dyn WriteSnapshotSink>,
-    seen: &mut Vec<String>,
+    observed: &mut Observed,
+    entry_count: &mut usize,
     depth: usize,
+    limits: WalkLimits,
     outcome: &mut OverlayOutcome,
-) {
-    if depth > MAX_OVERLAY_DEPTH {
-        return;
+) -> bool {
+    if depth > limits.depth {
+        // A directory the agent nested past the ceiling: staging would not
+        // have recorded it either, so nothing under it is deletable, but the
+        // agent's changes there are lost and the outcome says so.
+        outcome.rejected(slot, prefix, RejectedChangeReason::WalkLimit);
+        observed.unobservable.push(prefix.to_owned());
+        return true;
     }
     let Ok(entries) = directory.entries().await else {
         outcome.rejected(slot, prefix, RejectedChangeReason::Unavailable);
-        return;
+        observed.unobservable.push(prefix.to_owned());
+        return true;
     };
     for ScratchEntry { name, kind } in entries {
+        if *entry_count >= limits.entries {
+            let relative = join_relative(prefix, &name);
+            outcome.rejected(slot, &relative, RejectedChangeReason::WalkLimit);
+            observed.unobservable.push(String::new());
+            return false;
+        }
+        *entry_count += 1;
         let relative = join_relative(prefix, &name);
         match kind {
             ScratchEntryKind::File => {
-                seen.push(relative.clone());
+                observed.files.insert(relative.clone());
                 let Some(stamp) = directory.file_stamp(&name).await else {
                     outcome.rejected(slot, &relative, RejectedChangeReason::Unavailable);
                     continue;
@@ -839,22 +921,31 @@ async fn apply_directory(
             }
             ScratchEntryKind::Directory => match directory.open_dir(&name).await {
                 Ok(child) => {
-                    Box::pin(apply_directory(
+                    if !Box::pin(apply_directory(
                         slot,
                         &relative,
                         &child,
                         snapshots,
-                        seen,
+                        observed,
+                        entry_count,
                         depth + 1,
+                        limits,
                         outcome,
                     ))
-                    .await;
+                    .await
+                    {
+                        return false;
+                    }
                 }
-                Err(_) => outcome.rejected(slot, &relative, RejectedChangeReason::Unavailable),
+                Err(_) => {
+                    outcome.rejected(slot, &relative, RejectedChangeReason::Unavailable);
+                    observed.unobservable.push(relative);
+                }
             },
             ScratchEntryKind::Other => {}
         }
     }
+    true
 }
 
 async fn changed_staged_content(
@@ -1066,18 +1157,19 @@ async fn observe_prior(
 /// Remove from the real folder every file the overlay started with and no
 /// longer has. This is the only place anything is deleted, and it consults the
 /// manifest rather than the folder, so a file that was never staged is never a
-/// candidate.
+/// candidate. A manifest file under a prefix the walk could not observe is
+/// not a candidate either: absent from the walk is not the same as absent
+/// from the overlay.
 async fn apply_deletions(
     slot: &OverlaySlot,
     snapshots: Option<&dyn WriteSnapshotSink>,
     trash: &dyn TrashSink,
     trash_staging: &Path,
-    seen: &[String],
+    observed: &Observed,
     outcome: &mut OverlayOutcome,
 ) {
-    let seen = seen.iter().collect::<std::collections::HashSet<_>>();
     for (relative, manifest) in &slot.manifest {
-        if seen.contains(relative) {
+        if observed.files.contains(relative) || observed.unobservable(relative) {
             continue;
         }
         let (prefix, name) = split_relative(relative);
@@ -1820,5 +1912,141 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(target).unwrap(), "user edit");
         assert!(!applied.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The invariant deletion rests on: nothing is removed unless it was
+    /// observed to be gone from the overlay. A staged subdirectory that
+    /// cannot be listed is unobserved, not empty, so the files under it stay.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unlistable_staged_subdirectory_never_deletes_its_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("top.txt"), "top").unwrap();
+        std::fs::create_dir(granted.path().join("sub")).unwrap();
+        std::fs::write(granted.path().join("sub/a.txt"), "a").unwrap();
+        std::fs::write(granted.path().join("sub/b.txt"), "b").unwrap();
+
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        std::fs::write(staged.join("top.txt"), "revised").unwrap();
+        let locked = staged.join("sub");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: the mode does not bite, so the case cannot
+            // be exercised here.
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+            return;
+        }
+
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(None, &trash).await;
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("sub/a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("sub/b.txt")).unwrap(),
+            "b"
+        );
+        assert!(
+            trash.files.lock().unwrap().is_empty(),
+            "nothing was trashed"
+        );
+        assert!(
+            outcome
+                .written
+                .iter()
+                .all(|change| change.change != MaterializedChangeKind::Deleted),
+            "{:?}",
+            outcome.written
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("top.txt")).unwrap(),
+            "revised",
+            "the rest of the overlay still applies"
+        );
+        assert_eq!(
+            outcome
+                .rejected
+                .iter()
+                .map(|file| (file.relative.as_str(), file.reason))
+                .collect::<Vec<_>>(),
+            vec![("sub", RejectedChangeReason::Unavailable)]
+        );
+    }
+
+    /// Write-back honors the same entry ceiling staging does, and a walk that
+    /// stops early has observed nothing about the rest: the files it never
+    /// reached are neither written nor deleted, and the stop is reported.
+    #[tokio::test]
+    async fn a_write_back_walk_past_the_entry_ceiling_stops_and_deletes_nothing_unseen() {
+        let granted = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(granted.path().join(name), name).unwrap();
+        }
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        // The agent deleted one file and left three; a walk capped at two
+        // entries reaches two of the three and stops.
+        std::fs::remove_file(staged.join("d.txt")).unwrap();
+
+        let trash = RecordingTrash::default();
+        let outcome = overlay
+            .materialize_within(
+                None,
+                &trash,
+                WalkLimits {
+                    entries: 2,
+                    depth: MAX_OVERLAY_DEPTH,
+                },
+            )
+            .await;
+
+        assert!(
+            granted.path().join("d.txt").exists(),
+            "an unwalked slot deletes nothing"
+        );
+        assert!(trash.files.lock().unwrap().is_empty());
+        assert_eq!(outcome.written, Vec::new(), "nothing changed content");
+        assert_eq!(outcome.rejected.len(), 1, "{:?}", outcome.rejected);
+        assert_eq!(outcome.rejected[0].reason, RejectedChangeReason::WalkLimit);
+    }
+
+    /// A directory the agent nested past the depth ceiling is reported, not
+    /// silently dropped.
+    #[tokio::test]
+    async fn a_write_back_walk_reports_the_depth_cutoff() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("top.txt"), "top").unwrap();
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        std::fs::create_dir_all(staged.join("one/two")).unwrap();
+        std::fs::write(staged.join("one/two/deep.txt"), "deep").unwrap();
+
+        let trash = RecordingTrash::default();
+        let outcome = overlay
+            .materialize_within(
+                None,
+                &trash,
+                WalkLimits {
+                    entries: MAX_OVERLAY_ENTRIES,
+                    depth: 1,
+                },
+            )
+            .await;
+
+        assert!(!granted.path().join("one/two/deep.txt").exists());
+        assert_eq!(
+            outcome
+                .rejected
+                .iter()
+                .map(|file| (file.relative.as_str(), file.reason))
+                .collect::<Vec<_>>(),
+            vec![("one/two", RejectedChangeReason::WalkLimit)]
+        );
     }
 }
