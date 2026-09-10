@@ -14,6 +14,6 @@ pub mod runtime;
 mod tests;
 
 pub use runtime::{
-    ChromeAdapterState, ChromeCallOutcome, ChromeComputerUseService, ChromeConnectionSpec,
-    ChromeDiscoveredTab, ChromeOwnership, ChromeScope,
+    validate_websocket_endpoint, ChromeAdapterState, ChromeCallOutcome, ChromeComputerUseService,
+    ChromeConnectionSpec, ChromeDiscoveredTab, ChromeOwnership, ChromeScope,
 };
