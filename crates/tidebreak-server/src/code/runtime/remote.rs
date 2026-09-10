@@ -211,7 +211,16 @@ impl CodeRuntime {
             ));
         }
         let repo_id = repo_id.into();
-        let location = self.external_execution_location();
+        // The internal coordinator is a machine-side surface that owns the
+        // native tools; a configured runtime never silently moves it into a
+        // sandbox. Explicit external harnesses (and future conversation
+        // harnesses) take the deployment placement. Repository-backed
+        // sessions keep their existing rule unchanged.
+        let location = if repo_id.is_none() && harness == HarnessKind::Internal {
+            ExecutionLocation::Machine
+        } else {
+            self.external_execution_location()
+        };
         let delegated = if location == ExecutionLocation::Machine {
             match self
                 .harness_llm
