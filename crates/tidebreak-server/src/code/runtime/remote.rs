@@ -748,6 +748,9 @@ impl CodeRuntime {
                     "this session has spent {spent_microusd} of its {ceiling_microusd} micro-USD ceiling and takes no more turns"
                 ),
             )),
+            Outcome::RecoveryBlocked { code, message } => {
+                Err(ServerError::conflict_kind(code, message))
+            }
             Outcome::SignInRequired => Err(ServerError::conflict_kind(
                 "sign_in_required",
                 "sign in to the sandbox environment, then retry",
@@ -902,7 +905,7 @@ impl CodeRuntime {
             // the ceiling, and every retry would re-journal the refusal
             // and re-cancel the sandbox. Pause the queue so the tray
             // shows why nothing moves; unpausing retries deliberately.
-            Ok(Outcome::SpendExhausted { .. }) => {
+            Ok(Outcome::SpendExhausted { .. } | Outcome::RecoveryBlocked { .. }) => {
                 let _ = tidebreak_core::db::code::set_queue_paused(
                     &self.db,
                     &session.owner,

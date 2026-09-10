@@ -131,6 +131,14 @@ pub enum RemoteTurnOutcome {
     /// the way every other submit path does; the driver never interleaves
     /// two running turn rows on one session.
     TurnInFlight,
+    /// A stopped sandbox cannot safely continue. The caller must pause queued
+    /// turns and surface the reason instead of provisioning another sandbox.
+    RecoveryBlocked {
+        /// Stable reason for clients.
+        code: &'static str,
+        /// What requires attention before starting another session.
+        message: String,
+    },
     /// The environment rejected the owner's credential. Nothing was sent or
     /// provisioned; sign in and retry.
     SignInRequired,
@@ -284,6 +292,25 @@ fn state_token<'a>(
         super::wire::SandboxState::Expired => "expired",
         super::wire::SandboxState::CeilingExceeded => "ceiling_exceeded",
         _ => "ended",
+    }
+}
+
+/// A follow-up cannot authorize another budget after a spend stop. A failed
+/// checkout without a saved checkpoint cannot silently restart from the base.
+fn recovery_block(row: &CodeSessionIncarnation) -> Option<(&'static str, &'static str)> {
+    if row.sandbox_id.is_none() {
+        return None;
+    }
+    match row.stop_reason.as_deref() {
+        Some("ceiling_exceeded" | "spend_ceiling_exceeded") => Some((
+            "sandbox_spend_exhausted",
+            "This sandbox reached its spend ceiling. Queued follow-ups cannot start another sandbox with a fresh budget. Review its work and budget before explicitly starting a new session.",
+        )),
+        Some("failed" | "expired") if row.last_wip_ref.is_none() => Some((
+            "sandbox_checkpoint_missing",
+            "This sandbox stopped without a saved checkpoint. Its work cannot be restored, so queued follow-ups will not restart from the repository base. Review the failure before explicitly starting a new session.",
+        )),
+        _ => None,
     }
 }
 
@@ -497,6 +524,13 @@ impl RemoteDriver<'_> {
             // output a resume could miss.
             if predecessor.sandbox_id.is_some() && !predecessor.terminal_events_journaled {
                 return Ok(RemoteTurnOutcome::FlushPending);
+            }
+            if let Some((code, message)) = recovery_block(predecessor) {
+                refusal_notice(db, bus, session, message.to_owned(), message).await?;
+                return Ok(RemoteTurnOutcome::RecoveryBlocked {
+                    code,
+                    message: message.to_owned(),
+                });
             }
         }
 
@@ -1713,6 +1747,52 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn stopped_sandboxes_do_not_buy_another_budget_or_discard_failed_work() {
+        for (reason, expected) in [
+            ("ceiling_exceeded", "sandbox_spend_exhausted"),
+            ("spend_ceiling_exceeded", "sandbox_spend_exhausted"),
+            ("failed", "sandbox_checkpoint_missing"),
+            ("expired", "sandbox_checkpoint_missing"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+            let incarnation = super::super::fixtures::seeded_incarnation(&db, &session).await;
+            stop_incarnation(&db, &session.owner, incarnation, Some(reason))
+                .await
+                .unwrap();
+            mark_incarnation_terminal_events_journaled(&db, &session.owner, incarnation)
+                .await
+                .unwrap();
+            let fake = FakeProvisioner::default();
+            // No cumulative ceiling is configured: the terminal reason must
+            // still prevent the default per-sandbox budget from multiplying.
+            let settings = settings();
+            let driver = driver!(&db, &bus, &fake, &settings);
+            let outcome = driver
+                .submit_turn(&mut session, &workspace, &repo, "Please finish now")
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, RemoteTurnOutcome::RecoveryBlocked { code, .. } if code == expected)
+            );
+            assert!(fake.spawns.lock().unwrap().is_empty());
+            assert!(fake.sends.lock().unwrap().is_empty());
+            assert_eq!(
+                latest_incarnation(&db, &session.owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                incarnation
+            );
+            assert!(latest_turn(&db, &session.owner, session.id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+
     /// The spend ledger gates the turn before anything is sent or spawned,
     /// with a reason in dollars.
     #[tokio::test]
@@ -1818,8 +1898,8 @@ mod tests {
     }
 
     /// A live sandbox that refuses a message stays open for the pump: the
-    /// drain delivers the goodbye, closes the row, and the next turn then
-    /// reincarnates instead of waiting forever.
+    /// drain closes the row. Without a checkpoint, the follow-up gets a
+    /// recovery refusal instead of silently restarting from the base.
     #[tokio::test]
     async fn a_refused_message_leaves_the_row_for_the_pump_to_drain() {
         let dir = tempfile::tempdir().unwrap();
@@ -1863,7 +1943,14 @@ mod tests {
             .submit_turn(&mut session, &workspace, &repo, "late")
             .await
             .unwrap();
-        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+        assert!(matches!(
+            outcome,
+            RemoteTurnOutcome::RecoveryBlocked {
+                code: "sandbox_checkpoint_missing",
+                ..
+            }
+        ));
+        assert!(fake.spawns.lock().unwrap().is_empty());
     }
 
     /// A spawn that fails releases a reservation with nothing to drain: the
