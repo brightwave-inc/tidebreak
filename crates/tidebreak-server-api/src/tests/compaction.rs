@@ -257,7 +257,12 @@ async fn compacting_on_request_checkpoints_the_chat_and_journals_it() {
         wait_for_turn(&store, chat.id).await;
     }
     wait_until_idle(&store, chat.id).await;
-    let before = store.list_events(chat.id, 0).await.unwrap().len() as i64;
+    let before = store
+        .list_events(chat.id, 0)
+        .await
+        .unwrap()
+        .last()
+        .map_or(0, |event| event.seq);
 
     let response = post_json(
         &router,
@@ -310,7 +315,12 @@ async fn compacting_a_chat_with_nothing_to_give_up_says_so() {
         StatusCode::ACCEPTED
     );
     wait_for_turn(&store, chat.id).await;
-    let before = store.list_events(chat.id, 0).await.unwrap().len() as i64;
+    let before = store
+        .list_events(chat.id, 0)
+        .await
+        .unwrap()
+        .last()
+        .map_or(0, |event| event.seq);
 
     // Shipped fractions, one short exchange: there is no prefix worth standing
     // a summary in for.
