@@ -89,7 +89,69 @@ async fn require_bound(
     Ok(runtime)
 }
 
+async fn existing_session_identity(
+    runtime: &crate::code::runtime::CodeRuntime,
+    owner: &tidebreak_core::OwnerId,
+    acts_as: tidebreak_core::ActsAs,
+) -> Result<crate::code::runtime::ExternalActsAsView, ServerError> {
+    use tidebreak_server_core::obo_gateway::{
+        GitForgeAttribution, GitForgeAttributionRequest, GitForgeError,
+    };
+
+    let mut view = crate::code::runtime::ExternalActsAsView {
+        acts_as,
+        acting_login: None,
+        app_name: None,
+        connect_url: None,
+    };
+    let Some(lender) = runtime.git_credentials() else {
+        return Ok(view);
+    };
+    if acts_as == tidebreak_core::ActsAs::Person {
+        match lender
+            .git_forge_identity(owner, GitForgeAttributionRequest::Person)
+            .await
+        {
+            Ok(identity) => {
+                view.app_name = Some(identity.app_name).filter(|name| !name.is_empty());
+                if let GitForgeAttribution::Person { login, .. } = identity.attribution {
+                    view.acting_login = Some(login);
+                    return Ok(view);
+                }
+            }
+            Err(GitForgeError::NotConnected { connect_url }) => {
+                view.connect_url = connect_url;
+            }
+            Err(GitForgeError::PersonNotOffered | GitForgeError::NoGitForge) => {}
+            Err(GitForgeError::Unavailable(detail)) => {
+                return Err(ServerError::bad_gateway_kind(
+                    "forge_unavailable",
+                    format!("the forge is temporarily unavailable; retry ({detail})"),
+                ));
+            }
+            Err(_) => {
+                return Err(ServerError::bad_gateway_kind(
+                    "forge_unavailable",
+                    "the forge could not answer who this session acts as; retry",
+                ));
+            }
+        }
+    }
+    if let Ok(identity) = lender
+        .git_forge_identity(owner, GitForgeAttributionRequest::Installation)
+        .await
+    {
+        view.app_name = Some(identity.app_name).filter(|name| !name.is_empty());
+        if let GitForgeAttribution::Bot { bot_login } = identity.attribution {
+            view.acting_login = bot_login;
+        }
+    }
+    Ok(view)
+}
+
 #[derive(serde::Deserialize)]
+// Older adapters still send `channel_id` and `set_by` (decision 0096 kept the
+// per-channel confirms for them), so this body tolerates unknown fields.
 pub struct ExternalSessionBody {
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
@@ -301,6 +363,7 @@ pub async fn external_get_or_create(
         let session = runtime
             .get_session(&grant.owner, binding.session_id)
             .await?;
+        let identity = existing_session_identity(&runtime, &grant.owner, session.acts_as()).await?;
         let ended = session.lifecycle == tidebreak_core::SessionLifecycle::Ended;
         if !ended {
             repair_original_context(&runtime, &grant, &binding, body.channel_id.as_deref()).await?;
@@ -312,9 +375,9 @@ pub async fn external_get_or_create(
                 session_id: binding.session_id,
                 binding_id: (!ended).then_some(binding.id),
                 acts_as: session.acts_as(),
-                acting_login: None,
-                app_name: None,
-                connect_url: None,
+                acting_login: identity.acting_login.clone(),
+                app_name: identity.app_name.clone(),
+                connect_url: identity.connect_url.clone(),
             }),
         ));
     }
@@ -426,6 +489,7 @@ pub async fn external_get_or_create(
 }
 
 #[derive(serde::Deserialize)]
+// Same tolerance as `ExternalSessionBody`: older adapters send channel fields.
 pub struct ExternalBindingBody {
     pub external_key: String,
     #[serde(default)]
@@ -521,6 +585,7 @@ pub async fn external_bindings(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalMessageBody {
     pub text: String,
     /// The channel's delivery id; replays of it answer from the first row.
@@ -545,6 +610,7 @@ pub struct ExternalMessageBody {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalActor {
     pub external_identity: String,
     pub display: String,
@@ -651,11 +717,13 @@ pub async fn external_messages(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalAccessBody {
     pub contributors: Vec<ExternalContributor>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalContributor {
     pub external_identity: String,
 }
@@ -802,6 +870,7 @@ pub async fn external_reap(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalRotateBody {
     pub refresh: String,
 }
@@ -842,6 +911,7 @@ pub async fn external_rotate(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalDecisionActor {
     pub external_identity: String,
     #[serde(default)]
@@ -849,6 +919,7 @@ pub struct ExternalDecisionActor {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalDecisionBody {
     pub decision: ApprovalDecision,
     #[serde(default)]

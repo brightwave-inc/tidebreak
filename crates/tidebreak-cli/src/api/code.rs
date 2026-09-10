@@ -33,8 +33,8 @@ pub use tidebreak_server::wire::{
 
 use super::client::{Client, EventSocket};
 
-/// Result of `POST /sessions/{id}/turns`: the turn that ran on `200`, or
-/// the follow-up the server parked on `202`. The server answers with one of
+/// Result of `POST /sessions/{id}/turns`: the turn that ran or the follow-up
+/// the server parked, both on `202`. The server answers with one of
 /// two snapshots rather than a tagged union, so this is the one code-mode
 /// shape the client composes itself. Both arms reject unknown keys, so a
 /// snapshot that matches neither fails rather than folding into the other.

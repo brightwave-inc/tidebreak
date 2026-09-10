@@ -152,7 +152,37 @@ async fn stream_updates(
                         break;
                     }
                 }
-                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Lagged(_)) => {
+                    let workspaces = match tidebreak_core::db::code::list_workspaces(&runtime.db, &owner, None).await {
+                        Ok(workspaces) => workspaces,
+                        Err(_) => break,
+                    };
+                    let mut failed = false;
+                    for workspace in workspaces {
+                        for terminal in state.terminals.list(workspace.id) {
+                            if !terminal.ended
+                                && send_notice(
+                                    &mut socket,
+                                    &UpdateNotice::TerminalActivity {
+                                        workspace_id: workspace.id,
+                                        terminal_id: terminal.id,
+                                    },
+                                )
+                                .await
+                                .is_err()
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        if failed {
+                            break;
+                        }
+                    }
+                    if failed {
+                        break;
+                    }
+                }
                 Err(RecvError::Closed) => break,
             },
         }
@@ -178,8 +208,6 @@ async fn send_snapshot(
 }
 
 async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<(), axum::Error> {
-    let Ok(json) = serde_json::to_string(notice) else {
-        return Ok(());
-    };
+    let json = serde_json::to_string(notice).map_err(axum::Error::new)?;
     socket.send(Message::Text(json.into())).await
 }

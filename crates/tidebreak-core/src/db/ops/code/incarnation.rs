@@ -264,9 +264,9 @@ pub async fn record_incarnation_spend(
     owner: &OwnerId,
     id: CodeIncarnationId,
     spend_microusd: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let now = database_now(&store.conn).await?;
-    entities::code_session_incarnation::Entity::update_many()
+    let result = entities::code_session_incarnation::Entity::update_many()
         .col_expr(
             entities::code_session_incarnation::Column::SpendMicrousd,
             sea_orm::sea_query::Expr::value(spend_microusd),
@@ -280,7 +280,7 @@ pub async fn record_incarnation_spend(
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
-    Ok(())
+    Ok(result.rows_affected == 1)
 }
 
 /// What one sandbox event writes besides its journal rows.

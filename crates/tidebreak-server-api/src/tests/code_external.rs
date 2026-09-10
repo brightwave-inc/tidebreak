@@ -2182,6 +2182,18 @@ async fn an_external_machine_session_acts_as_the_connected_person() {
     assert_eq!(body["acting_login"], "mira");
     assert_eq!(body["app_name"], "Acme Forge");
     assert!(body.get("connect_url").is_none());
+    let existing = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-id/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(existing.status(), reqwest::StatusCode::OK);
+    let existing_body: serde_json::Value = existing.json().await.unwrap();
+    assert_eq!(existing_body["acting_login"], "mira");
+    assert_eq!(existing_body["app_name"], "Acme Forge");
+    assert!(existing_body.get("connect_url").is_none());
     let session_id = bound_session_id(&runtime, &owner, "T1/C-id/1.1").await;
     let session = runtime.get_session(&owner, session_id).await.unwrap();
     assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Person);

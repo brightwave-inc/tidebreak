@@ -47,7 +47,7 @@
 //! event frame on `/sessions/{id}/events`, and the notices on
 //! `/updates`. They follow the strictness above. The one shape a client
 //! composes itself is the response to `POST /sessions/{id}/turns`, which
-//! is a [`TurnSnapshot`] on `200` and a [`QueuedTurn`] on `202`.
+//! is a [`TurnSnapshot`] or [`QueuedTurn`], both on `202`.
 //!
 //! # Limits
 //!

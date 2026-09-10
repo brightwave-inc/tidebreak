@@ -118,10 +118,11 @@ pub(crate) use types::{
     SessionSnapshot, SetCodeWorktreeRootBody, SetSessionVisibilityBody, TurnSnapshot,
     UpdateCodeTriggerBody, UpdateNotice, WorkspaceTitleProposal,
 };
-#[allow(unused_imports)] // Compatibility exports keep these route paths stable.
+#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use types::{
-    CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeGithubRepository,
-    CodeHarnessInstallSnapshot, CodeRepoSource, CodeRepoSources, CodeWorktreeRoot,
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeHarnessInstallSnapshot,
+    CodeRepoSource, CodeRepoSources, CodeWorktreeRoot,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;

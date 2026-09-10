@@ -4,15 +4,14 @@
 //! request, so every route here is repository-scoped rather than
 //! workspace-scoped (decision record 60).
 
-use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use tidebreak_core::{CodeTriggerId, RepoId};
 
 use super::types::{CodeTriggerSnapshot, CreateCodeTriggerBody, UpdateCodeTriggerBody};
 use crate::code::ScopedCode;
 use crate::error::ServerError;
+use crate::extract::{Json, Path};
 
 pub async fn list_repo_triggers(
     code: ScopedCode,

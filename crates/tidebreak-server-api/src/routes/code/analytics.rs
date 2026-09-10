@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use axum::extract::Query;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use tidebreak_core::{
@@ -14,7 +13,7 @@ use tidebreak_core::{
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
-use crate::extract::Json;
+use crate::extract::{Json, Query};
 
 use super::types::{
     CodeAnalyticsDay, CodeAnalyticsHarness, CodeAnalyticsModel, CodeAnalyticsPricingCoverage,
