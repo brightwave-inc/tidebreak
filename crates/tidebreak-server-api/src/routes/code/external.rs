@@ -150,7 +150,8 @@ async fn existing_session_identity(
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+// Older adapters still send `channel_id` and `set_by` (decision 0096 kept the
+// per-channel confirms for them), so this body tolerates unknown fields.
 pub struct ExternalSessionBody {
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
