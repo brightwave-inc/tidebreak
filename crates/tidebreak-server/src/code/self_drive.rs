@@ -124,6 +124,27 @@ fn attribution(session: &Session) -> GitForgeAttributionRequest {
     }
 }
 
+async fn require_child_repository(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    child: &Session,
+    requested: &str,
+) -> Result<(), ServerError> {
+    let workspace_id = child.workspace_id.ok_or_else(|| {
+        ServerError::conflict_kind("workspace_missing", "The child has no workspace.")
+    })?;
+    let workspace = runtime.get_workspace(owner, workspace_id).await?;
+    let repo = runtime.get_repo(owner, workspace.repo_id).await?;
+    let origin = CodeRuntime::workspace_repository_origin(&repo)?;
+    if origin != requested {
+        return Err(ServerError::conflict_kind(
+            "request_key_reused",
+            "This request_key already names work in a different repository.",
+        ));
+    }
+    Ok(())
+}
+
 fn text<'a>(args: &'a Value, key: &str, max: usize) -> Result<&'a str, ServerError> {
     args[key]
         .as_str()
@@ -141,7 +162,7 @@ impl Tool for SessionTool {
     fn spec(&self) -> ToolSpec {
         let (description, properties, required) = match self.name {
             "code_repos" => ("List repositories available to this conversation's personal or bot identity. Choose repositories from the task; the conversation does not need a default repository.", json!({}), json!([])),
-            "code_session_create" => ("Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. Repository access and the channel’s approved repository scope apply.", json!({
+            "code_session_create" => ("Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. The configured GitHub identity controls repository access across every channel; no channel repository approval is needed.", json!({
                 "repository":{"type":"string","description":"GitHub owner/name"},
                 "task":{"type":"string","maxLength":16000},
                 "request_key":{"type":"string","maxLength":128,"description":"Stable key for this task, reused on retries."},
@@ -290,6 +311,15 @@ impl SessionTool {
             .clone();
         let _start = lock.lock().await;
         let auth = authority(runtime, auth.parent.id).await?;
+        if let Some(grant) = auth
+            .grant
+            .as_ref()
+            .filter(|grant| grant.kind.is_workspace())
+        {
+            runtime
+                .require_workspace_repository_access(&auth.parent.owner, grant.id, &origin)
+                .await?;
+        }
         let children = tidebreak_core::db::code::child_sessions(
             &runtime.db,
             &auth.parent.owner,
@@ -305,31 +335,7 @@ impl SessionTool {
             .await?
             .expect("child context");
             if context.request_key.as_deref() == Some(key) {
-                let workspace = runtime
-                    .get_workspace(
-                        &auth.parent.owner,
-                        child.workspace_id.ok_or_else(|| {
-                            ServerError::conflict_kind(
-                                "workspace_missing",
-                                "The child has no workspace.",
-                            )
-                        })?,
-                    )
-                    .await?;
-                let repo = runtime
-                    .get_repo(&auth.parent.owner, workspace.repo_id)
-                    .await?;
-                let bound_origin = format!(
-                    "{}/{}",
-                    repo.origin_owner.unwrap_or_default(),
-                    repo.origin_name.unwrap_or_default()
-                );
-                if !bound_origin.eq_ignore_ascii_case(&origin) {
-                    return Err(ServerError::conflict_kind(
-                        "request_key_reused",
-                        "This request_key already names work in a different repository.",
-                    ));
-                }
+                require_child_repository(runtime, &auth.parent.owner, child, &origin).await?;
                 send(runtime, &auth, child, task, key).await?;
                 return snapshot(runtime, &auth.parent.owner, child.clone()).await;
             }
@@ -347,34 +353,6 @@ impl SessionTool {
                 >= 8
         {
             return Err(ServerError::conflict_kind("child_session_limit", "A conversation can start at most 16 children and run at most 8 at once. Wait for running children before starting more."));
-        }
-        if let Some(grant) = auth
-            .grant
-            .as_ref()
-            .filter(|grant| grant.kind.is_workspace())
-        {
-            let channel = auth.channel.as_deref().ok_or_else(|| ServerError::conflict_kind("channel_scope_missing", "Start a new Slack conversation to record its channel before selecting a repository."))?;
-            if !tidebreak_core::db::code::channel_repository_is_confirmed(
-                &runtime.db,
-                &auth.parent.owner,
-                grant.id,
-                channel,
-                &origin,
-            )
-            .await?
-            {
-                tidebreak_core::db::code::ensure_pending_channel_repository(
-                    &runtime.db,
-                    &auth.parent.owner,
-                    grant.id,
-                    channel,
-                    &origin,
-                    &auth.parent.id.to_string(),
-                    "Parent conversation",
-                )
-                .await?;
-                return Err(ServerError::conflict_kind("repository_unconfirmed", format!("This channel does not yet allow {origin}. Ask an administrator to add the repositories this task needs together in Tidebreak Settings > Channels. A chat answer does not change access. After the scope is saved, retry this request_key.")));
-            }
         }
         if let Some(lender) = &auth.lender {
             // Refuse a missing person connection rather than silently moving
@@ -440,6 +418,7 @@ impl SessionTool {
                 let child = runtime
                     .get_session(&auth.parent.owner, binding.session_id)
                     .await?;
+                require_child_repository(runtime, &auth.parent.owner, &child, &origin).await?;
                 if child.acts_as() != auth.parent.acts_as() {
                     return Err(ServerError::conflict_kind(
                         "child_identity_mismatch",
@@ -704,6 +683,19 @@ mod tests {
         Arc<SessionTools>,
         Session,
     ) {
+        setup_with_lender(sandbox, parent_mode, None).await
+    }
+
+    async fn setup_with_lender(
+        sandbox: bool,
+        parent_mode: PermissionMode,
+        lender: Option<Arc<dyn GitCredentialLender>>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<CodeRuntime>,
+        Arc<SessionTools>,
+        Session,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(
             tidebreak_core::DbStore::connect(&format!(
@@ -739,6 +731,9 @@ mod tests {
                         session_spend_ceiling_microusd: None,
                     },
                 ));
+        }
+        if let Some(lender) = lender {
+            runtime = runtime.with_git_credentials(lender);
         }
         // The mode tests need both supervised Ask and unattended Allow.
         runtime.adapters.register(Arc::new(
@@ -900,6 +895,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_conversations_choose_repositories_across_channels_without_approvals() {
+        use crate::obo_gateway::test_support::FakeLender;
+        let lender = Arc::new(FakeLender::offering("channel-bot"));
+        let (_dir, runtime, host, mut parent) =
+            setup_with_lender(true, PermissionMode::Allow, Some(lender.clone())).await;
+        parent.acts_as = Some(tidebreak_core::ActsAs::Bot);
+        tidebreak_core::db::code::save_session(&runtime.db, &parent)
+            .await
+            .unwrap();
+        let grant = tidebreak_core::db::code::mint_external_grant(
+            &runtime.db,
+            &parent.owner,
+            tidebreak_core::db::code::MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "W",
+                workspace_identity: "W",
+                kind: tidebreak_core::CodeGrantKind::Workspace,
+            },
+            &crate::code::grants::hash_adapter_token("access"),
+            &crate::code::grants::hash_adapter_token("refresh"),
+        )
+        .await
+        .unwrap();
+        let tool = SessionTool {
+            host,
+            name: "code_session_create",
+        };
+        for channel in ["C1", "C2"] {
+            let mut conversation = parent.clone();
+            conversation.id = SessionId::new();
+            insert_session(&runtime.db, &conversation).await.unwrap();
+            tidebreak_core::db::code::bind_external_session(
+                &runtime.db,
+                &parent.owner,
+                grant.id,
+                "slack",
+                &format!("W/{channel}/1"),
+                conversation.id,
+            )
+            .await
+            .unwrap();
+            set_session_context(
+                &runtime.db,
+                &parent.owner,
+                conversation.id,
+                Some(channel),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            for name in ["one", "two"] {
+                let view = tool.run(&runtime, &ToolCtx::without_private_scratch(conversation.id, None), json!({
+                    "repository":format!("acme/{name}"), "task":"Inspect the repository", "request_key":name
+                })).await.unwrap();
+                assert_eq!(view["location"], "sandbox");
+            }
+        }
+        for origin in ["acme/one", "acme/two"] {
+            assert!(
+                lender
+                    .minted()
+                    .iter()
+                    .filter(|repository| repository.as_str() == origin)
+                    .count()
+                    >= 2
+            );
+        }
+        assert!(runtime
+            .list_channel_repository_confirms(&parent.owner, grant.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn revoked_external_authority_cannot_discover_or_start_children() {
         let (_dir, runtime, host, parent) = setup().await;
         let (grant, _) = runtime
@@ -1001,6 +1072,16 @@ mod tests {
             host: host.clone(),
             name: "code_session_create",
         };
+        let mismatched = tool.run(&runtime, &ToolCtx::without_private_scratch(parent.id, None), json!({
+            "repository":"acme/two", "task":"Do not redirect this child", "request_key":"one"
+        })).await.unwrap_err();
+        assert_eq!(mismatched.kind(), "request_key_reused");
+        assert!(
+            tidebreak_core::db::code::session_context(&runtime.db, &parent.owner, child.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let result = tool
             .run(
                 &runtime,

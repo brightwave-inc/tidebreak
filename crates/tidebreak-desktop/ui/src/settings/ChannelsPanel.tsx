@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/empty";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
-import { WorkspaceGrantRepositories } from "./WorkspaceGrantRepositories";
 
 /**
  * The grants an external channel holds on this machine, grouped by the
@@ -30,26 +29,22 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [refreshFailed, setRefreshFailed] = useState(false);
   const { confirm, dialog } = useConfirm();
 
-  const reload = useCallback(
-    async (failureContext?: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        setGrants(await client.listCodeGrants());
-        setRefreshFailed(false);
-      } catch (err) {
-        setError([failureContext, String(err)].filter(Boolean).join(" "));
-        setRefreshFailed(true);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client],
-  );
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setGrants(await client.listCodeGrants());
+      setRefreshFailed(false);
+    } catch (err) {
+      setError(String(err));
+      setRefreshFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [client]);
 
   useEffect(() => {
     void reload();
@@ -105,38 +100,13 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
     }
   }
 
-  async function approveRepositories(
-    grantId: string,
-    channelId: string,
-    repositories: string[],
-  ): Promise<boolean> {
-    setWorking(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await client.approveWorkspaceGrantChannelRepositories(
-        grantId,
-        channelId,
-        repositories,
-      );
-    } catch (err) {
-      setError(`Repositories could not be approved. ${String(err)}`);
-      setWorking(false);
-      return false;
-    }
-    setNotice(`Repositories approved for ${channelId}.`);
-    await reload("Repositories were approved, but the list could not refresh.");
-    setWorking(false);
-    return true;
-  }
-
   const groups = groupByWorkspace(grants ?? []);
   const disabled = loading || working || refreshFailed;
 
   return (
     <SettingsPanel
       title="Channels"
-      description="Manage the people and Slack workspaces that can reach coding sessions on this machine. For channel sessions, approve the repositories that agents can choose from. GitHub access is still required."
+      description="Manage the people and Slack workspaces that can reach coding sessions on this machine. Every channel uses the repositories available to this instance’s GitHub App. To change repository access, update the app installation in GitHub."
       busy={loading || working}
     >
       {loading && grants === null ? (
@@ -218,15 +188,6 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
                       </Button>
                     )}
                   </div>
-                  {grant.kind === "workspace" && (
-                    <WorkspaceGrantRepositories
-                      grant={grant}
-                      disabled={disabled}
-                      onApprove={(channelId, repositories) =>
-                        approveRepositories(grant.id, channelId, repositories)
-                      }
-                    />
-                  )}
                 </li>
               ))}
             </ul>
@@ -244,14 +205,6 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
             )}
           </SettingsSection>
         ))
-      )}
-      {notice && (
-        <p
-          className="notice-surface notice-success rounded-md border px-3 py-2 text-sm"
-          role="status"
-        >
-          {notice}
-        </p>
       )}
       {grants !== null && error && (
         <div className="notice-surface notice-critical flex flex-col items-start gap-2 rounded-md border px-3 py-2">

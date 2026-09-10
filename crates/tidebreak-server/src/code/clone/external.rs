@@ -1,10 +1,75 @@
-//! Start an owner-isolated checkout after the external repository is confirmed.
+//! Start an owner-isolated checkout with the external grant’s GitHub identity.
 
 use super::*;
 use crate::obo_gateway::{GitCredentialLender, GitForgeAttributionRequest};
 use std::sync::Arc;
 
 impl CodeRuntime {
+    /// Resolve the GitHub origin used by the instance's configured forge.
+    pub fn workspace_repository_origin(
+        repo: &tidebreak_core::CodeRepo,
+    ) -> Result<String, ServerError> {
+        let unknown = || {
+            ServerError::conflict_kind(
+                "repo_origin_unknown",
+                "workspace repository access requires a recorded github.com origin",
+            )
+        };
+        if !repo
+            .origin_host
+            .as_deref()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        {
+            return Err(unknown());
+        }
+        let (Some(owner), Some(name)) = (repo.origin_owner.as_deref(), repo.origin_name.as_deref())
+        else {
+            return Err(unknown());
+        };
+        Self::canonical_external_repository(&format!("{owner}/{name}"))
+    }
+
+    /// Check the instance's GitHub App authority before admitting repository
+    /// work, including a checkout that another channel already registered.
+    pub async fn require_workspace_repository_access(
+        &self,
+        owner: &OwnerId,
+        grant_id: tidebreak_core::CodeGrantId,
+        origin: &str,
+    ) -> Result<(), ServerError> {
+        let grant = tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+            .await?
+            .filter(|grant| grant.kind.is_workspace() && grant.revoked_at.is_none())
+            .ok_or_else(|| ServerError::unauthorized("The workspace connection was revoked."))?;
+        let origin = Self::canonical_external_repository(origin)?;
+        let lender: Arc<dyn GitCredentialLender> = if let Some(external) = self
+            .harness_llm()
+            .and_then(|relay| relay.external_delegations().cloned())
+        {
+            external
+                .for_grant(owner, grant.id)
+                .await
+                .map_err(ServerError::from)?
+        } else {
+            self.git_credentials().cloned().ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "git_forge_refused",
+                    git_forge_refusal_message(&GitForgeError::NoGitForge),
+                )
+            })?
+        };
+        // The gateway checks the selected installation for this exact repository.
+        // Do not use the discovery list as an allowlist: large lists can be bounded.
+        // The credential is discarded here; each git operation borrows its own.
+        lender
+            .git_credential(owner, &origin, GitForgeAttributionRequest::Installation)
+            .await
+            .map_err(|error| {
+                ServerError::conflict_kind("git_forge_refused", git_forge_refusal_message(&error))
+            })?;
+        Ok(())
+    }
+
     /// Resolve a registered repository or start its bounded clone with the
     /// adapter grant's identity. A later retry observes the completed job.
     pub async fn prepare_external_repository(
@@ -14,6 +79,13 @@ impl CodeRuntime {
         origin: &str,
         attribution: GitForgeAttributionRequest,
     ) -> Result<tidebreak_core::CodeRepo, ServerError> {
+        if tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+            .await?
+            .is_some_and(|grant| grant.kind.is_workspace())
+        {
+            self.require_workspace_repository_access(owner, grant_id, origin)
+                .await?;
+        }
         let _creation = self.clone_jobs.external_start_lock.lock().await;
         match self.repo_by_origin(owner, origin).await {
             Ok(repo) => return Ok(repo),

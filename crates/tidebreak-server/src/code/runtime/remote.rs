@@ -343,6 +343,11 @@ impl CodeRuntime {
         };
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
+        if workspace_grant {
+            let origin = Self::workspace_repository_origin(&repo)?;
+            self.require_workspace_repository_access(owner, grant_id, &origin)
+                .await?;
+        }
         match location {
             ExecutionLocation::Sandbox => {
                 if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {

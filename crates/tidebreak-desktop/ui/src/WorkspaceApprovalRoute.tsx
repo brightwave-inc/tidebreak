@@ -145,11 +145,10 @@ export function WorkspaceApprovalView({
               <>
                 <p className="text-sm leading-relaxed">
                   Run channel sessions for {channelLabel(page.channel_kind)}{" "}
-                  workspace {page.workspace_name} as {page.display_name}? The
-                  shared GitHub identity must have access to each repository. In
-                  Settings → Channels, approve the repositories each channel can
-                  use. Agents can then choose any approved repository and work
-                  across them.
+                  workspace {page.workspace_name} as {page.display_name}? Every
+                  channel can use the repositories available to this instance’s
+                  GitHub App. Agents can choose repositories and work across
+                  them.
                 </p>
                 <div className="flex gap-2">
                   <Button

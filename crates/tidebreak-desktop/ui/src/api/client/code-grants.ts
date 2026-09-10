@@ -84,23 +84,6 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
       );
     }
 
-    /** Approve explicit repositories for a channel under a workspace grant. */
-    approveWorkspaceGrantChannelRepositories(
-      grantId: string,
-      channelId: string,
-      repositories: string[],
-    ): Promise<void> {
-      return this.json(
-        `/deployment/code/grants/workspace/${encodeURIComponent(grantId)}/channels/${encodeURIComponent(channelId)}/repositories/approve`,
-        {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify({ repositories }),
-        },
-        204,
-      );
-    }
-
     async getWorkspaceGrantPage(id: string): Promise<CodeConnectPage> {
       return requireParsed(
         parseCodeConnectPage(

@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, within } from "storybook/test";
 
 import type { CodeConnectPage } from "@/api";
 import { WorkspaceApprovalView } from "@/WorkspaceApprovalRoute";
@@ -27,7 +28,16 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ApproveWorkspace: Story = {};
+export const ApproveWorkspace: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText(
+        /Every channel can use the repositories available to this instance’s GitHub App/,
+      ),
+    ).toBeVisible();
+  },
+};
 
 export const Loading: Story = {
   args: { page: null, phase: "loading" },

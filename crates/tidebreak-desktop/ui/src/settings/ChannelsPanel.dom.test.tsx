@@ -133,250 +133,47 @@ describe("ChannelsPanel", () => {
     );
   });
 
-  it("shows workspace grants with their channels and a revoke control", async () => {
-    const revokeCodeGrant = vi.fn(async () => ({
-      ...workspace,
-      revoked_at: "2026-09-08T11:00:00Z",
-    }));
+  it("uses GitHub App access for every channel without repository approval controls", async () => {
     const client = {
       listCodeGrants: vi.fn(async () => [workspace]),
-      revokeCodeGrant,
     } as unknown as ApiClient;
     render(<ChannelsPanel client={client} />);
     await screen.findByText("Workspace Acme Corp");
-    const channel = screen.getByRole("region", { name: "Channel C1" });
-    expect(within(channel).getByText("acme/tools")).toBeTruthy();
-    expect(within(channel).getByText("Approved repositories")).toBeTruthy();
-    expect(within(channel).getByText("Pending approval")).toBeTruthy();
-    expect(within(channel).getByText("Previous repositories (1)")).toBeTruthy();
-    expect(within(channel).queryByText("acme/private")).toBeNull();
-    expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
-  });
 
-  it("approves every pending repository in one channel and reloads its scope", async () => {
-    const approved = {
-      ...workspace,
-      channels: workspace.channels?.map((entry) =>
-        entry.channel_id === "C1" && entry.state === "pending"
-          ? { ...entry, state: "confirmed" }
-          : entry,
-      ),
-    };
-    const listCodeGrants = vi
-      .fn()
-      .mockResolvedValueOnce([workspace])
-      .mockResolvedValueOnce([approved]);
-    const approveWorkspaceGrantChannelRepositories = vi
-      .fn()
-      .mockResolvedValue(undefined);
-    render(
-      <ChannelsPanel
-        client={
-          {
-            listCodeGrants,
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
-      />,
-    );
-    const channel = await screen.findByRole("region", { name: "Channel C1" });
-    await userEvent.setup().click(
-      within(channel).getByRole("button", {
-        name: "Approve all pending repositories",
-      }),
-    );
-    await waitFor(() =>
-      expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledWith(
-        workspace.id,
-        "C1",
-        ["acme/web", "acme/api"],
-      ),
-    );
-    await waitFor(() =>
-      expect(within(channel).queryByText("Pending approval")).toBeNull(),
-    );
-    expect(listCodeGrants).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Repositories approved for C1.",
-    );
     expect(
-      within(screen.getByRole("region", { name: "Channel C2" })).getByText(
-        "Pending approval",
+      screen.getByText(
+        /Every channel uses the repositories available to this instance’s GitHub App/,
       ),
     ).toBeTruthy();
-  });
-
-  it("caps a large pending approval at the first 100 repositories", async () => {
-    const channels = Array.from({ length: 101 }, (_, index) => ({
-      channel_id: "C1",
-      repository: `acme/repository-${index}`,
-      state: "pending",
-      set_by_identity: "U1",
-      set_by_display: "Casey",
-    }));
-    const approveWorkspaceGrantChannelRepositories = vi
-      .fn()
-      .mockResolvedValue(undefined);
-    const listCodeGrants = vi
-      .fn()
-      .mockResolvedValue([{ ...workspace, channels }]);
-    render(
-      <ChannelsPanel
-        client={
-          {
-            listCodeGrants,
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
-      />,
-    );
-    await userEvent
-      .setup()
-      .click(await screen.findByRole("button", { name: "Approve first 100" }));
-    await waitFor(() =>
-      expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledWith(
-        workspace.id,
-        "C1",
-        channels.slice(0, 100).map((entry) => entry.repository),
-      ),
-    );
-    expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledTimes(1);
-    expect(listCodeGrants).toHaveBeenCalledTimes(2);
-  });
-
-  it("adds a channel before its first task with trimmed explicit names and URLs", async () => {
-    const listCodeGrants = vi
-      .fn()
-      .mockResolvedValue([{ ...workspace, channels: [] }]);
-    const approveWorkspaceGrantChannelRepositories = vi
-      .fn()
-      .mockResolvedValue(undefined);
-    render(
-      <ChannelsPanel
-        client={
-          {
-            listCodeGrants,
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
-      />,
-    );
-    const user = userEvent.setup();
-    await user.click(
-      await screen.findByRole("button", { name: "Add channel" }),
-    );
-    const form = screen.getByRole("form", { name: "Add channel repositories" });
-    await user.type(
-      within(form).getByRole("textbox", { name: /Slack channel ID/ }),
-      "  CNEW123  ",
-    );
-    await user.type(
-      within(form).getByRole("textbox", { name: /Repositories/ }),
-      " acme/tools , https://github.com/acme/web\nacme/tools ",
-    );
-    await user.click(
-      within(form).getByRole("button", { name: "Approve repositories" }),
-    );
-    await waitFor(() =>
-      expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledWith(
-        workspace.id,
-        "CNEW123",
-        ["acme/tools", "https://github.com/acme/web"],
-      ),
-    );
-    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
-    expect(listCodeGrants).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps the editor after an authorization failure and does not report success", async () => {
-    const listCodeGrants = vi.fn().mockResolvedValue([workspace]);
-    const approveWorkspaceGrantChannelRepositories = vi
-      .fn()
-      .mockRejectedValue(new Error("403: administrator access required"));
-    render(
-      <ChannelsPanel
-        client={
-          {
-            listCodeGrants,
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
-      />,
-    );
-    const user = userEvent.setup();
-    const channel = await screen.findByRole("region", { name: "Channel C1" });
-    await user.click(
-      within(channel).getByRole("button", { name: "Add repositories" }),
-    );
-    const editor = within(channel).getByRole("textbox", {
-      name: /Repositories/,
-    });
-    await user.type(editor, "acme/extra");
-    await user.click(
-      within(channel).getByRole("button", { name: "Approve repositories" }),
-    );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "403: administrator access required",
-    );
-    expect(editor).toHaveValue("acme/extra");
-    expect(listCodeGrants).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(
-      within(channel).getByRole("button", { name: "Approve repositories" }),
-    ).toBeEnabled();
+      screen.queryByRole("button", {
+        name: /Approve|Add channel|Add repositories/,
+      }),
+    ).toBeNull();
+    // Old approval records do not define or display the instance's access.
+    for (const entry of workspace.channels ?? []) {
+      expect(screen.queryByText(entry.repository)).toBeNull();
+      expect(screen.queryByText(entry.channel_id)).toBeNull();
+    }
+    expect(screen.queryByText("Pending approval")).toBeNull();
   });
 
-  it("reports saved approvals separately from a failed refresh and retries only the read", async () => {
-    const listCodeGrants = vi
-      .fn()
-      .mockResolvedValueOnce([workspace])
-      .mockRejectedValueOnce(new Error("Connection lost"))
-      .mockResolvedValueOnce([workspace]);
-    const approveWorkspaceGrantChannelRepositories = vi
-      .fn()
-      .mockResolvedValue(undefined);
-    render(
-      <ChannelsPanel
-        client={
-          {
-            listCodeGrants,
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
-      />,
-    );
-    const user = userEvent.setup();
-    const channel = await screen.findByRole("region", { name: "Channel C1" });
-    await user.click(
-      within(channel).getByRole("button", { name: "Add repositories" }),
-    );
-    await user.type(
-      within(channel).getByRole("textbox", { name: /Repositories/ }),
-      "acme/extra",
-    );
-    await user.click(
-      within(channel).getByRole("button", { name: "Approve repositories" }),
-    );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Repositories were approved, but the list could not refresh. Error: Connection lost",
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Repositories approved for C1.",
-    );
+  it("lets a workspace start using GitHub App access before its first task", async () => {
+    const client = {
+      listCodeGrants: vi.fn(async () => [{ ...workspace, channels: [] }]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+    await screen.findByText("Workspace Acme Corp");
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
     expect(screen.queryByRole("form")).toBeNull();
     expect(
-      within(channel).getByRole("button", { name: "Add repositories" }),
-    ).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Refresh grants" }));
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(listCodeGrants).toHaveBeenCalledTimes(3);
-    expect(approveWorkspaceGrantChannelRepositories).toHaveBeenCalledTimes(1);
-    expect(
-      within(channel).getByRole("button", { name: "Add repositories" }),
-    ).toBeEnabled();
+      screen.queryByRole("button", { name: /Add channel|Approve/ }),
+    ).toBeNull();
   });
 
-  it("keeps revoked workspace scopes visible without offering approval controls", async () => {
+  it("keeps a revoked workspace and its reason visible without offering actions", async () => {
     const client = {
       listCodeGrants: vi.fn().mockResolvedValue([
         {
@@ -387,65 +184,41 @@ describe("ChannelsPanel", () => {
       ]),
     } as unknown as ApiClient;
     render(<ChannelsPanel client={client} />);
-    await screen.findByRole("region", { name: "Channel C1" });
-    expect(screen.getByText("acme/tools")).toBeTruthy();
-    expect(
-      screen.queryByRole("button", {
-        name: /Approve|Add channel|Add repositories|Revoke/,
-      }),
-    ).toBeNull();
+    await screen.findByText("Workspace Acme Corp");
+    expect(screen.getByText(/Administrator revoked access/)).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("rejects missing channel IDs, wildcard scopes, and more than 100 repositories", async () => {
-    const approveWorkspaceGrantChannelRepositories = vi.fn();
+  it("retries only the grants read after a revoke succeeds but refresh fails", async () => {
+    const listCodeGrants = vi
+      .fn()
+      .mockResolvedValueOnce([workspace])
+      .mockRejectedValueOnce(new Error("Connection lost"))
+      .mockResolvedValueOnce([
+        { ...workspace, revoked_at: "2026-09-09T10:00:00Z" },
+      ]);
+    const revokeCodeGrant = vi.fn().mockResolvedValue(undefined);
     render(
       <ChannelsPanel
-        client={
-          {
-            listCodeGrants: vi
-              .fn()
-              .mockResolvedValue([{ ...workspace, channels: [] }]),
-            approveWorkspaceGrantChannelRepositories,
-          } as unknown as ApiClient
-        }
+        client={{ listCodeGrants, revokeCodeGrant } as unknown as ApiClient}
       />,
     );
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Revoke" }));
     await user.click(
-      await screen.findByRole("button", { name: "Add channel" }),
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Revoke",
+      }),
     );
-    const channelId = screen.getByRole("textbox", { name: /Slack channel ID/ });
-    const repositories = screen.getByRole("textbox", { name: /Repositories/ });
-    const approve = screen.getByRole("button", {
-      name: "Approve repositories",
-    });
-    await user.click(approve);
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter the Slack channel ID.",
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Connection lost",
     );
-    await user.type(channelId, "CNEW");
-    await user.click(approve);
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter between 1 and 100 explicit repositories.",
-    );
-    await user.type(repositories, "acme/*");
-    await user.click(approve);
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Wildcards are not supported.",
-    );
-    await user.clear(repositories);
-    await user.click(repositories);
-    await user.paste(
-      Array.from(
-        { length: 101 },
-        (_, index) => `acme/repository-${index}`,
-      ).join("\n"),
-    );
-    await user.click(approve);
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter between 1 and 100 explicit repositories.",
-    );
-    expect(approveWorkspaceGrantChannelRepositories).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Refresh grants" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(listCodeGrants).toHaveBeenCalledTimes(3);
+    expect(revokeCodeGrant).toHaveBeenCalledExactlyOnceWith(workspace.id);
+    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
   });
 
   it("says where connecting starts when nothing is connected", async () => {

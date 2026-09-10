@@ -37,6 +37,13 @@ describe("WorkspaceApprovalView", () => {
       ),
     ).toBeTruthy();
 
+    expect(
+      screen.getByText(
+        /Every channel can use the repositories available to this instance’s GitHub App/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Settings → Channels/)).toBeNull();
+
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Approve workspace" }));
