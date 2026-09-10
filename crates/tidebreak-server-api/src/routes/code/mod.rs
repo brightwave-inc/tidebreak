@@ -38,6 +38,7 @@ mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
+pub(crate) use crate::code::sandbox_tools::sandbox_tool_call;
 pub(crate) use access::{
     add_session_access, list_session_access, revoke_session_access, set_session_visibility,
 };

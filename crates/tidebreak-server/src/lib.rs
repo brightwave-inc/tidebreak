@@ -1333,6 +1333,7 @@ async fn bind_inner(
     let mut tools = tools;
     session_tools.register(&mut tools);
     let tools = Arc::new(tools);
+    let process_tools = tools.clone();
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
     // runtime, so it is injected at assembly rather than patched in after:
     // attestation contexts live in a per-instance registry (a second
@@ -1488,7 +1489,7 @@ async fn bind_inner(
         }
         _ => runtime,
     };
-    let code = Arc::new(runtime);
+    let code = Arc::new(runtime.with_tool_registry(process_tools));
     session_tools.attach(&code);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
