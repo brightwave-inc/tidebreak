@@ -237,9 +237,14 @@ async fn ws_live_and_replay_frames_use_the_renderer_safe_projection() {
     send_message_http(&client, addr, &token, chat.id).await;
     let live = read_raw_until_terminal(&mut live_socket).await;
     assert_renderer_event_frames_are_redacted(&live);
+    // The complete answer has a code-only journal row. Catching up across
+    // that sequence gap can replay the terminal frame; deltas remain live.
     assert!(
-        live.iter().all(|event| event.get("replayed").is_none()),
-        "live frames retain their established wire shape"
+        live.iter().all(|event| {
+            event.get("replayed").is_none()
+                || (event["replayed"] == true && event["event"]["type"] == "turn_completed")
+        }),
+        "only the terminal frame can catch up across the code-only answer row: {live:?}"
     );
 
     wait_for_turn(&store, chat.id).await;
