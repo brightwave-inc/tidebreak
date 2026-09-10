@@ -9699,7 +9699,3 @@ dependencies = [
  "syn 3.0.4",
  "winnow 1.0.4",
 ]
-
-[[patch.unused]]
-name = "symphonia-format-mkv"
-version = "0.6.0"
