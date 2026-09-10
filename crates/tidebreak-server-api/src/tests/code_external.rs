@@ -4685,3 +4685,30 @@ async fn channel_preferences_share_workspace_scope_and_enforce_admin_writes() {
         "Keep replies brief."
     );
 }
+
+#[tokio::test]
+async fn channel_preferences_preserve_supervised_model_ids() {
+    let (router, runtime, repo, service, _dir) = workspace_grant_app().await;
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-model").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", grant.id);
+    for (harness, model) in [
+        ("claude_code", "custom-anthropic-alias"),
+        ("codex", "custom-openai-alias"),
+        ("opencode", "model-gateway/custom-openai-alias"),
+    ] {
+        let (status, saved) = call_json(
+            &router,
+            "PUT",
+            &route,
+            ALICE_TOKEN,
+            Some(serde_json::json!({"harness": harness, "model": model})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (status, created) = call_json(&router, "POST", "/external/code/sessions", "prefs-model",
+            Some(serde_json::json!({"external_key":format!("T1/C1/{harness}"), "channel_id":"C1", "repo_id":repo}))).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["harness"], harness);
+        assert_eq!(created["model"], model);
+    }
+}

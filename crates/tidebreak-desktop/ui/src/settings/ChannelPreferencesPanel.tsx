@@ -89,11 +89,24 @@ export function ChannelPreferencesPanel({
     let active = true;
     setModels([]);
     setCatalogError(null);
-    if (preferences?.harness)
-      void client
-        .listCodeHarnessModels(preferences.harness)
-        .then((list) => {
-          if (active) setModels(list.models);
+    const harness = preferences?.harness;
+    if (harness)
+      void (
+        harness === "internal"
+          ? client
+              .listModels()
+              .then((catalog) =>
+                catalog.models
+                  .filter((model) => model.available && model.supports_tools)
+                  .map((model) => ({
+                    id: model.key,
+                    label: model.display_name,
+                  })),
+              )
+          : client.listCodeHarnessModels(harness).then((list) => list.models)
+      )
+        .then((models) => {
+          if (active) setModels(models);
         })
         .catch((err: unknown) => {
           if (active) setCatalogError(String(err));
@@ -159,7 +172,7 @@ export function ChannelPreferencesPanel({
           )}
           <SettingsSection
             title="Agent"
-            description="Unset choices inherit this Tidebreak instance’s defaults. Gateway controls which models and tools the agent can use."
+            description="Unset harness choices inherit this Tidebreak instance’s default. Each harness supplies its default model. Gateway controls which models and tools the agent can use."
           >
             <SettingsField label="Harness">
               <Select
@@ -211,7 +224,11 @@ export function ChannelPreferencesPanel({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="inherit">Use instance default</SelectItem>
+                  <SelectItem value="inherit">
+                    {preferences.harness === "internal"
+                      ? "Use instance default"
+                      : "Use harness default"}
+                  </SelectItem>
                   {preferences.model &&
                     !models.some((m) => m.id === preferences.model) && (
                       <SelectItem value={preferences.model}>

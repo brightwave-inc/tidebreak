@@ -157,6 +157,75 @@ pub(crate) async fn resolve_external_model(
     resolve_external_model_selection(state, grant, None).await
 }
 
+/// Preserve the model identifier that the selected harness sends to its provider.
+/// Only the internal engine understands Tidebreak's frozen chat selectors.
+async fn resolve_external_harness_model(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    harness: HarnessKind,
+    selection: Option<&str>,
+) -> Result<Option<String>, ServerError> {
+    if harness.is_in_process() {
+        return resolve_external_model_selection(state, grant, selection)
+            .await
+            .map(Some);
+    }
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let runtime = state
+        .code
+        .as_ref()
+        .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
+    if let Some(relay) = runtime.harness_llm() {
+        let (anthropic, openai) = match relay.external_delegations() {
+            Some(external) => {
+                external
+                    .for_grant(&grant.owner, grant.id)
+                    .await?
+                    .compat_listings(&grant.owner)
+                    .await?
+            }
+            None => relay.listings(&grant.owner).await?,
+        };
+        return select_external_compat_model(harness, selection, anthropic, openai).map(Some);
+    }
+    Ok(Some(selection.to_owned()))
+}
+
+fn select_external_compat_model(
+    harness: HarnessKind,
+    selection: &str,
+    anthropic: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+    openai: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+) -> Result<String, ServerError> {
+    let (models, id) = match harness {
+        HarnessKind::ClaudeCode => (anthropic?, selection),
+        HarnessKind::Codex | HarnessKind::Grok => (openai?, selection),
+        HarnessKind::Opencode => {
+            if let Some(id) = selection.strip_prefix("anthropic/") {
+                (anthropic?, id)
+            } else if let Some(id) = selection.strip_prefix("model-gateway/") {
+                (openai?, id)
+            } else {
+                return Err(unavailable_external_harness_model());
+            }
+        }
+        HarnessKind::Internal => return Err(unavailable_external_harness_model()),
+    };
+    if !models.iter().any(|model| model.id == id) {
+        return Err(unavailable_external_harness_model());
+    }
+    Ok(selection.to_owned())
+}
+
+fn unavailable_external_harness_model() -> ServerError {
+    ServerError::conflict_kind(
+        "model_provider_unavailable",
+        "this Slack connection cannot use the selected harness model; choose an available model in channel settings",
+    )
+}
+
 async fn resolve_external_model_selection(
     state: &AppState,
     grant: &CodeExternalGrant,
@@ -399,11 +468,9 @@ pub async fn external_get_or_create(
         } else {
             HarnessKind::ClaudeCode
         });
-    let model = if harness.is_in_process() || preferences.model.is_some() {
-        Some(resolve_external_model_selection(&state, &grant, preferences.model.as_deref()).await?)
-    } else {
-        None
-    };
+    let model =
+        resolve_external_harness_model(&state, &grant, harness, preferences.model.as_deref())
+            .await?;
     let (resolution, identity) = runtime
         .external_get_or_create_with_channel_context(
             &grant.owner,
@@ -1007,4 +1074,67 @@ async fn external_decide(
         .decide_approval(&grant.owner, call, decision, Some(actor))
         .await?;
     Ok(Json(ApprovalSnapshot::from(settled)))
+}
+
+#[cfg(test)]
+mod harness_model_tests {
+    use super::*;
+
+    fn listing(id: &str) -> tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>> {
+        Ok(vec![crate::obo_gateway::GatewayCompatModel {
+            id: id.to_owned(),
+            display_name: None,
+            family_default: false,
+        }])
+    }
+
+    #[test]
+    fn external_compat_models_preserve_harness_namespace_and_protocol() {
+        for (harness, selected) in [
+            (HarnessKind::ClaudeCode, "anthropic-alias"),
+            (HarnessKind::Codex, "openai-alias"),
+            (HarnessKind::Grok, "openai-alias"),
+            (HarnessKind::Opencode, "anthropic/anthropic-alias"),
+            (HarnessKind::Opencode, "model-gateway/openai-alias"),
+        ] {
+            assert_eq!(
+                select_external_compat_model(
+                    harness,
+                    selected,
+                    listing("anthropic-alias"),
+                    listing("openai-alias")
+                )
+                .unwrap(),
+                selected
+            );
+        }
+        for (harness, selected) in [
+            (HarnessKind::ClaudeCode, "openai-alias"),
+            (HarnessKind::Codex, "anthropic-alias"),
+            (HarnessKind::Opencode, "openai-alias"),
+            (HarnessKind::Opencode, "anthropic/openai-alias"),
+            (
+                HarnessKind::Codex,
+                "model_gateway::__tidebreak_gateway_v1.route",
+            ),
+        ] {
+            assert!(select_external_compat_model(
+                harness,
+                selected,
+                listing("anthropic-alias"),
+                listing("openai-alias")
+            )
+            .is_err());
+        }
+        assert_eq!(
+            select_external_compat_model(
+                HarnessKind::ClaudeCode,
+                "anthropic-alias",
+                listing("anthropic-alias"),
+                Err(tidebreak_core::AgentError::msg("unrelated listing down"))
+            )
+            .unwrap(),
+            "anthropic-alias"
+        );
+    }
 }

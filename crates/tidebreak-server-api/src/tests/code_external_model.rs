@@ -95,6 +95,20 @@ async fn model_gateway(empty_catalog: bool) -> (String, GatewayCalls) {
             }),
         )
         .route(
+            "/compat/anthropic/v1/models",
+            get(|headers: HeaderMap| async move {
+                assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
+                Json(serde_json::json!({"data": [{"id":"compat-anthropic-alias"}]}))
+            }),
+        )
+        .route(
+            "/compat/openai/v1/models",
+            get(|headers: HeaderMap| async move {
+                assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
+                Json(serde_json::json!({"data": [{"id":"compat-openai-alias"}]}))
+            }),
+        )
+        .route(
             "/compat/anthropic/v1/messages",
             post(|State(calls): State<GatewayCalls>, headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
                 let bearer = headers.get(header::AUTHORIZATION)
@@ -270,6 +284,19 @@ async fn fixture(empty_catalog: bool) -> Fixture {
         runtime.bus.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
+    for kind in [
+        tidebreak_core::HarnessKind::ClaudeCode,
+        tidebreak_core::HarnessKind::Codex,
+        tidebreak_core::HarnessKind::Opencode,
+    ] {
+        runtime.adapters.register(Arc::new(
+            crate::scripted_harness::ScriptedAdapter::new(
+                crate::scripted_harness::plain_text_script(),
+            )
+            .with_kind(kind)
+            .with_approvals(tidebreak_core::CapLevel::Supported),
+        ));
+    }
     state.events.mirror_into(runtime.bus.clone());
     let runtime = Arc::new(runtime);
     state.code = Some(runtime.clone());
@@ -535,4 +562,70 @@ async fn repository_free_external_creation_refuses_an_empty_grant_catalog() {
         sessions.is_empty(),
         "refused model admission must not create a conversation"
     );
+}
+
+#[tokio::test]
+async fn external_channel_harness_models_use_grant_compat_catalog_without_chat_rewriting() {
+    let fixture = fixture(false).await;
+    let address = super::code::serve(fixture.router.clone()).await;
+    fixture
+        .runtime
+        .start(format!("http://{address}"))
+        .await
+        .unwrap();
+    for (harness, model) in [
+        (
+            tidebreak_core::HarnessKind::ClaudeCode,
+            "compat-anthropic-alias",
+        ),
+        (tidebreak_core::HarnessKind::Codex, "compat-openai-alias"),
+        (
+            tidebreak_core::HarnessKind::Opencode,
+            "model-gateway/compat-openai-alias",
+        ),
+    ] {
+        crate::code::channel_preferences::write(
+            &fixture.runtime.db,
+            &fixture.grant,
+            "C1",
+            &crate::code::channel_preferences::ChannelPreferences {
+                harness: Some(harness),
+                model: Some(model.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, created) = post_external(
+            &fixture,
+            "/external/code/sessions",
+            serde_json::json!({
+                "external_key":format!("T1/C1/{harness}"), "channel_id":"C1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["model"], model);
+    }
+    crate::code::channel_preferences::write(
+        &fixture.runtime.db,
+        &fixture.grant,
+        "C1",
+        &crate::code::channel_preferences::ChannelPreferences {
+            harness: Some(tidebreak_core::HarnessKind::Codex),
+            model: Some("compat-anthropic-alias".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (status, rejected) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/wrong-protocol", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
 }

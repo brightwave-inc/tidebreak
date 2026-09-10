@@ -22,6 +22,17 @@ const client = {
     value: object,
   ) => ({ ...preferences, ...value }),
   getHarnessDoctor: async () => harnessDoctor,
+  listModels: async () => ({
+    models: [
+      {
+        key: "model_gateway::example",
+        display_name: "Example model",
+        available: true,
+        supports_tools: true,
+      },
+    ],
+    roles: [],
+  }),
   listCodeHarnessModels: async () => ({
     models: [{ id: "example-model", label: "Example model" }],
     source: "model_gateway",
@@ -35,6 +46,18 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 export const Configured: Story = {};
+export const Internal: Story = {
+  args: {
+    client: {
+      ...client,
+      getChannelPreferences: async () => ({
+        ...preferences,
+        harness: "internal",
+        model: "model_gateway::example",
+      }),
+    } as unknown as ApiClient,
+  },
+};
 export const Inherited: Story = {
   args: {
     client: {
