@@ -67,7 +67,6 @@ import {
 } from "./CodeUpdatesStore";
 
 type Stage = "sources" | "local" | "git_url" | "github" | "progress";
-type SourceKey = "local" | "git_url" | "github";
 
 type PaletteOpening = {
   id: number;
@@ -869,7 +868,7 @@ export function AddRepoPalette({
                   {unavailable.map((source) => (
                     <p
                       key={source.kind}
-                      className="text-xs text-muted-foreground"
+                      className="text-xs text-muted-foreground break-words"
                     >
                       {source.remediation}
                     </p>
@@ -1091,7 +1090,7 @@ function LocalStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical">{error}</p>}
+      {error && <p className="text-sm text-critical break-words">{error}</p>}
       <FormSubmit
         busy={busy}
         disabled={!path.trim()}
@@ -1181,7 +1180,7 @@ function GitUrlStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical">{error}</p>}
+      {error && <p className="text-sm text-critical break-words">{error}</p>}
       <FormSubmit
         busy={busy}
         disabled={
@@ -1304,7 +1303,7 @@ function GithubStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical">{error}</p>}
+      {error && <p className="text-sm text-critical break-words">{error}</p>}
       <FormSubmit
         busy={busy}
         disabled={
@@ -1369,7 +1368,6 @@ function GithubRepoField({
           onChange={(event) => onChange(event.target.value)}
           placeholder="owner/repo"
           disabled={busy}
-          autoFocus
         />
       ) : (
         <Popover
@@ -1767,6 +1765,3 @@ function Hint({ keys, label }: { keys: string[]; label: string }) {
     </span>
   );
 }
-
-export type { SourceKey };
-export { SOURCES };

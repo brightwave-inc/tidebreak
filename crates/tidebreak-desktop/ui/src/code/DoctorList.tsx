@@ -1,11 +1,5 @@
 import { useState, type ReactNode } from "react";
-import {
-  ArrowUpCircle,
-  ChevronDown,
-  Download,
-  Loader2,
-  RotateCw,
-} from "lucide-react";
+import { ArrowUpCircle, ChevronDown, Download, RotateCw } from "lucide-react";
 
 import type {
   CodeHarnessInstallSnapshot,
@@ -288,9 +282,7 @@ function DoctorRow({
               </span>
             )}
             <Badge variant={badge.variant} size="sm" className="shrink-0">
-              {downloading && (
-                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-              )}
+              {downloading && <Spinner className="size-3" aria-hidden="true" />}
               {badge.label}
             </Badge>
           </div>

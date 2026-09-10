@@ -5,7 +5,6 @@ import {
   Check,
   FileImage,
   FileText,
-  Loader2,
   RotateCcw,
 } from "lucide-react";
 import type {
@@ -15,6 +14,7 @@ import type {
 } from "./api";
 import type { ExecFilePreviewAvailability } from "./generated/wire";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Collapsible,
   CollapsibleContent,
@@ -418,9 +418,8 @@ function RevisionPreview({
         ) : loaded.status === "error" ? (
           <PreviewNotice>{loaded.message}</PreviewNotice>
         ) : (
-          <Loader2
-            className="animate-spin text-muted-foreground"
-            size={18}
+          <Spinner
+            className="text-muted-foreground"
             aria-label={`Loading ${revision} preview`}
           />
         )}

@@ -76,7 +76,10 @@ export function AddRepoInline({
       {/* The reading of the value sits under the value, not under the
           destination the value happens to also need. */}
       {state.blocked ? (
-        <p className="text-critical text-xs" data-testid="add-repo-blocked">
+        <p
+          className="text-critical text-xs break-words"
+          data-testid="add-repo-blocked"
+        >
           {state.blocked}
         </p>
       ) : (
@@ -124,7 +127,10 @@ export function AddRepoInline({
         </div>
       )}
       {state.error && (
-        <p className="text-critical text-xs" data-testid="add-repo-error">
+        <p
+          className="text-critical text-xs break-words"
+          data-testid="add-repo-error"
+        >
           {state.error}
         </p>
       )}

@@ -28,7 +28,8 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { LoaderCircle, Workflow } from "lucide-react";
+import { Workflow } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { PendingDetailSheet } from "./PendingDetail";
 import { RunDetailSheet } from "./RunDetailSheet";
 import { RunList } from "./RunList";
@@ -310,7 +311,7 @@ export function RunsSurface({
                   disabled={loadingMore}
                   onClick={() => void query(nextCursor, true)}
                 >
-                  {loadingMore && <LoaderCircle className="animate-spin" />}
+                  {loadingMore && <Spinner />}
                   Load more
                 </Button>
               </div>
