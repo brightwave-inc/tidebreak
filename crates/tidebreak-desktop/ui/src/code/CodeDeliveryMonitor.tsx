@@ -37,7 +37,14 @@ type MonitorBatch<T> = {
 };
 
 /** Shell-level delivery polling for GitHub notifications. */
-export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
+export function CodeDeliveryMonitor({
+  client,
+  maxPagesPerPass = MAX_MONITOR_PAGES,
+}: {
+  client: ApiClient;
+  /** Test seam for exercising continuation without changing production bounds. */
+  maxPagesPerPass?: number;
+}) {
   const wakeRef = useRef<(() => void) | null>(null);
   const deliveryRevision = useCodeUpdatesStore(
     (state) => state.deliveryRevision,
@@ -171,6 +178,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
                 pending.since,
                 pending.pullRequestCursor,
                 queryController.signal,
+                maxPagesPerPass,
               ),
           pending.runsComplete
             ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
@@ -183,21 +191,26 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
                 pending.since,
                 pending.runCursor,
                 queryController.signal,
+                maxPagesPerPass,
               ),
         ]);
         const [pullRequestBatch, runBatch] = batches;
-        pending.pullRequests.push(...pullRequestBatch.items);
-        pending.runs.push(...runBatch.items);
-        pending.pullRequestsComplete = pullRequestBatch.complete;
-        pending.runsComplete = runBatch.complete;
-        pending.pullRequestCursor = pullRequestBatch.nextCursor;
-        pending.runCursor = runBatch.nextCursor;
+        continuation = {
+          ...pending,
+          pullRequests: [...pending.pullRequests, ...pullRequestBatch.items],
+          runs: [...pending.runs, ...runBatch.items],
+          pullRequestsComplete: pullRequestBatch.complete,
+          runsComplete: runBatch.complete,
+          pullRequestCursor: pullRequestBatch.nextCursor,
+          runCursor: runBatch.nextCursor,
+        };
+        const nextPending = continuation;
 
         if (!isCurrent()) {
           initial.setPollState(false);
           return;
         }
-        if (!pending.pullRequestsComplete || !pending.runsComplete) {
+        if (!nextPending.pullRequestsComplete || !nextPending.runsComplete) {
           // Keep one pass bounded. Very large aggregates continue immediately
           // from these cursors and refresh across several passes.
           rerunRequested = true;
@@ -208,9 +221,9 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
         useCodeDeliveryStore
           .getState()
           .completeDeliveryPoll(
-            pending.pullRequests,
-            pending.runs,
-            pending.startedAt,
+            nextPending.pullRequests,
+            nextPending.runs,
+            nextPending.startedAt,
           );
       } catch (error) {
         continuation = null;
@@ -242,7 +255,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       if (timer !== null) window.clearTimeout(timer);
       queryController?.abort();
     };
-  }, [client]);
+  }, [client, maxPagesPerPass]);
 
   return null;
 }
@@ -314,10 +327,11 @@ export async function monitorPullRequests(
   updatedAfter: string,
   initialCursor?: string,
   signal?: AbortSignal,
+  maxPages = MAX_MONITOR_PAGES,
 ): Promise<MonitorBatch<CodeDeliveryPullRequestSummary>> {
   const items: CodeDeliveryPullRequestSummary[] = [];
   let cursor = initialCursor;
-  for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const page = await client.queryCodeDeliveryPullRequests(
       {
         repositories,
@@ -347,10 +361,11 @@ export async function monitorRuns(
   createdAfter: string,
   initialCursor?: string,
   signal?: AbortSignal,
+  maxPages = MAX_MONITOR_PAGES,
 ): Promise<MonitorBatch<CodeDeliveryRunSummary>> {
   const items: CodeDeliveryRunSummary[] = [];
   let cursor = initialCursor;
-  for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const page = await client.queryCodeDeliveryRuns(
       {
         repositories,
