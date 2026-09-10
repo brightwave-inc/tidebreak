@@ -34,6 +34,7 @@
 //!   [`crate::providers::collect_routes`].
 
 pub mod external;
+pub(crate) mod harness;
 pub mod static_lender;
 
 pub use static_lender::StaticGitCredentialLender;
@@ -45,7 +46,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt as _;
 
-use tidebreak_core::{AgentError, HarnessKind, OwnerId, Profile, Result, SessionId};
+use tidebreak_core::{AgentError, OwnerId, Profile, Result, SessionId};
 use tidebreak_router::BearerTokenSource;
 
 /// Mint a replacement this close to expiry instead of using the cached token.
@@ -117,54 +118,16 @@ impl CachedToken {
     }
 }
 
-/// The installed engine one relayed session runs, as the gateway binds it
-/// (gateway decision 118).
-///
-/// An inference token exchanged with this binding keeps Tidebreak as its
-/// host attribution; the gateway reads the engine only to decide which of
-/// the caller's provider subscriptions the turn may draw on. Anthropic and
-/// OpenAI honor a consumer plan for their own engine alone, so a Claude Code
-/// or Codex child relayed without a binding is always metered. The version
-/// is the installed binary's, exactly as its `--version` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EmbeddedEngine {
-    pub kind: HarnessKind,
-    pub version: String,
-}
-
-impl EmbeddedEngine {
-    /// The binding for an engine child, or `None` when there is nothing to
-    /// bind: the in-process engine is Tidebreak itself, and an engine whose
-    /// version the probe could not read cannot be named to the gateway
-    /// truthfully.
-    #[must_use]
-    pub fn installed(kind: HarnessKind, version: Option<&str>) -> Option<Self> {
-        if kind.is_in_process() {
-            return None;
-        }
-        let version = version
-            .map(str::trim)
-            .filter(|version| !version.is_empty())?;
-        Some(Self {
-            kind,
-            version: version.to_owned(),
-        })
-    }
-}
-
 /// What this process remembers about one caller.
 ///
 /// `subject` is the most recent machine-bound bearer that caller presented,
 /// and `token` is the inference token exchanged from it. The `token` mutex is
 /// also the single-flight gate: concurrent turns for the same user queue on it
-/// and all but the first find a fresh token already there. `engine_tokens`
-/// holds the engine-bound tokens the relay exchanges for the caller's
-/// sessions, one per session, engine, and version, because the gateway binds
-/// each of those immutably.
+/// and all but the first find a fresh token already there.
 struct UserSlot {
     subject: std::sync::Mutex<Arc<str>>,
     token: tokio::sync::Mutex<Option<CachedToken>>,
-    engine_tokens: tokio::sync::Mutex<HashMap<(SessionId, EmbeddedEngine), CachedToken>>,
+    harness_tokens: std::sync::Mutex<harness::HarnessTokenSlots>,
     catalog: tokio::sync::Mutex<Option<CachedCatalog>>,
     git_forge: tokio::sync::Mutex<HashMap<GitForgeAttributionRequest, CachedGitForge>>,
 }
@@ -206,19 +169,13 @@ struct OAuthError {
 }
 
 /// A successful exchange.
-///
-/// The engine fields echo an engine binding the gateway accepted
-/// (gateway decision 118); an ordinary exchange carries none.
 #[derive(serde::Deserialize)]
 struct ExchangeResponse {
     access_token: String,
     expires_in: u64,
-    #[serde(default)]
     engine: Option<String>,
-    #[serde(default)]
     engine_version: Option<String>,
-    #[serde(default)]
-    engine_session_id: Option<String>,
+    engine_session_id: Option<SessionId>,
 }
 
 /// The forge identity a hosted machine's git operations act as.
@@ -504,7 +461,7 @@ impl OboGateway {
                     Arc::new(UserSlot {
                         subject: std::sync::Mutex::new(bearer),
                         token: tokio::sync::Mutex::new(None),
-                        engine_tokens: tokio::sync::Mutex::new(HashMap::new()),
+                        harness_tokens: std::sync::Mutex::new(HashMap::new()),
                         catalog: tokio::sync::Mutex::new(None),
                         git_forge: tokio::sync::Mutex::new(HashMap::new()),
                     }),
@@ -593,58 +550,6 @@ impl OboGateway {
         Ok(token)
     }
 
-    /// The current inference token for `owner`'s `session`, bound to the
-    /// installed `engine` that session runs, exchanging one if the cached
-    /// token is missing or near expiry.
-    ///
-    /// Cached per session, engine, and version: the gateway binds each of
-    /// those immutably, so a token for one never serves another.
-    ///
-    /// # Errors
-    /// Fails when this process holds no subject token for `owner`, no
-    /// machine identity to authenticate the binding with, or when the
-    /// gateway refuses the exchange or does not acknowledge the binding.
-    pub async fn bearer_for_engine(
-        &self,
-        owner: &OwnerId,
-        session: SessionId,
-        engine: &EmbeddedEngine,
-    ) -> Result<String> {
-        let slot = {
-            let users = self.users.lock().map_err(|_| {
-                AgentError::msg("on-behalf-of inference state is unavailable in this process")
-            })?;
-            users.get(owner).cloned()
-        };
-        let Some(slot) = slot else {
-            return Err(AgentError::SignInRequired(
-                "this machine holds no live Model Gateway session for you; sign in again".into(),
-            ));
-        };
-        let key = (session, engine.clone());
-        // One gate for all of a caller's engine tokens: an exchange is quick,
-        // and a second turn for the same session then finds a fresh token.
-        let mut cached = slot.engine_tokens.lock().await;
-        if let Some(current) = cached.get(&key) {
-            if current.is_fresh() {
-                return Ok(current.token.to_string());
-            }
-        }
-        let subject = {
-            let subject = slot.subject.lock().map_err(|_| {
-                AgentError::msg("on-behalf-of inference state is unavailable in this process")
-            })?;
-            subject.clone()
-        };
-        let minted = self
-            .exchange_with(&subject, INFERENCE_AUDIENCE, Some((session, engine)))
-            .await?;
-        let token = minted.token.to_string();
-        cached.retain(|_, held| held.is_fresh());
-        cached.insert(key, minted);
-        Ok(token)
-    }
-
     /// Exchange one caller bearer for a short-lived inference token.
     ///
     /// # Errors
@@ -653,50 +558,42 @@ impl OboGateway {
     /// handles. Every other non-success is a refusal too — this never retries
     /// onto another credential.
     async fn exchange(&self, subject: &str, audience: &str) -> Result<CachedToken> {
-        self.exchange_with(subject, audience, None).await
+        self.exchange_with_harness(subject, audience, None).await
     }
 
-    /// The exchange, optionally binding the token to the installed engine a
-    /// session runs (gateway decision 118).
-    ///
-    /// A binding rides this machine's registered add-on identity, so a
-    /// caller's bearer alone never asserts an engine. The gateway echoes the
-    /// engine, version, and session it bound; anything short of an exact
-    /// echo is refused rather than used, because a token the gateway minted
-    /// as ordinary Tidebreak inference would silently run the engine's turns
-    /// off the caller's subscription.
-    async fn exchange_with(
+    async fn exchange_with_harness(
         &self,
         subject: &str,
         audience: &str,
-        engine: Option<(SessionId, &EmbeddedEngine)>,
+        harness: Option<&harness::HarnessIdentity>,
     ) -> Result<CachedToken> {
-        let mut form: Vec<(&str, &str)> = vec![
+        let mut form = vec![
             ("grant_type", TOKEN_EXCHANGE_GRANT),
             ("subject_token", subject),
             ("subject_token_type", SUBJECT_TOKEN_TYPE),
             ("audience", audience),
         ];
-        let bound = engine.map(|(session, engine)| {
-            (
-                engine.kind.as_str(),
-                engine.version.as_str(),
-                session.as_uuid().to_string(),
-            )
-        });
-        if let Some((kind, version, session)) = &bound {
+        let session;
+        if let Some(harness) = harness {
             let (client_id, client_secret) =
                 self.machine_credentials.as_ref().ok_or_else(|| {
                     AgentError::config(
-                        "this machine has no gateway identity to bind an installed engine with; \
-                         set GATEWAY_CLIENT_ID and GATEWAY_CLIENT_SECRET",
+                        "harness inference requires this machine's registered gateway client",
                     )
                 })?;
-            form.push(("engine", kind));
-            form.push(("engine_version", version));
-            form.push(("engine_session_id", session.as_str()));
-            form.push(("client_id", client_id.as_str()));
-            form.push(("client_secret", client_secret.as_str()));
+            if audience != INFERENCE_AUDIENCE {
+                return Err(AgentError::config(
+                    "a harness identity only authorizes inference",
+                ));
+            }
+            session = harness.session.to_string();
+            form.extend([
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+                ("engine", harness.kind.as_str()),
+                ("engine_version", harness.version.as_str()),
+                ("engine_session_id", session.as_str()),
+            ]);
         }
         let response = self
             .client
@@ -717,23 +614,20 @@ impl OboGateway {
                 "the Model Gateway returned an unreadable token exchange response: {error}"
             ))
         })?;
+        if let Some(harness) = harness {
+            if exchanged.engine.as_deref() != Some(harness.kind.as_str())
+                || exchanged.engine_version.as_deref() != Some(harness.version.as_str())
+                || exchanged.engine_session_id != Some(harness.session)
+            {
+                return Err(AgentError::config(
+                    "the Model Gateway did not confirm this session's installed harness; update the gateway before retrying",
+                ));
+            }
+        }
         if exchanged.access_token.is_empty() {
             return Err(AgentError::msg(
                 "the Model Gateway returned an empty on-behalf-of token",
             ));
-        }
-        if let Some((kind, version, session)) = &bound {
-            let acknowledged = exchanged.engine.as_deref() == Some(*kind)
-                && exchanged.engine_version.as_deref() == Some(*version)
-                && exchanged.engine_session_id.as_deref() == Some(session.as_str());
-            if !acknowledged {
-                return Err(AgentError::InvalidTarget(
-                    "the Model Gateway did not acknowledge this session's installed engine \
-                     binding (gateway decision 118); refusing rather than running the engine \
-                     as ordinary Tidebreak inference"
-                        .into(),
-                ));
-            }
         }
         Ok(CachedToken {
             token: exchanged.access_token.into(),
@@ -1945,12 +1839,6 @@ mod tests {
         forge_answer: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
         /// Last `attribution` query or body token the git surfaces saw.
         last_attribution: Arc<std::sync::Mutex<Option<String>>>,
-        /// Whether an engine-bound exchange echoes its binding back. Off
-        /// models a gateway that minted ordinary inference instead.
-        engine_ack: Arc<std::sync::atomic::AtomicBool>,
-        /// The last `(engine, engine_version, engine_session_id)` an
-        /// exchange declared.
-        last_engine: Arc<std::sync::Mutex<Option<(String, String, String)>>>,
     }
 
     impl FakeGateway {
@@ -1966,8 +1854,6 @@ mod tests {
                 git_refusal: Arc::new(std::sync::Mutex::new(None)),
                 forge_answer: Arc::new(std::sync::Mutex::new(None)),
                 last_attribution: Arc::new(std::sync::Mutex::new(None)),
-                engine_ack: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                last_engine: Arc::new(std::sync::Mutex::new(None)),
                 catalog: Arc::new(std::sync::Mutex::new(serde_json::json!({
                     "models": [
                         {
@@ -2060,49 +1946,20 @@ mod tests {
                                 .into_response();
                         }
                         let serial = state.mints.fetch_add(1, Ordering::SeqCst);
-                        let engine = form.get("engine").cloned();
                         let label = if audience == CATALOG_AUDIENCE {
                             "catalog"
                         } else if audience.starts_with("runtime:") {
                             "runtime"
-                        } else if engine.is_some() {
-                            "engine"
                         } else {
                             "inference"
                         };
-                        let mut body = serde_json::json!({
+                        Json(serde_json::json!({
                             "access_token": format!("mg_at_{label}_{serial}_for_{subject}"),
                             "token_type": "Bearer",
                             "expires_in": state.lifetime.load(Ordering::SeqCst),
                             "scope": "inference:invoke",
-                        });
-                        if let Some(engine) = engine {
-                            // An engine binding authenticates the add-on with
-                            // its client credentials beside the subject
-                            // (gateway decision 118), asserted server-side.
-                            assert_eq!(audience, INFERENCE_AUDIENCE, "engines bind llm only");
-                            assert_eq!(
-                                form.get("client_id").map(String::as_str),
-                                Some("tidebreak")
-                            );
-                            assert_eq!(
-                                form.get("client_secret").map(String::as_str),
-                                Some("test-machine-secret")
-                            );
-                            let version = form.get("engine_version").cloned().unwrap_or_default();
-                            let session =
-                                form.get("engine_session_id").cloned().unwrap_or_default();
-                            assert!(!version.is_empty() && !session.is_empty());
-                            if let Ok(mut last) = state.last_engine.lock() {
-                                *last = Some((engine.clone(), version.clone(), session.clone()));
-                            }
-                            if state.engine_ack.load(Ordering::SeqCst) {
-                                body["engine"] = serde_json::json!(engine);
-                                body["engine_version"] = serde_json::json!(version);
-                                body["engine_session_id"] = serde_json::json!(session);
-                            }
-                        }
-                        Json(body).into_response()
+                        }))
+                        .into_response()
                     }
                 }),
             );
@@ -2333,121 +2190,6 @@ mod tests {
         assert!(token.ends_with("mg_at_alice"));
         assert_eq!(gateway.served(), 1);
         server.abort();
-    }
-
-    fn claude_code(version: &str) -> EmbeddedEngine {
-        EmbeddedEngine::installed(HarnessKind::ClaudeCode, Some(version)).unwrap()
-    }
-
-    /// An engine-bound exchange declares the installed engine, its version,
-    /// and the session, signed by the machine's add-on identity, and the
-    /// result is cached per session, engine, and version rather than shared
-    /// with the caller's ordinary inference token.
-    #[tokio::test]
-    async fn an_engine_bound_exchange_declares_the_engine_and_caches_per_binding() {
-        let gateway = FakeGateway::new();
-        let (inference, server) = gateway.clone().start().await;
-        let inference = Arc::new(
-            Arc::try_unwrap(inference)
-                .ok()
-                .expect("fresh gateway")
-                .with_machine_credentials_for_test("tidebreak", "test-machine-secret"),
-        );
-        let alice = owner("user:alice");
-        inference.record_caller(&alice, "mg_at_alice".into());
-        let session = SessionId::new();
-
-        let bound = inference
-            .bearer_for_engine(&alice, session, &claude_code("2.1.220"))
-            .await
-            .unwrap();
-        assert!(bound.starts_with("mg_at_engine_"), "{bound}");
-        assert_eq!(
-            gateway.last_engine.lock().unwrap().clone(),
-            Some((
-                "claude_code".to_owned(),
-                "2.1.220".to_owned(),
-                session.as_uuid().to_string()
-            ))
-        );
-
-        // Same binding: served from cache. The ordinary token, another
-        // session, and an upgraded binary each exchange again.
-        let again = inference
-            .bearer_for_engine(&alice, session, &claude_code("2.1.220"))
-            .await
-            .unwrap();
-        assert_eq!(again, bound);
-        assert_eq!(gateway.served(), 1);
-        let ordinary = inference.bearer_for(&alice).await.unwrap();
-        assert!(ordinary.starts_with("mg_at_inference_"), "{ordinary}");
-        inference
-            .bearer_for_engine(&alice, SessionId::new(), &claude_code("2.1.220"))
-            .await
-            .unwrap();
-        inference
-            .bearer_for_engine(&alice, session, &claude_code("2.1.221"))
-            .await
-            .unwrap();
-        assert_eq!(gateway.served(), 4);
-        server.abort();
-    }
-
-    /// A gateway that mints without echoing the binding minted ordinary
-    /// inference; the exchange refuses rather than caching that token under
-    /// the engine.
-    #[tokio::test]
-    async fn an_unacknowledged_engine_binding_is_refused() {
-        let gateway = FakeGateway::new();
-        gateway.engine_ack.store(false, Ordering::SeqCst);
-        let (inference, server) = gateway.clone().start().await;
-        let inference = Arc::try_unwrap(inference)
-            .ok()
-            .expect("fresh gateway")
-            .with_machine_credentials_for_test("tidebreak", "test-machine-secret");
-        let alice = owner("user:alice");
-        inference.record_caller(&alice, "mg_at_alice".into());
-
-        let error = inference
-            .bearer_for_engine(&alice, SessionId::new(), &claude_code("2.1.220"))
-            .await
-            .unwrap_err();
-        assert!(matches!(error, AgentError::InvalidTarget(_)), "{error}");
-        server.abort();
-    }
-
-    /// Without a machine identity the binding cannot be signed, and the
-    /// exchange never degrades to ordinary inference on its own.
-    #[tokio::test]
-    async fn an_engine_binding_needs_the_machine_identity() {
-        let gateway = FakeGateway::new();
-        let (inference, server) = gateway.clone().start().await;
-        let alice = owner("user:alice");
-        inference.record_caller(&alice, "mg_at_alice".into());
-
-        let error = inference
-            .bearer_for_engine(&alice, SessionId::new(), &claude_code("2.1.220"))
-            .await
-            .unwrap_err();
-        assert!(matches!(error, AgentError::Config(_)), "{error}");
-        assert_eq!(gateway.served(), 0);
-        server.abort();
-    }
-
-    /// The in-process engine is Tidebreak itself, and an engine with no
-    /// readable version cannot be named truthfully: neither binds.
-    #[test]
-    fn only_a_versioned_external_engine_binds() {
-        assert!(EmbeddedEngine::installed(HarnessKind::Internal, Some("1.0.0")).is_none());
-        assert!(EmbeddedEngine::installed(HarnessKind::Codex, None).is_none());
-        assert!(EmbeddedEngine::installed(HarnessKind::Codex, Some("  ")).is_none());
-        assert_eq!(
-            EmbeddedEngine::installed(HarnessKind::Codex, Some("0.147.0 \n")),
-            Some(EmbeddedEngine {
-                kind: HarnessKind::Codex,
-                version: "0.147.0".to_owned()
-            })
-        );
     }
 
     /// A runtime bearer is exchanged for the `runtime:{endpoint}` audience,

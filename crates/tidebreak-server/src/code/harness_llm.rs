@@ -40,18 +40,13 @@ use tidebreak_core::{AgentError, HarnessKind, OwnerId, SessionId};
 
 use std::path::Path;
 
-use crate::obo_gateway::{GatewayCompatModel, OboGateway};
+use crate::obo_gateway::{harness::HarnessIdentity, GatewayCompatModel, OboGateway};
 
-/// Whose inference a relay key spends, and which installed engine spends it.
+/// Whose inference a relay key spends.
 #[derive(Clone)]
 pub struct HarnessLlmSubject {
     pub owner: OwnerId,
     pub session: SessionId,
-    /// The engine child this key was issued to, when the worker could name
-    /// it. The relay exchanges an engine-bound token for it (gateway decision
-    /// 118) so the child's turns may draw on the caller's subscription for
-    /// that engine; `None` exchanges ordinary Tidebreak inference.
-    pub engine: Option<crate::obo_gateway::EmbeddedEngine>,
 }
 
 /// The gateway compat endpoint one relay route forwards to.
@@ -109,7 +104,13 @@ pub struct HarnessLlmRelay {
 #[derive(Default)]
 struct RelayState {
     by_session: HashMap<SessionId, String>,
-    keys: HashMap<String, HarnessLlmSubject>,
+    keys: HashMap<String, RelayEntry>,
+}
+
+#[derive(Clone)]
+struct RelayEntry {
+    subject: HarnessLlmSubject,
+    harness: Option<HarnessIdentity>,
 }
 
 impl HarnessLlmRelay {
@@ -242,12 +243,34 @@ impl HarnessLlmRelay {
     /// session held. Reissue-on-attach is what keeps a reaped or relaunched
     /// worker from extending the life of a key an old child still knows.
     pub fn issue(&self, subject: HarnessLlmSubject) -> String {
+        self.issue_entry(RelayEntry {
+            subject,
+            harness: None,
+        })
+    }
+
+    /// Bind inference to the persisted session and the executable that its worker launches.
+    pub(crate) fn issue_for_session(
+        &self,
+        session: &tidebreak_core::Session,
+        probe: &tidebreak_harness::HarnessProbe,
+    ) -> String {
+        self.issue_entry(RelayEntry {
+            subject: HarnessLlmSubject {
+                owner: session.owner.clone(),
+                session: session.id,
+            },
+            harness: HarnessIdentity::from_probe(session.id, session.harness_kind, probe),
+        })
+    }
+
+    fn issue_entry(&self, entry: RelayEntry) -> String {
         let key = generate_key();
         let mut state = self.state.lock().expect("harness llm registry");
-        if let Some(old) = state.by_session.insert(subject.session, key.clone()) {
+        if let Some(old) = state.by_session.insert(entry.subject.session, key.clone()) {
             state.keys.remove(&old);
         }
-        state.keys.insert(key.clone(), subject);
+        state.keys.insert(key.clone(), entry);
         key
     }
 
@@ -267,6 +290,10 @@ impl HarnessLlmRelay {
     }
 
     fn subject_for_key(&self, key: &str) -> Option<HarnessLlmSubject> {
+        self.entry_for_key(key).map(|entry| entry.subject)
+    }
+
+    fn entry_for_key(&self, key: &str) -> Option<RelayEntry> {
         self.state
             .lock()
             .expect("harness llm registry")
@@ -294,40 +321,33 @@ impl HarnessLlmRelay {
                 "missing harness relay key",
             ));
         };
-        let Some(subject) = self.subject_for_key(key) else {
+        let Some(entry) = self.entry_for_key(key) else {
             return Err(endpoint.error_response(
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
                 "unknown or revoked harness relay key",
             ));
         };
+        let subject = &entry.subject;
         let bearer = async {
             let gateway = self
                 .gateway_for_session(&subject.owner, subject.session)
                 .await?;
-            match subject.engine.as_ref() {
-                Some(engine) => {
-                    gateway
-                        .bearer_for_engine(&subject.owner, subject.session, engine)
-                        .await
-                }
+            match entry.harness.as_ref() {
+                Some(harness) => gateway.bearer_for_harness(&subject.owner, harness).await,
                 None => gateway.bearer_for(&subject.owner).await,
             }
         }
         .await;
         match bearer {
             Ok(token) => Ok(token),
-            // A machine without a gateway identity cannot bind an engine; that
-            // is a deployment fault the engine should report once, not retry.
-            Err(
-                error @ (AgentError::SignInRequired(_)
-                | AgentError::InvalidTarget(_)
-                | AgentError::Config(_)),
-            ) => Err(endpoint.error_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication_error",
-                &error.to_string(),
-            )),
+            Err(error @ (AgentError::SignInRequired(_) | AgentError::InvalidTarget(_))) => {
+                Err(endpoint.error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_error",
+                    &error.to_string(),
+                ))
+            }
             Err(error) => Err(endpoint.error_response(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -729,18 +749,6 @@ mod tests {
         HarnessLlmSubject {
             owner: owner(name),
             session: SessionId::new(),
-            engine: None,
-        }
-    }
-
-    fn engine_subject_for(name: &str) -> HarnessLlmSubject {
-        HarnessLlmSubject {
-            owner: owner(name),
-            session: SessionId::new(),
-            engine: crate::obo_gateway::EmbeddedEngine::installed(
-                HarnessKind::ClaudeCode,
-                Some("2.1.220"),
-            ),
         }
     }
 
@@ -756,12 +764,6 @@ mod tests {
     /// compat endpoint received, so a test can assert on the relayed request
     /// through the relayed response.
     async fn fake_gateway() -> Arc<OboGateway> {
-        Arc::new(fake_gateway_acknowledging(true).await)
-    }
-
-    /// The same gateway, minting `mg_it_<engine>` for an engine-bound
-    /// exchange and echoing the binding back only when `acknowledge_engine`.
-    async fn fake_gateway_acknowledging(acknowledge_engine: bool) -> OboGateway {
         async fn seen(headers: HeaderMap, RawQuery(query): RawQuery, body: String) -> Response {
             (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -779,36 +781,13 @@ mod tests {
         let app = axum::Router::new()
             .route(
                 "/oauth/token",
-                post(
-                    move |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
-                        let mut body = serde_json::json!({
-                            "access_token": "mg_it_fresh",
-                            "expires_in": 3600,
-                            "token_type": "Bearer",
-                        });
-                        if let Some(engine) = form.get("engine") {
-                            // The binding rides the machine's add-on identity,
-                            // asserted server-side so a drifted client fails
-                            // the test.
-                            assert!(
-                                form.get("client_id").is_some_and(|value| !value.is_empty())
-                                    && form
-                                        .get("client_secret")
-                                        .is_some_and(|value| !value.is_empty()),
-                                "an engine binding must authenticate the add-on"
-                            );
-                            body["access_token"] = serde_json::json!(format!("mg_it_{engine}"));
-                            if acknowledge_engine {
-                                body["engine"] = serde_json::json!(engine);
-                                body["engine_version"] =
-                                    serde_json::json!(form.get("engine_version"));
-                                body["engine_session_id"] =
-                                    serde_json::json!(form.get("engine_session_id"));
-                            }
-                        }
-                        Json(body)
-                    },
-                ),
+                post(|| async {
+                    Json(serde_json::json!({
+                        "access_token": "mg_it_fresh",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    }))
+                }),
             )
             .route(
                 "/compat/openai/v1/models",
@@ -827,7 +806,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        OboGateway::new(&format!("http://{address}"), TEST_RESOURCE.to_owned()).unwrap()
+        Arc::new(OboGateway::new(&format!("http://{address}"), TEST_RESOURCE.to_owned()).unwrap())
     }
 
     fn bearer_headers(key: &str) -> HeaderMap {
@@ -964,84 +943,6 @@ mod tests {
             !text.contains(&key) && !text.contains("should-never-forward"),
             "child credentials never reach the gateway: {text}"
         );
-    }
-
-    /// An engine child's relayed turn is exchanged with the engine binding
-    /// the worker issued its key under, so the gateway can pair the caller's
-    /// subscription for that engine; the machine's add-on identity signs it.
-    #[tokio::test]
-    async fn forward_exchanges_an_engine_bound_token_for_an_engine_child() {
-        let obo = fake_gateway_acknowledging(true)
-            .await
-            .with_machine_credentials_for_test("tidebreak", "machine-secret");
-        obo.record_caller(&owner("thet"), Arc::from("mg_at_live"));
-        let relay = HarnessLlmRelay::new(Arc::new(obo));
-        let key = relay.issue(engine_subject_for("thet"));
-
-        let response = relay
-            .forward(
-                RelayEndpoint::AnthropicMessages,
-                &bearer_headers(&key),
-                None,
-                axum::body::Body::from(r#"{"model":"claude-opus-5"}"#),
-            )
-            .await;
-        let (status, text) = read_text(response).await;
-        assert_eq!(status, StatusCode::OK, "{text}");
-        assert!(
-            text.contains("auth=Bearer mg_it_claude_code"),
-            "the engine-bound token replaces the relay key: {text}"
-        );
-    }
-
-    /// A gateway that mints without echoing the binding is one that ran the
-    /// exchange as ordinary Tidebreak inference. The relay refuses the turn
-    /// instead of spending it off-subscription behind the engine's back.
-    #[tokio::test]
-    async fn forward_refuses_an_engine_binding_the_gateway_does_not_acknowledge() {
-        let obo = fake_gateway_acknowledging(false)
-            .await
-            .with_machine_credentials_for_test("tidebreak", "machine-secret");
-        obo.record_caller(&owner("thet"), Arc::from("mg_at_live"));
-        let relay = HarnessLlmRelay::new(Arc::new(obo));
-        let key = relay.issue(engine_subject_for("thet"));
-
-        let response = relay
-            .forward(
-                RelayEndpoint::AnthropicMessages,
-                &bearer_headers(&key),
-                None,
-                axum::body::Body::empty(),
-            )
-            .await;
-        let (status, text) = read_text(response).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
-        assert!(
-            text.contains("authentication_error") && text.contains("did not acknowledge"),
-            "{text}"
-        );
-    }
-
-    /// Without a machine identity there is nothing to sign the binding with;
-    /// the engine sees the deployment fault rather than a metered turn.
-    #[tokio::test]
-    async fn forward_refuses_an_engine_binding_without_a_machine_identity() {
-        let obo = fake_gateway_acknowledging(true).await;
-        obo.record_caller(&owner("thet"), Arc::from("mg_at_live"));
-        let relay = HarnessLlmRelay::new(Arc::new(obo));
-        let key = relay.issue(engine_subject_for("thet"));
-
-        let response = relay
-            .forward(
-                RelayEndpoint::AnthropicMessages,
-                &bearer_headers(&key),
-                None,
-                axum::body::Body::empty(),
-            )
-            .await;
-        let (status, text) = read_text(response).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
-        assert!(text.contains("GATEWAY_CLIENT_ID"), "{text}");
     }
 
     #[tokio::test]

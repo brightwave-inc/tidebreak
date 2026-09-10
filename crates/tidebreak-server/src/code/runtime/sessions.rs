@@ -102,54 +102,9 @@ impl CodeRuntime {
             }
         }
         let adapter = self.adapter(harness)?;
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            // The warm install the dialog starts usually got here first, in
-            // which case this is a marker read. It stays on the create path
-            // regardless: correctness must not depend on the warm path having
-            // run, and a pin installed here is serialized against that one.
-            // Skip when a CLI e2e has replaced this kind with the scripted
-            // engine: that binary has no pin and must not try to download one.
-            let skip_pin = {
-                #[cfg(debug_assertions)]
-                {
-                    crate::scripted_harness::env_is_set()
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    false
-                }
-            };
-            if !skip_pin && !harness.is_in_process() {
-                match self.ensure_harness(harness, false, false).await {
-                    Ok(installed) => {
-                        self.record_pin_install(harness, Ok(()));
-                        self.invalidate_moved_probe(harness, &installed.binary);
-                    }
-                    Err(err) => {
-                        self.record_pin_install(harness, Err(err.clone()));
-                        return Err(ServerError::unprocessable_kind(
-                            "harness_not_found",
-                            format!("{harness} could not be installed: {err}"),
-                        ));
-                    }
-                }
-            }
-        }
-        let probe = self.probe_for_session_create(adapter.as_ref()).await;
-        if !probe.found {
-            return Err(ServerError::unprocessable_kind(
-                "harness_not_found",
-                format!(
-                    "{harness} is not installed{}",
-                    if probe.stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", probe.stderr)
-                    }
-                ),
-            ));
-        }
+        let probe = self
+            .prepare_session_harness(harness, adapter.as_ref())
+            .await?;
         let caps = adapter.capabilities(&probe);
         refuse_ceiling_with_no_offered_mode(permission_mode_ceiling, harness, &caps)?;
         if let Some(ceiling) = permission_mode_ceiling {
@@ -165,13 +120,6 @@ impl CodeRuntime {
             }
         }
         refuse_unhonored_mode(harness, permission_mode, &caps)?;
-        if probe.binary_path.is_none() && !harness.is_in_process() {
-            return Err(ServerError::unprocessable_kind(
-                "harness_not_found",
-                format!("{harness} has no path"),
-            ));
-        }
-        self.refuse_signed_out_harness(harness, &probe)?;
         let execution_settings = SessionExecutionSettings {
             model: normalize_model(model),
             reasoning_effort,
@@ -282,6 +230,18 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         owner_kind: Option<&str>,
+        settings: NewSessionSettings,
+    ) -> Result<Session, ServerError> {
+        self.build_repositoryless_session(owner, owner_kind, HarnessKind::Internal, settings, None)
+            .await
+    }
+
+    /// Repositoryless engines use session-private scratch and keep their selected harness.
+    pub(super) async fn build_repositoryless_session(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        harness: HarnessKind,
         NewSessionSettings {
             permission_mode,
             model,
@@ -290,10 +250,12 @@ impl CodeRuntime {
             permission_mode_ceiling,
             acts_as,
         }: NewSessionSettings,
+        external_grant: Option<tidebreak_core::CodeGrantId>,
     ) -> Result<Session, ServerError> {
-        let harness = HarnessKind::Internal;
         let adapter = self.adapter(harness)?;
-        let probe = self.probe_for_session_create(adapter.as_ref()).await;
+        let probe = self
+            .prepare_session_harness(harness, adapter.as_ref())
+            .await?;
         let caps = adapter.capabilities(&probe);
         refuse_ceiling_with_no_offered_mode(permission_mode_ceiling, harness, &caps)?;
         if let Some(ceiling) = permission_mode_ceiling {
@@ -314,11 +276,25 @@ impl CodeRuntime {
             reasoning_effort,
             fast_mode,
         };
-        if execution_settings.fast_mode {
+        if harness.is_in_process() && execution_settings.fast_mode {
             return Err(ServerError::unprocessable_kind(
                 "fast_mode_unsupported",
                 "the internal engine has no fast mode",
             ));
+        }
+        if !harness.is_in_process()
+            && (execution_settings.reasoning_effort.is_some() || execution_settings.fast_mode)
+        {
+            let selected = self
+                .selected_model_capabilities_for_scope(
+                    owner,
+                    external_grant.map(super::settings::ModelCredentialScope::Grant),
+                    adapter.as_ref(),
+                    &probe,
+                    execution_settings.model.as_deref(),
+                )
+                .await;
+            Self::validate_execution_settings(harness, &execution_settings, &selected)?;
         }
         let session = Session {
             visibility: tidebreak_core::SessionVisibility::Private,
@@ -333,7 +309,7 @@ impl CodeRuntime {
             permission_mode,
             model: execution_settings.model,
             reasoning_effort: execution_settings.reasoning_effort,
-            fast_mode: false,
+            fast_mode: execution_settings.fast_mode,
             lifecycle: SessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -347,6 +323,70 @@ impl CodeRuntime {
             acts_as,
         };
         Ok(session)
+    }
+
+    /// Resolve and validate the executable before persisting a machine session.
+    async fn prepare_session_harness(
+        &self,
+        harness: HarnessKind,
+        adapter: &dyn HarnessAdapter,
+    ) -> Result<HarnessProbe, ServerError> {
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            // The warm install the dialog starts usually got here first, in
+            // which case this is a marker read. It stays on the create path
+            // regardless: correctness must not depend on the warm path having
+            // run, and a pin installed here is serialized against that one.
+            // Skip when a CLI e2e has replaced this kind with the scripted
+            // engine: that binary has no pin and must not try to download one.
+            let skip_pin = {
+                #[cfg(debug_assertions)]
+                {
+                    crate::scripted_harness::env_is_set()
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    false
+                }
+            };
+            if !skip_pin && !harness.is_in_process() {
+                match self.ensure_harness(harness, false, false).await {
+                    Ok(installed) => {
+                        self.record_pin_install(harness, Ok(()));
+                        self.invalidate_moved_probe(harness, &installed.binary);
+                    }
+                    Err(err) => {
+                        self.record_pin_install(harness, Err(err.clone()));
+                        return Err(ServerError::unprocessable_kind(
+                            "harness_not_found",
+                            format!("{harness} could not be installed: {err}"),
+                        ));
+                    }
+                }
+            }
+        }
+        let probe = self.probe_for_session_create(adapter).await;
+        if !probe.found {
+            return Err(ServerError::unprocessable_kind(
+                "harness_not_found",
+                format!(
+                    "{harness} is not installed{}",
+                    if probe.stderr.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", probe.stderr)
+                    }
+                ),
+            ));
+        }
+        if probe.binary_path.is_none() && !harness.is_in_process() {
+            return Err(ServerError::unprocessable_kind(
+                "harness_not_found",
+                format!("{harness} has no path"),
+            ));
+        }
+        self.refuse_signed_out_harness(harness, &probe)?;
+        Ok(probe)
     }
 
     pub async fn get_session(

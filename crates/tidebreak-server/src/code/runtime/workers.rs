@@ -209,13 +209,12 @@ impl CodeRuntime {
                 ))
             }
         };
-        let engine_version = probe.version.clone().or(session.harness_version.clone());
         let attached = attach_engine(
             &self.db,
             &self.bus,
             session.id,
             session.harness_kind,
-            engine_version.clone(),
+            probe.version.clone().or(session.harness_version.clone()),
             None,
         )
         .await
@@ -335,28 +334,7 @@ impl CodeRuntime {
                     .ok_or_else(|| {
                         ServerError::internal("harness LLM relay: loopback base not set")
                     })?;
-                // Name the installed engine so the relay exchanges an
-                // engine-bound token for the child (gateway decision 118):
-                // that is what lets its turns draw on the caller's Claude or
-                // Codex subscription instead of being metered as Tidebreak.
-                let engine = crate::obo_gateway::EmbeddedEngine::installed(
-                    session.harness_kind,
-                    engine_version.as_deref(),
-                );
-                if engine.is_none() && relay.forwards_inference() {
-                    tracing::warn!(
-                        session = %session.id,
-                        harness = %session.harness_kind,
-                        "the installed engine reported no version, so its turns run as \
-                         ordinary Tidebreak inference and cannot use an engine-bound \
-                         subscription"
-                    );
-                }
-                let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
-                    owner: session.owner.clone(),
-                    session: session.id,
-                    engine,
-                });
+                let key = relay.issue_for_session(&session, &probe);
                 let (argv, mut env) = if relay.forwards_inference() {
                     crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
                 } else {
@@ -406,8 +384,7 @@ impl CodeRuntime {
         let spec = SessionSpec {
             owner: session.owner.clone(),
             session_id: session.id,
-            // With no workspace the private root doubles as the working
-            // directory; the in-process engine keeps its own scratch there.
+            // With no workspace the private root is the engine's working directory.
             worktree: match &workspace {
                 Some(workspace) => PathBuf::from(&workspace.worktree_path),
                 None => private_root.path().to_path_buf(),

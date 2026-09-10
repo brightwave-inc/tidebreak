@@ -313,15 +313,17 @@ impl CodeRuntime {
                 ));
             }
             let session = self
-                .build_internal_session(
+                .build_repositoryless_session(
                     owner,
                     owner_kind,
+                    harness,
                     NewSessionSettings {
                         permission_mode: mode,
                         permission_mode_ceiling: Some(policy.ceiling),
                         acts_as: Some(identity.acts_as),
                         ..settings
                     },
+                    Some(grant_id),
                 )
                 .await?;
             let resolution = tidebreak_core::db::code::resolve_external_machine_session(

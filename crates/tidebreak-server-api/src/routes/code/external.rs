@@ -93,8 +93,8 @@ async fn require_bound(
 pub struct ExternalSessionBody {
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
-    /// An optional repository workspace. With neither selector, create an
-    /// internal-engine conversation. `repo_id` wins when both are sent.
+    /// An optional repository workspace. With neither selector, create a
+    /// conversation in private scratch. `repo_id` wins when both are sent.
     #[serde(default)]
     pub repo_id: Option<RepoId>,
     /// The repository by its origin, `owner/name`, resolved against the
@@ -104,6 +104,8 @@ pub struct ExternalSessionBody {
     pub repository: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// Select an engine explicitly. Without one, repository work uses Claude
+    /// Code and repositoryless conversations use the internal engine.
     #[serde(default)]
     pub harness: Option<HarnessKind>,
     /// The permission mode the channel asks for. On the machine's engine it
@@ -355,7 +357,14 @@ pub async fn external_get_or_create(
             )
         }
     };
-    let model = if repo_id.is_none() {
+    // Keep repository orchestration on the internal engine by default until
+    // external engines carry the same tools. An explicit harness is honored.
+    let harness = body.harness.unwrap_or(if repo_id.is_none() {
+        HarnessKind::Internal
+    } else {
+        HarnessKind::ClaudeCode
+    });
+    let model = if harness.is_in_process() {
         Some(resolve_external_model(&state, &grant).await?)
     } else {
         None
@@ -369,7 +378,7 @@ pub async fn external_get_or_create(
             &body.external_key,
             repo_id,
             body.title,
-            body.harness.unwrap_or(HarnessKind::ClaudeCode),
+            harness,
             NewSessionSettings {
                 permission_mode: PermissionMode::Allow,
                 model,

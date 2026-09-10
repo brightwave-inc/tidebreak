@@ -4338,3 +4338,170 @@ async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targe
         "ended"
     );
 }
+
+#[tokio::test]
+async fn repositoryless_external_sessions_honor_explicit_harness_and_private_scratch() {
+    use tidebreak_core::{HarnessKind, SessionId};
+    use tidebreak_harness::{
+        HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, HostEnv, SessionSpec,
+    };
+
+    struct Launch {
+        harness: HarnessKind,
+        session: SessionId,
+        cwd: std::path::PathBuf,
+        read_roots: Vec<std::path::PathBuf>,
+        model: Option<String>,
+    }
+    struct RecordingAdapter {
+        inner: crate::scripted_harness::ScriptedAdapter,
+        launches: Arc<StdMutex<Vec<Launch>>>,
+    }
+    #[async_trait::async_trait]
+    impl HarnessAdapter for RecordingAdapter {
+        fn kind(&self) -> HarnessKind {
+            self.inner.kind()
+        }
+        async fn probe(&self, host: &HostEnv) -> HarnessProbe {
+            self.inner.probe(host).await
+        }
+        fn capabilities(&self, probe: &HarnessProbe) -> tidebreak_core::HarnessCaps {
+            self.inner.capabilities(probe)
+        }
+        async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
+            self.launches.lock().unwrap().push(Launch {
+                harness: self.kind(),
+                session: spec.session_id,
+                cwd: spec.worktree.clone(),
+                read_roots: spec.allowed_read_roots.clone(),
+                model: spec.model.clone(),
+            });
+            self.inner.launch(spec).await
+        }
+    }
+    let launches = Arc::new(StdMutex::new(Vec::new()));
+    let (router, runtime, _, directory) = machine_app_built(|mut runtime| {
+        for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+            runtime.adapters.register(Arc::new(RecordingAdapter {
+                inner: crate::scripted_harness::ScriptedAdapter::new(
+                    crate::scripted_harness::plain_text_script(),
+                )
+                .with_kind(harness)
+                .with_approvals(tidebreak_core::CapLevel::Supported)
+                .with_allow_mode(tidebreak_core::CapLevel::Supported),
+                launches: launches.clone(),
+            }));
+        }
+        runtime
+    })
+    .await;
+    let owner = OwnerId::local();
+    let (_, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+        let key = format!("T1/D1/{harness}");
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({
+                "external_key": key, "harness": harness,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id: SessionId = serde_json::from_value(body["session_id"].clone()).unwrap();
+        let session = runtime.get_session(&owner, id).await.unwrap();
+        assert_eq!(session.harness_kind, harness);
+        assert!(session.workspace_id.is_none());
+        assert!(
+            session.model.is_none(),
+            "the CLI chooses its model; the chat default must not leak into it"
+        );
+        assert_eq!(
+            session.execution_location,
+            tidebreak_core::ExecutionLocation::Machine
+        );
+        {
+            let launches = launches.lock().unwrap();
+            let launch = launches.iter().find(|launch| launch.session == id).unwrap();
+            let scratch = directory
+                .path()
+                .join("code/private/sessions")
+                .join(id.to_string());
+            assert_eq!(launch.harness, harness);
+            assert_eq!(launch.cwd, scratch);
+            assert_eq!(launch.read_roots, [scratch.clone()]);
+            assert!(launch.model.is_none());
+            assert!(scratch.is_dir());
+            assert!(!scratch.join(".git").exists());
+        }
+        let (status, retried) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({
+                "external_key": key, "harness": "internal",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retried}");
+        assert_eq!(retried["session_id"], body["session_id"]);
+        assert_eq!(
+            runtime.get_session(&owner, id).await.unwrap().harness_kind,
+            harness
+        );
+    }
+    assert_eq!(launches.lock().unwrap().len(), 2);
+    assert_eq!(
+        tidebreak_core::db::code::list_repos(&runtime.db, &owner)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn repositoryless_explicit_harness_refuses_missing_authentication() {
+    let (router, runtime, _, _directory) = machine_app_built(|mut runtime| {
+        let adapter = crate::scripted_harness::ScriptedAdapter::new(
+            crate::scripted_harness::plain_text_script(),
+        )
+        .with_approvals(tidebreak_core::CapLevel::Supported);
+        adapter.set_authenticated(Some(false));
+        runtime.adapters.register(Arc::new(adapter));
+        runtime
+    })
+    .await;
+    let owner = OwnerId::local();
+    let (_, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({
+            "external_key": "T1/D1/missing-auth", "harness": "claude_code",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["kind"], "harness_not_authenticated");
+    assert!(tidebreak_core::db::code::get_external_binding(
+        &runtime.db,
+        &owner,
+        "slack",
+        "T1/D1/missing-auth"
+    )
+    .await
+    .unwrap()
+    .is_none());
+}

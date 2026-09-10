@@ -16,6 +16,7 @@ const RESOURCE: &str = "tidebreak:test-machine";
 struct Gateway {
     approvals: Arc<AtomicUsize>,
     exchanges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    exchange_forms: Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>,
     mints: Arc<AtomicUsize>,
     revokes: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
@@ -56,8 +57,12 @@ async fn gateway() -> (String, Gateway) {
         .route("/oauth/token", post(|State(state): State<Gateway>, axum::Form(body): axum::Form<HashMap<String, String>>| async move {
             assert!(body["subject_token"].starts_with("delegated-"), "a browser token must never supply external inference");
             state.exchanges.lock().unwrap().push((body["subject_token"].clone(), body["audience"].clone()));
+            state.exchange_forms.lock().unwrap().push(body.clone());
             let prefix = if body["audience"].starts_with("runtime:") { "runtime" } else { "llm" };
-            Json(serde_json::json!({"access_token": format!("{prefix}-{}", body["subject_token"]), "expires_in": 600}))
+            Json(serde_json::json!({
+                "access_token": format!("{prefix}-{}", body["subject_token"]), "expires_in": 600,
+                "engine": body.get("engine"), "engine_version": body.get("engine_version"), "engine_session_id": body.get("engine_session_id"),
+            }))
         }))
         .route("/compat/openai/v1/responses", post(|headers: HeaderMap| async move {
             headers.get("authorization").unwrap().to_str().unwrap().to_owned()
@@ -325,7 +330,7 @@ async fn grant_and_gateway_responses_cannot_cross_owner_or_machine() {
 
 #[tokio::test]
 async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
-    use crate::code::harness_llm::{HarnessLlmSubject, RelayEndpoint};
+    use crate::code::harness_llm::RelayEndpoint;
     use tidebreak_core::{
         Attention, AttentionSource, ExecutionLocation, HarnessKind, PermissionMode, Session,
         SessionKind, SessionLifecycle, SessionVisibility,
@@ -338,8 +343,8 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
         owner_kind: None,
         workspace_id: None,
         kind: SessionKind::Interactive,
-        harness_kind: HarnessKind::ClaudeCode,
-        harness_version: None,
+        harness_kind: HarnessKind::Codex,
+        harness_version: Some("0.140.0".into()),
         harness_resume_ref: None,
         permission_mode: PermissionMode::default(),
         model: None,
@@ -395,13 +400,20 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
         .unwrap()
         .is_none());
     let restarted = HarnessLlmRelay::new(obo(&base)).with_external_delegations(db.clone());
-    let key = restarted.issue(HarnessLlmSubject {
-        owner: owner.clone(),
-        session: session.id,
-        engine: None,
-    });
+    let probe = tidebreak_harness::HarnessProbe {
+        found: true,
+        binary_path: Some("/installed/codex".into()),
+        version: Some("codex-cli 0.147.0".into()),
+        authenticated: Some(false),
+        stderr: String::new(),
+        env: Vec::new(),
+        commands: Vec::new(),
+    };
+    let key = restarted.issue_for_session(&session, &probe);
     let mut headers = HeaderMap::new();
     headers.insert("authorization", format!("Bearer {key}").parse().unwrap());
+    headers.insert("x-engine", "claude_code".parse().unwrap());
+    headers.insert("x-engine-version", "9.9.9".parse().unwrap());
     let response = restarted
         .forward(
             RelayEndpoint::OpenAiResponses,
@@ -416,6 +428,18 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
         .unwrap();
     assert_eq!(body.as_ref(), b"Bearer llm-delegated-1");
     assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+    {
+        let forms = state.exchange_forms.lock().unwrap();
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0]["client_id"], "tidebreak");
+        assert_eq!(forms[0]["client_secret"], "test-machine-secret");
+        assert_eq!(forms[0]["engine"], "codex");
+        assert_eq!(
+            forms[0]["engine_version"], "0.147.0",
+            "use the running binary version"
+        );
+        assert_eq!(forms[0]["engine_session_id"], session.id.to_string());
+    }
     runtime
         .revoke_adapter_grant(&owner, grant.id, "disconnect")
         .await
