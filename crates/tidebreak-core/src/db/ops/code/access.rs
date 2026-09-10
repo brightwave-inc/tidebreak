@@ -48,12 +48,12 @@ pub struct ResolvedSessionAccess {
 }
 
 /// The subject that names one principal.
-pub fn principal_subject(owner: &OwnerId) -> String {
+fn principal_subject(owner: &OwnerId) -> String {
     format!("principal:{}", owner.as_str())
 }
 
 /// The subject that names one channel identity.
-pub fn external_subject(channel_kind: &str, external_identity: &str) -> String {
+fn external_subject(channel_kind: &str, external_identity: &str) -> String {
     format!("external:{channel_kind}:{external_identity}")
 }
 

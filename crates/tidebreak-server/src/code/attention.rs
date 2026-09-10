@@ -12,8 +12,8 @@ use tracing::warn;
 use tidebreak_core::db::code::{
     count_attributed_prs_for_workspace, count_turns, get_session, get_workspace,
     latest_event_created_at, latest_turn, latest_watch_for_session, list_approvals,
-    list_recent_events, list_sessions, list_sessions_by_lifecycle_all_owners,
-    list_sessions_for_workspace, list_turns, replace_session_attention, save_session,
+    list_recent_events, list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace,
+    list_turns, replace_session_attention, save_session,
 };
 use tidebreak_core::{
     preview_formatting_character, ApprovalState, Attention, AttentionSource, AttentionState,
@@ -453,21 +453,6 @@ pub async fn list_accessible_digests(
             digest.can_open_chat &= principal == &session.owner;
             out.push(digest);
         }
-    }
-    Ok(out)
-}
-
-/// The owner's live session digests.
-pub async fn list_digests(
-    db: &DbStore,
-    owner: &OwnerId,
-) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
-    let mut out = Vec::new();
-    for session in list_sessions(db, owner).await? {
-        if session.lifecycle == SessionLifecycle::Ended {
-            continue;
-        }
-        out.push(build_digest(db, &session).await?);
     }
     Ok(out)
 }

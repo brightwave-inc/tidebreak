@@ -4080,8 +4080,9 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     use crate::db::code::{
         count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
-        list_fact_repo_identities, promote_attribution_to_authored, save_pull_request_fact,
-        set_pull_request_fetch_state, set_pull_request_live_state, PullRequestFetchCondition,
+        list_fact_repo_identities_all_owners, promote_attribution_to_authored,
+        save_pull_request_fact, set_pull_request_fetch_state, set_pull_request_live_state,
+        PullRequestFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4317,8 +4318,9 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         1
     );
     assert_eq!(
-        list_fact_repo_identities(&store, &owner).await.unwrap(),
+        list_fact_repo_identities_all_owners(&store).await.unwrap(),
         vec![(
+            owner.as_str().to_owned(),
             "github.com".to_owned(),
             "acme".to_owned(),
             "tools".to_owned()
@@ -4333,10 +4335,11 @@ async fn pull_request_facts_upsert_claim_and_promote() {
             .unwrap()
             .is_none()
     );
-    assert!(list_fact_repo_identities(&store, &stranger)
+    assert!(list_fact_repo_identities_all_owners(&store)
         .await
         .unwrap()
-        .is_empty());
+        .iter()
+        .all(|(row_owner, _, _, _)| row_owner != stranger.as_str()));
 }
 
 #[tokio::test]
@@ -4831,8 +4834,8 @@ async fn another_owner_cannot_see_or_touch_a_code_queue() {
 async fn workflow_run_facts_upsert_and_conditional_etag() {
     use crate::code::{CodeWorkflowRunFact, CodeWorkflowRunId};
     use crate::db::code::{
-        get_workflow_run_fact, get_workflow_run_fetch_state, list_workflow_run_facts_for_repo,
-        save_workflow_run_fact, set_workflow_run_fetch_state, WorkflowRunFetchCondition,
+        get_workflow_run_fetch_state, list_workflow_run_facts_for_repo, save_workflow_run_fact,
+        set_workflow_run_fetch_state, WorkflowRunFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4877,9 +4880,11 @@ async fn workflow_run_facts_upsert_and_conditional_etag() {
     let (same_id, changed) = save_workflow_run_fact(&store, &refreshed).await.unwrap();
     assert_eq!(id, same_id);
     assert!(changed, "status and conclusion moved");
-    let stored = get_workflow_run_fact(&store, &owner, "github.com", "acme", "tools", 77)
+    let stored = list_workflow_run_facts_for_repo(&store, &owner, "github.com", "acme", "tools")
         .await
         .unwrap()
+        .into_iter()
+        .find(|fact| fact.github_id == 77)
         .unwrap();
     assert_eq!(stored.id, id);
     assert_eq!(stored.status, "completed");

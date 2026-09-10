@@ -254,9 +254,7 @@ impl BrowserChannelBinding {
 /// Public contract for desktop native computer-use adapters. The desktop
 /// implements [`NativeRuntime`] behind an `Arc` and installs it with the
 /// native-binding bind variants.
-pub use crate::code::native_runtime::{
-    NativeOperationHandle, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
-};
+pub use crate::code::native_runtime::{NativeRuntime, NativeRuntimeError, NativeRuntimeScope};
 
 /// Bind-time pairing of the desktop native computer-use runtime and the
 /// trusted bridge executable.
@@ -1329,7 +1327,7 @@ async fn bind_inner(
         foreground_browser_semantic_actions,
         cancellation_acceleration,
     );
-    let session_tools = Arc::new(code::self_drive::SessionTools::default());
+    let session_tools = Arc::new(code::session_tools::SessionTools::default());
     let mut tools = tools;
     session_tools.register(&mut tools);
     let tools = Arc::new(tools);
@@ -1447,7 +1445,6 @@ async fn bind_inner(
         .register(Arc::new(engine::internal::InternalAdapter::new(
             state.clone(),
             runtime.db.clone(),
-            runtime.bus.clone(),
             sandbox_spawn_execution_location,
         )));
     // A chat is a session on the one journal: every event the lane

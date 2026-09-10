@@ -1527,13 +1527,6 @@ name: string,
 status: CodeSubagentStatus, };
 
 /**
- * Unsequenced activity notice published on the updates channel.
- *
- * Never journaled. A client that missed one just pulls from its last cursor.
- */
-export type CodeTerminalActivityNotice = { workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
-
-/**
  * Identifies one auxiliary terminal attached to a workspace.
  */
 export type CodeTerminalId = string;
@@ -1590,8 +1583,6 @@ export type CodeWatchId = string;
 export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: SessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
 
 /**
- * Bounded image reference recorded on a code-mode user turn.
- *
  * State of a persisted watch task.
  */
 export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopped" | "failed";
@@ -4352,7 +4343,11 @@ head_sha?: string,
 /**
  * True when auto-merge is enabled on the host.
  */
-auto_merge_enabled?: boolean, in_merge_queue?: boolean, };
+auto_merge_enabled?: boolean,
+/**
+ * True when the host timeline says the PR is currently in its merge queue.
+ */
+in_merge_queue?: boolean, };
 
 /**
  * The id is the client-generated turn id promotion will accept under, so an

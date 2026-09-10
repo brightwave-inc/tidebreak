@@ -61,6 +61,7 @@ where
 }
 
 /// Insert one Code turn settlement. Idempotent on `(owner, dedupe_key)`.
+#[cfg(test)]
 pub(in crate::db) async fn record_code_turn_notification(
     store: &DbStore,
     owner: &OwnerId,

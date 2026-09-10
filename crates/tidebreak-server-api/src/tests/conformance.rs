@@ -54,7 +54,6 @@ async fn self_host_app() -> (Router, AppState, Arc<dyn Store>, tempfile::TempDir
         .register(Arc::new(crate::engine::internal::InternalAdapter::new(
             state.clone(),
             runtime.db.clone(),
-            runtime.bus.clone(),
             tidebreak_core::AgentRunExecutionLocation::InProcess,
         )));
     state.code = Some(Arc::new(runtime));
