@@ -104,7 +104,6 @@ impl Outbox {
 pub struct Control {
     client: reqwest::Client,
     poll_url: String,
-    host_url: String,
     embedded_engine: Option<EmbeddedEngineRegistration>,
 }
 
@@ -120,7 +119,6 @@ impl Control {
         Self {
             client,
             poll_url: format!("{base}/supervisor/poll"),
-            host_url: format!("{base}/supervisor/tools/call"),
             embedded_engine: None,
         }
     }
@@ -169,56 +167,6 @@ impl Control {
             }
         }
         unreachable!("a registration attempt always returns or retries")
-    }
-
-    /// Invokes one protected server-side native tool on the host, by name.
-    ///
-    /// The sandbox never holds an authoritative registry or forge
-    /// credentials; the host validates and executes the request. Named
-    /// refusals are fatal so a sandbox cannot silently pretend a tool ran.
-    pub async fn call_tool(
-        &self,
-        request: &tidebreak_core::code::SupervisorToolRequest,
-    ) -> Result<serde_json::Value, PollFailure> {
-        let response = self
-            .client
-            .post(&self.host_url)
-            .json(&serde_json::json!({ "request": request }))
-            .send()
-            .await
-            .map_err(|error| PollFailure::Retryable(error.to_string()))?;
-        let status = response.status();
-        if status.is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|error| PollFailure::Retryable(format!("tool response was unreadable: {error}")))?;
-            if let Some(error) = body.get("error") {
-                return Err(PollFailure::Fatal {
-                    code: body
-                        .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("host_tool_refused")
-                        .to_owned(),
-                    description: error
-                        .as_str()
-                        .unwrap_or("the host refused the tool request")
-                        .to_owned(),
-                });
-            }
-            return body.get("output").cloned().ok_or_else(|| PollFailure::Retryable("tool response carried no output".to_owned()));
-        }
-        let body = response.bytes().await.unwrap_or_default();
-        if let Ok(rejection) = serde_json::from_slice::<PollRejection>(&body) {
-            return Err(PollFailure::Fatal {
-                code: rejection.error,
-                description: rejection.error_description,
-            });
-        }
-        Err(PollFailure::Retryable(format!(
-            "{status}: {}",
-            String::from_utf8_lossy(&body)
-        )))
     }
 
     /// Posts one poll and classifies the reply.
