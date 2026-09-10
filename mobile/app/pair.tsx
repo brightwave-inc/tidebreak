@@ -4,6 +4,7 @@ import { useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, Text, TextInput } from "react-native";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
+import { attachFailureParams, autoAttach } from "../src/lib/autoAttach";
 import {
   buildAuthorizeRequest,
   exchangeAuthorizationCode,
@@ -29,12 +30,15 @@ export default function PairScreen() {
   const router = useRouter();
   const setSession = useSessionStore((state) => state.setSession);
   const [url, setUrl] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "authorizing" | "attaching">(
+    "idle",
+  );
   const [error, setError] = useState<string | null>(null);
+  const busy = phase !== "idle";
 
   async function pair() {
     setError(null);
-    setBusy(true);
+    setPhase("authorizing");
     try {
       const gatewayUrl = validatedBaseUrl(url);
       const meta = await fetchGatewayMeta(gatewayUrl);
@@ -67,11 +71,29 @@ export default function PairScreen() {
         // Identity is shown later from a control-scoped mint.
       }
       setSession(tokenStore.snapshot());
-      router.replace("/attach");
+      // The gateway named a machine and attach validation refuses anything but
+      // that deployment's own, so the confirm screen would be ceremony: run it
+      // here. A failure routes to the Attach screen with its error state.
+      setPhase("attaching");
+      const outcome = await autoAttach(
+        { gatewayUrl, machinePrefillUrl: meta.tidebreak_machine_url ?? undefined },
+        { getAccessToken: (resource) => tokenStore.getAccessToken(resource) },
+      );
+      if (outcome.kind === "attached") {
+        await tokenStore.update({ machine: outcome.machine });
+        setSession(tokenStore.snapshot());
+        router.replace("/home");
+        return;
+      }
+      router.replace(
+        outcome.failure
+          ? { pathname: "/attach", params: attachFailureParams(outcome.failure) }
+          : "/attach",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Pairing failed.");
     } finally {
-      setBusy(false);
+      setPhase("idle");
     }
   }
 
@@ -92,6 +114,11 @@ export default function PairScreen() {
         onChangeText={setUrl}
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"
       />
+      {phase === "attaching" ? (
+        <Text className="text-sm text-info-foreground">
+          Attaching to the machine this gateway advertises…
+        </Text>
+      ) : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
       <Pressable
         disabled={busy || url.trim().length === 0}
@@ -99,7 +126,11 @@ export default function PairScreen() {
         onPress={() => void pair()}
       >
         <Text className="text-center text-base font-medium text-primary-foreground">
-          {busy ? "Opening browser…" : "Continue"}
+          {phase === "attaching"
+            ? "Attaching…"
+            : phase === "authorizing"
+              ? "Opening browser…"
+              : "Continue"}
         </Text>
       </Pressable>
     </Screen>
