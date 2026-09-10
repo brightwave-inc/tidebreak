@@ -6,6 +6,7 @@
 
 pub mod approval_bridge;
 pub mod approval_sweep;
+pub mod apps_bridge;
 pub mod attention;
 pub mod browser_channel;
 pub mod browser_runtime;

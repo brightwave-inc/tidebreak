@@ -155,6 +155,9 @@ pub struct ScriptedAdapter {
     /// Approval endpoint each launch was handed, `None` when it was handed no
     /// channel at all. Lets a test see how a session was wired.
     launched_approvals: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    /// Connected-apps channel each launch was handed, `None` when it was
+    /// handed none.
+    launched_apps: Arc<std::sync::Mutex<Vec<Option<tidebreak_harness::AppsChannelSpec>>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -203,6 +206,7 @@ impl ScriptedAdapter {
             approval_ack_delay: Duration::ZERO,
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_apps: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
@@ -220,6 +224,15 @@ impl ScriptedAdapter {
     #[cfg(any(test, feature = "test-support"))]
     pub fn launched_approvals(&self) -> Vec<Option<String>> {
         self.launched_approvals
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// The connected-apps channel each launched session was given, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_apps(&self) -> Vec<Option<tidebreak_harness::AppsChannelSpec>> {
+        self.launched_apps
             .lock()
             .expect("scripted launches")
             .clone()
@@ -517,6 +530,10 @@ impl HarnessAdapter for ScriptedAdapter {
                     .as_ref()
                     .map(|channel| channel.mcp_endpoint_url.clone()),
             );
+        self.launched_apps
+            .lock()
+            .expect("scripted launches")
+            .push(spec.apps.clone());
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),
@@ -1008,6 +1025,7 @@ mod tests {
             sink,
             browser: None,
             native: None,
+            apps: None,
         }
     }
 

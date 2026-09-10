@@ -95,6 +95,7 @@ crates/tidebreak-server/src/code/   (the spine, not the whole directory)
   recovery.rs, worktree_orphans.rs   boot recovery, fencing, orphan probe, reap
   attention.rs       server-side attention computation, digest publication
   approval_bridge.rs the loopback approval-prompt endpoint glue and decision routing
+  apps_bridge.rs     the loopback connected-apps MCP bridge external engines mount as `tb-apps`
   gh.rs              gh CLI shell-out for repository and pull-request operations
   pr_fetch.rs        pull-request and checks reads through gh
   forge_rest.rs      brokered forge REST operations and auto-merge GraphQL mutation
@@ -314,6 +315,18 @@ Process models the trait absorbs:
   capabilities honestly `Unsupported` or `Unknown` where its surface does not
   carry them.
 
+Every external engine also mounts Tidebreak's connected apps. The server
+serves every MCP server it has mounted — the gateway endpoints an
+organization entitles plus locally configured servers — as one HTTP MCP
+server at `/code/mcp/connected-apps`, and each adapter wires it in as
+`tb-apps` with a session-scoped token: Claude Code through `--mcp-config`,
+Codex through an `mcp_servers` override with the bearer in
+`TIDEBREAK_APPS_TOKEN`, opencode through its config overlay, Grok through the
+ACP `mcpServers` list. The in-process engine reads the MCP runtime directly,
+so a chat sees the same tools on every engine. Gateway bearers and
+attestation stay inside the server; the child only ever holds the loopback
+token.
+
 Session-long children spawn lazily on the first turn, and an idle session's
 child is parked — stopped, then respawned and resumed by the next turn
 ([`0064`](decisions/0064-idle-engine-children-are-parked.md)). Resident
@@ -523,6 +536,7 @@ WS              /code/updates                        digests, restated on connec
 GET             /code/approvals?state=pending
 POST            /code/approvals/{id}/decision        {decision: approve | deny | approve_with_grant | answers | plan_decision, ...}
 POST            /code/mcp/approval-prompt            loopback approval endpoint (0033)
+POST            /code/mcp/connected-apps             loopback MCP bridge over every mounted MCP server, for external engines
 
 GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff

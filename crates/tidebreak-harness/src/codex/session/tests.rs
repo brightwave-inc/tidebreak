@@ -11,6 +11,7 @@ fn app_server_plan_is_clean() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -24,6 +25,7 @@ fn extra_bypass_flag_is_rejected() {
         &["--dangerously-bypass-approvals-and-sandbox".into()],
         std::path::Path::new("/workspace"),
         &[],
+        None,
         None,
         None,
         None,
@@ -281,6 +283,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         sink,
         browser: None,
         native: None,
+        apps: None,
     })
 }
 
@@ -590,6 +593,7 @@ fn spec_for(
         sink: Arc::new(SilentSink),
         browser: None,
         native: None,
+        apps: None,
     }
 }
 
@@ -1331,6 +1335,7 @@ fn native_present_appends_exactly_one_trusted_config_override() {
         None,
         Some(&spec),
         None,
+        None,
     )
     .unwrap();
     let overrides: Vec<_> = plan
@@ -1368,6 +1373,7 @@ fn browser_and_native_each_get_their_own_override() {
         Some(&browser),
         Some(&native),
         None,
+        None,
     )
     .unwrap();
     assert!(plan
@@ -1390,6 +1396,7 @@ fn browser_absent_produces_same_argv_as_before() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -1407,6 +1414,7 @@ fn browser_present_appends_exactly_one_trusted_config_override() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1443,6 +1451,7 @@ fn browser_override_is_after_extra_argv() {
         Some(&spec),
         None,
         None,
+        None,
     )
     .unwrap();
     let browser_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -1463,6 +1472,7 @@ fn browser_capfile_path_is_never_in_argv() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1486,6 +1496,7 @@ fn browser_env_key_is_stripped_from_plan_even_when_browser_is_some() {
         std::path::Path::new("/workspace"),
         &[("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into())],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1512,6 +1523,7 @@ fn session_relay_key_survives_the_reserved_namespace_strip() {
             ("TIDEBREAK_LLM_KEY".into(), "tbreak_hl_test".into()),
             ("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into()),
         ],
+        None,
         None,
         None,
         Some("TIDEBREAK_LLM_KEY"),
@@ -1541,6 +1553,7 @@ fn relay_key_is_stripped_when_no_relay_is_wired() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(plan.env.is_empty(), "{:?}", plan.env);
@@ -1558,6 +1571,7 @@ fn bridge_command_with_spaces_remains_one_command_value() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1584,6 +1598,7 @@ fn bridge_command_with_backslashes_is_escaped() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1615,6 +1630,7 @@ fn bridge_command_with_embedded_quote_is_escaped() {
         Some(&spec),
         None,
         None,
+        None,
     )
     .unwrap();
     let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -1643,6 +1659,7 @@ fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
         std::path::Path::new("/workspace"),
         &[],
         Some(&spec),
+        None,
         None,
         None,
     )
@@ -1909,4 +1926,47 @@ async fn duplicate_mcp_elicitation_rejects_stale_approval_before_server_resoluti
         .any(|event| matches!(event,
         HarnessEvent::ApprovalResolved { harness_ref, decision: ApprovalDecision::Deny { .. } }
         if harness_ref.call_id == "call_fixture")));
+}
+
+#[test]
+fn apps_channel_mounts_an_http_server_with_the_bearer_in_the_environment() {
+    let apps = crate::AppsChannelSpec {
+        mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
+        token: "apps-token".into(),
+    };
+    let plan = compose_app_server_plan(
+        std::path::Path::new("/usr/bin/codex"),
+        &[],
+        std::path::Path::new("/workspace"),
+        &[("TIDEBREAK_APPS_TOKEN".into(), "from-settings".into())],
+        None,
+        None,
+        Some(&apps),
+        None,
+    )
+    .unwrap();
+    let overrides: Vec<_> = plan
+        .argv
+        .iter()
+        .filter(|arg| arg.starts_with("mcp_servers.tb-apps="))
+        .collect();
+    assert_eq!(
+        overrides,
+        [&"mcp_servers.tb-apps={url=\"http://127.0.0.1:9999/code/mcp/connected-apps\",bearer_token_env_var=\"TIDEBREAK_APPS_TOKEN\"}".to_string()]
+    );
+    assert!(
+        !plan.argv.iter().any(|arg| arg.contains("apps-token")),
+        "the bearer never appears in argv"
+    );
+    let tokens: Vec<_> = plan
+        .env
+        .iter()
+        .filter(|(key, _)| key == "TIDEBREAK_APPS_TOKEN")
+        .collect();
+    assert_eq!(
+        tokens,
+        [&("TIDEBREAK_APPS_TOKEN".to_string(), "apps-token".to_string())],
+        "the adapter's token is the only source; settings cannot supply one"
+    );
+    validate_launch_plan(&plan).unwrap();
 }

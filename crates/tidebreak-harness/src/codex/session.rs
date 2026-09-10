@@ -779,6 +779,7 @@ impl CodexSession {
 /// the child: the provider config the spawn wiring emits reads the session
 /// relay key through `env_key={relay_key_env}`, so stripping it would leave
 /// a hosted session with no credential at all.
+#[allow(clippy::too_many_arguments)] // one optional channel per argument, mirroring SessionSpec
 pub(crate) fn compose_app_server_plan(
     binary: &std::path::Path,
     extra_argv: &[String],
@@ -786,6 +787,7 @@ pub(crate) fn compose_app_server_plan(
     extra_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
     native: Option<&crate::NativeChannelSpec>,
+    apps: Option<&crate::AppsChannelSpec>,
     relay_key_env: Option<&str>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
@@ -812,10 +814,24 @@ pub(crate) fn compose_app_server_plan(
             format!("mcp_servers.tb-native={{command={escaped},args=[\"computer-mcp\"],env_vars=[\"TIDEBREAK_NATIVE_CAPFILE\"]}}"),
         );
     }
+    if let Some(spec) = apps {
+        argv.push("-c".into());
+        argv.push(spec.codex_config_override());
+    }
     let mut env = extra_env.to_vec();
     env.retain(|(key, _)| {
         !BrowserChannelSpec::is_reserved_env_key_except(key, relay_key_env) && key != "PWD"
     });
+    if let Some(spec) = apps {
+        // The bearer rides the environment (`bearer_token_env_var`), never
+        // argv. Settings cannot set this name: the retain above already
+        // dropped every reserved `TIDEBREAK_` key, so this push is the only
+        // source.
+        env.push((
+            crate::AppsChannelSpec::TOKEN_ENV.to_owned(),
+            spec.token.clone(),
+        ));
+    }
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
@@ -892,6 +908,7 @@ impl CodexSession {
             &self.spec.extra_env,
             self.spec.browser.as_ref(),
             self.spec.native.as_ref(),
+            self.spec.apps.as_ref(),
             self.spec.relay_key_env.as_deref(),
         )?;
         let mut command = Command::new(&plan.argv[0]);

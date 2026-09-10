@@ -1506,6 +1506,7 @@ exit 0
                     sink,
                     browser: None,
                     native: None,
+                    apps: None,
                 },
                 "1.0.5".into(),
             )

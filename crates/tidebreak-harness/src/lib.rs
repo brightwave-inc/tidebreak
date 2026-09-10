@@ -526,6 +526,91 @@ pub trait ApprovalCompleter: Send + Sync {
     ) -> Result<(), HarnessError>;
 }
 
+/// Loopback connected-apps wiring supplied by the server layer.
+///
+/// The server serves every MCP server Tidebreak has mounted — the gateway
+/// endpoints an organization entitles plus locally configured servers — as
+/// one HTTP MCP server at `mcp_endpoint_url`, authenticated by `token`. An
+/// external engine mounts it as [`Self::MCP_SERVER`], so the tools the
+/// in-process engine already sees reach every harness the same way. This
+/// crate does not implement the endpoint.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AppsChannelSpec {
+    /// Loopback MCP endpoint URL.
+    pub mcp_endpoint_url: String,
+    /// Session-scoped token. Never logged.
+    pub token: String,
+}
+
+impl std::fmt::Debug for AppsChannelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppsChannelSpec")
+            .field("mcp_endpoint_url", &self.mcp_endpoint_url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl AppsChannelSpec {
+    /// The MCP server name every adapter mounts the bridge under.
+    pub const MCP_SERVER: &'static str = "tb-apps";
+    /// Environment variable carrying the bearer for engines that read MCP
+    /// credentials from the environment (Codex).
+    pub const TOKEN_ENV: &'static str = "TIDEBREAK_APPS_TOKEN";
+
+    /// The `Authorization` header value the bridge expects.
+    #[must_use]
+    pub fn authorization_header(&self) -> String {
+        format!("Bearer {}", self.token)
+    }
+
+    /// One `mcpServers` entry for Claude Code's `--mcp-config`.
+    #[must_use]
+    pub fn claude_mcp_config_entry(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "http",
+            "url": self.mcp_endpoint_url,
+            "headers": { "Authorization": self.authorization_header() },
+        })
+    }
+
+    /// One `mcp` entry for OpenCode's config document.
+    #[must_use]
+    pub fn opencode_mcp_config_entry(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "remote",
+            "url": self.mcp_endpoint_url,
+            "headers": { "Authorization": self.authorization_header() },
+        })
+    }
+
+    /// One `mcpServers` element for an ACP `session/new` request.
+    #[must_use]
+    pub fn acp_mcp_server(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": Self::MCP_SERVER,
+            "type": "http",
+            "url": self.mcp_endpoint_url,
+            "headers": [
+                { "name": "Authorization", "value": self.authorization_header() }
+            ],
+        })
+    }
+
+    /// The Codex `-c mcp_servers.tb-apps=…` override. The bearer travels
+    /// through [`Self::TOKEN_ENV`], never argv.
+    #[must_use]
+    pub fn codex_config_override(&self) -> String {
+        let url = serde_json::to_string(&self.mcp_endpoint_url)
+            .expect("a string always serializes as JSON");
+        format!(
+            "mcp_servers.{}={{url={url},bearer_token_env_var=\"{}\"}}",
+            Self::MCP_SERVER,
+            Self::TOKEN_ENV
+        )
+    }
+}
+
 /// Loopback approval-channel wiring supplied by the server layer.
 ///
 /// The server must serve a permission-prompt tool at `mcp_endpoint_url`
@@ -826,6 +911,9 @@ pub struct SessionSpec {
     /// has produced a session-private capability file. `None` preserves the
     /// existing behavior: no native tools are advertised or injected.
     pub native: Option<NativeChannelSpec>,
+    /// Connected-apps channel wiring: the loopback MCP bridge over every
+    /// server Tidebreak has mounted. `None` advertises no connected apps.
+    pub apps: Option<AppsChannelSpec>,
 }
 
 /// Receives normalized events as the engine stream is parsed.

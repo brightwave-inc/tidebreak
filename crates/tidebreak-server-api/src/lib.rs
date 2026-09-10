@@ -1288,6 +1288,10 @@ pub fn app(state: AppState) -> Router {
             "/code/mcp/approval-prompt",
             post(routes::code::approval_prompt),
         )
+        .route(
+            "/code/mcp/connected-apps",
+            post(routes::code::connected_apps),
+        )
         .with_state(frame_state);
 
     let root = Router::new()

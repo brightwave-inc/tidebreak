@@ -42,6 +42,7 @@ mod app_library;
 mod chat_titling;
 mod code;
 mod code_approvals;
+mod code_apps_bridge;
 mod code_archive;
 mod code_attachments;
 mod code_browser;

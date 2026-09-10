@@ -445,6 +445,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
