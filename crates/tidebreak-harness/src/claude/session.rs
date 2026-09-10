@@ -591,12 +591,8 @@ impl ClaudeSession {
             argv.push("--resume".into());
             argv.push(resume);
         }
+        crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
         for root in &self.spec.allowed_read_roots {
-            if !root.is_absolute() {
-                return Err(HarnessError::AllowedReadRootNotAbsolute(
-                    root.to_string_lossy().into_owned(),
-                ));
-            }
             argv.push("--add-dir".into());
             argv.push(root.to_string_lossy().into_owned());
         }

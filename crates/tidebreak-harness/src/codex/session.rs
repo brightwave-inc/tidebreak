@@ -1,6 +1,7 @@
 //! Long-lived `codex app-server --stdio` child.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use tokio::time::{timeout, Instant};
 use tracing::warn;
 
 use crate::browser_channel::apply_child_env_tokio;
+use crate::child::ChildPid;
 use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
@@ -67,7 +69,7 @@ pub struct CodexSession {
     /// Detail from an engine error saying the resumed thread is gone.
     resume_lost: Mutex<Option<String>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
-    child_pid: AtomicU32,
+    pid: ChildPid,
     stdin: Mutex<Option<Arc<AsyncMutex<ChildStdin>>>>,
     stdout: Mutex<Option<Arc<AsyncMutex<StdoutReader>>>>,
     parser: Arc<Mutex<CodexStreamParser>>,
@@ -201,7 +203,7 @@ impl CodexSession {
             thread_ran_a_turn: AtomicBool::new(false),
             resume_lost: Mutex::new(None),
             child: AsyncMutex::new(None),
-            child_pid: AtomicU32::new(0),
+            pid: ChildPid::new(),
             stdin: Mutex::new(None),
             stdout: Mutex::new(None),
             parser: Arc::new(Mutex::new(CodexStreamParser::new())),
@@ -757,7 +759,7 @@ impl CodexSession {
         let mut slot = self.child.lock().await;
         *self.stdin.lock().expect("codex stdin") = None;
         *self.stdout.lock().expect("codex stdout") = None;
-        self.child_pid.store(0, Ordering::SeqCst);
+        self.pid.clear();
         if let Some(mut child) = slot.take() {
             child.interrupt(PROCESS_INTERRUPT_GRACE).await?;
         }
@@ -871,15 +873,27 @@ pub(crate) fn thread_start_policy(mode: PermissionMode) -> (&'static str, &'stat
 /// takes: `sandboxPolicy` is a tagged object there, not the plain mode string
 /// `thread/start` accepts. Both fields apply to this turn and every later one,
 /// which is what lets a mode switch land without a new child.
-#[must_use]
-pub(crate) fn turn_start_policy(mode: PermissionMode) -> (Value, &'static str) {
+pub(crate) fn turn_start_policy(
+    mode: PermissionMode,
+    allowed_read_roots: &[PathBuf],
+) -> Result<(Value, &'static str), HarnessError> {
+    crate::require_absolute_read_roots(allowed_read_roots)?;
     let (sandbox, approval) = thread_start_policy(mode);
-    let sandbox = match sandbox {
+    let mut sandbox = match sandbox {
         "read-only" => json!({ "type": "readOnly" }),
         "danger-full-access" => json!({ "type": "dangerFullAccess" }),
         _ => json!({ "type": "workspaceWrite" }),
     };
-    (sandbox, approval)
+    if !allowed_read_roots.is_empty() {
+        // Codex app-server `sandboxPolicy` has no read-roots field. `writableRoots`
+        // is the closest equivalent (0.147.0): extra paths are writable as well
+        // as readable.
+        sandbox["writableRoots"] = json!(allowed_read_roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect::<Vec<_>>());
+    }
+    Ok((sandbox, approval))
 }
 
 impl CodexSession {
@@ -890,6 +904,7 @@ impl CodexSession {
     /// turn's own request goes out. The child slot is held across the whole
     /// ensure, so two callers cannot race two spawns.
     pub(super) async fn ensure_child(&self) -> Result<(), HarnessError> {
+        crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
@@ -897,7 +912,7 @@ impl CodexSession {
             }
             // The process is gone; drop the handles that pointed at it.
             *slot = None;
-            self.child_pid.store(0, Ordering::SeqCst);
+            self.pid.clear();
             *self.stdin.lock().expect("codex stdin") = None;
             *self.stdout.lock().expect("codex stdout") = None;
         }
@@ -942,8 +957,7 @@ impl CodexSession {
                 stdout,
                 lines: StreamLineBuffer::new(),
             })));
-        self.child_pid
-            .store(child.id().unwrap_or(0), Ordering::SeqCst);
+        self.pid.set(child.id());
         *slot = Some(child);
         tokio::spawn(async move {
             let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
@@ -955,7 +969,7 @@ impl CodexSession {
             if let Some(mut child) = slot.take() {
                 let _ = child.terminate().await;
             }
-            self.child_pid.store(0, Ordering::SeqCst);
+            self.pid.clear();
             *self.stdin.lock().expect("codex stdin") = None;
             *self.stdout.lock().expect("codex stdout") = None;
             return Err(err);
@@ -1333,10 +1347,15 @@ impl HarnessSession for CodexSession {
             params["serviceTier"] = json!(FAST_SERVICE_TIER);
         }
         let posture = self.pending_posture();
-        if let Some(posture) = posture {
-            let (sandbox, approval) = turn_start_policy(posture.mode);
+        if posture.is_some() || !self.spec.allowed_read_roots.is_empty() {
+            let mode = posture
+                .map(|generation| generation.mode)
+                .unwrap_or_else(|| self.permission_mode());
+            let (sandbox, approval) = turn_start_policy(mode, &self.spec.allowed_read_roots)?;
             params["sandboxPolicy"] = sandbox;
-            params["approvalPolicy"] = json!(approval);
+            if posture.is_some() {
+                params["approvalPolicy"] = json!(approval);
+            }
         }
         let id = match self.request("turn/start", params).await {
             Ok(id) => id,
@@ -1425,7 +1444,7 @@ impl HarnessSession for CodexSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        if self.child_pid.load(Ordering::SeqCst) == 0 {
+        if self.pid.get().is_none() {
             // No child means nothing is running: a stop aimed at a parked
             // session must not cost it anything (decision 0064).
             return Ok(());
@@ -1485,10 +1504,11 @@ impl HarnessSession for CodexSession {
     }
 
     fn child_pid(&self) -> Option<i64> {
-        match self.child_pid.load(Ordering::SeqCst) {
-            0 => None,
-            pid => Some(i64::from(pid)),
-        }
+        self.pid.get()
+    }
+
+    fn child_pid_changes(&self) -> Option<tokio::sync::watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
     }
 
     fn unrecognized_events(&self) -> u64 {
@@ -1504,7 +1524,7 @@ impl HarnessSession for CodexSession {
         let mut slot = self.child.lock().await;
         *self.stdin.lock().expect("codex stdin") = None;
         *self.stdout.lock().expect("codex stdout") = None;
-        self.child_pid.store(0, Ordering::SeqCst);
+        self.pid.clear();
         if let Some(mut child) = slot.take() {
             let _ = child.terminate().await;
         }

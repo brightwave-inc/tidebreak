@@ -117,6 +117,10 @@ impl GrokSession {
         } else {
             (None, session_id.as_deref())
         };
+        // Grok print/ACP protocols have no extra-read-root flag. Roots are
+        // still required to be absolute so a relative private path cannot
+        // slip through; the engine then runs without additional read scoping.
+        crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
         compose_print_plan(PrintLaunch {
             binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             extra_argv: &self.spec.extra_argv,
@@ -862,6 +866,48 @@ where
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    struct Discard;
+
+    #[async_trait]
+    impl crate::HarnessEventSink for Discard {
+        async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    #[test]
+    fn allowed_read_roots_must_be_absolute() {
+        let session = GrokSession::new(
+            SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::SessionId::new(),
+                worktree: std::path::PathBuf::from("/workspace"),
+                allowed_read_roots: vec![std::path::PathBuf::from("relative/private")],
+                permission_mode: PermissionMode::Auto,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/usr/bin/grok")),
+                sink: std::sync::Arc::new(Discard),
+                browser: None,
+                native: None,
+                apps: None,
+            },
+            "1.0.5".into(),
+        );
+        let err = session
+            .compose_plan(std::path::Path::new("/tmp/prompt.txt"), None, None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessError::AllowedReadRootNotAbsolute(root) if root == "relative/private"
+        ));
+    }
 
     #[test]
     fn grok_1_0_5_never_receives_the_removed_xhigh_token() {

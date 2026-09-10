@@ -2,7 +2,6 @@
 
 use std::net::TcpListener;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +15,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::browser_channel::apply_child_env_tokio;
+use crate::child::ChildPid;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::opencode::parse::OpencodeStreamParser;
 use crate::{
@@ -44,7 +44,7 @@ pub struct OpencodeSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
-    child_pid: AtomicU32,
+    pid: ChildPid,
     /// Loopback base of the current child. Each spawn binds a fresh port, so
     /// this is per-child state; empty until the first spawn.
     base_url: Mutex<String>,
@@ -138,7 +138,7 @@ impl OpencodeSession {
             spec,
             resume_ref: Mutex::new(resume_ref),
             child: AsyncMutex::new(None),
-            child_pid: AtomicU32::new(0),
+            pid: ChildPid::new(),
             base_url: Mutex::new(String::new()),
             client: reqwest::Client::new(),
             parser: Mutex::new(OpencodeStreamParser::new()),
@@ -523,6 +523,10 @@ impl OpencodeSession {
     /// child slot is held across the whole ensure, so two callers cannot race
     /// two spawns.
     pub(super) async fn ensure_child(&self) -> Result<(), HarnessError> {
+        // OpenCode serve has no extra-read-root flag. Absolute roots are still
+        // required so a relative private path cannot slip through; the engine
+        // then runs without additional read scoping.
+        crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
         let mut slot = self.child.lock().await;
         let stream_failure = {
             let events = self.events.lock().await;
@@ -539,7 +543,7 @@ impl OpencodeSession {
             if let Some(mut child) = slot.take() {
                 let _ = child.terminate().await;
             }
-            self.child_pid.store(0, Ordering::SeqCst);
+            self.pid.clear();
             warn!(failure = %failure, "replacing opencode child after event stream failure");
         }
         if let Some(child) = slot.as_mut() {
@@ -547,7 +551,7 @@ impl OpencodeSession {
                 return Ok(());
             }
             *slot = None;
-            self.child_pid.store(0, Ordering::SeqCst);
+            self.pid.clear();
         }
         let port = pick_loopback_port()?;
         let plan = compose_serve_plan(ServeLaunch {
@@ -584,9 +588,7 @@ impl OpencodeSession {
         let stderr = child
             .take_stderr()
             .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-        if let Some(pid) = child.id() {
-            self.child_pid.store(pid, Ordering::SeqCst);
-        }
+        self.pid.set(child.id());
         *slot = Some(child);
         tokio::spawn(async move {
             let _ = drain_capped(stdout, MAX_STDERR_BYTES).await;
@@ -610,7 +612,7 @@ impl OpencodeSession {
             if let Some(mut child) = slot.take() {
                 let _ = child.terminate().await;
             }
-            self.child_pid.store(0, Ordering::SeqCst);
+            self.pid.clear();
             *self.events.lock().await = None;
             let _ = timeout(Duration::from_secs(1), stderr_task).await;
             let stderr = {
@@ -723,7 +725,7 @@ impl OpencodeSession {
 
     async fn retire_child(&self) {
         let mut slot = self.child.lock().await;
-        self.child_pid.store(0, Ordering::SeqCst);
+        self.pid.clear();
         *self.events.lock().await = None;
         if let Some(mut child) = slot.take() {
             let _ = child.terminate().await;
@@ -964,7 +966,7 @@ impl HarnessSession for OpencodeSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        if self.child_pid.load(Ordering::SeqCst) == 0 {
+        if self.pid.get().is_none() {
             // No child means nothing is running: a stop aimed at a parked
             // session must not cost it anything (decision 0064).
             return Ok(());
@@ -990,7 +992,7 @@ impl HarnessSession for OpencodeSession {
         };
         child.interrupt(Duration::from_secs(2)).await?;
         *slot = None;
-        self.child_pid.store(0, Ordering::SeqCst);
+        self.pid.clear();
         Ok(())
     }
 
@@ -999,8 +1001,11 @@ impl HarnessSession for OpencodeSession {
     }
 
     fn child_pid(&self) -> Option<i64> {
-        let pid = self.child_pid.load(Ordering::SeqCst);
-        (pid != 0).then_some(i64::from(pid))
+        self.pid.get()
+    }
+
+    fn child_pid_changes(&self) -> Option<tokio::sync::watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
     }
 
     fn unrecognized_events(&self) -> u64 {
@@ -1014,7 +1019,7 @@ impl HarnessSession for OpencodeSession {
     /// respawns a server and reopens it.
     async fn park(&self) -> Result<(), HarnessError> {
         let mut slot = self.child.lock().await;
-        self.child_pid.store(0, Ordering::SeqCst);
+        self.pid.clear();
         *self.events.lock().await = None;
         if let Some(mut child) = slot.take() {
             let _ = child.terminate().await;
@@ -1156,6 +1161,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowed_read_roots_must_be_absolute() {
+        let mut session = unit_session();
+        session.spec.allowed_read_roots = vec![std::path::PathBuf::from("relative/private")];
+        let err = session.ensure_child().await.unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessError::AllowedReadRootNotAbsolute(root) if root == "relative/private"
+        ));
+    }
+
+    /// A park/respawn must publish the new pid the same way Claude and Grok do.
+    #[tokio::test]
+    async fn a_respawn_publishes_a_pid_transition() {
+        let session = unit_session();
+        assert!(
+            session.child_pid_changes().is_some(),
+            "an adapter that owns a child must stream its pid"
+        );
+        let rx = session.child_pid_changes().expect("pid stream");
+        session.pid.set(Some(11));
+        assert_eq!(*rx.borrow(), Some(11));
+
+        session.park().await.unwrap();
+        assert_eq!(session.child_pid(), None);
+        assert_eq!(*rx.borrow(), None);
+
+        session.pid.set(Some(22));
+        assert_eq!(*rx.borrow(), Some(22));
+    }
+
+    #[tokio::test]
     async fn sse_queue_applies_event_count_backpressure() {
         let (sender, stream) = sse_event_channel(2, 1_024);
         sender.send("one".into()).await.unwrap();
@@ -1275,7 +1311,7 @@ mod tests {
         let session = unit_session();
         let (_sender, stream) = sse_event_channel(2, 1_024);
         *session.events.lock().await = Some(stream);
-        session.child_pid.store(42, Ordering::SeqCst);
+        session.pid.set(Some(42));
 
         session.retire_child().await;
 
@@ -1289,7 +1325,7 @@ mod tests {
         let session = Arc::new(unit_session());
         let (_sender, stream) = sse_event_channel(2, 1_024);
         *session.events.lock().await = Some(Arc::clone(&stream));
-        session.child_pid.store(42, Ordering::SeqCst);
+        session.pid.set(Some(42));
         let receiver = stream.receiver.lock().await;
 
         timeout(Duration::from_secs(1), session.retire_child())
@@ -1309,7 +1345,7 @@ mod tests {
         let (sender, stream) = sse_event_channel(2, 1_024);
         sender.fail("recorded stream failure".into()).await;
         *session.events.lock().await = Some(stream);
-        session.child_pid.store(42, Ordering::SeqCst);
+        session.pid.set(Some(42));
 
         let error = session.ensure_child().await.unwrap_err();
 
