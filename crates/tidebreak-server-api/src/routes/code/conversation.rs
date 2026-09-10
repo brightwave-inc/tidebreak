@@ -16,7 +16,7 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::state::AppState;
 
-use super::external::{ExternalGrantAuth, require_bound};
+use super::external::{require_bound, ExternalGrantAuth};
 
 /// `GET /external/code/sessions/{id}/conversation-requests` — list the
 /// unexpired pending jobs for the authenticated grant's bound session.
