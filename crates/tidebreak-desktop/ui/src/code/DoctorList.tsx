@@ -249,12 +249,7 @@ function DoctorRow({
   const downloading = Boolean(install && !install.done && !install.error);
   const failed = Boolean(install?.error);
   const canDownload =
-    Boolean(onInstall) &&
-    !entry.found &&
-    entry.installable &&
-    !downloading &&
-    // Downloading an engine the relay cannot carry would hand the reader a
-    // binary that still cannot run here.
+    Boolean(onInstall) && !entry.found && entry.installable && !downloading;
   // The same install path, pointed at the registry's newest release. Only
   // the server on the `latest` channel ever reports one.
   const canUpdate =

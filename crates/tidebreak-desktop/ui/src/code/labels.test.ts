@@ -134,14 +134,6 @@ describe("harnessUnusableReason", () => {
     expect(isHarnessReady({ found: false, auth_mode: "gateway_relay" })).toBe(
       false,
     );
-    // An engine the relay does not cover can never be ready hosted.
-    expect(
-      isHarnessReady({
-        found: true,
-        authenticated: true,
-        auth_mode: "gateway_relay",
-      }),
-    ).toBe(false);
   });
 
   it("reads a gateway-managed engine as ready without a sign-in", () => {
@@ -172,7 +164,7 @@ describe("harnessUnusableReason", () => {
     ).toBeNull();
   });
 
-  it("gates hosted rows on relay coverage, not a terminal sign-in", () => {
+  it("does not gate hosted rows on a terminal sign-in", () => {
     expect(
       harnessUnusableReason({
         found: true,
@@ -182,15 +174,6 @@ describe("harnessUnusableReason", () => {
         caps: caps("supported", "supported", "supported"),
       }),
     ).toBeNull();
-    expect(
-      harnessUnusableReason({
-        found: true,
-        installable: true,
-        authenticated: true,
-        auth_mode: "gateway_relay",
-        caps: caps("supported", "supported", "supported"),
-      }),
-    ).toBe("Not available on hosted machines yet");
   });
 
   it("names the one reason a picker row cannot be chosen", () => {

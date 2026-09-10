@@ -170,22 +170,17 @@ describe("DoctorList", () => {
               found: true,
               authenticated: false,
               auth_mode: "gateway_relay",
-              remediation: "opencode is not available on hosted machines yet.",
             },
           ],
         }}
       />,
     );
 
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getAllByText("Ready")).toHaveLength(2);
     expect(
-      screen.getByText("Turns run as you through the Model Gateway."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Unavailable")).toBeInTheDocument();
-    expect(
-      screen.getByText("opencode is not available on hosted machines yet."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("1 of 2 engines ready.")).toBeInTheDocument();
+      screen.getAllByText("Turns run as you through the Model Gateway."),
+    ).toHaveLength(2);
+    expect(screen.getByText("2 of 2 engines ready.")).toBeInTheDocument();
     expect(
       screen.queryByText(
         "No engine is ready yet. Sign in to one below, then re-check.",
