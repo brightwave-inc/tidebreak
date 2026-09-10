@@ -486,6 +486,12 @@ pub fn app(state: AppState) -> Router {
                 routes::code::MAX_GIT_CREDENTIAL_BODY_BYTES,
             )),
         )
+        // The key is the only bearer these routes know, and a self-host
+        // image binds every interface, so the peer address is the second
+        // gate: a child on this machine dials loopback, and a leaked key
+        // from anywhere else is refused before it spends inference or
+        // borrows a forge credential.
+        .route_layer(axum::middleware::from_fn(auth::require_loopback_peer))
         .with_state(state.clone());
 
     // The channel-adapter surface (docs/slack-sessions.md, stage 2).
