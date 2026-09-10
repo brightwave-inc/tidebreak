@@ -16,6 +16,7 @@
   "dependencies": {
     "@tanstack/react-query": "5.90.21",
     "expo": "55.0.30",
+    "expo-application": "55.0.19",
     "expo-constants": "55.0.17",
     "expo-crypto": "55.0.19",
     "expo-linking": "55.0.17",
