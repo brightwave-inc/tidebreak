@@ -140,7 +140,7 @@ export function ChannelPreferencesPanel({
   const tooLong = new TextEncoder().encode(instructions).length > 8192;
   return (
     <SettingsPanel
-      title={`Configure Tidebreak · ${channelId}`}
+      title="Configure Tidebreak"
       description="Choose how Tidebreak works in this Slack channel. Model, harness, and instructions apply to new conversations. Existing work keeps its settings."
       busy={loading || saving}
     >
@@ -157,9 +157,6 @@ export function ChannelPreferencesPanel({
         </>
       ) : (
         <>
-          <p className="font-mono text-xs text-muted-foreground">
-            {preferences.workspace_identity} · {preferences.channel_id}
-          </p>
           {!preferences.can_edit && (
             <p className="text-sm text-muted-foreground">
               An administrator can change these shared channel settings.
