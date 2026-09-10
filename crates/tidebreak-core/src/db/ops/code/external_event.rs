@@ -131,7 +131,7 @@ pub async fn record_external_message(
     .await
     .map_err(|error| match error {
         ExternalMessageIntakeError::Store(error) => error,
-        ExternalMessageIntakeError::Context { message, .. } => AgentError::Store(message.into()),
+        ExternalMessageIntakeError::Context { message, .. } => AgentError::Store(message),
     })
 }
 
@@ -144,7 +144,7 @@ pub enum ExternalMessageIntakeError {
         /// Machine-readable refusal.
         kind: &'static str,
         /// Client-safe explanation.
-        message: &'static str,
+        message: String,
     },
     /// Persistence or serialization failed.
     #[error(transparent)]
@@ -223,7 +223,8 @@ pub async fn record_external_message_with_context(
         if has_turn || has_event || !existing.is_empty() {
             return Err(ExternalMessageIntakeError::Context {
                 kind: "context_first_turn_only",
-                message: "Thread context is accepted only on the first message of a session.",
+                message: "Thread context is accepted only on the first message of a session."
+                    .into(),
             });
         }
         let binding = entities::code_external_binding::Entity::find_by_id(context.binding_id.0)
@@ -236,7 +237,7 @@ pub async fn record_external_message_with_context(
         let Some(binding) = binding else {
             return Err(ExternalMessageIntakeError::Context {
                 kind: "context_binding_mismatch",
-                message: "The context binding must belong to this session and grant.",
+                message: "The context binding must belong to this session and grant.".into(),
             });
         };
         entities::code_external_binding::ActiveModel {
