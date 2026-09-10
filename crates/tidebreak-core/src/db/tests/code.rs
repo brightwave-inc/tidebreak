@@ -6935,3 +6935,187 @@ async fn conversation_requests_concurrent_calls_and_completion_preserve_first_re
             | (Err(crate::AgentError::InvalidTarget(_)), Ok(_))
     ));
 }
+
+#[tokio::test]
+async fn external_channel_snapshot_commits_with_session_and_survives_replay() {
+    use crate::db::code::{
+        resolve_external_session_with_channel_context, ExternalSessionChannelContext,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "channel-snapshot").await;
+    let repo = crate::db::code::list_repos(&store, &owner)
+        .await
+        .unwrap()
+        .remove(0);
+    let grant = crate::CodeGrantId::new();
+    for repositoryless in [false, true] {
+        let key = format!("T1/C1/snapshot-{repositoryless}");
+        let (workspace, mut session) = external_pair(&owner, repo.id, &key);
+        session.model = Some("original-model".into());
+        if repositoryless {
+            session.workspace_id = None;
+            session.harness_kind = HarnessKind::Internal;
+        }
+        let context = ExternalSessionChannelContext {
+            channel_id: Some("C1"),
+            instructions: "Original channel instructions.",
+        };
+        let result = resolve_external_session_with_channel_context(
+            &store,
+            &owner,
+            grant,
+            "slack",
+            &key,
+            (!repositoryless).then_some(&workspace),
+            &session,
+            Some(context),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            crate::ExternalSessionResolution::Created(_)
+        ));
+        let stored = crate::db::code::get_session(&store, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.as_deref(), Some("original-model"));
+        let settings_key = format!("code.session.{}.channel_instructions", session.id);
+        assert_eq!(
+            store.get_setting(&settings_key).await.unwrap(),
+            Some(serde_json::json!("Original channel instructions."))
+        );
+        assert_eq!(
+            crate::db::code::session_context(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("C1")
+        );
+        let (next_workspace, mut next_session) = external_pair(&owner, repo.id, "channel-replay");
+        next_session.model = Some("changed-model".into());
+        next_session.harness_kind = HarnessKind::Codex;
+        if repositoryless {
+            next_session.workspace_id = None;
+        }
+        let changed = ExternalSessionChannelContext {
+            channel_id: Some("C2"),
+            instructions: "Changed instructions.",
+        };
+        let replay = resolve_external_session_with_channel_context(
+            &store,
+            &owner,
+            grant,
+            "slack",
+            &key,
+            (!repositoryless).then_some(&next_workspace),
+            &next_session,
+            Some(changed),
+        )
+        .await
+        .unwrap();
+        let crate::ExternalSessionResolution::Existing(binding) = replay else {
+            panic!("expected existing session");
+        };
+        assert_eq!(binding.session_id, session.id);
+        let unchanged = crate::db::code::get_session(&store, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.model.as_deref(), Some("original-model"));
+        assert_eq!(
+            crate::db::code::session_context(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("C1")
+        );
+        assert_eq!(
+            crate::db::code::get_session(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_kind,
+            session.harness_kind
+        );
+        assert_eq!(
+            store.get_setting(&settings_key).await.unwrap(),
+            Some(serde_json::json!("Original channel instructions."))
+        );
+        assert!(
+            crate::db::code::get_session(&store, &owner, next_session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store
+            .get_setting(&format!(
+                "code.session.{}.channel_instructions",
+                next_session.id
+            ))
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn external_channel_snapshot_failure_rolls_back_session_and_binding() {
+    use crate::db::code::{
+        resolve_external_session_with_channel_context, ExternalSessionChannelContext,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "channel-rollback").await;
+    let repo = crate::db::code::list_repos(&store, &owner)
+        .await
+        .unwrap()
+        .remove(0);
+    let (workspace, session) = external_pair(&owner, repo.id, "channel-rollback-candidate");
+    // Force the snapshot insert to fail after the session insert. The same
+    // transaction must roll back the session, workspace, and binding.
+    let key = format!("code.session.{}.channel_instructions", session.id);
+    store
+        .set_setting(&key, &serde_json::json!("existing value"))
+        .await
+        .unwrap();
+    let result = resolve_external_session_with_channel_context(
+        &store,
+        &owner,
+        crate::CodeGrantId::new(),
+        "slack",
+        "T1/C1/rollback",
+        Some(&workspace),
+        &session,
+        Some(ExternalSessionChannelContext {
+            channel_id: Some("C1"),
+            instructions: "Do not expose a partial session.",
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(crate::db::code::get_session(&store, &owner, session.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(crate::db::code::get_workspace(&store, &owner, workspace.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        crate::db::code::get_external_binding(&store, &owner, "slack", "T1/C1/rollback")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.get_setting(&key).await.unwrap(),
+        Some(serde_json::json!("existing value"))
+    );
+}

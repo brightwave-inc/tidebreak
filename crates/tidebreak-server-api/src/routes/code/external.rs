@@ -405,7 +405,7 @@ pub async fn external_get_or_create(
         None
     };
     let (resolution, identity) = runtime
-        .external_get_or_create(
+        .external_get_or_create_with_channel_context(
             &grant.owner,
             owner_kind,
             grant.id,
@@ -424,21 +424,18 @@ pub async fn external_get_or_create(
             },
             body.permission_mode,
             body.acts_as,
+            (grant.channel_kind == "slack").then_some(
+                tidebreak_core::db::code::ExternalSessionChannelContext {
+                    channel_id: body.channel_id.as_deref(),
+                    instructions: &preferences.instructions,
+                },
+            ),
         )
         .await?;
     if let ExternalSessionResolution::Created(binding)
     | ExternalSessionResolution::Existing(binding) = &resolution
     {
         repair_original_context(&runtime, &grant, binding, body.channel_id.as_deref()).await?;
-    }
-    if let ExternalSessionResolution::Created(binding) = &resolution {
-        crate::code::channel_preferences::freeze_instructions(
-            &runtime.db,
-            &grant.owner,
-            binding.session_id,
-            &preferences.instructions,
-        )
-        .await?;
     }
     let resolved_session_id = match &resolution {
         ExternalSessionResolution::Created(binding)
