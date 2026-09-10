@@ -24,7 +24,9 @@ use crate::control::{Control, Outbox, PollFailure};
 use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, TurnSource};
 use crate::inputs::{Inputs, RunMode, POLL_INTERVAL};
 use crate::wip::{self, CheckpointPoint, WipContext};
-use crate::wire::{SupervisorMessage, SupervisorPoll};
+use crate::wire::{
+    SupervisorMessage, SupervisorMessageBody, SupervisorPoll, SupervisorToolResult,
+};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 
 /// Consecutive retryable poll failures before the agent gives up.
@@ -70,11 +72,16 @@ pub struct Driver<E> {
     delivered_through: Option<i64>,
     /// Highest sequence enqueued, so unacknowledged redeliveries dedupe.
     seen_through: i64,
+    pending_tool_results: Vec<SupervisorToolResult>,
     consecutive_failures: u32,
     stop_reason: Option<String>,
     acceptance_met: bool,
     mode: RunMode,
     task: String,
+    /* Distinct from task text: the typed tool bridge carries server-native
+       tools only when the endpoint's tool-call route exists. Ordinary text
+       never becomes a host tool call. */
+    bridge: bool,
     turn: u32,
     max_turns: Option<u32>,
     ran_spawn_task: bool,
@@ -105,11 +112,13 @@ impl<E: Engine> Driver<E> {
             inbox: VecDeque::new(),
             delivered_through: None,
             seen_through: 0,
+            pending_tool_results: Vec::new(),
             consecutive_failures: 0,
             stop_reason: None,
             acceptance_met: false,
             mode: inputs.mode,
             task: inputs.task.clone(),
+            bridge: false,
             turn: inputs.starting_turn,
             max_turns: inputs.max_turns,
             ran_spawn_task: resumed,
@@ -121,6 +130,13 @@ impl<E: Engine> Driver<E> {
             push_denied: inputs.forge_push_denied,
             wip: None,
         }
+    }
+
+    /// Enables the typed server-tool bridge for this run.
+    #[must_use]
+    pub fn with_tool_bridge(mut self, enabled: bool) -> Self {
+        self.bridge = enabled;
+        self
     }
 
     /// Overrides the poll cadence. Tests shrink it; production keeps the
@@ -215,10 +231,16 @@ impl<E: Engine> Driver<E> {
             });
         }
         if !self.inbox.is_empty() {
+            // Tool results never join text; the engine reads them from the
+            // materialized scratch files or the host output in its prompt.
+            // Ordinary text messages still batch into one next turn.
             let input = self
                 .inbox
                 .iter()
-                .map(|message| message.body.as_str())
+                .filter_map(|message| match &message.body {
+                    SupervisorMessageBody::Input(body) => Some(body.as_str()),
+                    SupervisorMessageBody::Tool(_) => None,
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n");
             return NextAction::Run(TurnRequest {
@@ -260,6 +282,9 @@ impl<E: Engine> Driver<E> {
             // delivered.
             while let Some(message) = self.inbox.pop_front() {
                 self.delivered_through = Some(message.seq);
+                if let SupervisorMessageBody::Tool(result) = &message.body {
+                    self.pending_tool_results.push(result.clone());
+                }
             }
         }
 
@@ -377,18 +402,35 @@ impl<E: Engine> Driver<E> {
                 handle.interrupt().await;
                 return None;
             }
-            let body = message.body.clone();
-            match handle.steer(body).await {
-                SteerOutcome::Delivered => {
+            match &message.body {
+                SupervisorMessageBody::Input(body) => {
+                    match handle.steer(body.clone()).await {
+                        SteerOutcome::Delivered => {
+                            let message = self.inbox.pop_front().expect("front was just observed");
+                            self.delivered_through = Some(message.seq);
+                        }
+                        // This engine takes input only between turns; the
+                        // message waits there.
+                        SteerOutcome::Refused => return None,
+                        // The poll completed after the turn did. Keep the
+                        // message queued so the next turn carries it.
+                        SteerOutcome::Ended(end) => return Some(end),
+                    }
+                }
+                SupervisorMessageBody::Tool(result) => {
+                    if let Err(error) = crate::scratch::materialize_artifacts(&self.workdir, &result.artifacts) {
+                        self.outbox.push(
+                            "host_tool_failed",
+                            serde_json::json!({
+                                "request_id": result.request_id,
+                                "tool": "artifact_materialize",
+                                "error": error,
+                            }),
+                        );
+                    }
                     let message = self.inbox.pop_front().expect("front was just observed");
                     self.delivered_through = Some(message.seq);
                 }
-                // This engine takes input only between turns; the message
-                // waits there.
-                SteerOutcome::Refused => return None,
-                // The poll completed after the turn did. Keep the message
-                // queued so the next turn carries it.
-                SteerOutcome::Ended(end) => return Some(end),
             }
         }
         None

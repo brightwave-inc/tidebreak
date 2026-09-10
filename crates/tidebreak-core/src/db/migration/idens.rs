@@ -976,6 +976,8 @@ pub(crate) enum CodeSessionIncarnation {
     EventsCursor,
     TaskOutput,
     LastWipRef,
+    ToolRequestsJson,
+    ToolAckSeqsJson,
     CreatedAt,
     ActivatedAt,
     StoppedAt,

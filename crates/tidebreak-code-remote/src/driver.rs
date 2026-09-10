@@ -29,7 +29,7 @@ use tidebreak_core::{
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
-use super::wire::{EmbeddedEngine, EventCursor, SandboxMessage, SpawnArguments};
+use super::wire::{EmbeddedEngine, EventCursor, SandboxMessage, SpawnArguments, SupervisorMessageBody};
 use super::{
     apply_attention, fence_session, journal_event, persist_session, reap_session,
     recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
@@ -346,11 +346,12 @@ impl RemoteDriver<'_> {
     pub async fn submit_turn(
         &self,
         session: &mut Session,
-        workspace: &CodeWorkspace,
-        repo: &CodeRepo,
+        workspace: Option<&CodeWorkspace>,
+        repo: Option<&CodeRepo>,
+        scratch_branch: Option<&str>,
         text: &str,
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
-        self.submit_turn_from(session, workspace, repo, text, None)
+        self.submit_turn_from(session, workspace, repo, scratch_branch, text, None)
             .await
     }
 
@@ -364,8 +365,9 @@ impl RemoteDriver<'_> {
     pub async fn submit_turn_from(
         &self,
         session: &mut Session,
-        workspace: &CodeWorkspace,
-        repo: &CodeRepo,
+        workspace: Option<&CodeWorkspace>,
+        repo: Option<&CodeRepo>,
+        scratch_branch: Option<&str>,
         text: &str,
         promoted: Option<&tidebreak_core::code::QueuedTurn>,
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
@@ -445,7 +447,7 @@ impl RemoteDriver<'_> {
                     )));
                 };
                 let message = SandboxMessage {
-                    body: text.to_owned(),
+                    body: SupervisorMessageBody::Input(text.to_owned()),
                     interrupt: false,
                 };
                 message
@@ -541,7 +543,14 @@ impl RemoteDriver<'_> {
         // it would drop the predecessor's checkpoint.
         let pushed = latest_pushed_wip_ref(db, &owner, session.id).await?;
         let resumed_from_wip = pushed.is_some();
-        let resume_ref = pushed.unwrap_or_else(|| workspace.base_ref.clone());
+        let resume_ref = pushed
+            .clone()
+            .or_else(|| workspace.map(|workspace| workspace.base_ref.clone()))
+            .unwrap_or_else(|| "scratch".to_owned());
+        let workspace_branch = workspace
+            .map(|workspace| workspace.branch_name.clone())
+            .or_else(|| scratch_branch.map(str::to_owned))
+            .unwrap_or_else(|| "scratch".to_owned());
         let arguments = SpawnArguments {
             profile: settings.profile.clone(),
             harness: "custom".to_owned(),
@@ -553,17 +562,29 @@ impl RemoteDriver<'_> {
                 }),
             mode: Some("turn".to_owned()),
             task: if settings.engine.is_some() {
-                tidebreak_core::code::RemoteWorkspaceTask::encode(text, &workspace.branch_name)
+                if repo.is_some() {
+                    tidebreak_core::code::RemoteWorkspaceTask::encode(text, &workspace_branch)
+                        .map_err(|error| {
+                            tidebreak_core::AgentError::config(format!(
+                                "the workspace task could not be encoded: {error}"
+                            ))
+                        })?
+                } else {
+                    tidebreak_core::code::RemoteWorkspaceTask::encode_scratch(
+                        text,
+                        &workspace_branch,
+                    )
                     .map_err(|error| {
                         tidebreak_core::AgentError::config(format!(
-                            "the workspace task could not be encoded: {error}"
+                            "the scratch task could not be encoded: {error}"
                         ))
                     })?
+                }
             } else {
                 text.to_owned()
             },
-            repository: Some(repository_url(repo)?),
-            repository_ref: Some(resume_ref.clone()),
+            repository: repo.map(repository_url).transpose()?,
+            repository_ref: repo.map(|_| resume_ref.clone()),
             repositories: Vec::new(),
             apps: Vec::new(),
             model: session.model.clone(),
@@ -1181,7 +1202,7 @@ mod tests {
             rejected.permission_mode = mode;
             rejected.fast_mode = fast;
             assert!(driver
-                .submit_turn(&mut rejected, &workspace, &repo, "start")
+                .submit_turn(&mut rejected, Some(&workspace), Some(&repo), None, "start")
                 .await
                 .is_err());
         }
@@ -1229,7 +1250,7 @@ mod tests {
             ]);
             let driver = driver!(&db, &bus, &fake, &settings);
             driver
-                .submit_turn(&mut session, &workspace, &repo, "start")
+                .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
                 .await
                 .unwrap();
             let spawns = fake.spawns.lock().unwrap();
@@ -1259,7 +1280,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "build it")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "build it")
             .await
             .unwrap();
         let RemoteTurnOutcome::Reincarnated { turn, incarnation } = outcome else {
@@ -1294,7 +1315,7 @@ mod tests {
         settings.engine = Some(session.harness_kind);
         let driver = driver!(&db, &bus, &fake, &settings);
         driver
-            .submit_turn(&mut session, &workspace, &repo, "build it")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "build it")
             .await
             .unwrap();
         let spawns = fake.spawns.lock().unwrap();
@@ -1320,7 +1341,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "and then this")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "and then this")
             .await
             .unwrap();
         let RemoteTurnOutcome::Delivered { turn } = outcome else {
@@ -1381,7 +1402,7 @@ mod tests {
         // The send succeeds against the still-Active row, but the sandbox
         // stops before running the turn: its goodbye carries no turn events.
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "too late")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "too late")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Delivered { .. }));
@@ -1416,7 +1437,7 @@ mod tests {
         // The session can continue: the next turn reincarnates instead of
         // refusing as TurnInFlight.
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "again")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "again")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1435,7 +1456,7 @@ mod tests {
 
         // Turn 1 provisions.
         driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .unwrap();
         // The sandbox works the turn, pushes WIP, says goodbye, and the
@@ -1473,7 +1494,7 @@ mod tests {
 
         // Turn 2 reincarnates from the pushed ref, starting at turn 2.
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "continue")
             .await
             .unwrap();
         let RemoteTurnOutcome::Reincarnated { turn, incarnation } = outcome else {
@@ -1532,7 +1553,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "resume")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "resume")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::FlushPending));
@@ -1549,7 +1570,7 @@ mod tests {
         let settings = settings();
         let driver = driver!(&db, &bus, &fake, &settings);
         driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .unwrap();
         fake.event_reads.lock().unwrap().push_back(read(
@@ -1572,7 +1593,7 @@ mod tests {
                 message: "the remote does not advertise mg-wip/sb-next-i1".to_owned(),
             }));
         let error = driver
-            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "continue")
             .await;
         assert!(error.is_err());
         let live = get_session(&db, &session.owner, session.id)
@@ -1595,7 +1616,7 @@ mod tests {
         // resumes from the base ref instead of looping on the same refusal.
         let mut recovered = driver.reap(live).await.unwrap();
         let outcome = driver
-            .submit_turn(&mut recovered, &workspace, &repo, "continue")
+            .submit_turn(&mut recovered, Some(&workspace), Some(&repo), None, "continue")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1645,7 +1666,7 @@ mod tests {
         assert!(row.terminal_events_journaled);
         let mut recovered = recovered;
         let outcome = driver
-            .submit_turn(&mut recovered, &_workspace, &_repo, "again")
+            .submit_turn(&mut recovered, Some(&_workspace), Some(&_repo), None, "again")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1671,7 +1692,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let outcome = driver
-            .submit_turn(&mut session_b, &workspace, &repo, "queue-jump")
+            .submit_turn(&mut session_b, Some(&workspace), Some(&repo), None, "queue-jump")
             .await
             .unwrap();
         let RemoteTurnOutcome::CapExhausted { running } = outcome else {
@@ -1731,7 +1752,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "one more")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "one more")
             .await
             .unwrap();
         let RemoteTurnOutcome::SpendExhausted {
@@ -1782,7 +1803,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .unwrap();
         *fake.spend.lock().unwrap() = Some(1_500_000);
@@ -1797,7 +1818,7 @@ mod tests {
         driver.pump(&mut session, 0).await.unwrap();
 
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "continue")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1838,7 +1859,7 @@ mod tests {
                 message: "the sandbox has ended".to_owned(),
             }));
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "late")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "late")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::FlushPending));
@@ -1860,7 +1881,7 @@ mod tests {
         let report = driver.pump(&mut session, 0).await.unwrap();
         assert!(report.incarnation_stopped);
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "late")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "late")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1886,11 +1907,11 @@ mod tests {
                 message: "no such profile".to_owned(),
             }));
         assert!(driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .is_err());
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "retry")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "retry")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -1907,11 +1928,11 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         driver
-            .submit_turn(&mut session, &workspace, &repo, "first")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "first")
             .await
             .unwrap();
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "second")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "second")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::TurnInFlight));
@@ -2002,7 +2023,7 @@ mod tests {
         }));
 
         assert!(driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .is_err());
         assert_eq!(
@@ -2024,7 +2045,7 @@ mod tests {
 
         // Incarnation 1 runs, pushes WIP, and the environment retires it.
         driver
-            .submit_turn(&mut session, &workspace, &repo, "start")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
             .await
             .unwrap();
         fake.event_reads.lock().unwrap().push_back(read(
@@ -2048,13 +2069,13 @@ mod tests {
                 detail: "gateway restarting".to_owned(),
             }));
         assert!(driver
-            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "continue")
             .await
             .is_err());
 
         // The retry still resumes from the pushed checkpoint, not the base.
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "continue")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -2163,7 +2184,7 @@ mod tests {
             .unwrap();
         let mut recovered = driver.reap(reloaded).await.unwrap();
         let outcome = driver
-            .submit_turn(&mut recovered, &workspace, &repo, "again")
+            .submit_turn(&mut recovered, Some(&workspace), Some(&repo), None, "again")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
@@ -2269,7 +2290,7 @@ mod tests {
                 "token expired".to_owned(),
             )));
         let outcome = driver
-            .submit_turn(&mut session, &workspace, &repo, "held")
+            .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "held")
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::SignInRequired));
