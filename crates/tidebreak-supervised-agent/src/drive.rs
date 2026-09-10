@@ -22,7 +22,7 @@ use crate::bootstrap::Event;
 use crate::completion;
 use crate::control::{Control, Outbox, PollFailure};
 use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, TurnSource};
-use crate::inputs::{Inputs, POLL_INTERVAL, RunMode};
+use crate::inputs::{Inputs, RunMode, POLL_INTERVAL};
 use crate::tool_bridge::LocalToolBridge;
 use crate::wip::{self, CheckpointPoint, WipContext};
 use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll};
@@ -676,14 +676,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use axum::Json;
     use axum::extract::State;
     use axum::response::IntoResponse;
+    use axum::Json;
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
     use crate::engine::{AssistantRecord, EngineError};
-    use crate::inputs::{RawInputs, resolve};
+    use crate::inputs::{resolve, RawInputs};
     use std::collections::VecDeque;
 
     /// One scripted delay for the next supervisor poll.
@@ -943,10 +943,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn native_reply_bypasses_refused_steer_without_skipping_its_acknowledgment() {
-        use tidebreak_core::code::SupervisorToolRequest;
         use tidebreak_core::code::supervisor_tools::{
-            SupervisorArtifact, SupervisorToolResult, encode_result_frames,
+            encode_result_frames, SupervisorArtifact, SupervisorToolResult,
         };
+        use tidebreak_core::code::SupervisorToolRequest;
         let root = tempfile::tempdir().unwrap();
         let bridge = LocalToolBridge::start(root.path()).unwrap();
         let socket = bridge.socket_path();
@@ -1010,14 +1010,12 @@ mod tests {
                 .len(),
             40000
         );
-        assert!(
-            state
-                .lock()
-                .unwrap()
-                .polls
-                .iter()
-                .all(|poll| poll["delivered_through_seq"].is_null())
-        );
+        assert!(state
+            .lock()
+            .unwrap()
+            .polls
+            .iter()
+            .all(|poll| poll["delivered_through_seq"].is_null()));
         engine.finish(TurnEnd::Completed { success: true });
         wait_for(&state, |supervisor| {
             supervisor

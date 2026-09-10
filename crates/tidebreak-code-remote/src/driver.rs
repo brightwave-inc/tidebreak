@@ -29,7 +29,9 @@ use tidebreak_core::{
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
-use super::wire::{EventCursor, SandboxMessage, SpawnArguments, SpawnEmbeddedEngine, SupervisorMessageBody};
+use super::wire::{
+    EventCursor, SandboxMessage, SpawnArguments, SpawnEmbeddedEngine, SupervisorMessageBody,
+};
 use super::{
     apply_attention, fence_session, journal_event, persist_session, reap_session,
     recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
@@ -1753,7 +1755,13 @@ mod tests {
         assert!(settings.validate_execution(&session).is_ok());
         let driver = driver!(&db, &bus, &fake, &settings);
         driver
-            .submit_turn(&mut session, &workspace, &repo, "build it")
+            .submit_turn(
+                &mut session,
+                Some(&workspace),
+                Some(&repo),
+                None,
+                "build it",
+            )
             .await
             .unwrap();
         let spawns = fake.spawns.lock().unwrap();
