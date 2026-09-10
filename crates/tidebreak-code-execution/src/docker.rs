@@ -701,24 +701,24 @@ impl DockerExecutionProvider {
         )
         .await
         else {
-            // The CLI itself was abandoned, so whether the command ran to
-            // completion inside the container is genuinely unknown.
+            // The CLI itself was abandoned with no bytes read, so whether the
+            // command ran to completion inside the container is unknown.
             return Err(ExecError::AmbiguousExecution.into());
         };
-        if output.status.is_none() {
-            return Err(ExecError::AmbiguousExecution.into());
-        }
         if is_missing_container(output.status, &output.stderr) {
             return Err(RemoteSessionError::Missing);
         }
         let mut capture = Capture::default();
         capture.append(&output.stdout, StreamKind::Stdout);
         capture.append(&output.stderr, StreamKind::Stderr);
+        if output.truncated {
+            capture.mark_truncated();
+        }
         // The in-container `timeout` is what stopped the command, and its own
         // exit status is how it says so. A command that exits 124 by itself is
         // indistinguishable from one that was stopped — the same conflation
         // every backend's timeout reporting carries.
-        let timed_out = output.status == Some(TIMEOUT_EXIT);
+        let timed_out = output.status == Some(TIMEOUT_EXIT) || output.status.is_none();
         Ok(capture.response(
             ExecProviderKind::Docker,
             started,
@@ -1123,15 +1123,22 @@ struct CapturedOutput {
     status: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    truncated: bool,
 }
 
-/// Drain a child's streams up to `capture_bytes` each and wait for it,
-/// abandoning the whole thing after `deadline`.
+struct DrainedStream {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Drain a child's streams up to `capture_bytes` each and wait for it.
 ///
 /// Reading concurrently rather than sequentially matters: a command that fills
 /// the stderr pipe while this waits on stdout would block forever. Bytes past
 /// the cap are read and dropped rather than left in the pipe, for the same
-/// reason.
+/// reason, and [`CapturedOutput::truncated`] is set so the caller can report
+/// it. A deadline that fires still returns whatever was already read rather
+/// than discarding the partial capture.
 async fn bounded_output(
     mut child: Child,
     deadline: Duration,
@@ -1139,37 +1146,65 @@ async fn bounded_output(
 ) -> Option<CapturedOutput> {
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    let drain = async {
-        let (out, err) = tokio::join!(
-            drain_stream(&mut stdout, capture_bytes),
-            drain_stream(&mut stderr, capture_bytes),
-        );
-        let status = child.wait().await.ok()?;
-        Some(CapturedOutput {
-            status: status.code(),
-            stdout: out,
-            stderr: err,
-        })
+    let stdout_task = tokio::spawn(async move { drain_stream(&mut stdout, capture_bytes).await });
+    let stderr_task = tokio::spawn(async move { drain_stream(&mut stderr, capture_bytes).await });
+    let wait = tokio::time::timeout(deadline, child.wait()).await;
+    let timed_out = wait.is_err();
+    if timed_out {
+        let _ = child.start_kill();
+    }
+    let status = match wait {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(_)) => return None,
+        Err(_) => tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .ok()
+            .and_then(Result::ok),
     };
-    tokio::time::timeout(deadline, drain).await.ok()?
+    let stdout = stdout_task.await.unwrap_or_else(|_| DrainedStream {
+        bytes: Vec::new(),
+        truncated: false,
+    });
+    let stderr = stderr_task.await.unwrap_or_else(|_| DrainedStream {
+        bytes: Vec::new(),
+        truncated: false,
+    });
+    Some(CapturedOutput {
+        status: status.and_then(|status| status.code()),
+        truncated: stdout.truncated || stderr.truncated || timed_out,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
 }
 
-async fn drain_stream<S>(stream: &mut Option<S>, capture_bytes: usize) -> Vec<u8>
+async fn drain_stream<S>(stream: &mut Option<S>, capture_bytes: usize) -> DrainedStream
 where
     S: AsyncReadExt + Unpin,
 {
     let mut kept = Vec::new();
+    let mut truncated = false;
     let Some(stream) = stream.as_mut() else {
-        return kept;
+        return DrainedStream {
+            bytes: kept,
+            truncated,
+        };
     };
     let mut buffer = [0_u8; 16 * 1024];
     loop {
         match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => return kept,
+            Ok(0) | Err(_) => {
+                return DrainedStream {
+                    bytes: kept,
+                    truncated,
+                }
+            }
             Ok(read) => {
                 let available = capture_bytes.saturating_sub(kept.len());
                 if available > 0 {
                     kept.extend_from_slice(&buffer[..read.min(available)]);
+                }
+                if read > available {
+                    truncated = true;
                 }
             }
         }
@@ -1213,6 +1248,14 @@ fn inspect_args(reference: &str) -> Vec<String> {
 /// no shell parses the model's arguments and no quoting question arises. The
 /// in-container `timeout` is prepended because killing the CLI on this side
 /// would leave the command running inside the container.
+///
+/// The documents image ships GNU coreutils `timeout`. Unless `--foreground` is
+/// given, that `timeout` starts `COMMAND` in a new process group and delivers
+/// `TERM`/`KILL` to the group, so descendants that stay in the group are
+/// stopped with the command. `--` keeps a command whose first byte is `-`
+/// from being parsed as a `timeout` option. We do not wrap the command in
+/// `setsid`: a new session would move descendants *out* of the group `timeout`
+/// signals.
 fn exec_command_args(
     container: &str,
     request: &ExecRequest,
@@ -1226,6 +1269,7 @@ fn exec_command_args(
         "timeout".to_owned(),
         format!("--kill-after={TIMEOUT_KILL_AFTER_SECS}"),
         timeout_seconds(timeout).to_string(),
+        "--".to_owned(),
         request.command.clone(),
     ];
     args.extend(request.arguments.iter().cloned());
@@ -1370,15 +1414,25 @@ fn is_name_conflict(stderr: &str) -> bool {
 
 /// Whether a `docker exec` failure means the container is gone rather than
 /// that the command failed. The CLI reserves 125 for its own errors, so a
-/// "no such container" there is the runtime speaking, not the command.
+/// "no such container" there is the runtime speaking, not the command. Exit
+/// 126 with "is not running" is the same class: the container exists but is
+/// not a live session.
 fn is_missing_container(status: Option<i32>, stderr: &[u8]) -> bool {
-    status == Some(125) && is_no_such_container(&String::from_utf8_lossy(stderr))
+    let stderr = String::from_utf8_lossy(stderr);
+    let not_running = stderr.to_ascii_lowercase().contains("is not running");
+    match status {
+        Some(125) => is_no_such_container(&stderr) || not_running,
+        Some(126) => not_running,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::{Capture, StreamKind};
     use crate::ExecutionId;
+    use std::time::Instant;
     use tidebreak_egress::{DomainPattern, EgressAllowlist};
 
     fn provider() -> DockerExecutionProvider {
@@ -1600,6 +1654,7 @@ mod tests {
                 "timeout",
                 "--kill-after=5",
                 "30",
+                "--",
                 "python3",
                 "-c",
                 "print('a; rm -rf /')",
@@ -1608,6 +1663,45 @@ mod tests {
         // A cwd that tries to leave the workspace never reaches the runtime.
         assert!(container_cwd("../escape").is_err());
         assert_eq!(container_cwd(".").unwrap(), WORKSPACE_ROOT);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_docker_capture_reports_truncated() {
+        let mut capture = Capture::default();
+        capture.append(
+            &vec![b'a'; crate::MAX_CAPTURE_BYTES + 8],
+            StreamKind::Stdout,
+        );
+        capture.append(b"err\n", StreamKind::Stderr);
+        let response = capture.response(ExecProviderKind::Docker, Instant::now(), Some(1), false);
+        assert!(response.output_truncated);
+        assert_eq!(response.stdout.len(), crate::MAX_CAPTURE_BYTES);
+        assert_eq!(response.stderr, "err\n");
+        assert_eq!(response.exit_code, Some(1));
+
+        let drained = drain_stream(
+            &mut Some(std::io::Cursor::new(vec![
+                b'x';
+                crate::MAX_CAPTURE_BYTES + 1
+            ])),
+            crate::MAX_CAPTURE_BYTES,
+        )
+        .await;
+        assert!(drained.truncated);
+        assert_eq!(drained.bytes.len(), crate::MAX_CAPTURE_BYTES);
+    }
+
+    #[test]
+    fn exit_126_is_not_running_is_a_missing_container() {
+        assert!(is_missing_container(
+            Some(126),
+            b"Error: container abc is not running\n"
+        ));
+        assert!(!is_missing_container(Some(126), b"permission denied\n"));
+        assert!(is_missing_container(
+            Some(125),
+            b"Error: No such container: abc\n"
+        ));
     }
 
     /// The listing feeds a pull that writes into host scratch, so the shape of

@@ -10,7 +10,9 @@ use tidebreak_core::{ExecDegradation, SecretProvider};
 use tidebreak_egress::{EgressEnforcement, EgressPolicy};
 
 use crate::credential::SecretCredential;
-use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
+use crate::http::{
+    decode_bounded_json, decode_bounded_json_truncated, download_bounded_file, multipart_file,
+};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
     connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
@@ -38,6 +40,9 @@ const DAYTONA_START_TIMEOUT: Duration = Duration::from_secs(60);
 const DAYTONA_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DAYTONA_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const MAX_DAYTONA_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Execute bodies can exceed the management cap; keep a complete JSON document
+/// so a large `result` still yields an exit code, then [`Capture`] truncates.
+const MAX_DAYTONA_EXECUTE_BYTES: usize = 8 * 1024 * 1024;
 /// Daytona accepts at most this many CIDR entries per sandbox allowlist.
 const DAYTONA_MAX_NETWORK_ALLOW_ENTRIES: usize = 10;
 /// Daytona accepts at most this many domain entries per sandbox allowlist.
@@ -660,37 +665,38 @@ impl DaytonaExecutionProvider {
         ) {
             return Err(RemoteSessionError::Missing);
         }
-        if response.status() == StatusCode::REQUEST_TIMEOUT {
-            return Ok(Capture::default().response(ExecProviderKind::Daytona, started, None, true));
-        }
+        let timed_out_status = response.status() == StatusCode::REQUEST_TIMEOUT;
         if !response.status().is_success() {
             let status = response.status();
-            let error = decode_bounded_json::<DaytonaErrorResponse>(
+            let error = decode_bounded_json::<DaytonaTimeoutBody>(
                 response,
                 "Daytona",
-                MAX_DAYTONA_RESPONSE_BYTES,
+                MAX_DAYTONA_EXECUTE_BYTES,
             )
             .await
             .ok();
-            if error
-                .and_then(|body| body.code)
-                .is_some_and(|code| code == "PROCESS_EXECUTION_TIMEOUT")
+            if timed_out_status
+                || error
+                    .as_ref()
+                    .and_then(|body| body.code.as_deref())
+                    .is_some_and(|code| code == "PROCESS_EXECUTION_TIMEOUT")
             {
-                return Ok(Capture::default().response(
-                    ExecProviderKind::Daytona,
+                return Ok(daytona_captured_response(
+                    error.unwrap_or_default().into_execute(),
                     started,
-                    None,
                     true,
+                    false,
                 ));
             }
             return Err(provider_status_error(status).into());
         }
-        let body =
-            decode_bounded_json::<ExecuteResponse>(response, "Daytona", MAX_DAYTONA_RESPONSE_BYTES)
-                .await?;
-        let mut capture = Capture::default();
-        capture.append(body.result.as_bytes(), StreamKind::Stdout);
-        Ok(capture.response(ExecProviderKind::Daytona, started, body.exit_code, false))
+        let (body, oversized) = decode_bounded_json_truncated::<ExecuteResponse>(
+            response,
+            "Daytona",
+            MAX_DAYTONA_EXECUTE_BYTES,
+        )
+        .await?;
+        Ok(daytona_captured_response(body, started, false, oversized))
     }
 
     fn toolbox_file_url(&self, session: &RemoteSession, suffix: &str) -> Result<Url, ExecError> {
@@ -1148,16 +1154,72 @@ struct ExecuteRequest<'a> {
     timeout: u32,
 }
 
-#[derive(Deserialize)]
+/// Toolbox `process/execute` payload.
+///
+/// Daytona's execute API returns one merged `result` string and no separate
+/// stderr stream. When `stdout` / `stderr` fields are present they are used;
+/// otherwise the merged `result` is filed as stdout and stderr stays empty.
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ExecuteResponse {
     exit_code: Option<i32>,
+    #[serde(default)]
     result: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct DaytonaErrorResponse {
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaTimeoutBody {
     code: Option<String>,
+    #[serde(default)]
+    result: String,
+    exit_code: Option<i32>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+}
+
+impl DaytonaTimeoutBody {
+    fn into_execute(self) -> ExecuteResponse {
+        ExecuteResponse {
+            exit_code: self.exit_code,
+            result: self.result,
+            stdout: self.stdout,
+            stderr: self.stderr,
+        }
+    }
+}
+
+fn daytona_captured_response(
+    body: ExecuteResponse,
+    started: Instant,
+    timed_out: bool,
+    oversized: bool,
+) -> ExecResponse {
+    let mut capture = Capture::default();
+    match (body.stdout, body.stderr) {
+        (None, None) => capture.append(body.result.as_bytes(), StreamKind::Stdout),
+        (stdout, stderr) => {
+            if let Some(stdout) = stdout {
+                capture.append(stdout.as_bytes(), StreamKind::Stdout);
+            } else if !body.result.is_empty() {
+                capture.append(body.result.as_bytes(), StreamKind::Stdout);
+            }
+            if let Some(stderr) = stderr {
+                capture.append(stderr.as_bytes(), StreamKind::Stderr);
+            }
+        }
+    }
+    if oversized {
+        capture.mark_truncated();
+    }
+    capture.response(
+        ExecProviderKind::Daytona,
+        started,
+        if timed_out { None } else { body.exit_code },
+        timed_out,
+    )
 }
 
 /// Best-effort body on snapshot refusals so the degrade log names the real
@@ -1456,6 +1518,7 @@ mod tests {
                 Json(json!({
                     "code": "PROCESS_EXECUTION_TIMEOUT",
                     "message": "command exceeded its timeout",
+                    "result": "partial\n",
                 })),
             )
         } else {
@@ -1820,6 +1883,7 @@ mod tests {
         let response = provider.execute(timeout_request()).await.unwrap();
         assert!(response.timed_out);
         assert_eq!(response.exit_code, None);
+        assert_eq!(response.stdout, "partial\n");
         server.abort();
     }
 

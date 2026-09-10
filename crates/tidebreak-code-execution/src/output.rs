@@ -20,15 +20,19 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub(crate) fn append(&mut self, bytes: &[u8], kind: StreamKind) {
-        let available = MAX_CAPTURE_BYTES.saturating_sub(self.total);
-        let kept = available.min(bytes.len());
         let target = match kind {
             StreamKind::Stdout => &mut self.stdout,
             StreamKind::Stderr => &mut self.stderr,
         };
+        let available = MAX_CAPTURE_BYTES.saturating_sub(target.len());
+        let kept = available.min(bytes.len());
         target.extend_from_slice(&bytes[..kept]);
-        self.total += kept;
+        self.total = self.stdout.len().saturating_add(self.stderr.len());
         self.truncated |= kept < bytes.len();
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
     }
 
     pub(crate) fn append_base64(

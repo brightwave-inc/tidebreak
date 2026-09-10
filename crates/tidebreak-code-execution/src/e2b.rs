@@ -62,6 +62,10 @@ const E2B_ENVD_PORT: &str = "49983";
 const E2B_SANDBOX_TTL_SECONDS: u64 = 300;
 const E2B_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const MAX_MANAGEMENT_RESPONSE_BYTES: usize = 64 * 1024;
+/// Directory listings are truncated to [`MAX_WORKSPACE_LIST_ENTRIES`], so the
+/// JSON body is allowed to exceed the management cap instead of failing the
+/// whole listing.
+const MAX_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONNECT_FRAME_BYTES: usize = 256 * 1024;
 const CONNECT_END_STREAM_FLAG: u8 = 0b0000_0010;
 const CONNECT_COMPRESSED_FLAG: u8 = 0b0000_0001;
@@ -571,10 +575,9 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
         if !response.status().is_success() {
             return Err(provider_status_error(response.status()).into());
         }
-        let body =
-            decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_MANAGEMENT_RESPONSE_BYTES)
-                .await
-                .map_err(RemoteSessionError::Provider)?;
+        let body = decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_LIST_RESPONSE_BYTES)
+            .await
+            .map_err(RemoteSessionError::Provider)?;
         let mut entries = Vec::new();
         for entry in body.entries {
             if entry.name.is_empty() {

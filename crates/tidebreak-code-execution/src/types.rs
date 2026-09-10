@@ -13,7 +13,11 @@ pub const MAX_ARGUMENTS: usize = 128;
 pub const MAX_ARGUMENT_BYTES: usize = 32 * 1_024;
 /// Maximum UTF-8 bytes in a private-workspace-relative current directory.
 pub const MAX_CWD_BYTES: usize = 1_024;
-/// Maximum bytes captured from stdout and stderr together.
+/// Maximum bytes captured from each of stdout and stderr.
+///
+/// The two streams have independent budgets so a stdout-heavy command cannot
+/// discard stderr (or the reverse). Bytes past either cap are dropped and
+/// [`ExecResponse::output_truncated`] is set.
 pub const MAX_CAPTURE_BYTES: usize = 40_000;
 /// Maximum bytes transferred for one workspace file in either direction.
 pub const MAX_WORKSPACE_FILE_BYTES: usize = tidebreak_core::MAX_EXEC_WORKSPACE_FILE_BYTES;
@@ -683,7 +687,7 @@ pub trait ExecProvider: Send + Sync {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ExecError {
     #[error("invalid code execution request: {0}")]
     InvalidRequest(String),
