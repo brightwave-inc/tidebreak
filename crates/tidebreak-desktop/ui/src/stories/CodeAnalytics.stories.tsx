@@ -455,7 +455,5 @@ export const CollapsedMacRail: Story = {
 
 export const NarrowWidth: Story = {
   args: { scenario: "gateway" },
-  parameters: {
-    viewport: { defaultViewport: "tablet" },
-  },
+  globals: { viewport: { value: "conversation", isRotated: false } },
 };

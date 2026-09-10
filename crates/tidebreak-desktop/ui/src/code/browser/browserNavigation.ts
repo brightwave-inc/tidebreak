@@ -75,14 +75,24 @@ export function validateBrowserUrl(value: string): BrowserTarget {
 }
 
 export function browserSecurity(url: string): BrowserSecurity {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { kind: "insecure", label: "Not secure" };
+  }
   if (parsed.protocol === "https:") return { kind: "secure", label: "Secure" };
   if (isLoopbackHost(parsed.hostname)) return { kind: "local", label: "Local" };
   return { kind: "insecure", label: "Not secure" };
 }
 
 export function browserDisplayAddress(url: string): string {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
   if (parsed.protocol === "http:") return parsed.href;
   const suffix = `${parsed.pathname}${parsed.search}${parsed.hash}`;
   return `${parsed.host}${suffix === "/" ? "" : suffix}`;

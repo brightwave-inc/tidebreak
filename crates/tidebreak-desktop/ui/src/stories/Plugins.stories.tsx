@@ -228,7 +228,7 @@ export const ImportResults: Story = {
 
 export const ImportResultsCompact: Story = {
   render: () => <ImportResultsStory />,
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 export const LoadFailure: Story = {

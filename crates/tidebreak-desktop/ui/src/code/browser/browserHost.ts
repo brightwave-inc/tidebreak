@@ -125,7 +125,6 @@ export type BrowserHostEvent = {
     | "agent_navigation_paused"
     | "agent_access_changed"
     | "agent_open_requested"
-    | "agent_activate_requested"
     | "agent_closed_tab"
     | "profile_reset_closing"
     | "profile_reset_deleting_data"

@@ -152,6 +152,7 @@ export function usePullRequestQuery({
     setError(null);
     try {
       if (selectedRepositories.length === 0) {
+        if (!append) setItems([]);
         setNextCursor(undefined);
         setErrors([]);
         return;
