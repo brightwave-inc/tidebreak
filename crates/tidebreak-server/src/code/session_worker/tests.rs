@@ -155,6 +155,7 @@ async fn seeded_session_at(
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await

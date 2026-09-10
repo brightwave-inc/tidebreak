@@ -39,6 +39,7 @@ where
         released_at: Set(workspace.released_at),
         released_tip: Set(workspace.released_tip.clone()),
         bundle_bytes: Set(workspace.bundle_bytes),
+        setup_error: Set(workspace.setup_error.clone()),
     }
     .insert(connection)
     .await
@@ -241,6 +242,10 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
             entities::code_workspace::Column::BundleBytes,
             sea_orm::sea_query::Expr::value(workspace.bundle_bytes),
         )
+        .col_expr(
+            entities::code_workspace::Column::SetupError,
+            sea_orm::sea_query::Expr::value(workspace.setup_error.clone()),
+        )
         .filter(entities::code_workspace::Column::Id.eq(workspace.id.0))
         .filter(entities::code_workspace::Column::Owner.eq(workspace.owner.as_str()))
         .exec(&store.conn)
@@ -342,5 +347,6 @@ pub(super) fn workspace_from_row(row: entities::code_workspace::Model) -> Result
         released_at: row.released_at,
         released_tip: row.released_tip,
         bundle_bytes: row.bundle_bytes,
+        setup_error: row.setup_error,
     })
 }

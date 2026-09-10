@@ -36,6 +36,7 @@ mod session_acts_as;
 mod session_context;
 mod session_owner_kind;
 mod turn_actor;
+mod workspace_setup_error;
 
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
@@ -101,6 +102,7 @@ impl MigratorTrait for Migrator {
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
             Box::new(external_thread_context::ExternalThreadContext),
             Box::new(session_context::SessionContext),
+            Box::new(workspace_setup_error::WorkspaceSetupError),
         ]
     }
 }

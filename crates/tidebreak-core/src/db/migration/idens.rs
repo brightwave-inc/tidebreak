@@ -878,6 +878,7 @@ pub(crate) enum CodeWorkspace {
     ReleasedAt,
     ReleasedTip,
     BundleBytes,
+    SetupError,
     Owner,
 }
 

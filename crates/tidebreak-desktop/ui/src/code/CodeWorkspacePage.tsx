@@ -77,6 +77,7 @@ import {
   TabPointerSensor,
 } from "./workspace/tabDrag";
 import {
+  SetupFailedBanner,
   StartSessionPrompt,
   WorkspaceSessionStartingState,
 } from "./StartSessionPrompt";
@@ -667,6 +668,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     Reap
                   </Button>
                 </div>
+              )}
+              {workspace?.status === "setup_failed" && (
+                <SetupFailedBanner
+                  output={workspace.setup_error}
+                  onRetry={() =>
+                    run("retry-setup", {
+                      workspace,
+                      title: title ?? workspace.title,
+                    })
+                  }
+                />
               )}
               {workspaceStartup &&
                 workspace?.status === "active" &&

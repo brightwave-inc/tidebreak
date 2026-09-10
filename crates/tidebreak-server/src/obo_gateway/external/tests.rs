@@ -819,6 +819,7 @@ async fn remote_workspace_status_keeps_the_original_grant_after_restart_and_revo
         released_at: None,
         released_tip: None,
         bundle_bytes: None,
+        setup_error: None,
     };
     tidebreak_core::db::code::insert_workspace(&db, &workspace)
         .await

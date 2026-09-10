@@ -831,6 +831,10 @@ export function useWorkspaceCardCommands(): {
       });
     } catch (error) {
       toast.error(friendlyErrorMessage(error, "The setup script failed again"));
+      const refreshed = await client
+        .getCodeWorkspace(workspace.id)
+        .catch(() => null);
+      if (refreshed) upsertWorkspace(refreshed);
     }
   }
 

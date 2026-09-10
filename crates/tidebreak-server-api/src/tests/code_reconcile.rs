@@ -477,6 +477,7 @@ async fn seeded_runtime() -> (
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await
@@ -501,6 +502,7 @@ async fn seeded_runtime() -> (
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await

@@ -74,6 +74,7 @@ type WorkspaceScenario =
   | "settings-pending"
   | "loading"
   | "failure"
+  | "setup-failed"
   | SubagentScenario;
 
 type SubagentStorySpec = {
@@ -596,7 +597,15 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     ? startupWorkspace
     : scenario === "shared"
       ? { ...workspace, read_only: true }
-      : workspace;
+      : scenario === "setup-failed"
+        ? {
+            ...workspace,
+            status: "setup_failed" as const,
+            pr: undefined,
+            setup_error:
+              "setup script failed (exit 1):\nerror: pnpm: command not found",
+          }
+        : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
     ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
     : prSnapshot;
@@ -606,7 +615,8 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     scenario === "session-create-failure" ||
     scenario === "first-turn-failure" ||
     scenario === "loading" ||
-    scenario === "failure"
+    scenario === "failure" ||
+    scenario === "setup-failed"
       ? []
       : [
           scenario === "shared"
@@ -851,6 +861,11 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     }),
     patchCodeWorkspace: async () => workspace,
     archiveCodeWorkspace: async () => ({ ...workspace, status: "archived" }),
+    retryCodeWorkspaceSetup: async () => ({
+      ...currentWorkspace,
+      status: "active" as const,
+      setup_error: undefined,
+    }),
   } as unknown as ApiClient;
 }
 
@@ -1318,6 +1333,11 @@ export const Loading: Story = {
 
 export const Failure: Story = {
   args: { scenario: "failure", reviewOpen: false },
+};
+
+/** A failed setup script keeps its output in the pane with a retry. */
+export const SetupFailed: Story = {
+  args: { scenario: "setup-failed", reviewOpen: false },
 };
 
 /** The minimum supported window keeps identity, status, and utilities distinct. */

@@ -333,6 +333,7 @@ async fn seed_owner(
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await
@@ -5118,6 +5119,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         released_at: None,
         released_tip: None,
         bundle_bytes: None,
+        setup_error: None,
     };
     let session = Session {
         visibility: crate::SessionVisibility::Private,

@@ -313,6 +313,7 @@ async fn seed_session(db: &DbStore, lc: SessionLifecycle) -> (WorkspaceId, Sessi
         released_at: None,
         released_tip: None,
         bundle_bytes: None,
+        setup_error: None,
     };
     db::code::insert_workspace(db, &ws).await.unwrap();
     let s = Session {

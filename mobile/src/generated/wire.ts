@@ -1698,7 +1698,11 @@ released_tip?: string,
 /**
  * Stored bundle size, for reporting what a release reclaimed.
  */
-bundle_bytes?: number, };
+bundle_bytes?: number,
+/**
+ * Bounded setup-script failure output, when status is `setup_failed`.
+ */
+setup_error?: string, };
 
 /**
  * Status of a persisted workspace.

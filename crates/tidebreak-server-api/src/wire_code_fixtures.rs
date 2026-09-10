@@ -366,6 +366,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 released_at: None,
                 released_tip: None,
                 bundle_bytes: None,
+                setup_error: None,
             },
         ),
         fixture(
@@ -387,6 +388,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 released_at: Some(at(1_756_200_000)),
                 released_tip: Some("0bace692f4b5a7e3d2c1f0a9b8c7d6e5f4a3b2c1".to_owned()),
                 bundle_bytes: Some(48_213),
+                setup_error: None,
             },
         ),
         fixture("session", "session", &session()),

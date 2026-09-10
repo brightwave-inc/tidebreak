@@ -766,6 +766,7 @@ mod tests {
                 released_at: None,
                 released_tip: None,
                 bundle_bytes: None,
+                setup_error: None,
             },
         )
         .await

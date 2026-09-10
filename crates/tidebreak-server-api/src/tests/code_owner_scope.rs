@@ -297,6 +297,7 @@ async fn legacy_managed_repo_and_worktree_paths_remain_accessible() {
         released_at: None,
         released_tip: None,
         bundle_bytes: None,
+        setup_error: None,
     };
     tidebreak_core::db::code::insert_workspace(&db, &workspace)
         .await

@@ -235,6 +235,7 @@ pub(crate) async fn seed(
         released_at: None,
         released_tip: None,
         bundle_bytes: None,
+        setup_error: None,
     };
     insert_workspace(&db, &workspace).await.unwrap();
     let mut session = session_value();

@@ -1427,6 +1427,7 @@ pub mod code_workspace {
         pub released_at: Option<DateTimeUtc>,
         pub released_tip: Option<String>,
         pub bundle_bytes: Option<i64>,
+        pub setup_error: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
