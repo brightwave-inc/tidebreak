@@ -25,7 +25,8 @@ use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, Turn
 use crate::inputs::{Inputs, RunMode, POLL_INTERVAL};
 use crate::wip::{self, CheckpointPoint, WipContext};
 use crate::wire::{
-    SupervisorMessage, SupervisorMessageBody, SupervisorPoll, SupervisorToolResult,
+    SupervisorMessage, SupervisorMessageBody, SupervisorPoll, SupervisorToolRequest,
+    SupervisorToolResult,
 };
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 
@@ -479,6 +480,23 @@ impl<E: Engine> Driver<E> {
                 message: fatal.to_string(),
             }),
         }
+    }
+
+    /// Queues one protected host-tool request on the next poll.
+    ///
+    /// The sandbox never dials the host; the request rides the durable event
+    /// stream and the host replies through the sandbox inbox. The engine
+    /// adapter that surfaces these tools is a later integration slice; this
+    /// method is the transport half only.
+    pub fn request_host_tool(&mut self, request: SupervisorToolRequest) {
+        self.outbox.push(
+            "host_tool_request",
+            serde_json::json!({
+                "request_id": request.request_id,
+                "tool": request.tool,
+                "arguments": request.arguments,
+            }),
+        );
     }
 
     /// Reports a clean stop and exits zero.

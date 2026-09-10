@@ -1146,6 +1146,76 @@ impl CodeRuntime {
         Ok(ExternalMessageOutcome::Dropped)
     }
 
+    /// Deliver one protected tool result back into a live sandbox inbox.
+    ///
+    /// The result is authenticated by the incarnation it belongs to; the
+    /// sandbox never holds a server bearer. Idempotency is the sandbox's own
+    /// request_id: redelivered results are no-ops on the agent's cursor.
+    pub async fn send_sandbox_tool_result(
+        &self,
+        session_id: tidebreak_core::SessionId,
+        result: super::super::sandbox_tools::BridgeResult,
+    ) -> Result<(), ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        };
+        let session = tidebreak_core::db::code::get_session_all_owners(
+            &self.db,
+            session_id,
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("sandbox session not found"))?;
+        let Some(row) =
+            tidebreak_core::db::code::latest_incarnation(&self.db, &session.owner, session.id)
+                .await?
+        else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active incarnation to deliver the tool result",
+            ));
+        };
+        if row.state != tidebreak_core::IncarnationState::Active {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active incarnation to deliver the tool result",
+            ));
+        }
+        let sandbox_id = row.sandbox_id.as_deref().ok_or_else(|| {
+            ServerError::conflict_kind(
+                "no_active_turn",
+                "the active incarnation has no sandbox id",
+            )
+        })?;
+        let message = crate::code::remote::wire::SandboxMessage {
+            body: crate::code::remote::wire::SupervisorMessageBody::Tool(
+                crate::code::remote::wire::SupervisorToolResult {
+                    request_id: result.request_id,
+                    output: result.output,
+                    artifacts: result
+                        .artifacts
+                        .into_iter()
+                        .map(|artifact| crate::code::remote::wire::SupervisorArtifact {
+                            path: artifact.path,
+                            media_type: artifact.media_type,
+                            bytes: artifact.bytes,
+                        })
+                        .collect(),
+                },
+            ),
+            interrupt: false,
+        };
+        message.validate().map_err(ServerError::bad_request)?;
+        remote
+            .provisioner
+            .send(&session.owner, session.id, sandbox_id, &message)
+            .await
+            .map_err(|error| ServerError::internal(error.to_string()))?;
+        Ok(())
+    }
+
     pub(super) async fn interrupt_remote(&self, session: &Session) -> Result<(), ServerError> {
         let Some(remote) = self.remote_sessions() else {
             return Err(ServerError::conflict_kind(

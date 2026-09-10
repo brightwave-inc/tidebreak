@@ -253,6 +253,9 @@ pub async fn sandbox_tool_call(
         .execute_sandbox_tool(body.session_id, &body.request)
         .await
         .map_err(|err| ServerError::internal(err.to_string()))?;
+    runtime
+        .send_sandbox_tool_result(body.session_id, result.clone())
+        .await?;
     Ok(axum::Json(BridgeResponse { result }))
 }
 
