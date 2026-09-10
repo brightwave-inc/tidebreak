@@ -250,20 +250,36 @@ impl SessionTool {
                     ));
                 }
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                let live = authority(runtime, ctx.chat_id).await?;
+                let mut children = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    children.push(require_child(runtime, &live, *id).await?);
+                }
+                let mut snapshots = Vec::with_capacity(children.len());
+                for child in &children {
+                    snapshots.push(snapshot(runtime, &live.parent.owner, child.clone()).await?);
+                }
                 loop {
-                    let live = authority(runtime, ctx.chat_id).await?;
-                    let mut children = Vec::new();
                     let mut waiting = false;
-                    for id in &ids {
-                        let child = require_child(runtime, &live, *id).await?;
-                        let view = snapshot(runtime, &live.parent.owner, child).await?;
-                        waiting |= view["running"].as_bool().unwrap_or(false);
-                        children.push(view);
+                    for (index, child) in children.iter_mut().enumerate() {
+                        let current = runtime.get_session(&live.parent.owner, child.id).await?;
+                        if current.lifecycle != child.lifecycle {
+                            snapshots[index] =
+                                snapshot(runtime, &live.parent.owner, current.clone()).await?;
+                        }
+                        *child = current;
+                        waiting |= snapshots[index]["running"].as_bool().unwrap_or(false);
                     }
                     if !waiting || tokio::time::Instant::now() >= deadline {
-                        return Ok(json!({"waiting":waiting,"sessions":children}));
+                        if waiting {
+                            for (index, child) in children.iter().enumerate() {
+                                snapshots[index] =
+                                    snapshot(runtime, &live.parent.owner, child.clone()).await?;
+                            }
+                        }
+                        return Ok(json!({"waiting":waiting,"sessions":snapshots}));
                     }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
             _ => {

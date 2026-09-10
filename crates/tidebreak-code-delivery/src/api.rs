@@ -111,6 +111,14 @@ pub trait DeliveryApi: Send + Sync {
         etag: Option<&str>,
     ) -> Result<EndpointRead<Vec<Value>>, HostReadError>;
 
+    async fn has_merge_queue(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _base_branch: &str,
+    ) -> bool {
+        false
+    }
+
     async fn merge_queue_membership(
         &self,
         target: &CodeGitHubRepositoryTarget,

@@ -1,6 +1,10 @@
 //! Pull requests: list and detail reads, guarded actions, stacks, comments, and stored facts.
 
 use super::*;
+use crate::stack::{
+    fact_from_summary, StackParentCandidate, StackParentEdge, StackParentIndex,
+    StackParentResolution, StackPullRequestIdentity, StackRepositoryIdentity,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PullRequestRemotePlan {
@@ -1084,20 +1088,34 @@ pub(super) async fn attach_merge_queue_membership(
     target: &CodeGitHubRepositoryTarget,
     values: &mut [Value],
 ) {
+    let mut queue_branches = HashMap::new();
+    for value in values.iter() {
+        let Some(branch) = text_field(value, "baseRefName") else {
+            continue;
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            queue_branches.entry(branch.clone())
+        {
+            let enabled = api.has_merge_queue(target, &branch).await;
+            entry.insert(enabled);
+        }
+    }
     let jobs = values
         .iter()
         .enumerate()
         .filter_map(|(index, value)| {
+            let base_branch = text_field(value, "baseRefName")?;
             Some((
                 index,
                 u64_field(value, "number")?,
                 text_field(value, "state").is_some_and(|state| state.eq_ignore_ascii_case("open")),
+                queue_branches.get(&base_branch).copied().unwrap_or(false),
             ))
         })
         .collect::<Vec<_>>();
     let memberships = stream::iter(jobs)
-        .map(|(index, number, open)| async move {
-            let queued = if open {
+        .map(|(index, number, open, has_queue)| async move {
+            let queued = if open && has_queue {
                 api.merge_queue_membership(target, number).await
             } else {
                 Some(false)
@@ -1122,6 +1140,7 @@ pub(super) fn parse_pull_request(
     value: &Value,
     workspaces: &[WorkspaceIndexEntry],
 ) -> Option<PullRequestObservation> {
+    StackRepositoryIdentity::new(&repository.host, &repository.owner, &repository.name)?;
     let number = u64_field(value, "number")?;
     let title = text_field(value, "title")?;
     let state = text_field(value, "state")?.to_ascii_lowercase();

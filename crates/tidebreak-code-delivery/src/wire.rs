@@ -72,6 +72,10 @@ pub struct CodeDeliverySourceError {
     pub repository: Option<CodeGitHubRepositoryTarget>,
     pub kind: String,
     pub message: String,
+    /// Absolute retry time when the transport preserves a host reset header.
+    /// The current `gh` and forge delivery error strings do not, so ordinary
+    /// aggregate failures leave this absent; conditional reads park inside
+    /// the server's host gate instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retry_at: Option<chrono::DateTime<chrono::Utc>>,

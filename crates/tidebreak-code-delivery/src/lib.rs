@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use futures::{stream, StreamExt};
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -69,11 +70,6 @@ pub use repositories::{
     repository_target_from_path, resolve_repositories,
 };
 pub use runs::{act_on_run, query_runs, refresh_workflow_runs, run_detail};
-pub use stack::{
-    fact_from_summary, StackParentCandidate, StackParentEdge, StackParentIndex,
-    StackParentResolution, StackParentUnresolvedReason, StackPullRequestIdentity,
-    StackRepositoryIdentity,
-};
 
 use error::DeliveryError as ServerError;
 use wire::{
@@ -98,6 +94,8 @@ use runs::*;
 mod tests;
 
 const GIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_READ_MAX_BYTES: usize = 256 * 1024;
+const GIT_READ_MAX_LINES: usize = 10_000;
 
 const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -289,16 +287,45 @@ pub async fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("GIT_TERMINAL_PROMPT", "0");
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to spawn git: {error}"))?;
-    let output = timeout(GIT_READ_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|error| format!("git {} failed: {error}", args.join(" ")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if output.status.success() {
+    async fn read_bounded(
+        mut stream: impl tokio::io::AsyncRead + Unpin,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut kept = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        let mut lines = 0;
+        loop {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            for byte in &buffer[..read] {
+                if kept.len() >= GIT_READ_MAX_BYTES || lines >= GIT_READ_MAX_LINES {
+                    break;
+                }
+                kept.push(*byte);
+                if *byte == b'\n' {
+                    lines += 1;
+                }
+            }
+        }
+        Ok(kept)
+    }
+    let stdout = child.stdout.take().expect("git stdout is piped");
+    let stderr = child.stderr.take().expect("git stderr is piped");
+    let (status, stdout, stderr) = timeout(GIT_READ_TIMEOUT, async {
+        let (status, stdout, stderr) =
+            tokio::join!(child.wait(), read_bounded(stdout), read_bounded(stderr));
+        Ok::<_, std::io::Error>((status?, stdout?, stderr?))
+    })
+    .await
+    .map_err(|_| format!("git {} timed out", args.join(" ")))?
+    .map_err(|error| format!("git {} failed: {error}", args.join(" ")))?;
+    let stdout = String::from_utf8_lossy(&stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+    if status.success() {
         Ok(stdout)
     } else {
         Err(if stderr.is_empty() { stdout } else { stderr })

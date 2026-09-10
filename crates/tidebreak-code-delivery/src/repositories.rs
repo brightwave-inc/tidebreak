@@ -177,7 +177,7 @@ pub(super) async fn owner_repository_catalog(
         }
     }
 
-    loop {
+    for _ in 0..3 {
         let generation = runtime.delivery_cache().owner_cache_generation(&key);
         let results = stream::iter(runtime.list_repos(owner).await?)
             .map(|repo| async move {
@@ -209,6 +209,30 @@ pub(super) async fn owner_repository_catalog(
             return Ok(catalog);
         }
     }
+    let results = stream::iter(runtime.list_repos(owner).await?)
+        .map(|repo| async move {
+            let display_name = repo.display_name.clone();
+            repository_target_from_local(&repo)
+                .await
+                .map(|target| OwnerRepositoryEntry { repo, target })
+                .map_err(|message| CodeDeliverySourceError {
+                    repository: None,
+                    kind: "not_github".into(),
+                    message: format!("{display_name}: {message}"),
+                    retry_at: None,
+                })
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let mut catalog = OwnerRepositoryCatalog::default();
+    for result in results {
+        match result {
+            Ok(entry) => catalog.entries.push(entry),
+            Err(error) => catalog.errors.push(error),
+        }
+    }
+    Ok(catalog)
 }
 
 pub(super) async fn ensure_delivery_targets(

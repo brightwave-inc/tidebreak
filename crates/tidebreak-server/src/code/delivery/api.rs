@@ -95,6 +95,22 @@ pub(super) enum ServerDeliveryApi {
     },
 }
 
+impl ServerDeliveryApi {
+    async fn admit_host_read(
+        &self,
+        host: &str,
+    ) -> Result<crate::code::pr_fetch::GatePermit, String> {
+        let runtime = match self {
+            Self::Gh { runtime, .. } | Self::Rest { runtime, .. } => runtime,
+        };
+        runtime
+            .host_gate
+            .admit(host)
+            .await
+            .map_err(|remaining| format!("the host is parked for {}s", remaining.as_secs()))
+    }
+}
+
 #[async_trait::async_trait]
 impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
     fn can_mark_pull_request_ready(&self) -> bool {
@@ -102,6 +118,11 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
     }
 
     async fn get(&self, endpoint: &str) -> Result<Value, String> {
+        let host = match self {
+            Self::Gh { host, .. } => host.as_str(),
+            Self::Rest { .. } => "github.com",
+        };
+        let _permit = self.admit_host_read(host).await?;
         match self {
             Self::Gh {
                 observation, host, ..
@@ -125,6 +146,7 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
     }
 
     async fn repository(&self, target: &CodeGitHubRepositoryTarget) -> Result<Value, String> {
+        let _permit = self.admit_host_read(&target.host).await?;
         match self {
             Self::Gh {
                 observation, host, ..
@@ -156,6 +178,7 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
         checks_loaded: bool,
         author: Option<&str>,
     ) -> Result<Vec<Value>, String> {
+        let _permit = self.admit_host_read(&target.host).await?;
         match self {
             Self::Gh { observation, .. } => {
                 let binary = observation
@@ -202,6 +225,7 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
     }
 
     async fn deployments(&self, target: &CodeGitHubRepositoryTarget) -> Result<Value, String> {
+        let _permit = self.admit_host_read(&target.host).await?;
         match self {
             Self::Gh {
                 observation, host, ..
@@ -298,11 +322,56 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
         }
     }
 
+    async fn has_merge_queue(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        base_branch: &str,
+    ) -> bool {
+        match self {
+            Self::Gh { observation, runtime, .. } => crate::code::pr_fetch::read_branch_rules(
+                    &runtime.host_gate,
+                    crate::code::pr_fetch::FetchTransport::Gh {
+                        cwd: Path::new("."),
+                        binary: observation
+                            .binary
+                            .as_deref()
+                            .expect("authenticated gh has a binary"),
+                    },
+                    &target.host,
+                    &target.owner,
+                    &target.name,
+                    base_branch,
+                )
+                .await
+                .ok()
+                .is_some_and(|read| matches!(read, crate::code::pr_fetch::EndpointRead::Fresh { value, .. } if value.has_merge_queue)),
+            Self::Rest {
+                api_base,
+                credential,
+                runtime,
+            } => crate::code::pr_fetch::read_branch_rules(
+                    &runtime.host_gate,
+                    crate::code::pr_fetch::FetchTransport::Rest {
+                        api_base,
+                        credential,
+                    },
+                    &target.host,
+                    &target.owner,
+                    &target.name,
+                    base_branch,
+                )
+                .await
+                .ok()
+                .is_some_and(|read| matches!(read, crate::code::pr_fetch::EndpointRead::Fresh { value, .. } if value.has_merge_queue)),
+        }
+    }
+
     async fn merge_queue_membership(
         &self,
         target: &CodeGitHubRepositoryTarget,
         number: u64,
     ) -> Option<bool> {
+        let _permit = self.admit_host_read(&target.host).await.ok()?;
         match self {
             Self::Gh {
                 observation, host, ..
@@ -345,6 +414,7 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
         repository: &CodeGitHubRepositoryRef,
         number: u64,
     ) -> Result<Value, String> {
+        let _permit = self.admit_host_read(&target.host).await?;
         match self {
             Self::Gh { observation, .. } => {
                 let binary = observation

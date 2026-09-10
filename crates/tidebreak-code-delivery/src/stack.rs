@@ -210,3 +210,117 @@ impl StackParentIndex {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repository(owner: &str, name: &str) -> StackRepositoryIdentity {
+        StackRepositoryIdentity::new("github.com", owner, name).unwrap()
+    }
+
+    fn parent(
+        number: u64,
+        base: &StackRepositoryIdentity,
+        head: Option<&StackRepositoryIdentity>,
+        branch: Option<&str>,
+    ) -> StackParentCandidate {
+        StackParentCandidate {
+            pull_request: StackPullRequestIdentity {
+                base_repository: base.clone(),
+                number,
+            },
+            open: true,
+            head_repository: head.cloned(),
+            head_branch: branch.map(str::to_owned),
+        }
+    }
+
+    fn edge(base: &StackRepositoryIdentity, head: &StackRepositoryIdentity) -> StackParentEdge {
+        StackParentEdge::new(base.clone(), Some(head.clone()), "stack/base").unwrap()
+    }
+
+    #[test]
+    fn fork_and_base_repository_identity_select_the_only_exact_parent() {
+        let tools = repository("acme", "tools");
+        let web = repository("acme", "web");
+        let alice = repository("alice", "tools");
+        let bob = repository("bob", "tools");
+        let index = StackParentIndex::new([
+            parent(41, &tools, Some(&alice), Some("stack/base")),
+            parent(42, &tools, Some(&bob), Some("stack/base")),
+            parent(61, &web, Some(&web), Some("stack/base")),
+        ]);
+        assert_eq!(
+            index.resolve(&edge(&tools, &bob), None),
+            StackParentResolution::Resolved(StackPullRequestIdentity {
+                base_repository: tools,
+                number: 42
+            })
+        );
+        assert_eq!(
+            index.resolve(&edge(&web, &web), None),
+            StackParentResolution::Resolved(StackPullRequestIdentity {
+                base_repository: web,
+                number: 61
+            })
+        );
+    }
+
+    #[test]
+    fn missing_incomplete_and_ambiguous_parents_stay_explicit() {
+        let base = repository("acme", "tools");
+        let missing =
+            StackParentIndex::new([parent(71, &base, Some(&base), Some("stack/renamed"))]);
+        assert!(matches!(
+            missing.resolve(&edge(&base, &base), None),
+            StackParentResolution::Unresolved {
+                reason: StackParentUnresolvedReason::MissingParent,
+                ..
+            }
+        ));
+        let incomplete = StackParentIndex::new([parent(72, &base, None, Some("stack/base"))]);
+        assert!(matches!(
+            incomplete.resolve(&edge(&base, &base), None),
+            StackParentResolution::Unresolved {
+                reason: StackParentUnresolvedReason::IncompleteHostIdentity,
+                ..
+            }
+        ));
+        let ambiguous = StackParentIndex::new([
+            parent(82, &base, Some(&base), Some("stack/base")),
+            parent(81, &base, Some(&base), Some("stack/base")),
+        ]);
+        assert!(
+            matches!(ambiguous.resolve(&edge(&base, &base), None), StackParentResolution::Unresolved { reason: StackParentUnresolvedReason::Ambiguous { candidates }, .. } if candidates.iter().map(|candidate| candidate.number).collect::<Vec<_>>() == vec![81, 82])
+        );
+    }
+
+    #[test]
+    fn closed_heads_self_edges_and_incomplete_edges_do_not_resolve() {
+        let base = repository("acme", "tools");
+        let mut closed = parent(91, &base, Some(&base), Some("stack/base"));
+        closed.open = false;
+        let child = StackPullRequestIdentity {
+            base_repository: base.clone(),
+            number: 92,
+        };
+        let index =
+            StackParentIndex::new([closed, parent(92, &base, Some(&base), Some("stack/base"))]);
+        assert!(matches!(
+            index.resolve(&edge(&base, &base), Some(&child)),
+            StackParentResolution::Unresolved {
+                reason: StackParentUnresolvedReason::MissingParent,
+                ..
+            }
+        ));
+        let incomplete = StackParentEdge::new(base, None, "stack/base").unwrap();
+        assert!(matches!(
+            index.resolve(&incomplete, None),
+            StackParentResolution::Unresolved {
+                reason: StackParentUnresolvedReason::IncompleteHostIdentity,
+                ..
+            }
+        ));
+    }
+}
