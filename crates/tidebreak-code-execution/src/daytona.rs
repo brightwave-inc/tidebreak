@@ -275,7 +275,7 @@ impl DaytonaExecutionProvider {
     ///
     /// An escape hatch, not the normal path: absent an override the provider
     /// registers and uses the official documents snapshot itself (see
-    /// [`Self::documents_snapshot_name`]). An override disables that entirely —
+    /// [`DOCUMENTS_SNAPSHOT`]). An override disables that entirely —
     /// no auto-registration and no fallback, so a snapshot name that does not
     /// exist in the account stays a visible sandbox-creation error rather than
     /// quietly becoming Daytona's default.
@@ -374,17 +374,6 @@ impl DaytonaExecutionProvider {
             .ok_or_else(|| {
                 ExecError::Unavailable("Daytona sandbox disappeared while it was starting".into())
             })
-    }
-
-    /// The name of the snapshot the official Tidebreak documents image is
-    /// registered under in the caller's own Daytona organization.
-    ///
-    /// Daytona has no cross-organization public snapshots, so a key that has
-    /// never seen Tidebreak has nothing to point at. The provider closes that
-    /// gap itself rather than asking the user to register an image by hand.
-    #[must_use]
-    pub fn documents_snapshot_name() -> &'static str {
-        DOCUMENTS_SNAPSHOT
     }
 
     /// Decide which snapshot the next sandbox is created from.

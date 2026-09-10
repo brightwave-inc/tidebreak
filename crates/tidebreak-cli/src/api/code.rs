@@ -390,6 +390,14 @@ pub fn supported_caps_summary(caps: &HarnessCaps) -> String {
         ("reasoning", caps.reasoning_levels),
         ("file_events", caps.native_file_change_events),
         ("interrupt", caps.native_interrupt),
+        ("image_input", caps.image_input),
+        ("slash_commands", caps.slash_commands),
+        ("durable_parks", caps.durable_parks),
+        ("user_questions", caps.user_questions),
+        ("standing_grants", caps.standing_grants),
+        ("mid_turn_resume", caps.mid_turn_resume),
+        ("transcript", caps.transcript),
+        ("memory_loopback", caps.memory_loopback),
     ];
     let supported: Vec<&str> = flags
         .into_iter()

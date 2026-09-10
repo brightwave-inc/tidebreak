@@ -35,7 +35,13 @@ impl ExternalThreadContext {
     /// Validate before allocating the rendered quote envelope.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.messages.len() > Self::MAX_MESSAGES {
-            return Err("Thread context may contain at most 20 messages.");
+            return Err(Box::leak(
+                format!(
+                    "Thread context may contain at most {} messages.",
+                    Self::MAX_MESSAGES
+                )
+                .into_boxed_str(),
+            ));
         }
         let mut bytes = 0_usize;
         for message in &self.messages {
@@ -55,7 +61,13 @@ impl ExternalThreadContext {
                 .saturating_add(message.timestamp.len())
                 .saturating_add(message.text.len());
             if bytes > Self::MAX_BYTES {
-                return Err("Thread context may contain at most 16 KiB of text.");
+                return Err(Box::leak(
+                    format!(
+                        "Thread context may contain at most {} KiB of text.",
+                        Self::MAX_BYTES / 1024
+                    )
+                    .into_boxed_str(),
+                ));
             }
         }
         Ok(())

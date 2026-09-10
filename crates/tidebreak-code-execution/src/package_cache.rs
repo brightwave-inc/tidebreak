@@ -638,13 +638,6 @@ impl SharedPackageCache {
         })
     }
 
-    /// Derive the wheel cache key for one supported local interpreter.
-    pub async fn runtime_key(python: &Path) -> Option<String> {
-        Self::python_runtime(python)
-            .await
-            .map(|runtime| runtime.key)
-    }
-
     /// Host-side acquisition: download the exactly pinned requirements (and
     /// their transitive closure) as wheels with the host's own pip, then
     /// verify and promote them.
