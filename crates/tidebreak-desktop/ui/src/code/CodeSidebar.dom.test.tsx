@@ -205,11 +205,11 @@ describe("CodeSidebar", () => {
       }),
     );
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/c/internal-1"),
+      expect(router.state.location.pathname).toBe("/code/s/internal-1"),
     );
   });
 
-  it("does not link shared internal sessions to the owner-only chat route", async () => {
+  it("hides conversations that the server does not mark as openable", async () => {
     useCodeUpdatesStore.setState({
       conversationsWithoutWorkspace: {
         shared: {

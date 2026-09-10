@@ -1676,6 +1676,10 @@ export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line
  */
 export type CodeWorkspaceSnapshot = {
 /**
+ * True when the caller reads this workspace through a shared session.
+ */
+read_only?: boolean,
+/**
  * Present only on creation when the base refresh could not complete.
  */
 base_refresh_warning?: string, id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
@@ -4798,7 +4802,7 @@ export type SessionDigest = {
  */
 workspace: WorkspaceId | null,
 /**
- * Whether this viewer can open the owner-scoped chat route.
+ * Whether this viewer can open the conversation through the authorized session route.
  */
 can_open_chat?: boolean, session: SessionId, kind: SessionKind,
 /**
@@ -4882,7 +4886,11 @@ export type SessionLifecycle = "created" | "idle" | "running" | "fenced" | "ende
 /**
  * One durable conversation with an external agent engine.
  */
-export type SessionSnapshot = { id: SessionId,
+export type SessionSnapshot = {
+/**
+ * The authenticated caller's access. Event frames omit caller-specific fields.
+ */
+access?: SessionAccessLevel, is_owner?: boolean, id: SessionId,
 /**
  * `service` when a deployment service owns the session; absent means person.
  */

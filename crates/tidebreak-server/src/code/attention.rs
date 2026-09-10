@@ -368,9 +368,7 @@ pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
         }
     };
     for reader in digest_readers(db, bus, session).await {
-        let mut visible = digest.clone();
-        visible.can_open_chat &= reader == session.owner;
-        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(visible)));
+        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(digest.clone())));
     }
 }
 
@@ -449,9 +447,7 @@ pub async fn list_accessible_digests(
     let mut out = Vec::new();
     for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
         if session.lifecycle != SessionLifecycle::Ended {
-            let mut digest = build_digest(db, &session).await?;
-            digest.can_open_chat &= principal == &session.owner;
-            out.push(digest);
+            out.push(build_digest(db, &session).await?);
         }
     }
     Ok(out)
@@ -787,17 +783,24 @@ mod tests {
         assert!(list_accessible_digests(&db, &session.owner).await.unwrap()[0].can_open_chat);
         let shared = list_accessible_digests(&db, &reader).await.unwrap();
         assert_eq!(shared.len(), 1);
-        assert!(!shared[0].can_open_chat);
+        assert!(shared[0].can_open_chat);
+        let outsider = OwnerId::new("outsider").unwrap();
+        assert!(list_accessible_digests(&db, &outsider)
+            .await
+            .unwrap()
+            .is_empty());
         let bus = CodeEventBus::default();
         let mut owner_updates = bus.subscribe_updates(&session.owner);
         let mut reader_updates = bus.subscribe_updates(&reader);
+        let mut outsider_updates = bus.subscribe_updates(&outsider);
         emit_digest(&db, &bus, &session).await;
         assert!(
             matches!(owner_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if digest.can_open_chat)
         );
         assert!(
-            matches!(reader_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if !digest.can_open_chat)
+            matches!(reader_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if digest.can_open_chat)
         );
+        assert!(outsider_updates.try_recv().is_err());
         session.visibility = tidebreak_core::SessionVisibility::Deployment;
         tidebreak_core::db::code::set_session_visibility(
             &db,
@@ -810,11 +813,11 @@ mod tests {
         let public_reader = OwnerId::new("public-reader").unwrap();
         let public = list_accessible_digests(&db, &public_reader).await.unwrap();
         assert_eq!(public.len(), 1);
-        assert!(!public[0].can_open_chat);
+        assert!(public[0].can_open_chat);
         let mut public_updates = bus.subscribe_updates(&public_reader);
         emit_digest(&db, &bus, &session).await;
         assert!(
-            matches!(public_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if !digest.can_open_chat)
+            matches!(public_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if digest.can_open_chat)
         );
 
         let mut foreign = session.clone();

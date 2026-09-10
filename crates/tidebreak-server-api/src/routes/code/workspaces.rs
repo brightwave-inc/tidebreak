@@ -117,9 +117,11 @@ pub async fn get_workspace(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    Ok(Json(CodeWorkspaceSnapshot::from(
-        code.get_workspace(id).await?,
-    )))
+    let workspace = code.read_workspace(id).await?;
+    let read_only = workspace.owner != *code.owner();
+    let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
+    snapshot.read_only = Some(read_only);
+    Ok(Json(snapshot))
 }
 
 pub async fn patch_workspace(

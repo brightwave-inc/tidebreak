@@ -13,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { AppShell } from "./AppShell";
 import { AppsPage } from "./apps/AppsPage";
 import { ChatRoute } from "./ChatRoute";
+import { LegacyChatRoute } from "./LegacyChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
@@ -42,6 +43,10 @@ const CodeAnalyticsPage = lazyRouteComponent(
 const CodeArchivePage = lazyRouteComponent(
   () => import("./code/CodeArchivePage"),
   "CodeArchivePage",
+);
+const CodeSessionPage = lazyRouteComponent(
+  () => import("./code/CodeSessionPage"),
+  "CodeSessionPage",
 );
 const CodeWorkspacePage = lazyRouteComponent(
   () => import("./code/CodeWorkspacePage"),
@@ -159,7 +164,7 @@ const chatRoute = createRoute({
  */
 function ChatRouteComponent() {
   const { chatId } = chatRoute.useParams();
-  return <ChatRoute key={chatId} chatId={chatId} />;
+  return <LegacyChatRoute key={chatId} chatId={chatId} />;
 }
 
 /**
@@ -226,6 +231,21 @@ const codeRoute = createRoute({
     </CodeRouteSuspense>
   ),
 });
+
+const codeSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/s/$sessionId",
+  component: CodeSessionRouteComponent,
+});
+
+function CodeSessionRouteComponent() {
+  const { sessionId } = codeSessionRoute.useParams();
+  return (
+    <CodeRouteSuspense>
+      <CodeSessionPage key={sessionId} sessionId={sessionId} />
+    </CodeRouteSuspense>
+  );
+}
 
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -406,6 +426,7 @@ export const routeTree = rootRoute.addChildren([
   projectRoute,
   projectChatRoute,
   codeRoute,
+  codeSessionRoute,
   codeWorkspaceRoute,
   codeAnalyticsRoute,
   codeDeliveryPullRequestsRoute,

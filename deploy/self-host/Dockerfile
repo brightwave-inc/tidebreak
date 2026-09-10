@@ -26,7 +26,9 @@
 # tab and the desktop app run one renderer against one API. Node 22 and pnpm
 # 10 match the desktop UI lane in .github/workflows/ci.yml. Digest-pinned
 # like the stages below: this is node:22-bookworm as of 2026-09-02.
-FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS renderer
+FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS node-runtime
+
+FROM node-runtime AS renderer
 WORKDIR /src/crates/tidebreak-desktop/ui
 
 # Manifests first, so the dependency layer survives a source-only change.
@@ -288,17 +290,18 @@ RUN set -eu; \
 # The supervised workload reuses the server's verified tools and runs behind
 # Gateway's sidecar. It carries no server, renderer, or authentication store.
 FROM runtime-base AS supervised-agent
+# The pinned harnesses require Node 22. Reuse the renderer's pinned runtime
+# without changing the server's separately verified managed Node installation.
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY --from=build /out/tidebreak-supervised-agent /usr/local/bin/tidebreak-supervised-agent
 COPY crates/tidebreak-harness/src/pin.rs /tmp/harness-pins.rs
 COPY deploy/supervised-agent/install-harness.mjs /tmp/install-harness.mjs
 COPY deploy/supervised-agent/entrypoint.sh /usr/local/bin/sandbox-agent
 RUN set -eu; \
-    node_root="$(find /opt/tidebreak/node -mindepth 1 -maxdepth 1 -type d)"; \
-    test -x "$node_root/bin/node"; \
-    for executable in node npm npx; do \
-        ln -s "$node_root/bin/$executable" "/usr/local/bin/$executable"; \
-    done; \
-    "$node_root/bin/node" /tmp/install-harness.mjs /tmp/harness-pins.rs "$node_root/bin/npm"; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    node /tmp/install-harness.mjs /tmp/harness-pins.rs /usr/local/bin/npm; \
     rm -f /tmp/harness-pins.rs /tmp/install-harness.mjs; \
     chmod 0755 /usr/local/bin/sandbox-agent
 ENV HOME=/workspace \

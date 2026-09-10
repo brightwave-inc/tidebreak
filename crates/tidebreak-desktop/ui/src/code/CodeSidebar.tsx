@@ -300,8 +300,8 @@ export function CodeSidebar() {
                 digest={digest}
                 onOpen={(sessionId) =>
                   void navigate({
-                    to: "/c/$chatId",
-                    params: { chatId: sessionId },
+                    to: "/code/s/$sessionId",
+                    params: { sessionId },
                   })
                 }
               />

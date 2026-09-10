@@ -170,8 +170,8 @@ pub enum HarnessKind {
     /// Grok CLI.
     Grok,
     /// Tidebreak's own agent loop, run in-process behind the same adapter
-    /// contract as the external engines (decision 0048 step 5). A session
-    /// with no workspace selects it.
+    /// contract as the external engines (decision 0048 step 5). It is the
+    /// default for conversations that bind no workspace.
     Internal,
 }
 

@@ -18,28 +18,12 @@ use serde::{Deserialize, Serialize};
 /// rather than silently drifting.
 pub const SUPERVISOR_POLL_SCHEMA_VERSION: u32 = 1;
 
-/// The installed engine this agent registers under the environment's
-/// admitted identity (gateway decision 118).
-///
-/// Sent on every poll while the run has one; the environment echoes exactly
-/// what it accepted, and inference stays unavailable until it does.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EmbeddedEngineRegistration {
-    /// The Tidebreak session UUID the engine runs for.
-    pub engine_session_id: String,
-    /// Engine token the environment admitted (`claude_code`, `codex`).
-    pub engine: String,
-    /// Version the installed binary reported.
-    pub engine_version: String,
-}
-
 /// One turn of the poll loop, as the agent reports it.
 #[derive(Clone, Debug, Serialize)]
 pub struct SupervisorPoll {
     /// Always [`SUPERVISOR_POLL_SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// The installed engine to register, while the run has an admitted
-    /// identity.
+    /// Probed identity for a managed supervised engine, repeated on every poll.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedded_engine: Option<EmbeddedEngineRegistration>,
     /// Whether the engine is idle rather than mid-turn. Process state, not
@@ -69,6 +53,22 @@ impl SupervisorPoll {
             events: Vec::new(),
         }
     }
+}
+
+/// Identity Gateway injects from the authenticated spawn request.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedEngine {
+    pub engine_session_id: tidebreak_core::SessionId,
+    pub engine: tidebreak_core::HarnessKind,
+}
+
+/// The installed version the agent registers before using the sandbox.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbeddedEngineRegistration {
+    pub engine_session_id: tidebreak_core::SessionId,
+    pub engine: tidebreak_core::HarnessKind,
+    pub engine_version: String,
 }
 
 /// One event the agent reports about itself.
@@ -102,8 +102,7 @@ impl SupervisorEvent {
 /// on these promptly is tidiness, not correctness.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SupervisorInstructions {
-    /// The engine registration the environment accepted under the current
-    /// execution lease, echoed exactly.
+    /// Gateway must echo the exact registered identity on a managed poll.
     #[serde(default)]
     pub embedded_engine: Option<EmbeddedEngineRegistration>,
     /// Whether the agent should stop the engine and exit.

@@ -2891,7 +2891,30 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     }
     assert_eq!((committed, existing), (1, 1));
     assert_eq!(terminal_events[0], terminal_events[1]);
-    assert_eq!(terminal_events[0].seq, 1);
+    assert_eq!(terminal_events[0].seq, 2);
+    let journal = tidebreak_core::db::code::list_events(
+        &store,
+        &tidebreak_core::OwnerId::local(),
+        next_chat.id,
+        0,
+        100,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        journal.events.len(),
+        2,
+        "completion retries preserve one answer"
+    );
+    assert!(matches!(
+        &journal.events[0].event,
+        tidebreak_core::Event::AssistantMessage { text, parent_call_id: None }
+            if text == &output.content
+    ));
+    assert!(matches!(
+        &journal.events[1].event,
+        tidebreak_core::Event::TurnCompleted { .. }
+    ));
     assert_eq!(store.list_messages(next_chat.id).await.unwrap().len(), 2);
 
     let failure_chat = sample_chat();

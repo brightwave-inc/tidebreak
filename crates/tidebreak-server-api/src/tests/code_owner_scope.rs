@@ -643,6 +643,35 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
     )
     .await;
 
+    // Submit overrides persist settings, so contribution alone cannot supply them.
+    let before_settings: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session}"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for override_body in [
+        serde_json::json!({"message": "change model", "model": "other-model"}),
+        serde_json::json!({"message": "change effort", "reasoning_effort": "high"}),
+        serde_json::json!({"message": "clear effort", "reasoning_effort": null}),
+    ] {
+        assert_eq!(
+            post_status(
+                &client,
+                addr,
+                BOB_TOKEN,
+                &format!("/sessions/{session}/turns"),
+                override_body
+            )
+            .await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a contributor cannot override session settings in a turn"
+        );
+    }
+
     // A contributor submits.
     let submitted = client
         .post(format!("http://{addr}/sessions/{session}/turns"))
@@ -662,6 +691,21 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
         turn["actor"]["principal"].as_str(),
         Some("user:bob"),
         "the submitted turn names its actor"
+    );
+
+    let after_settings: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session}"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_settings["model"], before_settings["model"]);
+    assert_eq!(
+        after_settings["reasoning_effort"],
+        before_settings["reasoning_effort"]
     );
 
     // A contributor publishes an image and attaches it. The publication row
@@ -1023,4 +1067,145 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
         Some("local"),
         "a desktop turn names the principal that sent it"
     );
+}
+
+/// A shared task reveals its workspace, never sibling sessions or repository settings.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (repo_body, workspace) = register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
+    let sessions = create_sibling_sessions(&client, addr, ALICE_TOKEN, &workspace, 2).await;
+    let private_turn = client
+        .post(format!("http://{addr}/sessions/{}/turns", sessions[1]))
+        .bearer_auth(ALICE_TOKEN)
+        .json(&serde_json::json!({"message": "private sibling work"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(private_turn.status(), reqwest::StatusCode::ACCEPTED);
+    std::fs::write(
+        std::path::Path::new(workspace["worktree_path"].as_str().unwrap())
+            .join("private-sibling.txt"),
+        "private sibling file",
+    )
+    .unwrap();
+    let workspace_id = workspace["id"].as_str().unwrap();
+    let session = &sessions[0];
+    let path = format!("/code/workspaces/{workspace_id}");
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &path).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+    let shared: serde_json::Value = client
+        .get(format!("http://{addr}{path}"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(shared["read_only"], true);
+    let listed: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}{path}/sessions"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], *session);
+    assert_eq!(listed[0]["access"], "view");
+    assert_eq!(listed[0]["is_owner"], false);
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{}", sessions[1])
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/code/repos/{}", repo_body["id"].as_str().unwrap())
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("{path}/tree")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client
+            .patch(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .json(&serde_json::json!({"title": "not yours"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("{path}/sessions"),
+            serde_json::json!({"harness": "codex", "permission_mode": "ask"})
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    // No turn selector must not resolve an ungranted sibling's latest checkpoint.
+    for suffix in [
+        "/files",
+        "/diff",
+        "/blob?path=README.md",
+        "/file?path=README.md",
+        "/search?query=private",
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    let revoke = client
+        .delete(format!(
+            "http://{addr}/sessions/{session}/access/principal:user:bob"
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(revoke.status().is_success(), "{}", revoke.status());
+    for suffix in ["", "/sessions", "/tree"] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
 }

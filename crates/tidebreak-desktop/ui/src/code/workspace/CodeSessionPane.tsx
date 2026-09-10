@@ -83,7 +83,7 @@ export function CodeSessionPane({
   composerOverride,
 }: {
   session: CodeSessionSnapshot;
-  workspaceId: string;
+  workspaceId?: string;
   client: ApiClient;
   catalogModels: ModelInfo[];
   defaultModelKey: string | null;
@@ -106,6 +106,8 @@ export function CodeSessionPane({
    */
   composerOverride?: ReactNode;
 }) {
+  const canContribute = session.access !== "view";
+  const canManage = session.is_owner !== false;
   const follow = useTranscriptFollow();
   const store = useRegisteredCodeSession(session.id, client);
   const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
@@ -447,7 +449,10 @@ export function CodeSessionPane({
     message: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
   ) {
-    const pendingReasoningEffort = pendingReasoningEffortRef.current;
+    const pendingReasoningEffort = canManage
+      ? pendingReasoningEffortRef.current
+      : null;
+    const requestedModel = canManage ? (model ?? undefined) : undefined;
     const recoveryAtSend = firstTurnRecovery;
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
@@ -462,14 +467,14 @@ export function CodeSessionPane({
         ? client.submitCodeTurn(
             session.id,
             message,
-            model ?? undefined,
+            requestedModel,
             attachments,
             pendingReasoningEffort.value,
           )
         : client.submitCodeTurn(
             session.id,
             message,
-            model ?? undefined,
+            requestedModel,
             attachments,
           ),
     ).then((outcome) => {
@@ -578,7 +583,7 @@ export function CodeSessionPane({
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
-          onDecide={decideApproval}
+          onDecide={canContribute ? decideApproval : undefined}
           recap={sessionDigest?.recap}
           emptyState={
             subagentCallId
@@ -602,119 +607,134 @@ export function CodeSessionPane({
         </button>
       </div>
       {composerOverride}
-      {lifecycle !== "ended" && !composerOverride && !subagentCallId && (
-        <>
-          <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
-            <QueueTray
-              queue={sessionQueue}
-              active={turnRunning}
-              onStop={interrupt}
-            />
-          </div>
-          <CodeComposer
-            running={turnRunning}
-            disabled={disabled || firstTurnRecovery?.status === "sending"}
-            permissionMode={settings.permissionMode}
-            availableModes={availableModes}
-            reasoningEffort={settings.reasoningEffort}
-            fastMode={settings.fastMode}
-            settingsPending={settingsPending}
-            engineEfforts={engineEfforts}
-            harness={session.harness_kind}
-            model={model ?? undefined}
-            modelOptions={modelOptions}
-            modelLoading={
-              requiresHarnessModelIds(session.harness_kind) &&
-              cachedModels === undefined
-            }
-            promptScope={workspaceId}
-            sessionId={session.id}
-            history={composerHistory}
-            slashCommands={doctorEntry?.commands}
-            searchPaths={(query) =>
-              client
-                .listCodeWorkspaceTree(workspaceId, { query })
-                .then((tree) => tree.paths)
-            }
-            workspaceFiles={
-              firstTurnRecovery?.forkSource
-                ? {
-                    items: [forkTranscriptFile(firstTurnRecovery.forkSource)],
-                    onRemove: () =>
-                      updateFirstTurnRecovery(
-                        client,
-                        session.id,
-                        firstTurnRecovery.id,
-                        (current) => ({ ...current, forkSource: null }),
-                      ),
-                  }
-                : undefined
-            }
-            recovery={
-              firstTurnRecovery
-                ? {
-                    id: firstTurnRecovery.id,
-                    draft: firstTurnRecovery.draft,
-                  }
-                : undefined
-            }
-            onModelChange={setModel}
-            onModeChange={
-              doctorEntry?.relaunch_composes_permission_mode === false &&
-              session.harness_resume_ref
-                ? undefined
-                : changePermissionMode
-            }
-            onEffortChange={
-              doctorEntry?.caps.reasoning_levels === "unsupported"
-                ? undefined
-                : changeReasoningEffort
-            }
-            onFastModeChange={changeFastMode}
-            contextUsage={
-              lastUsage
-                ? {
-                    // The engine's own reading of the prompt still resident
-                    // after its last model call. The four counts below are the
-                    // turn's spend across every call, which on a long turn runs
-                    // to several times this.
-                    contextTokens: lastUsage.context_tokens,
-                    spend: {
-                      input: lastUsage.input_tokens,
-                      output: lastUsage.output_tokens,
-                      cacheRead: lastUsage.cache_read_input_tokens,
-                      cacheWrite: lastUsage.cache_creation_input_tokens,
-                    },
-                    contextWindow: catalogModels.find(
-                      (entry) => entry.id === model || entry.key === model,
-                    )?.context_window,
-                    modelName:
-                      modelOptions.find((option) => option.id === model)
-                        ?.label ??
-                      model ??
-                      undefined,
-                  }
-                : null
-            }
-            onSend={send}
-            onSteer={steeringSupported ? steer : undefined}
-            onInterrupt={interrupt}
-          />
-          {firstTurnRecovery && (
-            <p
-              role={firstTurnRecovery.status === "failed" ? "alert" : "status"}
-              className={cn(
-                "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
-                firstTurnRecovery.status === "failed"
-                  ? "text-critical-foreground"
-                  : "text-muted-foreground",
-              )}
-            >
-              {firstTurnRecovery.message}
-            </p>
-          )}
-        </>
+      {!canContribute && !composerOverride && (
+        <p className="text-muted-foreground border-t border-border px-4 py-3 text-sm">
+          You have view access to this conversation.
+        </p>
       )}
+      {canContribute &&
+        lifecycle !== "ended" &&
+        !composerOverride &&
+        !subagentCallId && (
+          <>
+            <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
+              <QueueTray
+                queue={sessionQueue}
+                active={turnRunning}
+                onStop={interrupt}
+              />
+            </div>
+            <CodeComposer
+              running={turnRunning}
+              disabled={disabled || firstTurnRecovery?.status === "sending"}
+              permissionMode={settings.permissionMode}
+              availableModes={availableModes}
+              reasoningEffort={settings.reasoningEffort}
+              fastMode={settings.fastMode}
+              settingsPending={settingsPending}
+              engineEfforts={engineEfforts}
+              harness={session.harness_kind}
+              model={model ?? undefined}
+              modelOptions={modelOptions}
+              modelLoading={
+                requiresHarnessModelIds(session.harness_kind) &&
+                cachedModels === undefined
+              }
+              promptScope={workspaceId ?? session.id}
+              sessionId={session.id}
+              history={composerHistory}
+              slashCommands={doctorEntry?.commands}
+              searchPaths={
+                workspaceId
+                  ? (query) =>
+                      client
+                        .listCodeWorkspaceTree(workspaceId, { query })
+                        .then((tree) => tree.paths)
+                  : undefined
+              }
+              workspaceFiles={
+                firstTurnRecovery?.forkSource
+                  ? {
+                      items: [forkTranscriptFile(firstTurnRecovery.forkSource)],
+                      onRemove: () =>
+                        updateFirstTurnRecovery(
+                          client,
+                          session.id,
+                          firstTurnRecovery.id,
+                          (current) => ({ ...current, forkSource: null }),
+                        ),
+                    }
+                  : undefined
+              }
+              recovery={
+                firstTurnRecovery
+                  ? {
+                      id: firstTurnRecovery.id,
+                      draft: firstTurnRecovery.draft,
+                    }
+                  : undefined
+              }
+              onModelChange={canManage ? setModel : undefined}
+              onModeChange={
+                !canManage ||
+                (doctorEntry?.relaunch_composes_permission_mode === false &&
+                  session.harness_resume_ref)
+                  ? undefined
+                  : changePermissionMode
+              }
+              onEffortChange={
+                !canManage ||
+                doctorEntry?.caps.reasoning_levels === "unsupported"
+                  ? undefined
+                  : changeReasoningEffort
+              }
+              onFastModeChange={canManage ? changeFastMode : undefined}
+              contextUsage={
+                lastUsage
+                  ? {
+                      // The engine's own reading of the prompt still resident
+                      // after its last model call. The four counts below are the
+                      // turn's spend across every call, which on a long turn runs
+                      // to several times this.
+                      contextTokens: lastUsage.context_tokens,
+                      spend: {
+                        input: lastUsage.input_tokens,
+                        output: lastUsage.output_tokens,
+                        cacheRead: lastUsage.cache_read_input_tokens,
+                        cacheWrite: lastUsage.cache_creation_input_tokens,
+                      },
+                      contextWindow: catalogModels.find(
+                        (entry) => entry.id === model || entry.key === model,
+                      )?.context_window,
+                      modelName:
+                        modelOptions.find((option) => option.id === model)
+                          ?.label ??
+                        model ??
+                        undefined,
+                    }
+                  : null
+              }
+              onSend={send}
+              onSteer={steeringSupported ? steer : undefined}
+              onInterrupt={interrupt}
+            />
+            {firstTurnRecovery && (
+              <p
+                role={
+                  firstTurnRecovery.status === "failed" ? "alert" : "status"
+                }
+                className={cn(
+                  "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
+                  firstTurnRecovery.status === "failed"
+                    ? "text-critical-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                {firstTurnRecovery.message}
+              </p>
+            )}
+          </>
+        )}
     </div>
   );
 }

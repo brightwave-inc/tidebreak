@@ -11,10 +11,13 @@ if [ "$MODEL_GATEWAY_SANDBOX_PLACEHOLDER_TOKEN" != mg-sandbox-placeholder ]; the
     echo "Gateway's public workload placeholder is required." >&2
     exit 2
 fi
-if [ "${TIDEBREAK_AGENT_ENGINE:-claude_code}" != claude_code ]; then
-    echo "This image supports the pinned Claude Code engine." >&2
-    exit 2
-fi
+case "${TIDEBREAK_AGENT_ENGINE:-claude_code}" in
+    claude_code|codex) ;;
+    *)
+        echo "This image supports the pinned Claude Code and Codex engines." >&2
+        exit 2
+        ;;
+esac
 if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" != "$MODEL_GATEWAY_SANDBOX_PLACEHOLDER_TOKEN" ]; then
     echo "The GitHub CLI must use Gateway's public workload placeholder." >&2
     exit 2

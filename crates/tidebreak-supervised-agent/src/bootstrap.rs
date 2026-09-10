@@ -1,4 +1,4 @@
-//! Everything the pod does before the first poll.
+//! Prepare the workspace after any required managed-engine registration.
 //!
 //! The agent is the pod's only command, so the setup a hosted runtime would
 //! do around it falls to the agent itself: prepare outbound trust, clone the

@@ -48,6 +48,12 @@ is a per-session default.
   `contribute` or ownership. Reap, permission mode, model, settings,
   delete, and access management stay with the owner, or an admin where the
   route already admits one.
+- Shared workspace reads expose its metadata and only the sessions the caller
+  can read. Repository settings, live files, diffs, terminals, and workspace
+  mutations remain owner-only. A Slack link uses `/code/s/<session>`; the UI
+  resolves that session before opening `/code/w/<workspace>?task=<session>`.
+  A shared workspace renders the authorized transcript without mounting owner
+  controls. A session without a workspace opens its transcript directly.
 - The updates channel and the session event socket fan out to every
   granted reader and sever a reader's stream the moment their row is
   revoked or their grant is fenced.

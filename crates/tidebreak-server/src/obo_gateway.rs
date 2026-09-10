@@ -34,6 +34,7 @@
 //!   [`crate::providers::collect_routes`].
 
 pub mod external;
+pub(crate) mod harness;
 pub mod static_lender;
 
 pub use static_lender::StaticGitCredentialLender;
@@ -178,6 +179,7 @@ struct UserSlot {
     subject: std::sync::Mutex<Arc<str>>,
     token: tokio::sync::Mutex<Option<CachedToken>>,
     engine_tokens: tokio::sync::Mutex<HashMap<(SessionId, EmbeddedEngine), CachedToken>>,
+    harness_tokens: std::sync::Mutex<harness::HarnessTokenSlots>,
     catalog: tokio::sync::Mutex<Option<CachedCatalog>>,
     git_forge: tokio::sync::Mutex<HashMap<GitForgeAttributionRequest, CachedGitForge>>,
 }
@@ -520,6 +522,7 @@ impl OboGateway {
                         subject: std::sync::Mutex::new(bearer),
                         token: tokio::sync::Mutex::new(None),
                         engine_tokens: tokio::sync::Mutex::new(HashMap::new()),
+                        harness_tokens: std::sync::Mutex::new(HashMap::new()),
                         catalog: tokio::sync::Mutex::new(None),
                         git_forge: tokio::sync::Mutex::new(HashMap::new()),
                     }),
@@ -677,6 +680,34 @@ impl OboGateway {
             .await
     }
 
+    async fn exchange_with_harness(
+        &self,
+        subject: &str,
+        audience: &str,
+        identity: Option<&harness::HarnessIdentity>,
+    ) -> Result<CachedToken> {
+        match identity {
+            Some(identity) => {
+                if audience != INFERENCE_AUDIENCE {
+                    return Err(AgentError::config(
+                        "a harness identity only authorizes inference",
+                    ));
+                }
+                let engine = EmbeddedEngine {
+                    kind: identity.kind,
+                    version: identity.version.clone(),
+                };
+                self.exchange_with(
+                    subject,
+                    audience,
+                    ExchangeBinding::Engine(identity.session, &engine),
+                )
+                .await
+            }
+            None => self.exchange(subject, audience).await,
+        }
+    }
+
     /// The exchange, optionally asserting this machine's add-on identity or
     /// the installed engine a session runs (gateway decision 118).
     ///
@@ -693,6 +724,11 @@ impl OboGateway {
         audience: &str,
         binding: ExchangeBinding<'_>,
     ) -> Result<CachedToken> {
+        if matches!(binding, ExchangeBinding::Host) && audience != "runtime:tidebreak" {
+            return Err(AgentError::config(
+                "managed engine registration requires the tidebreak runtime endpoint",
+            ));
+        }
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", TOKEN_EXCHANGE_GRANT),
             ("subject_token", subject),
@@ -1466,6 +1502,11 @@ pub struct RuntimeTokens {
 }
 
 impl RuntimeTokens {
+    /// Opt in only when the configured supervised image supports registration.
+    pub fn with_embedded_engine_registration(self: Arc<Self>, enabled: bool) -> Arc<Self> {
+        self.authenticating_host(enabled)
+    }
+
     /// Resolve external sessions through their durable consent on every call.
     pub fn with_external_delegations(
         self: Arc<Self>,

@@ -195,6 +195,10 @@ impl From<CodeRepo> for CodeRepoSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceSnapshot {
+    /// True when the caller reads this workspace through a shared session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub read_only: Option<bool>,
     /// Present only on creation when the base refresh could not complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -230,6 +234,7 @@ pub struct CodeWorkspaceSnapshot {
 impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
     fn from(workspace: CodeWorkspace) -> Self {
         Self {
+            read_only: None,
             base_refresh_warning: None,
             id: workspace.id,
             repo_id: workspace.repo_id,
@@ -265,6 +270,13 @@ pub struct SessionExternalOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    /// The authenticated caller's access. Event frames omit caller-specific fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub access: Option<tidebreak_core::SessionAccessLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub is_owner: Option<bool>,
     pub id: tidebreak_core::SessionId,
     /// `service` when a deployment service owns the session; absent means person.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,6 +352,8 @@ impl From<Session> for SessionSnapshot {
     fn from(session: Session) -> Self {
         let acts_as = session.acts_as();
         Self {
+            access: None,
+            is_owner: None,
             id: session.id,
             owner_kind: session.owner_kind,
             workspace_id: session.workspace_id,
@@ -1770,7 +1784,7 @@ pub struct CodeTerminalRead {
 pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
-    /// Whether this viewer can open the owner-scoped chat route.
+    /// Whether this viewer can open the conversation through the authorized session route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub can_open_chat: Option<bool>,

@@ -159,6 +159,8 @@ fn caps() -> HarnessCaps {
 
 fn session() -> SessionSnapshot {
     SessionSnapshot {
+        access: Some(tidebreak_core::SessionAccessLevel::View),
+        is_owner: Some(false),
         visibility: tidebreak_core::SessionVisibility::Private,
         id: session_id(),
         owner_kind: Some("service".to_owned()),
@@ -349,6 +351,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace",
             "workspace",
             &CodeWorkspaceSnapshot {
+                read_only: Some(true),
                 base_refresh_warning: None,
                 id: workspace_id(),
                 repo_id: repo_id(),
@@ -369,6 +372,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "released workspace",
             "workspace",
             &CodeWorkspaceSnapshot {
+                read_only: Some(true),
                 base_refresh_warning: None,
                 id: WorkspaceId(id(0x12)),
                 repo_id: repo_id(),

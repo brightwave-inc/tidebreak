@@ -66,6 +66,11 @@ export async function renderWithRouter(
     path: "/code",
     component: () => <>{ui}</>,
   });
+  const codeSessionRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/s/$sessionId",
+    component: () => <>{ui}</>,
+  });
   const codeWorkspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
@@ -80,6 +85,7 @@ export async function renderWithRouter(
       chatRoute,
       appDetailRoute,
       codeRoute,
+      codeSessionRoute,
       codeWorkspaceRoute,
       settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),
     ]),

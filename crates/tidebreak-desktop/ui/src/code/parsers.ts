@@ -2125,6 +2125,7 @@ export function parseCodeWorkspace(
     !isRecord(value) ||
     !onlyKeys<WireCodeWorkspaceSnapshot>(value, [
       "base_refresh_warning",
+      "read_only",
       "id",
       "repo_id",
       "title",
@@ -2139,6 +2140,7 @@ export function parseCodeWorkspace(
       "released_tip",
       "bundle_bytes",
     ]) ||
+    (value.read_only !== undefined && typeof value.read_only !== "boolean") ||
     (value.base_refresh_warning !== undefined &&
       !nonEmptyLine(value.base_refresh_warning)) ||
     !wireId(value.id) ||
@@ -2157,6 +2159,7 @@ export function parseCodeWorkspace(
     return null;
   }
   const parsed: CodeWorkspaceSnapshot = {
+    ...(value.read_only !== undefined ? { read_only: value.read_only } : {}),
     ...(value.base_refresh_warning !== undefined
       ? { base_refresh_warning: value.base_refresh_warning }
       : {}),
@@ -2672,6 +2675,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !isRecord(value) ||
     !onlyKeys<WireCodeSessionSnapshot>(value, [
       "id",
+      "access",
+      "is_owner",
       "workspace_id",
       "kind",
       "harness_kind",
@@ -2693,6 +2698,10 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "owner_kind",
       "acts_as",
     ]) ||
+    (value.access !== undefined &&
+      value.access !== "view" &&
+      value.access !== "contribute") ||
+    (value.is_owner !== undefined && typeof value.is_owner !== "boolean") ||
     !wireId(value.id) ||
     // Absent for a person's session; a fixed token for a service's.
     !optionalLine(value.owner_kind) ||
@@ -2781,6 +2790,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
   }
   return {
     id: value.id,
+    ...(value.access !== undefined ? { access: value.access } : {}),
+    ...(value.is_owner !== undefined ? { is_owner: value.is_owner } : {}),
     workspace_id: value.workspace_id,
     kind: value.kind,
     harness_kind: value.harness_kind,

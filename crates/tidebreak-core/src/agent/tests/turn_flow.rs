@@ -530,7 +530,8 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     let terminal = completed
         .terminal_event
         .expect("completion must return its committed terminal event");
-    assert_eq!(terminal.seq, i64::try_from(events.len() + 1).unwrap());
+    // The committed answer occupies the sequence immediately before completion.
+    assert_eq!(terminal.seq, i64::try_from(events.len() + 2).unwrap());
     assert_eq!(
         terminal.event,
         AgentEvent::TurnCompleted { usage, stop_reason }

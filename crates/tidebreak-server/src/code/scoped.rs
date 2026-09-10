@@ -90,7 +90,7 @@ impl ScopedCode {
     /// The single resolution step every session-scoped method below goes
     /// through. A session that does not exist and one this principal holds no
     /// claim on both answer "not found".
-    async fn session_access(
+    pub async fn session_access(
         &self,
         id: SessionId,
     ) -> Result<tidebreak_core::db::code::ResolvedSessionAccess, ServerError> {
@@ -378,6 +378,27 @@ impl ScopedCode {
 
     pub async fn get_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
         self.runtime.get_workspace(&self.owner, id).await
+    }
+
+    /// Read a workspace through ownership or a live grant on one of its sessions.
+    /// Mutation paths keep using `get_workspace`, which requires ownership.
+    pub async fn read_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.get_workspace(&owner, id).await
+    }
+
+    async fn workspace_owner_for_read(&self, id: WorkspaceId) -> Result<OwnerId, ServerError> {
+        if let Some(workspace) =
+            tidebreak_core::db::code::get_workspace(&self.runtime.db, &self.owner, id).await?
+        {
+            return Ok(workspace.owner);
+        }
+        tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
+            .await?
+            .into_iter()
+            .find(|session| session.workspace_id == Some(id))
+            .map(|session| session.owner)
+            .ok_or_else(|| ServerError::not_found("code workspace not found"))
     }
 
     /// Require a writable workspace whose commands may run on this machine.
@@ -815,18 +836,36 @@ impl ScopedCode {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Session>, ServerError> {
-        self.runtime
-            .list_workspace_sessions(&self.owner, workspace_id)
-            .await
+        let owner = self.workspace_owner_for_read(workspace_id).await?;
+        if owner == self.owner {
+            return self
+                .runtime
+                .list_workspace_sessions(&self.owner, workspace_id)
+                .await;
+        }
+        Ok(
+            tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
+                .await?
+                .into_iter()
+                .filter(|session| session.workspace_id == Some(workspace_id))
+                .collect(),
+        )
     }
 
     pub async fn external_bindings_for_sessions(
         &self,
         session_ids: &[SessionId],
     ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
-        self.runtime
-            .external_bindings_for_sessions(&self.owner, session_ids)
-            .await
+        let mut bindings = Vec::new();
+        for id in session_ids {
+            let owner = self.session_owner_for_read(*id).await?;
+            bindings.extend(
+                self.runtime
+                    .external_bindings_for_sessions(&owner, &[*id])
+                    .await?,
+            );
+        }
+        Ok(bindings)
     }
 
     pub async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
@@ -888,7 +927,13 @@ impl ScopedCode {
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        let owner = self.session_owner_for_contribute(id).await?;
+        // Model and effort overrides persist as session settings. A contributor
+        // may submit work but cannot change the owner's execution settings.
+        let owner = if model.is_some() || reasoning_effort.is_some() {
+            self.require_session_owner(id).await?.owner
+        } else {
+            self.session_owner_for_contribute(id).await?
+        };
         // The turn records who sent it, not whose session it ran under
         // (decision 0086). On a shared session those differ.
         let actor = tidebreak_core::TurnActor::principal(&self.owner);

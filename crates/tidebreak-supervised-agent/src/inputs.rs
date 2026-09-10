@@ -59,10 +59,7 @@ pub const INCARNATION_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_INCARNATION";
 /// because a typo here would otherwise drive the wrong engine for the whole
 /// run.
 pub const ENGINE_VARIABLE: &str = "TIDEBREAK_AGENT_ENGINE";
-/// The engine identity the environment admitted for this sandbox, as the
-/// JSON object `{"engine": ..., "engine_session_id": ...}` (gateway decision
-/// 118). Present only for a managed supervised run; the agent registers the
-/// installed binary under it before its first turn.
+/// Authenticated spawn identity injected by Gateway for managed supervised engines.
 pub const EMBEDDED_ENGINE_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_EMBEDDED_ENGINE";
 
 const DEFAULT_SUPERVISOR_ENDPOINT: &str = "127.0.0.1:15003";
@@ -118,18 +115,8 @@ pub struct Inputs {
     pub incarnation: u32,
     /// Engine CLI the agent drives.
     pub engine: HarnessKind,
-    /// The admitted engine identity to register the installed binary under,
-    /// when the environment declared one.
-    pub embedded_engine: Option<EmbeddedEngineIdentity>,
-}
-
-/// The engine identity the environment admitted for this sandbox.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EmbeddedEngineIdentity {
-    /// The engine the environment admitted; always the one the agent drives.
-    pub engine: HarnessKind,
-    /// The Tidebreak session UUID the engine runs for.
-    pub engine_session_id: String,
+    /// Identity this run must register before bootstrap or inference.
+    pub embedded_engine: Option<crate::wire::EmbeddedEngine>,
 }
 
 /// A missing or unusable input, carrying the exit code and the variable name.
@@ -317,9 +304,23 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         })?,
     };
 
-    let embedded_engine = optional(raw.embedded_engine)
-        .map(|declared| parse_embedded_engine(&declared, engine))
-        .transpose()?;
+    let embedded_engine =
+        optional(raw.embedded_engine)
+            .map(|value| {
+                let binding: crate::wire::EmbeddedEngine =
+                    serde_json::from_str(&value).map_err(|error| {
+                        InputError::unusable(EMBEDDED_ENGINE_VARIABLE, &error.to_string())
+                    })?;
+                if binding.engine_session_id.as_uuid().is_nil()
+                    || !matches!(binding.engine, HarnessKind::ClaudeCode | HarnessKind::Codex)
+                    || binding.engine != engine
+                {
+                    return Err(InputError::unusable(EMBEDDED_ENGINE_VARIABLE,
+                "expected a nonzero session UUID and the selected claude_code or codex engine"));
+                }
+                Ok(binding)
+            })
+            .transpose()?;
 
     Ok(Inputs {
         task,
@@ -337,54 +338,6 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         incarnation,
         engine,
         embedded_engine,
-    })
-}
-
-/// Parses the admitted engine identity, refusing one that names a different
-/// engine than the agent drives: registering the wrong binary would pair a
-/// subscription the turns cannot use.
-fn parse_embedded_engine(
-    declared: &str,
-    engine: HarnessKind,
-) -> Result<EmbeddedEngineIdentity, InputError> {
-    #[derive(serde::Deserialize)]
-    struct Declared {
-        engine: String,
-        engine_session_id: String,
-    }
-    let parsed: Declared = serde_json::from_str(declared).map_err(|error| {
-        InputError::unusable(
-            EMBEDDED_ENGINE_VARIABLE,
-            &format!("expected a JSON object with engine and engine_session_id: {error}"),
-        )
-    })?;
-    let admitted = HarnessKind::from_str(&parsed.engine).ok_or_else(|| {
-        InputError::unusable(
-            EMBEDDED_ENGINE_VARIABLE,
-            &format!("unknown engine {:?}", parsed.engine),
-        )
-    })?;
-    if admitted != engine {
-        return Err(InputError::unusable(
-            EMBEDDED_ENGINE_VARIABLE,
-            &format!(
-                "admits {admitted} but {ENGINE_VARIABLE} selects {engine}; the two must agree"
-            ),
-        ));
-    }
-    let session = parsed.engine_session_id.trim();
-    let uuid_shaped = session.len() == 36
-        && session.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-        && session.chars().any(|c| c.is_ascii_hexdigit() && c != '0');
-    if !uuid_shaped {
-        return Err(InputError::unusable(
-            EMBEDDED_ENGINE_VARIABLE,
-            "engine_session_id is not a non-nil UUID",
-        ));
-    }
-    Ok(EmbeddedEngineIdentity {
-        engine: admitted,
-        engine_session_id: session.to_owned(),
     })
 }
 
@@ -445,6 +398,36 @@ mod tests {
         assert!(inputs.repositories.is_empty());
         assert!(!inputs.forge_push_denied);
         assert_eq!(inputs.incarnation, 1);
+        assert!(inputs.embedded_engine.is_none());
+    }
+
+    #[test]
+    fn managed_input_requires_the_declared_engine_and_persisted_nonzero_session() {
+        let session = tidebreak_core::SessionId::new();
+        let mut raw = minimal();
+        raw.engine = Some("codex".into());
+        raw.embedded_engine = Some(
+            serde_json::json!({
+                "engine": "codex", "engine_session_id": session,
+            })
+            .to_string(),
+        );
+        let parsed = resolve(raw.clone()).unwrap();
+        assert_eq!(parsed.embedded_engine.unwrap().engine_session_id, session);
+        raw.engine = Some("claude_code".into());
+        assert!(resolve(raw.clone())
+            .unwrap_err()
+            .message
+            .contains(EMBEDDED_ENGINE_VARIABLE));
+        raw.engine = Some("codex".into());
+        for binding in [
+            serde_json::json!({"engine":"codex", "engine_session_id":"00000000-0000-0000-0000-000000000000"}),
+            serde_json::json!({"engine":"codex", "engine_session_id":"not-a-uuid"}),
+            serde_json::json!({"engine":"codex"}),
+        ] {
+            raw.embedded_engine = Some(binding.to_string());
+            assert!(resolve(raw.clone()).is_err());
+        }
     }
 
     #[test]
@@ -607,9 +590,9 @@ mod tests {
         };
         assert_eq!(
             resolve(raw).unwrap().embedded_engine,
-            Some(EmbeddedEngineIdentity {
+            Some(crate::wire::EmbeddedEngine {
                 engine: HarnessKind::Codex,
-                engine_session_id: session.to_owned(),
+                engine_session_id: serde_json::from_value(serde_json::json!(session)).unwrap(),
             })
         );
         assert_eq!(resolve(minimal()).unwrap().embedded_engine, None);

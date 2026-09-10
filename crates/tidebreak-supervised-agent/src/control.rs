@@ -11,7 +11,10 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::wire::{PollRejection, SupervisorEvent, SupervisorInstructions, SupervisorPoll};
+use crate::wire::{
+    EmbeddedEngineRegistration, PollRejection, SupervisorEvent, SupervisorInstructions,
+    SupervisorPoll,
+};
 
 /// Serialized ceiling for one poll's event batch.
 ///
@@ -104,6 +107,7 @@ impl Outbox {
 pub struct Control {
     client: reqwest::Client,
     poll_url: String,
+    embedded_engine: Option<EmbeddedEngineRegistration>,
 }
 
 impl Control {
@@ -117,26 +121,92 @@ impl Control {
         Self {
             client,
             poll_url: format!("{}/supervisor/poll", control_url.trim_end_matches('/')),
+            embedded_engine: None,
         }
+    }
+
+    /// Require Gateway to confirm this identity on every poll.
+    #[must_use]
+    pub fn with_embedded_engine(mut self, identity: Option<EmbeddedEngineRegistration>) -> Self {
+        self.embedded_engine = identity;
+        self
+    }
+
+    /// Register before catalog queries, repository bootstrap, or engine launch.
+    /// Ordinary custom workloads have no registration handshake.
+    pub async fn register(&self) -> Result<(), PollFailure> {
+        self.register_with_retry(
+            crate::inputs::POLL_INTERVAL,
+            crate::drive::MAX_CONSECUTIVE_POLL_FAILURES,
+        )
+        .await
+    }
+
+    async fn register_with_retry(
+        &self,
+        interval: Duration,
+        attempts: u32,
+    ) -> Result<(), PollFailure> {
+        if self.embedded_engine.is_none() {
+            return Ok(());
+        }
+        let poll = SupervisorPoll::new(true, None);
+        for attempt in 0..attempts.max(1) {
+            match self.poll(&poll).await {
+                Ok(instructions) if instructions.stop => {
+                    return Err(PollFailure::Fatal {
+                        code: "managed_engine_stopped".into(),
+                        description: instructions.stop_reason.unwrap_or_else(|| {
+                            "the sandbox stopped before engine registration".into()
+                        }),
+                    })
+                }
+                Ok(_) => return Ok(()),
+                Err(PollFailure::Retryable(_)) if attempt + 1 < attempts => {
+                    tokio::time::sleep(interval).await
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("a registration attempt always returns or retries")
     }
 
     /// Posts one poll and classifies the reply.
     pub async fn poll(&self, poll: &SupervisorPoll) -> Result<SupervisorInstructions, PollFailure> {
+        let mut poll = poll.clone();
+        poll.embedded_engine.clone_from(&self.embedded_engine);
         let response = self
             .client
             .post(&self.poll_url)
-            .json(poll)
+            .json(&poll)
             .send()
             .await
             .map_err(|error| PollFailure::Retryable(error.to_string()))?;
         let status = response.status();
         if status.is_success() {
-            return response
-                .json::<SupervisorInstructions>()
-                .await
-                .map_err(|error| {
-                    PollFailure::Retryable(format!("instructions were unreadable: {error}"))
-                });
+            let instructions =
+                response
+                    .json::<SupervisorInstructions>()
+                    .await
+                    .map_err(|error| {
+                        if self.embedded_engine.is_some() {
+                            PollFailure::Fatal {
+                                code: "managed_engine_not_confirmed".into(),
+                                description: format!("instructions were unreadable: {error}"),
+                            }
+                        } else {
+                            PollFailure::Retryable(format!("instructions were unreadable: {error}"))
+                        }
+                    })?;
+            if let Some(expected) = &self.embedded_engine {
+                if instructions.embedded_engine.as_ref() != Some(expected) {
+                    return Err(PollFailure::Fatal {
+                        code: "managed_engine_not_confirmed".into(),
+                        description: "Gateway did not confirm this session's installed engine; update Gateway before retrying".into(),
+                    });
+                }
+            }
+            return Ok(instructions);
         }
         let body = response.bytes().await.unwrap_or_default();
         // 413 is the transport's own "too large": the request can never
@@ -148,7 +218,9 @@ impl Control {
             });
         }
         if let Ok(rejection) = serde_json::from_slice::<PollRejection>(&body) {
-            if FATAL_REJECTIONS.contains(&rejection.error.as_str()) {
+            if FATAL_REJECTIONS.contains(&rejection.error.as_str())
+                || (self.embedded_engine.is_some() && status.is_client_error())
+            {
                 return Err(PollFailure::Fatal {
                     code: rejection.error,
                     description: rejection.error_description,
@@ -169,6 +241,103 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity() -> EmbeddedEngineRegistration {
+        EmbeddedEngineRegistration {
+            engine_session_id: tidebreak_core::SessionId::new(),
+            engine: tidebreak_core::HarnessKind::Codex,
+            engine_version: "0.147.0".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_registration_retries_the_exact_identity_then_checks_every_poll() {
+        use axum::response::IntoResponse;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let recorded = seen.clone();
+        let app = axum::Router::new().route(
+            "/supervisor/poll",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    let mut seen = recorded.lock().unwrap();
+                    seen.push(body.clone());
+                    if seen.len() == 1 {
+                        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    axum::Json(serde_json::json!({"embedded_engine":body["embedded_engine"]}))
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let expected = identity();
+        let control = Control::new(&base).with_embedded_engine(Some(expected.clone()));
+        control
+            .register_with_retry(Duration::ZERO, 2)
+            .await
+            .unwrap();
+        control
+            .poll(&SupervisorPoll::new(false, Some(4)))
+            .await
+            .unwrap();
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        for request in requests.iter() {
+            assert_eq!(
+                request["embedded_engine"],
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_registration_refuses_missing_or_mismatched_acknowledgments() {
+        let expected = identity();
+        let exact = serde_json::to_value(&expected).unwrap();
+        let mut acknowledgments = vec![serde_json::json!({})];
+        for (field, value) in [
+            ("engine", "claude_code".to_owned()),
+            (
+                "engine_session_id",
+                tidebreak_core::SessionId::new().to_string(),
+            ),
+            ("engine_version", "0.148.0".to_owned()),
+        ] {
+            let mut wrong = exact.clone();
+            wrong[field] = serde_json::json!(value);
+            acknowledgments.push(serde_json::json!({"embedded_engine":wrong}));
+        }
+        for acknowledgment in acknowledgments {
+            let app = axum::Router::new().route(
+                "/supervisor/poll",
+                axum::routing::post(move || {
+                    let acknowledgment = acknowledgment.clone();
+                    async move { axum::Json(acknowledgment) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let control = Control::new(&base).with_embedded_engine(Some(expected.clone()));
+            assert!(matches!(
+                control.register_with_retry(Duration::ZERO, 1).await,
+                Err(PollFailure::Fatal { .. })
+            ));
+            // An ordinary custom workload does not require an engine acknowledgment.
+            assert!(Control::new(&base)
+                .poll(&SupervisorPoll::new(true, None))
+                .await
+                .is_ok());
+            server.abort();
+        }
+        // Standalone registration does not contact a control endpoint.
+        Control::new("http://127.0.0.1:1").register().await.unwrap();
+    }
 
     #[test]
     fn batches_stay_under_the_byte_ceiling() {

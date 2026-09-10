@@ -133,6 +133,9 @@ impl<E: Engine> Driver<E> {
     /// the environment has accepted it.
     #[must_use]
     pub fn with_embedded_engine(mut self, registration: EmbeddedEngineRegistration) -> Self {
+        self.control = self
+            .control
+            .with_embedded_engine(Some(registration.clone()));
         self.embedded_engine = Some(registration);
         self
     }
@@ -883,8 +886,8 @@ mod tests {
 
     fn registration() -> EmbeddedEngineRegistration {
         EmbeddedEngineRegistration {
-            engine_session_id: "018f0000-0000-7000-8000-000000000001".to_owned(),
-            engine: "codex".to_owned(),
+            engine_session_id: "018f0000-0000-7000-8000-000000000001".parse().unwrap(),
+            engine: tidebreak_core::HarnessKind::Codex,
             engine_version: "0.147.0".to_owned(),
         }
     }
@@ -939,7 +942,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, EXIT_CONTROL_FATAL);
         assert!(
-            error.message.contains("did not acknowledge"),
+            error.message.contains("did not confirm"),
             "{}",
             error.message
         );
