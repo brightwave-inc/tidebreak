@@ -694,7 +694,7 @@ export const ArchiveEmpty: Story = {
 };
 
 export const NarrowPullRequestDetail: Story = {
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 /**

@@ -173,6 +173,23 @@ describe("useWorkspaceSessions", () => {
     ]);
   });
 
+  it("restores a closed conversation tab when it is selected again", async () => {
+    const { result } = setup([main, sibling]);
+    await waitFor(() => expect(result.current.session?.id).toBe("sess-main"));
+    act(() => result.current.selectConversation("sess-sibling"));
+    act(() => result.current.closeConversation("sess-sibling"));
+    expect(result.current.conversationTabs.map((tab) => tab.id)).toEqual([
+      "sess-main",
+    ]);
+
+    act(() => result.current.selectConversation("sess-sibling"));
+    expect(result.current.session?.id).toBe("sess-sibling");
+    expect(result.current.conversationTabs.map((tab) => tab.id)).toEqual([
+      "sess-main",
+      "sess-sibling",
+    ]);
+  });
+
   it("reports a load failure and retries on request", async () => {
     const { result, client } = setup([main], undefined, {
       failFirstLoad: true,

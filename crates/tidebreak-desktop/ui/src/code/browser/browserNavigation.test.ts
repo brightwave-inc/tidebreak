@@ -70,5 +70,10 @@ describe("browser navigation", () => {
     expect(browserDisplayAddress("http://example.com/docs")).toBe(
       "http://example.com/docs",
     );
+    expect(browserSecurity("not a url")).toEqual({
+      kind: "insecure",
+      label: "Not secure",
+    });
+    expect(browserDisplayAddress("not a url")).toBe("not a url");
   });
 });

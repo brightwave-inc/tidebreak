@@ -444,6 +444,12 @@ export function useWorkspaceSessions({
     }
     setDraftAgent(false);
     setActiveSessionId(sessionId);
+    setClosedConversationIds((current) => {
+      if (!current.has(sessionId)) return current;
+      const next = new Set(current);
+      next.delete(sessionId);
+      return next;
+    });
     openWorkspaceTask(
       sessionId === conversations[0]?.id ? undefined : sessionId,
     );

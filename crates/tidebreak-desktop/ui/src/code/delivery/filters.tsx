@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { commaList, humanize, toggleValue } from "./helpers";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export function PullRequestFilters({
   repositories,
@@ -64,7 +64,7 @@ export function PullRequestFilters({
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-[22rem] max-w-[calc(100vw-24px)] p-3"
+        className="max-h-[min(720px,calc(100vh-32px))] w-[22rem] max-w-[calc(100vw-24px)] overflow-auto p-3"
       >
         <FilterSection title="Repositories">
           <RepositoryCheckboxes
@@ -524,13 +524,30 @@ function AdvancedTextFilter({
   placeholder: string;
   onChange: (value: string[]) => void;
 }) {
+  const committed = value.join(", ");
+  const [draft, setDraft] = useState(committed);
+  useEffect(() => {
+    setDraft(committed);
+  }, [committed]);
+
+  function commit() {
+    onChange(commaList(draft));
+  }
+
   return (
     <div className="mb-3 flex flex-col gap-1.5">
       <Label className="text-xs text-muted-foreground">{label}</Label>
       <Input
-        value={value.join(", ")}
+        value={draft}
         placeholder={placeholder}
-        onChange={(event) => onChange(commaList(event.target.value))}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        }}
       />
     </div>
   );

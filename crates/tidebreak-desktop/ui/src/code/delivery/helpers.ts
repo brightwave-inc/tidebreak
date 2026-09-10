@@ -12,6 +12,7 @@ import type {
   CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
 } from "../../api/types";
+import type { StatusTone } from "../statusTone";
 import type { PrBuiltInView, PullRequestGrouping } from "./views";
 import {
   groupedPullRequestRows,
@@ -37,10 +38,8 @@ export function runBucket(
   return "skipped";
 }
 
-export function runTone(
-  value: string,
-): "success" | "critical" | "warning" | "muted" {
-  if (value === "success") return "success";
+export function runTone(value: string): StatusTone {
+  if (value === "success") return "ready";
   if (
     value === "failure" ||
     value === "timed_out" ||
@@ -51,9 +50,9 @@ export function runTone(
     return "critical";
   }
   if (value === "queued" || value === "in_progress" || value === "pending") {
-    return "warning";
+    return "pending";
   }
-  return "muted";
+  return "neutral";
 }
 
 export function selectedRepositoryTargets(

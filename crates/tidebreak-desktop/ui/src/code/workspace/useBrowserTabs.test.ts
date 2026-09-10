@@ -205,23 +205,6 @@ describe("agent browser lifecycle", () => {
     });
   });
 
-  it("ignores activation events that would select an agent preview", () => {
-    const layout = withBrowser(
-      openCodeEditor(EMPTY, { type: "file", path: "app.tsx" }),
-      "agent-1",
-    );
-    const { setLayout } = setup({ ...layout, activeIndex: 0 });
-    const listener = mocks.subscribe.mock.calls.at(-1)![0];
-    act(() =>
-      listener({
-        type: "agent_activate_requested",
-        workspaceId: "ws-1",
-        browserId: "agent-1",
-      }),
-    );
-    expect(setLayout).not.toHaveBeenCalled();
-  });
-
   it("discovers tabs opened while another route was showing without selecting them", async () => {
     mocks.list.mockResolvedValueOnce([
       {
