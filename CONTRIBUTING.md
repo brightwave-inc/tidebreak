@@ -36,6 +36,11 @@ cargo build --workspace
 scripts/clean-worktree-artifacts.sh
 scripts/clean-worktree-artifacts.sh --worktree ../finished-task --yes
 
+# Wipe this machine's debug-app profile so the next `scripts/dev.sh` run
+# starts from empty stores. Does not touch an installed release profile.
+scripts/wipe-dev.sh
+scripts/wipe-dev.sh --yes
+
 # Formatting, lints, and tests (what CI runs)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

@@ -33,9 +33,12 @@ impl ExternalThreadContext {
     pub const MAX_BYTES: usize = 16_384;
 
     /// Validate before allocating the rendered quote envelope.
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.messages.len() > Self::MAX_MESSAGES {
-            return Err("Thread context may contain at most 20 messages.");
+            return Err(format!(
+                "Thread context may contain at most {} messages.",
+                Self::MAX_MESSAGES
+            ));
         }
         let mut bytes = 0_usize;
         for message in &self.messages {
@@ -48,14 +51,17 @@ impl ExternalThreadContext {
                     .iter()
                     .any(|value| value.contains('\0'))
             {
-                return Err("Each context message needs a bounded author, timestamp, and nonempty text without NUL characters.");
+                return Err("Each context message needs a bounded author, timestamp, and nonempty text without NUL characters.".into());
             }
             bytes = bytes
                 .saturating_add(message.author.len())
                 .saturating_add(message.timestamp.len())
                 .saturating_add(message.text.len());
             if bytes > Self::MAX_BYTES {
-                return Err("Thread context may contain at most 16 KiB of text.");
+                return Err(format!(
+                    "Thread context may contain at most {} KiB of text.",
+                    Self::MAX_BYTES / 1024
+                ));
             }
         }
         Ok(())

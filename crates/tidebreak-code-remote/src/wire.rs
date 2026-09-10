@@ -166,7 +166,10 @@ impl SandboxState {
     }
 }
 
-/// Current state of one sandbox, reduced to the fields this server acts on.
+/// Current state of one sandbox as the gateway returns it.
+///
+/// The driver reads only `spend_microusd`. The other fields exist so
+/// deserialization pins the gateway response shape for the contract test.
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct SandboxStatus {

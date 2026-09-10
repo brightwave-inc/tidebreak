@@ -16,8 +16,8 @@
 //!
 //! # Storage and retention
 //!
-//! This crate's in-memory store is **not** crash-safe; production uses the
-//! durable adapter in `tidebreak-server`. The shared contract is:
+//! This crate's in-memory store is **not** crash-safe; production uses
+//! `DurableOperationStore` in `tidebreak-sandbox-runtime`. The shared contract is:
 //!
 //! 1. A durable store persists the
 //!    `Claimed -> Recorded / Failed` transition on the run, committed
@@ -108,7 +108,7 @@ pub enum StoreError {
 /// The durable-storage seam for the reverse-RPC operation log.
 ///
 /// A production implementation persists these transitions transactionally on
-/// the run (see the module-level TODO). The trait is intentionally small: claim
+/// the run. The trait is intentionally small: claim
 /// an identity, record its terminal outcome, read it back, and evict it once it
 /// can no longer be re-issued.
 pub trait OperationStore: Send + Sync {

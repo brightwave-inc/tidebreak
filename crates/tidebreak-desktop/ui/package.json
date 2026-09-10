@@ -12,9 +12,7 @@
     "format": "biome format --write src",
     "lint": "biome lint src",
     "before-tauri-dev": "node ../scripts/prepare-sidecar.mjs && vite",
-    "before-tauri-build": "node ../scripts/prepare-sidecar.mjs --release && tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
-    "preview": "vite preview",
-    "tauri": "cargo tauri"
+    "before-tauri-build": "node ../scripts/prepare-sidecar.mjs --release && tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build"
   },
   "dependencies": {
     "@dnd-kit/core": "6.3.1",
