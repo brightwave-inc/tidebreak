@@ -882,6 +882,12 @@ pub(crate) enum CodeWorkspace {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum Session {
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum CodeSession {
     Table,
     Id,
@@ -1187,6 +1193,22 @@ pub(crate) enum CodeExternalGrantRetiredRefresh {
     Hash,
     GrantId,
     RetiredAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeConversationRequest {
+    Table,
+    Id,
+    Owner,
+    SessionId,
+    GrantId,
+    BindingId,
+    CallKey,
+    Operation,
+    Arguments,
+    Result,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
