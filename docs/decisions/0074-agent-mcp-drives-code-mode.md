@@ -93,7 +93,7 @@ the headless loop.
 
 ## Validation
 
-`crates/tidebreak-cli/tests/agent_mcp_code.rs` speaks MCP over the real binary
+`crates/tidebreak-cli/src/agent_mcp/code.rs` speaks MCP over the real binary
 against `tidebreak serve` with the feature-gated scripted harness: repo →
 workspace → session → `code_run_turn` completes with assistant text; a
 scripted approval returns `needs_approval` and `code_decide` settles it; a

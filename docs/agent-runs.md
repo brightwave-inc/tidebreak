@@ -58,7 +58,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | Uses a small fixed sandbox tool surface over a bounded checkpoint budget; has no shared conversation context |
+| Uses conversation-facing tools | Uses a small fixed sandbox tool surface under a model-step check-in cadence (`DEFAULT_SANDBOX_AGENT_CHECKIN_STEPS`, default 100); has no shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -166,24 +166,27 @@ answer/cancel races cannot produce two results. See
 ## Sandbox and host-access boundary
 
 A background agent cannot access projects, general host folders, the general
-network, or the parent conversation. Its narrow exceptions share one bounded
-tool-call budget: commands in its own execution workspace, a checkpointed
-public web search, a typed folder-access proposal that grants no access, or—only
-in the embedded desktop—one exact file named by its immutable admission. A run
-may spend that budget over several checkpoints; the worker replays the whole
-resolved chain on every claim, which is why the count is capped. The read tool
-takes no arguments. A native executor revalidates the current chat attachment
-immediately before the host broker performs a bounded UTF-8 read, persists
-private no-replay recovery state, and publishes only bounded content or a
-neutral failure. Headless workers never advertise the read. Sandboxes do not
-receive foreground spawn/wait or broker transport contracts, and absolute paths
-never cross into provider context. See
-[Host access and connected folders](host-access.md).
+network, or the parent conversation. Its narrow tools are commands in its own
+execution workspace, a checkpointed public web search, a typed folder-access
+proposal that grants no access, `update_task_plan`, `done`, or—only in the
+embedded desktop—one exact file named by its immutable admission. The run's
+one policy bound is a check-in cadence, not a row budget: each step is one
+model completion over the replayed checkpoint chain
+(`DEFAULT_SANDBOX_AGENT_CHECKIN_STEPS`, default 100, user-configurable).
+Reaching the cadence is not a failure: tools are withdrawn two steps early and
+the run submits what it has. The read tool takes no arguments. A native
+executor revalidates the current chat attachment immediately before the host
+broker performs a bounded UTF-8 read, persists private no-replay recovery
+state, and publishes only bounded content or a neutral failure. Headless
+workers never advertise the read. Sandboxes do not receive foreground
+spawn/wait or broker transport contracts, and absolute paths never cross into
+provider context. See [Host access and connected folders](host-access.md).
 
 Execution is how a background run produces anything the user keeps. Its
 workspace is named by the run, not the conversation, so siblings delegated in
-one message never share a filesystem; it starts empty and holds nothing but what
-the run's own earlier commands wrote. The request carries no folder authority
+one message never share a filesystem. Document skills are staged first under
+`<scratch>/.tidebreak/skills/`; after that the workspace holds only what the
+run's own earlier commands wrote. The request carries no folder authority
 and stages no host paths — delegation already bypasses the conversation's
 approval gate, so this path must not be the one that hands a delegated agent the
 user's files. The one thing the parent conversation contributes is its network
@@ -208,18 +211,6 @@ back on its next step. Each call replaces the whole list, and the plan is keyed
 by the run rather than by the chat — four siblings delegated in one message are
 working four different tasks, and a chat-keyed row would have them overwriting
 each other and the conversation's own plan.
-
-Plan rows are budgeted apart from the rest. A run is told to keep its checklist
-current as steps finish, which is a call after most real steps; charged to the
-same tool allowance, bookkeeping would starve the commands and searches the task
-is actually for, and the run would exhaust itself describing work it never got
-to do. So the allowance above bounds work rows, and plan rows get their own
-smaller cap — enough revisions to narrate one delegated task, few enough to
-bound a model that does nothing else. Each budget withdraws its own tools when
-it runs out, and the durable store enforces the same split, so the advertised
-surface and the bound the transaction applies cannot disagree. Model steps are
-unaffected: every checkpoint still costs the completion that makes it and the
-completion that reads its result.
 
 When a run calls `done` with steps still open, the host hands that call back
 once with the open steps named, the same way it answers a terminal tool that
@@ -253,15 +244,12 @@ worker advances them under its own lease — so the delegation is the only place
 in the chat where the reader could speak about what the child does. Classing it
 below the authority it hands out would state the opposite.
 
-Declaring the class is not the same as gating on it. The gate parks a *pending
-server tool call* on a durable approval receipt, and a spawn has no such
-record: its tool call is written already completed, inside the same transaction
-that admits the child. So the class today decides advertisement — a plan turn
-never sees the pair — and not admission. The consequence worth naming: in a
-chat where a foreground `web_search` would stop and ask, the same egress
-performed by a delegated child does not. Closing that requires a durable
-pending-spawn checkpoint the reader can answer, which is its own change
-(issue #1477), not a flag.
+A gated spawn parks and asks. `gate_sandbox_spawn` first accepts an ordinary
+pending server row and parks on that, exactly like any other Sensitive call;
+the child is admitted only after the decision commits. In `Allow` mode, or
+when a standing grant already covers this spawn, the ungated path still
+writes the tool call completed in the same transaction that admits the child.
+An interrupted decision leaves the row pending and no child is admitted.
 
 ## Bounded scheduling
 
@@ -305,14 +293,17 @@ and a short summary, and the receipt records the outputs the scan already
 published under those names alongside the summary. Naming a file the run never
 wrote fails the completion like any other malformed one, bounded by the run's own
 attempt budget; a run that genuinely produced nothing submits nothing. Final text
-remains the receipt for a model that simply stops without submitting. The only
-current non-text outcome is a validated folder-consent proposal. It carries no
-host path, root identity, broker grant, or client-call identity; it only tells
-the foreground parent to decide whether the existing foreground consent tool is
-appropriate. The receipt, `completed` state, and one parent inbox entry commit
-together, so an ambiguous worker retry can recover its original result but
-cannot overwrite or double-deliver it. Each inbox entry advances through a
-fenced lifecycle: `pending -> consumed`, with a stable resume token proving the
+remains the receipt for a model that simply stops without submitting. Other
+typed outcomes are a validated folder-consent proposal (no host path, root
+identity, broker grant, or client-call identity — it only tells the foreground
+parent to decide whether the existing consent tool is appropriate),
+`Cancelled`, and `CheckIn`. Check-in is not terminal: the run sits in
+`NeedsInput` until a resume deletes that receipt so the result slot is free
+for the outcome it eventually produces. The receipt, terminal or paused state,
+and one parent inbox entry commit together, so an ambiguous worker retry can
+recover its original result but cannot overwrite or double-deliver it. Each
+inbox entry advances through a fenced lifecycle:
+`pending -> claimed -> consumed`, with a stable resume token proving the
 consumer, or `cancelled` when the parent retires the delivery. The ordered wait
 consumes all named entries in one transaction only after the matching
 foreground checkpoint exists. A result that arrives first remains pending; it
@@ -340,10 +331,12 @@ always durable state transitions, never process-local notifications.
 
 The authenticated local API exposes `GET /chats/{id}/agent-runs` for a
 chat-scoped snapshot of its foreground coordinator and any sandbox children.
-It is a read model, not a scheduler control surface: clients use it to render
-queued, running, waiting, failed, and completed work, while workers continue to
-advance runs solely through fenced store transitions. A missing chat returns
-`404`, rather than revealing whether an unrelated run identifier exists.
+Clients use it to render queued, running, waiting, failed, and completed work.
+Cancel, resume, and steer are separate POST routes on the same run
+(`…/cancel`, `…/resume`, `…/steer`); the foreground also drives resume and
+cancel as the `resume_agent` and `cancel_agent` tools. Workers still advance
+runs through fenced store transitions. A missing chat returns `404`, rather
+than revealing whether an unrelated run identifier exists.
 The response is deliberately renderer-safe: worker lease tokens, delegated
 input, raw failure details, and scheduler bookkeeping never cross this API
 boundary. A bounded failure code may be included for display and recovery
@@ -354,9 +347,10 @@ renderer correlation key, not a provider call identity or scheduler control.
 
 When an agent has a live, supported tool checkpoint, the snapshot may also
 contain a small `activity` object. Its values are a deliberately admitted,
-fixed display vocabulary—for example, sandbox `exec` and `web_search`, or foreground
-`list_connected_folders`, `list_folder`, and `read_connected_file`, each with
-`waiting` or `running` status. It is not a tool trace: queries, tool arguments,
+fixed display vocabulary—for example, sandbox `exec`, `web_search`, and
+`update_task_plan`, or foreground `list_connected_folders`, `list_folder`,
+`read_connected_file`, `read_delegated_file`, and `import_connected_file`,
+each with `waiting` or `running` status. It is not a tool trace: queries, tool arguments,
 results, folder/root identities, relative paths, filenames, host paths, grants,
 provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
@@ -382,7 +376,7 @@ and are outside the host-field non-disclosure guarantee.
 
 A settled `exec` step's output tail is the one deliberate exception to the rule
 that stored results stay server-side. A sandbox command runs in a private,
-initially-empty workspace containing only what the run itself staged, so what it
+initially-empty workspace containing staged skills and then only what the run itself wrote, so what it
 printed is the command's own text rather than host- or user-derived content, and
 without it a failed background command is unreadable. The tail is bounded to
 2,000 characters, carried only for terminal steps, and taken from the whole
@@ -461,39 +455,3 @@ The agent hierarchy preserves the runtime's existing rules:
 
 Until a tool satisfies the side-effect receipt contract, Tidebreak continues to
 fail conservatively after an ambiguous execution rather than replay it.
-
-## Delivery sequence
-
-The implementation is intentionally incremental:
-
-1. Add the durable `AgentRun` hierarchy, atomic foreground ownership, and
-   depth-one constraints. *(Shipped.)*
-2. Add the bounded sandbox scheduler and lease lifecycle. *(Shipped.)*
-3. Add idempotent cancellation and immutable fenced result submission.
-   *(Shipped.)*
-4. Add the parent inbox and atomic child-result delivery. *(Shipped.)*
-5. Generalize client execution into the shared continuation model.
-6. Persist shared model/tool step boundaries and side-effect receipts.
-7. Atomically join durable inbox consumption with a parent turn checkpoint and
-   durable `resuming` wake signal. *(Shipped.)*
-8. Run isolated sandbox tasks with no shared conversation context, over the
-   durable lease/result boundary. *(Shipped.)*
-9. Prove the bounded foreground-only spawn path with atomic child admission,
-   sandbox wake-up, immutable delivery, and parent resume. *(Shipped.)*
-10. Add the one-call sandbox `web_search` checkpoint, host executor, and
-    receipt-backed model resume. *(Shipped.)*
-11. Let a sandbox relay a typed folder-consent proposal to its foreground
-    parent, without host access or a picker. *(Shipped.)*
-12. Add fenced read-only tools to the foreground turn for roots its chat already
-    attached. *(Shipped.)*
-13. Add desktop surfaces for queued, running, waiting, failed, and completed
-   background work, including exact sandbox stop controls. *(Shipped.)*
-14. Persist the non-blocking spawn checkpoint and ordered wait receipts.
-    *(Shipped.)*
-15. Activate non-blocking spawn and ordered multi-agent waits together.
-    *(Shipped.)*
-16. Add the desktop-only, argument-free read of one exact file immutably
-    delegated at spawn, with native claim/revalidation, broker authorization,
-    revocation fencing, and crash-safe no-replay recovery. *(Shipped.)*
-17. Add richer context lifecycle, parallel-safe tool groups, and further
-    orchestration only after these recovery boundaries are proven.

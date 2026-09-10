@@ -1,3 +1,5 @@
+Superseded by `tidebreak-sandbox-protocol` (`reverse.rs` and `oplog.rs`); kept as historical spike notes.
+
 # Reverse-RPC callback channel — spike findings
 
 Spike for [sandbox-providers.md](../sandbox-providers.md) step 5, issue #821. The

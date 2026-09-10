@@ -215,8 +215,10 @@ issue.
 
 Install [rustup](https://rustup.rs/) for the pinned Rust toolchain, Node.js 22,
 [pnpm](https://pnpm.io), the
-[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), the Tauri
-CLI, and CMake for the local voice engine:
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), and the Tauri
+CLI. Local voice transcription runs in a separately published `tidebreak-whisper`
+helper the desktop downloads on demand, so building the desktop app does not
+require CMake:
 
 ```sh
 cargo install tauri-cli --version "^2"
