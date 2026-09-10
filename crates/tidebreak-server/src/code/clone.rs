@@ -5,6 +5,7 @@
 //! setup. Named-member clones receive only an explicit borrowed credential
 //! inside an isolated process and never store secrets.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -37,6 +38,7 @@ const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
 /// without git reports so rather than stalling the dialog that asked.
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_CHARS: usize = 4_096;
+const MAX_PROGRESS_LINE_BYTES: usize = 4_096;
 const COMPLETED_JOB_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_COMPLETED_JOBS: usize = 256;
 pub const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
@@ -61,6 +63,27 @@ struct CloneJob {
     repo_id: Option<RepoId>,
     external_origin: Option<String>,
     finished_at: Option<Instant>,
+}
+
+struct CloneJobGuard {
+    runtime: std::sync::Arc<CodeRuntime>,
+    owner: OwnerId,
+    id: Uuid,
+    target: PathBuf,
+    armed: bool,
+}
+
+impl Drop for CloneJobGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.target);
+            self.runtime.fail_clone(
+                &self.owner,
+                self.id,
+                "clone job stopped before it completed",
+            );
+        }
+    }
 }
 
 impl CloneJobs {
@@ -416,6 +439,30 @@ impl CodeRuntime {
             ));
         }
         write_clone_parent_dir(&*self.db, &parent).await?;
+        tokio::fs::create_dir_all(target.parent().expect("clone target has a parent"))
+            .await
+            .map_err(|error| {
+                ServerError::bad_request_kind(
+                    "clone_target_unusable",
+                    format!("could not create clone destination parent: {error}"),
+                )
+            })?;
+        tokio::fs::create_dir(&target).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ServerError::conflict_kind(
+                    "clone_target_exists",
+                    format!("destination {} already exists", target.display()),
+                )
+            } else {
+                ServerError::bad_request_kind(
+                    "clone_target_unusable",
+                    format!(
+                        "could not create clone destination {}: {error}",
+                        target.display()
+                    ),
+                )
+            }
+        })?;
 
         let id = Uuid::new_v4();
         let job = CloneJob {
@@ -435,9 +482,17 @@ impl CodeRuntime {
         let runtime = std::sync::Arc::clone(self);
         let owner = owner.clone();
         tokio::spawn(async move {
+            let mut guard = CloneJobGuard {
+                runtime: std::sync::Arc::clone(&runtime),
+                owner: owner.clone(),
+                id,
+                target: target.clone(),
+                armed: true,
+            };
             runtime
                 .run_clone(&owner, id, source, target, attribution, lender)
                 .await;
+            guard.armed = false;
         });
         Ok(job.to_snapshot())
     }
@@ -459,6 +514,7 @@ impl CodeRuntime {
                 match lender.git_credential(owner, slug, attribution).await {
                     Ok(credential) => Some(credential),
                     Err(refusal) => {
+                        let _ = tokio::fs::remove_dir_all(&target).await;
                         self.fail_clone(owner, id, git_forge_refusal_message(&refusal));
                         return;
                     }
@@ -483,7 +539,7 @@ impl CodeRuntime {
             Ok(()) => match self
                 .register_repo(
                     owner,
-                    target,
+                    target.clone(),
                     super::runtime::RepoRegistration {
                         cloned_from: Some(redact_clone_url(&source.url)),
                         ..Default::default()
@@ -500,10 +556,14 @@ impl CodeRuntime {
                     });
                 }
                 Err(error) => {
+                    let _ = tokio::fs::remove_dir_all(&target).await;
                     self.fail_clone(owner, id, error.message());
                 }
             },
-            Err(error) => self.fail_clone(owner, id, error),
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&target).await;
+                self.fail_clone(owner, id, error);
+            }
         }
     }
 
@@ -560,7 +620,7 @@ pub async fn registered_legacy_clone_target(
     let canonical = match tokio::fs::canonicalize(target).await {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Ok(false),
+        Err(error) => return Err(ServerError::internal(error.to_string())),
     };
     Ok(
         get_repo_by_root_path(store, owner, &canonical.display().to_string())
@@ -1196,7 +1256,7 @@ async fn write_clone_parent_dir(store: &dyn Store, parent: &Path) -> Result<(), 
 async fn read_progress_line<R: AsyncReadExt + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<String>, String> {
-    let mut buf = Vec::new();
+    let mut buf = VecDeque::new();
     loop {
         let mut byte = [0u8; 1];
         match reader.read(&mut byte).await {
@@ -1213,12 +1273,17 @@ async fn read_progress_line<R: AsyncReadExt + Unpin>(
                     }
                     break;
                 }
-                buf.push(byte[0]);
+                if buf.len() == MAX_PROGRESS_LINE_BYTES {
+                    buf.pop_front();
+                }
+                buf.push_back(byte[0]);
             }
             Err(err) => return Err(format!("git clone stderr: {err}")),
         }
     }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+    Ok(Some(
+        String::from_utf8_lossy(buf.make_contiguous()).into_owned(),
+    ))
 }
 
 fn append_tail(tail: &mut String, line: &str) {
@@ -1312,6 +1377,15 @@ mod tests {
             Some(("compressing objects".into(), 100))
         );
         assert_eq!(parse_clone_progress_line("Cloning into 'foo'..."), None);
+    }
+
+    #[tokio::test]
+    async fn progress_reader_keeps_only_the_bounded_tail() {
+        let input = format!("{}tail\n", "x".repeat(MAX_PROGRESS_LINE_BYTES + 10));
+        let mut reader = BufReader::new(input.as_bytes());
+        let line = read_progress_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(line.len(), MAX_PROGRESS_LINE_BYTES);
+        assert!(line.ends_with("tail"));
     }
 
     #[test]

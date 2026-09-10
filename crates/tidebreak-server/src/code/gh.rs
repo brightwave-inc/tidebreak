@@ -27,6 +27,7 @@ const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_CHARS: usize = 4_096;
+const MAX_UNTRACKED_DIFFSTAT_BYTES: u64 = 1024 * 1024;
 const MAX_ACTION_OUTPUT_BYTES: usize = 4_096;
 const MAX_ACTION_OUTPUT_LINES: usize = 256;
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
@@ -1136,16 +1137,27 @@ async fn working_tree_diffstat(worktree: &Path) -> Result<Diffstat, GhError> {
             .await
             .unwrap_or_default(),
     );
-    let status = git(worktree, &["status", "--porcelain"], GIT_TIMEOUT).await?;
+    let status = git(
+        worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        GIT_TIMEOUT,
+    )
+    .await?;
     let mut untracked_files = 0_u32;
     let mut untracked_insertions = 0_u32;
-    for line in status.lines() {
-        if let Some(path) = line.strip_prefix("?? ") {
+    for record in status.split('\0').filter(|record| !record.is_empty()) {
+        if let Some(path) = record.strip_prefix("?? ") {
             untracked_files += 1;
-            if let Ok(bytes) = tokio::fs::read(worktree.join(path.trim())).await {
-                untracked_insertions +=
-                    u32::try_from(String::from_utf8_lossy(&bytes).lines().count())
-                        .unwrap_or(u32::MAX);
+            let path = worktree.join(path);
+            let Ok(metadata) = tokio::fs::metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_file() && metadata.len() <= MAX_UNTRACKED_DIFFSTAT_BYTES {
+                if let Ok(bytes) = tokio::fs::read(path).await {
+                    untracked_insertions +=
+                        u32::try_from(String::from_utf8_lossy(&bytes).lines().count())
+                            .unwrap_or(u32::MAX);
+                }
             }
         }
     }
@@ -2239,12 +2251,8 @@ async fn spawn_gh_with_login_env(
     let output = spawn_gh_output(cwd, binary, login_env, args, limit).await?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if output.status.success() || args == ["pr", "checks"] {
-        // `gh pr checks` exits non-zero when checks are pending or failing;
-        // the table is still the digest we want.
-        if output.status.success() || !stdout.is_empty() {
-            return Ok(stdout);
-        }
+    if output.status.success() {
+        return Ok(stdout);
     }
     Err(if stderr.is_empty() { stdout } else { stderr })
 }
@@ -2329,9 +2337,15 @@ pub async fn run_gh_http(
 }
 
 fn refuse_gh_args(args: &[&str]) -> bool {
-    args.iter()
-        .any(|arg| *arg == "merge" || *arg == "--merge" || *arg == "--auto" || *arg == "graphql")
+    let subcommands = args
+        .iter()
+        .copied()
+        .filter(|arg| !arg.starts_with('-'))
+        .take(2)
+        .collect::<Vec<_>>();
+    matches!(subcommands.as_slice(), ["merge", ..] | ["pr", "merge"])
         || args.windows(2).any(|pair| pair == ["api", "graphql"])
+        || args.first() == Some(&"graphql")
 }
 
 /// Parse a `gh api --include` answer: status line, headers, blank line, body.
@@ -3277,6 +3291,13 @@ exit 3
         assert_eq!(inline[0].line, Some(42));
         assert_eq!(inline[1].line, Some(7), "falls back to original_line");
         assert_eq!(parse_review_comments("surprise!").len(), 0);
+    }
+
+    #[test]
+    fn gh_argument_refusal_ignores_comment_bodies_named_merge() {
+        assert!(!refuse_gh_args(&["pr", "comment", "12", "--body", "merge"]));
+        assert!(refuse_gh_args(&["pr", "merge", "12"]));
+        assert!(refuse_gh_args(&["api", "graphql"]));
     }
 
     #[tokio::test]
