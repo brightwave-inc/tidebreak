@@ -511,7 +511,9 @@ pub(crate) fn digest_from_parts(
         title: pull.title.clone(),
         checks_summary: Some(counts.summary_line()),
         check_counts: Some(counts),
-        checks: (!checks.is_empty()).then(|| checks.to_vec()),
+        // The fetcher always loads the rollup, so an empty list is a fact
+        // ("no checks") and clears the row, unlike a read that never asked.
+        checks: Some(checks.to_vec()),
         draft: pull.draft,
         merged: Some(pull.state == "merged"),
         review_decision,
