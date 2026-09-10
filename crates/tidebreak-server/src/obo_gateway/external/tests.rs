@@ -398,6 +398,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
     let key = restarted.issue(HarnessLlmSubject {
         owner: owner.clone(),
         session: session.id,
+        engine: None,
     });
     let mut headers = HeaderMap::new();
     headers.insert("authorization", format!("Bearer {key}").parse().unwrap());

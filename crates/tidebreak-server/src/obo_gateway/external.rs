@@ -233,10 +233,16 @@ impl ExternalDelegations {
         // A revoke may commit while the mint is in flight. Recheck before
         // publishing its result into the slot or using it for an exchange.
         self.live_handshake(owner, grant).await?;
-        let gateway = Arc::new(OboGateway::new(
+        let mut gateway = OboGateway::new(
             &self.gateway.gateway_base_url,
             self.gateway.resource.clone(),
-        )?);
+        )?;
+        // A delegated session binds the installed engine it runs with the
+        // same machine identity the browser path uses: the gateway
+        // authenticates the binding by the registered add-on, not by whose
+        // consent the subject token came from.
+        gateway.machine_credentials = self.gateway.machine_credentials.clone();
+        let gateway = Arc::new(gateway);
         gateway.record_caller(owner, token.access_token.into());
         *held = Some(DelegatedGateway {
             expires_at: unix_time().saturating_add(token.expires_in),
