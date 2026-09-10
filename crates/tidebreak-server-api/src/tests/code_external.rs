@@ -235,6 +235,49 @@ async fn bound_session_id(
         .session_id
 }
 
+/// The relay key is the only bearer the engine-facing routes know, so the
+/// peer address is their second gate: a git credential ask from anywhere
+/// but this machine is refused before the key is even looked up, and so is
+/// one whose peer the server cannot see.
+#[tokio::test]
+async fn the_git_credential_route_answers_loopback_peers_only() {
+    let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::keys_only());
+    let (router, _fake, _runtime, _repo_id, _token, _dir) =
+        external_app_built(move |runtime| runtime.with_harness_llm(relay)).await;
+    let ask = |peer: Option<&'static str>| {
+        let router = router.clone();
+        async move {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(crate::code::harness_llm::GIT_CREDENTIAL_PATH)
+                .header(header::AUTHORIZATION, "Bearer tbreak_hl_not-a-key")
+                .body(Body::from("protocol=https\nhost=github.com\n"))
+                .unwrap();
+            if let Some(peer) = peer {
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    peer.parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
+            router.oneshot(request).await.unwrap().status()
+        }
+    };
+    assert_eq!(
+        ask(Some("203.0.113.9:40000")).await,
+        axum::http::StatusCode::FORBIDDEN,
+        "a routable peer never reaches the key check"
+    );
+    assert_eq!(
+        ask(None).await,
+        axum::http::StatusCode::FORBIDDEN,
+        "an unknown peer is refused, not trusted"
+    );
+    assert_eq!(
+        ask(Some("127.0.0.1:40000")).await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "a loopback peer proceeds to the key check"
+    );
+}
+
 /// A channel names its repository the way a forge does. `repository:
 /// owner/name` resolves to the owner's registered checkout regardless of
 /// case, a name nobody registered is a typed conflict the adapter can word,

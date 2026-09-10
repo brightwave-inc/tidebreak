@@ -26,7 +26,10 @@
 //!   follows the browser channel's lifecycle.
 //! * The caller's gateway tokens never reach the child. The relay key is
 //!   the only secret in the child's environment, and it is useless off
-//!   this machine.
+//!   this machine: the relay and git-credential routes refuse any peer
+//!   that is not loopback (`auth::require_loopback_peer`), and the child
+//!   is handed a loopback base even when the listener binds every
+//!   interface (`crate::loopback_base`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -1739,6 +1739,35 @@ pub async fn require_app_origin(
     next.run(request).await
 }
 
+/// Middleware for the engine-facing routes a session-scoped relay key
+/// opens (`/code/llm/*` and `/code/git/credential`): the peer must be this
+/// machine.
+///
+/// The key is the only bearer those routes know, and a self-host image binds
+/// every interface, so without this a key that leaked off the machine would
+/// spend the caller's inference and return a live forge credential from
+/// anywhere. An engine child runs beside the server and dials the loopback
+/// base it was handed ([`crate::loopback_base`]), so its peer address is
+/// loopback; a request that arrived any other way is refused, and so is one
+/// whose peer is unknown — a router served without connect info is a
+/// misconfiguration, not a reason to open the route.
+pub async fn require_loopback_peer(request: Request, next: Next) -> Response {
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip());
+    // `to_canonical` folds an IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`), the
+    // shape a dual-stack listener reports for an IPv4 loopback dial.
+    if !peer.is_some_and(|ip| ip.to_canonical().is_loopback()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "this route answers loopback peers only",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 /// Whether the request's `Origin`, if it declared one, is this app's.
 #[must_use]
 pub fn origin_is_this_app(headers: &HeaderMap) -> bool {
@@ -2748,5 +2777,59 @@ mod tests {
             "the OIDC jwks_uri",
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod loopback_peer_tests {
+    use std::net::SocketAddr;
+
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt as _;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/gated", get(|| async { "open" }))
+            .route_layer(axum::middleware::from_fn(super::require_loopback_peer))
+    }
+
+    async fn status(peer: Option<&str>) -> StatusCode {
+        let mut request = Request::builder()
+            .uri("/gated")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(peer) = peer {
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        }
+        app().oneshot(request).await.unwrap().status()
+    }
+
+    /// A relay key is useless off this machine only if the route refuses
+    /// every peer that is not this machine, including an unknown one.
+    #[tokio::test]
+    async fn only_a_loopback_peer_passes() {
+        assert_eq!(status(Some("127.0.0.1:50000")).await, StatusCode::OK);
+        assert_eq!(status(Some("[::1]:50000")).await, StatusCode::OK);
+        assert_eq!(
+            status(Some("[::ffff:127.0.0.1]:50000")).await,
+            StatusCode::OK,
+            "an IPv4 loopback dial on a dual-stack listener"
+        );
+        assert_eq!(
+            status(Some("203.0.113.9:50000")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(status(Some("10.0.0.5:50000")).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            status(None).await,
+            StatusCode::FORBIDDEN,
+            "no connect info is a misconfigured server, not an open door"
+        );
     }
 }
