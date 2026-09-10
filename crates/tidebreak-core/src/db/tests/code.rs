@@ -4190,19 +4190,61 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         in_merge_queue: Some(false),
         observed_at: later,
     };
-    let (live_id, changed) =
+    let (live_id, changed, _) =
         set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
             .await
             .unwrap()
             .unwrap();
     assert_eq!(live_id, id);
     assert!(changed);
-    let (_, changed_again) =
+    let (_, changed_again, _) =
         set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
             .await
             .unwrap()
             .unwrap();
     assert!(!changed_again, "observed_at alone is not change");
+    // A read that never loaded checks (`checks: None`) keeps the row's
+    // rollup and does not count as change; one that loaded and found none
+    // (`Some(vec![])`) clears it.
+    let unloaded = CodePullRequestLiveState {
+        checks_summary: None,
+        checks: None,
+        ..live.clone()
+    };
+    let (_, changed_unloaded, stored_unloaded) = set_pull_request_live_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        &unloaded,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!changed_unloaded, "an unloaded rollup is not a change");
+    assert_eq!(stored_unloaded.checks.as_ref().map(Vec::len), Some(1));
+    assert_eq!(
+        stored_unloaded.checks_summary.as_deref(),
+        Some("8 passing, 1 pending, 0 failing")
+    );
+    let cleared = CodePullRequestLiveState {
+        checks_summary: Some("0 passing, 0 pending, 0 failing".into()),
+        checks: Some(Vec::new()),
+        ..live.clone()
+    };
+    let (_, changed_cleared, stored_cleared) =
+        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &cleared)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(changed_cleared, "a loaded empty rollup clears the row");
+    assert_eq!(stored_cleared.checks.as_ref().map(Vec::len), Some(0));
+    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+        .await
+        .unwrap()
+        .unwrap();
     let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
         .await
         .unwrap()
