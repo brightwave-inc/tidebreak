@@ -8,7 +8,6 @@ import type {
   CodeUsage,
   Diffstat,
   FileChangeKind,
-  HarnessKind,
   HarnessNoticeLevel,
   SequencedCodeEventFrame,
   ToolDetail,
@@ -177,8 +176,6 @@ export type CodeSessionState = {
   >;
   assistantBuffer: string;
   reasoningBuffer: string;
-  harnessKind: HarnessKind | null;
-  harnessVersion: string | null;
   lastUsage: CodeUsage | null;
   /** Session lifecycle as the journal last stated it. */
   lifecycle: CodeSessionLifecycle | null;
@@ -250,8 +247,6 @@ export function initialCodeSessionState(): CodeSessionState {
     pendingTerminalReconciliations: new Map(),
     assistantBuffer: "",
     reasoningBuffer: "",
-    harnessKind: null,
-    harnessVersion: null,
     lastUsage: null,
     lifecycle: null,
     contentRevision: 0,
@@ -397,14 +392,6 @@ export function applyCodeTurnSnapshot(
  * started while the request was in flight, the snapshot still fills durable
  * transcript data but leaves the newer activity untouched.
  */
-export function reconcileCodeTurnSnapshot(
-  state: CodeSessionState,
-  turn: CodeTurnSnapshot,
-): CodeSessionState {
-  const pending = latestPendingForTurn(state, turn.id);
-  return reconcileCodeTurnSnapshotWithPending(state, turn, pending);
-}
-
 function reconcileCodeTurnSnapshotWithPending(
   state: CodeSessionState,
   turn: CodeTurnSnapshot,
@@ -840,14 +827,8 @@ export function reduceCodeSessionEvent(
 
   switch (event.type) {
     case "session_started":
-      return {
-        state: {
-          ...state,
-          harnessKind: event.harness_kind,
-          harnessVersion: event.harness_version,
-        },
-        effects,
-      };
+      // Session metadata already comes from the durable session snapshot.
+      return { state, effects };
 
     case "turn_resumed": {
       // Same turn, not a new one. Keep the transcript on this turn so the
@@ -1323,6 +1304,15 @@ export function reduceCodeSessionEvent(
       };
     }
 
+    case "stream_interrupted":
+    case "tool_args_delta":
+    case "task_plan_updated":
+    case "context_truncated":
+    case "compaction_started":
+    case "compaction_finished":
+      // Only the internal harness emits these, and code mode filters it out.
+      return { state, effects };
+
     default:
       return { state, effects };
   }
@@ -1382,15 +1372,13 @@ function withTruncationNotice(
   items: CodeTranscriptItem[],
 ): CodeTranscriptItem[] {
   if (items.some((item) => item.id === TRUNCATED_NOTICE_ID)) return items;
-  return [
-    {
-      kind: "notice",
-      id: TRUNCATED_NOTICE_ID,
-      level: "info",
-      message: "Earlier history in this session is not shown.",
-    },
-    ...items,
-  ];
+  const notice: CodeTranscriptItem = {
+    kind: "notice",
+    id: TRUNCATED_NOTICE_ID,
+    level: "info",
+    message: "Earlier history in this session is not shown.",
+  };
+  return items.length === 0 ? [notice] : [...items, notice];
 }
 
 /** Fixed so a reconnect does not stack a second copy of the same line. */
@@ -1787,6 +1775,9 @@ export function applyTurnRewrite(
     rewrite.rewriteState !== "rewritten"
       ? (item.rewriteState ?? "rewritten")
       : rewrite.rewriteState;
+  if (item.rewrite === nextRewrite && item.rewriteState === nextState) {
+    return items;
+  }
   const next = items.slice();
   next[last] = {
     ...item,

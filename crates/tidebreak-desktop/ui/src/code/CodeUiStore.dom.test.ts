@@ -81,6 +81,7 @@ describe("workspace rail preferences", () => {
   });
 
   it("uses repository grouping for an old Created preference and preserves card choices", async () => {
+    window.localStorage.setItem("tidebreak.code-workspace-sort", "by-status");
     window.localStorage.setItem(
       PREFS_KEY,
       JSON.stringify({
@@ -97,12 +98,18 @@ describe("workspace rail preferences", () => {
       showRepoChip: false,
       showBranch: true,
     });
+    expect(
+      window.localStorage.getItem("tidebreak.code-workspace-sort"),
+    ).toBeNull();
   });
 
   it("falls back from the legacy Created sort key", async () => {
     window.localStorage.setItem("tidebreak.code-workspace-sort", "by-created");
     const { useCodeUiStore } = await import("./CodeUiStore");
     expect(useCodeUiStore.getState().railPrefs.sortMode).toBe("by-repo");
+    expect(
+      window.localStorage.getItem("tidebreak.code-workspace-sort"),
+    ).toBeNull();
   });
 
   it("clears selection on host change and keeps rail preferences", async () => {
