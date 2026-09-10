@@ -791,6 +791,11 @@ describe("NewWorkspaceDialog", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeEnabled();
+    expect(
+      screen.getByText(
+        "This engine's permission system is off; every action runs without asking",
+      ),
+    ).toBeVisible();
 
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",

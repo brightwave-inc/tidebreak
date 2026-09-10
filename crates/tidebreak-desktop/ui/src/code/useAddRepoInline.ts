@@ -26,6 +26,14 @@ import {
 
 const CLONE_POLL_INTERVAL_MS = 1_500;
 
+export function displayClonePhase(phase?: string | null): string {
+  if (!phase || phase === "starting") return "Starting";
+  if (phase === "done") return "Clone complete";
+  return phase
+    .replace(/[_-]+/g, " ")
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
+
 /** What the inline add-repo field is doing, and what it needs to finish. */
 export type AddRepoInlineState = {
   value: string;
@@ -367,7 +375,7 @@ export function useAddRepoInline({
     blocked,
     busy,
     error,
-    phase: jobId ? (job?.phase ?? "Starting") : null,
+    phase: jobId ? displayClonePhase(job?.phase) : null,
     percent: jobId ? (job?.percent ?? null) : null,
     defaultsProbeFailed: defaultsProbeFailed && !seededDestination,
     defaultsBusy,

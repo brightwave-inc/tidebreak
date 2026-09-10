@@ -65,6 +65,7 @@ import {
   type CodeCloneRequest,
   type ResumableCodeClone,
 } from "./CodeUpdatesStore";
+import { displayClonePhase } from "./useAddRepoInline";
 
 type Stage = "sources" | "local" | "git_url" | "github" | "progress";
 
@@ -226,11 +227,17 @@ export function AddRepoPalette({
   // than swallowed: "GitHub is missing" with no reason is worse than absent.
   const unavailable = useMemo(
     () =>
-      (sources?.sources ?? []).filter(
-        (source) =>
-          !source.available &&
-          source.remediation &&
-          SOURCES.some((row) => row.key === source.kind),
+      Array.from(
+        new Set(
+          (sources?.sources ?? [])
+            .filter(
+              (source) =>
+                !source.available &&
+                source.remediation &&
+                SOURCES.some((row) => row.key === source.kind),
+            )
+            .map((source) => source.remediation),
+        ),
       ),
     [sources],
   );
@@ -865,12 +872,15 @@ export function AddRepoPalette({
               </CommandGroup>
               {unavailable.length > 0 && (
                 <div className="border-t px-3 py-2">
-                  {unavailable.map((source) => (
+                  <p className="mb-1 text-xs font-medium">
+                    Not available on this machine
+                  </p>
+                  {unavailable.map((remediation) => (
                     <p
-                      key={source.kind}
+                      key={remediation}
                       className="text-xs text-muted-foreground break-words"
                     >
-                      {source.remediation}
+                      {remediation}
                     </p>
                   ))}
                 </div>
@@ -1633,7 +1643,7 @@ function ProgressStage({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium" data-testid="clone-phase">
-            {job?.phase ?? "Starting"}
+            {displayClonePhase(job?.phase)}
           </p>
           {!job?.done && (
             <p className="mt-0.5 text-xs text-muted-foreground">
@@ -1670,6 +1680,13 @@ function ProgressStage({
             Retry
           </Button>
         </>
+      )}
+      {job?.done && !job.error && !job.repo_id && (
+        <ProbeFailure
+          message="The clone finished without a repository."
+          busy={false}
+          onRetry={onRetry}
+        />
       )}
       {completed && (
         <div className="rounded-lg border border-success-border bg-success-background p-3">

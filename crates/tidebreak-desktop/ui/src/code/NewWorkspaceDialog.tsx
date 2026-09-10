@@ -77,6 +77,7 @@ import { startFirstSession } from "./startWorkspaceSession";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   createPermissionModes,
+  createPermissionModePosture,
   defaultCreatePermissionMode,
   effortLadder,
   gatewayCodeModels,
@@ -1281,6 +1282,14 @@ export function NewWorkspaceDialog({
                     />
                   </span>
                 </WithTooltip>
+                {selectedHarness && (
+                  <p className="text-muted-foreground px-2 text-xs whitespace-nowrap">
+                    {createPermissionModePosture(
+                      postedMode,
+                      selectedHarness.caps,
+                    )}
+                  </p>
+                )}
                 {selectedHarness?.relaunch_composes_permission_mode ===
                   false && (
                   <p className="text-muted-foreground px-2 text-xs">
