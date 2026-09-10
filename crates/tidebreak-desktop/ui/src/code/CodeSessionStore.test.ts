@@ -32,18 +32,34 @@ describe("CodeSessionStore", () => {
     const store = createCodeSessionStore();
     store
       .getState()
-      .applyEvent(
-        { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+      .applyEvents(
+        [{ seq: 1, event: { type: "turn_started", turn_id: "turn-1" } }],
         deps,
       );
+    store.getState().update((session) => ({
+      ...session,
+      items: [
+        {
+          kind: "assistant",
+          id: "assistant-1",
+          turnId: "turn-1",
+          parentCallId: null,
+          text: "Done.",
+          streaming: false,
+          rewrite: "Recap.",
+          rewriteState: "rewritten",
+        },
+      ],
+      storedRewrites: { "turn-1": "Recap." },
+    }));
     const listener = vi.fn();
     store.subscribe(listener);
 
     expect(
       store
         .getState()
-        .applyEvent(
-          { seq: 1, event: { type: "assistant_delta", text: "late" } },
+        .applyEvents(
+          [{ seq: 1, event: { type: "assistant_delta", text: "late" } }],
           deps,
         ),
     ).toEqual([]);

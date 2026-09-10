@@ -720,17 +720,27 @@ export function CodeSessionPane({
 }
 
 export function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
-  const storeRef = useRef<ReturnType<
-    typeof acquireCodeSessionFromClient
-  > | null>(null);
-  if (storeRef.current === null) {
-    storeRef.current = acquireCodeSessionFromClient(sessionId, client);
+  const registrationRef = useRef<{
+    sessionId: string;
+    client: ApiClient;
+    store: ReturnType<typeof acquireCodeSessionFromClient>;
+  } | null>(null);
+  const current = registrationRef.current;
+  if (current?.sessionId !== sessionId || current.client !== client) {
+    if (current) releaseCodeSession(current.sessionId);
+    registrationRef.current = {
+      sessionId,
+      client,
+      store: acquireCodeSessionFromClient(sessionId, client),
+    };
   }
   useEffect(() => {
     return () => {
-      releaseCodeSession(sessionId);
-      storeRef.current = null;
+      const registration = registrationRef.current;
+      if (!registration) return;
+      releaseCodeSession(registration.sessionId);
+      registrationRef.current = null;
     };
-  }, [sessionId, client]);
-  return storeRef.current;
+  }, []);
+  return registrationRef.current!.store;
 }

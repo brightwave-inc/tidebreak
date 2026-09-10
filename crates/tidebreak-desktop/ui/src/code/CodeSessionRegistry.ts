@@ -237,8 +237,9 @@ export function releaseCodeSession(sessionId: string): void {
 
 export function peekCodeSession(
   sessionId: string,
-): CodeSessionEntry | undefined {
-  return registry.get(sessionId);
+): Readonly<Pick<CodeSessionEntry, "store" | "refCount">> | undefined {
+  const entry = registry.get(sessionId);
+  return entry ? { store: entry.store, refCount: entry.refCount } : undefined;
 }
 
 /** Stamp a finished recap onto a retained or open session store. */
@@ -266,7 +267,7 @@ export function applyLiveTurnRewrite(
   });
 }
 
-/** Test-only: drop every live entry without waiting for unmounts. */
+/** Dispose and forget every session; client swaps call this before remounting. */
 export function resetCodeSessionRegistry(): void {
   for (const entry of registry.values()) {
     entry.controller?.dispose();

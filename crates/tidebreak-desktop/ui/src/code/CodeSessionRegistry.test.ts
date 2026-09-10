@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import {
@@ -12,6 +14,7 @@ import {
 import { resetCodeClientGenerationForTests } from "./CodeClientGeneration";
 import { activateCodeClient } from "./CodeClientScope";
 import { userItemId } from "./CodeSessionReducer";
+import { useRegisteredCodeSession } from "./workspace/CodeSessionPane";
 
 class FakeSocket {
   closed = false;
@@ -69,12 +72,41 @@ function turnSnapshot(
 }
 
 afterEach(() => {
+  cleanup();
   vi.useRealTimers();
   resetCodeSessionRegistry();
   resetCodeClientGenerationForTests();
 });
 
 describe("CodeSessionRegistry", () => {
+  it("switches hook stores and registry references with the session id", () => {
+    const client = {
+      listCodeSessionTurns: vi.fn(async () => []),
+      openCodeEvents: vi.fn(
+        (
+          _sessionId: string,
+          after: number,
+          onFrame: (frame: SequencedCodeEventFrame) => void,
+        ) => new FakeSocket(after, onFrame) as unknown as WebSocket,
+      ),
+    };
+    const hook = renderHook(
+      ({ sessionId }) => useRegisteredCodeSession(sessionId, client as never),
+      { initialProps: { sessionId: "s1" } },
+    );
+    const first = hook.result.current;
+
+    expect(peekCodeSession("s1")).toMatchObject({ store: first, refCount: 1 });
+
+    hook.rerender({ sessionId: "s2" });
+
+    expect(hook.result.current).not.toBe(first);
+    expect(peekCodeSession("s1")?.refCount).toBe(0);
+    expect(peekCodeSession("s2")).toMatchObject({
+      store: hook.result.current,
+      refCount: 1,
+    });
+  });
   it("does not let old session hydration populate a replacement client", async () => {
     const staleTurns = deferred<CodeTurnSnapshot[]>();
     const oldSockets: FakeSocket[] = [];
@@ -190,8 +222,8 @@ describe("CodeSessionRegistry", () => {
 
     first
       .getState()
-      .applyEvent(
-        { seq: 1, event: { type: "turn_started", turn_id: "t1" } },
+      .applyEvents(
+        [{ seq: 1, event: { type: "turn_started", turn_id: "t1" } }],
         { nextId: () => "id", now: () => "2026-08-15T00:00:00.000Z" },
       );
     expect(second.getState().busy).toBe(true);
@@ -202,10 +234,7 @@ describe("CodeSessionRegistry", () => {
 
     releaseCodeSession("s1");
     expect(sockets[0]?.closed).toBe(true);
-    expect(peekCodeSession("s1")).toMatchObject({
-      controller: null,
-      refCount: 0,
-    });
+    expect(peekCodeSession("s1")?.refCount).toBe(0);
     expect(first.getState().connectionState).toBe("reconnecting");
   });
 
@@ -237,8 +266,8 @@ describe("CodeSessionRegistry", () => {
     await Promise.resolve();
     first
       .getState()
-      .applyEvent(
-        { seq: 7, event: { type: "turn_started", turn_id: "t2" } },
+      .applyEvents(
+        [{ seq: 7, event: { type: "turn_started", turn_id: "t2" } }],
         { nextId: () => "id", now: () => "2026-08-15T12:00:03.000Z" },
       );
 
@@ -342,20 +371,24 @@ describe("CodeSessionRegistry", () => {
     });
     expect(sockets[0]?.after).toBe(0);
 
-    store.getState().applyEvent(
-      {
-        seq: 1,
-        event: { type: "turn_started", turn_id: "t1" },
-        replayed: true,
-      },
+    store.getState().applyEvents(
+      [
+        {
+          seq: 1,
+          event: { type: "turn_started", turn_id: "t1" },
+          replayed: true,
+        },
+      ],
       { nextId: () => "id", now: () => "2026-08-15T12:00:02.500Z" },
     );
-    store.getState().applyEvent(
-      {
-        seq: 2,
-        event: { type: "assistant_delta", text: "README.md" },
-        replayed: true,
-      },
+    store.getState().applyEvents(
+      [
+        {
+          seq: 2,
+          event: { type: "assistant_delta", text: "README.md" },
+          replayed: true,
+        },
+      ],
       { nextId: () => "a1", now: () => "2026-08-15T12:00:02.500Z" },
     );
     expect(
@@ -744,7 +777,9 @@ describe("CodeSessionRegistry", () => {
 
     expect(hydrateTurns).toHaveBeenCalledTimes(2);
     expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
-    expect(store.getState().items.at(-1)).toMatchObject({
+    expect(
+      store.getState().items.find((item) => item.id === "boundary:t2"),
+    ).toMatchObject({
       kind: "turn_boundary",
       turnId: "t2",
       status: "failed",
