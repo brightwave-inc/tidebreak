@@ -216,6 +216,9 @@ type Story = StoryObj<typeof meta>;
 /** Four engines, each with its honest mode list. */
 export const AllEngines: Story = {};
 
+/** The autonomous default states its bypass posture before any interaction. */
+export const AllowPostureOnOpen: Story = {};
+
 export const PastedTextBeforeSession: Story = {
   args: {
     pastedText: `Session report\n${"x".repeat(1_000)}`,

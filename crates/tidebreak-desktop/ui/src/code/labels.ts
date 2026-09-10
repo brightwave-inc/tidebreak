@@ -118,6 +118,20 @@ export const PERMISSION_MODE_POSTURES: Record<PermissionMode, string> = {
   allow: "Runs every tool without asking",
 };
 
+/** Create-time posture, strengthened where the engine will not ask at all. */
+export function createPermissionModePosture(
+  mode: PermissionMode,
+  caps: ModeCaps,
+): string {
+  if (mode === "allow") {
+    return "This engine's permission system is off; every action runs without asking";
+  }
+  if (mode === "auto" && caps.structured_approvals !== "supported") {
+    return "This engine has no approval channel; every action proceeds without asking";
+  }
+  return PERMISSION_MODE_POSTURES[mode];
+}
+
 /** The header chip's tooltip: the posture, named and spelled out. */
 export function sessionPermissionModeTooltip(mode: PermissionMode): string {
   return `Permissions: ${PERMISSION_MODE_LABELS[mode]}\n${PERMISSION_MODE_POSTURES[mode]}`;

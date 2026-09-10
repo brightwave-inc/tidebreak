@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -227,22 +228,44 @@ describe("CodeHome", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("leaves the loading empty when the doctor request fails", async () => {
+  it("keeps Add repo available and retries when the engine check fails", async () => {
+    const refreshHarnessDoctor = vi.fn(async () => READY_DOCTOR);
     await renderHome(
       app({
         getHarnessDoctor: vi.fn(async () => {
           throw new Error("doctor unavailable");
         }),
+        refreshHarnessDoctor,
       }),
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Set up a coding engine" }),
+      await screen.findByText(
+        "The coding engine check did not answer: doctor unavailable",
+      ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("Start with a repository"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      screen.getByRole("heading", { name: "Start with a repository" }),
+    ).toBeInTheDocument();
+    const main = document.querySelector(".main");
+    expect(main).not.toBeNull();
+    expect(
+      within(main as HTMLElement).getByRole("button", { name: "Add repo" }),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Re-check" }));
+    expect(refreshHarnessDoctor).toHaveBeenCalledOnce();
+  });
+
+  it("offers Try again when the repository catalog fails", async () => {
+    const listCodeRepos = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("catalog unavailable"))
+      .mockResolvedValueOnce([]);
+    await renderHome(app({ listCodeRepos }));
+
+    expect(await screen.findByText("catalog unavailable")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(listCodeRepos).toHaveBeenCalledTimes(2));
   });
 
   it("lists repos as soon as the catalog loads, without waiting for the doctor", async () => {

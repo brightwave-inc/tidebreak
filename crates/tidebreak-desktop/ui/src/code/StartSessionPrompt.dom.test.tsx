@@ -177,6 +177,11 @@ describe("StartSessionPrompt", () => {
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByText(
+        "This engine's permission system is off; every action runs without asking",
+      ),
+    ).toBeVisible();
+    expect(
       screen.getByRole("combobox", { name: "Harness" }).closest("form"),
     ).toHaveClass("chat-composer");
     const field = screen.getByRole("textbox", { name: "Message" });

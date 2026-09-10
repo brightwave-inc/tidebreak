@@ -109,6 +109,7 @@ export function PermissionModePicker({
   pending,
   onChange,
   scopeKey = "code-create",
+  posture,
 }: {
   value: PermissionMode;
   availableModes?: readonly PermissionMode[];
@@ -117,6 +118,7 @@ export function PermissionModePicker({
   pending?: boolean;
   onChange?: (mode: PermissionMode) => void;
   scopeKey?: string;
+  posture?: string;
 }) {
   const locked = !onChange;
   const menu = (
@@ -134,29 +136,41 @@ export function PermissionModePicker({
       }}
     />
   );
+  let control: ReactNode;
   if (pending) {
-    return (
+    control = (
       <WithTooltip label="Saving session settings">
         <span className="inline-flex" aria-busy="true">
           {menu}
         </span>
       </WithTooltip>
     );
-  }
-  if (unavailableReason) {
-    return (
+  } else if (unavailableReason) {
+    control = (
       <WithTooltip label={unavailableReason}>
         <span className="inline-flex">{menu}</span>
       </WithTooltip>
     );
+  } else if (!locked) {
+    control = menu;
+  } else {
+    // Disabled buttons drop pointer events, so the tooltip has to sit on a
+    // wrapper the reader can still hover and focus.
+    control = (
+      <WithTooltip label={SESSION_PERMISSION_MODE_LOCKED}>
+        <span className="inline-flex">{menu}</span>
+      </WithTooltip>
+    );
   }
-  if (!locked) return menu;
-  // Disabled buttons drop pointer events, so the tooltip has to sit on a
-  // wrapper the reader can still hover and focus.
   return (
-    <WithTooltip label={SESSION_PERMISSION_MODE_LOCKED}>
-      <span className="inline-flex">{menu}</span>
-    </WithTooltip>
+    <span className="flex min-w-0 flex-col items-end">
+      {control}
+      {posture && (
+        <span className="text-muted-foreground text-xs whitespace-nowrap">
+          {posture}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -662,6 +676,7 @@ export function CodeComposer({
   disabled,
   running,
   permissionMode,
+  permissionPosture,
   availableModes = MODES,
   unavailableReason,
   harness,
@@ -694,6 +709,7 @@ export function CodeComposer({
   disabled?: boolean;
   running: boolean;
   permissionMode: PermissionMode;
+  permissionPosture?: string;
   availableModes?: readonly PermissionMode[];
   /** Why no permission mode can start this session. */
   unavailableReason?: string;
@@ -1191,6 +1207,7 @@ export function CodeComposer({
             pending={settingsPending}
             onChange={onModeChange}
             scopeKey={sessionId ?? "code-create"}
+            posture={permissionPosture}
           />
         }
         contextUsage={contextUsage}

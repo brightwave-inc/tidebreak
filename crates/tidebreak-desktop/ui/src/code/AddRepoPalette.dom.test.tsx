@@ -264,7 +264,7 @@ describe("AddRepoPalette", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clone" }));
     await waitFor(() => expect(started).toHaveBeenCalled());
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "starting",
+      "Starting",
     );
     useCodeUpdatesStore.getState().apply({
       type: "clone_progress",
@@ -277,7 +277,7 @@ describe("AddRepoPalette", () => {
     });
     await waitFor(() =>
       expect(screen.getByTestId("clone-phase")).toHaveTextContent(
-        "receiving objects",
+        "Receiving objects",
       ),
     );
     useCodeUpdatesStore.getState().apply({
@@ -312,7 +312,7 @@ describe("AddRepoPalette", () => {
 
     await startGitClone();
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "starting",
+      "Starting",
     );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() =>
@@ -877,14 +877,14 @@ describe("AddRepoPalette", () => {
 
     await startGitClone();
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "receiving objects",
+      "Receiving objects",
     );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     fireEvent.click(
       screen.getByRole("button", { name: "Open add repository" }),
     );
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "receiving objects",
+      "Receiving objects",
     );
 
     act(() => {
@@ -942,9 +942,8 @@ describe("AddRepoPalette on a machine that answers for itself", () => {
     ).toBeInTheDocument();
     // Absent with no reason reads as a broken dialog; the machine's own
     // sentence is what makes it legible.
-    expect(
-      screen.getAllByText(/This machine has no git\./).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getByText("Not available on this machine")).toBeVisible();
+    expect(screen.getAllByText("This machine has no git.")).toHaveLength(1);
   });
 
   it("asks for no destination when the machine places clones itself", async () => {

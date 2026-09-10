@@ -49,6 +49,7 @@ function CodeHomeBody() {
   const { client } = useApp();
   const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
   const doctor = useCodeCatalogStore((state) => state.doctor);
+  const doctorError = useCodeCatalogStore((state) => state.doctorError);
   const repos = useCodeCatalogStore((state) => state.repos);
   const loaded = useCodeCatalogStore((state) => state.loaded);
   const error = useCodeCatalogStore((state) => state.error);
@@ -73,7 +74,8 @@ function CodeHomeBody() {
   const showDoctor = Boolean(doctor && !usable);
   // Repos resolve before the doctor. Until one of the three settled
   // bodies can render, keep this slot filled so the empty state does not pop in.
-  const showLoading = !showRepos && !showEmpty && !showDoctor && !error;
+  const showLoading =
+    !showRepos && !showEmpty && !showDoctor && !doctorError && !error;
 
   async function install(kind: HarnessKind) {
     try {
@@ -118,7 +120,32 @@ function CodeHomeBody() {
           </p>
         </header>
       )}
-      {error && <p className="text-sm text-critical">{error}</p>}
+      {error && (
+        <div className="notice-surface notice-critical flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
+          <span>{error}</span>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => void refresh(client)}
+          >
+            Try again
+          </Button>
+        </div>
+      )}
+      {doctorError && (
+        <div className="notice-surface notice-warning flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
+          <span>The coding engine check did not answer: {doctorError}</span>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => void onRefresh()}
+          >
+            {refreshing ? "Re-checking…" : "Re-check"}
+          </Button>
+        </div>
+      )}
       {showLoading && (
         <Empty role="status">
           <EmptyHeader>
@@ -144,6 +171,11 @@ function CodeHomeBody() {
             installs={installs}
           />
         </section>
+      )}
+      {doctorError && repos.length === 0 && (
+        <div className="flex flex-1 items-center">
+          <CodeRepoEmptyState onAddRepo={() => setAddOpen(true)} />
+        </div>
       )}
       {showEmpty && (
         <div className="flex flex-1 items-center">
@@ -264,7 +296,7 @@ export function CodeRepoEmptyState({ onAddRepo }: { onAddRepo: () => void }) {
       >
         {CODE_ONBOARDING_STEPS.map(({ icon: Icon, title, description }) => (
           <li key={title} className="relative flex gap-4 pb-7 last:pb-0">
-            <span className="z-10 grid size-9 shrink-0 place-items-center rounded-full border border-border-subtle bg-background text-muted-foreground shadow-xs">
+            <span className="z-10 grid size-9 shrink-0 place-items-center rounded-full border border-border-subtle bg-background text-muted-foreground">
               <Icon aria-hidden="true" className="size-4" strokeWidth={1.75} />
             </span>
             <span className="min-w-0 pt-0.5">

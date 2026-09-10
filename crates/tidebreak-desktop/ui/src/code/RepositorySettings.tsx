@@ -291,7 +291,9 @@ export function RepositorySettings({
             </label>
             <p className="text-xs text-muted-foreground">
               Runs after a worktree is created or restored. Tidebreak sets
-              TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME.
+              TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME. A failure leaves
+              the workspace in Setup failed. Fix the script, then pick Retry
+              setup; the checkout is kept.
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-1.5">
