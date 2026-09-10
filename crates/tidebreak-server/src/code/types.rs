@@ -19,13 +19,13 @@ pub use tidebreak_code_delivery::wire::{
 };
 
 use tidebreak_core::{
-    Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, CapLevel,
-    CodePullRequestRelation, CodeRepo, CodeSubagentSummary, CodeTerminalId, CodeTrigger,
-    CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event, ExecutionLocation, FenceReason,
-    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest,
-    QuickAction, ReasoningEffort, RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId,
-    TurnStatus, WorkspaceId,
+    Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, CodePullRequestRelation,
+    CodeRepo, CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction,
+    CodeTriggerCondition, CodeTriggerId, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace,
+    CodeWorkspaceStatus, Diffstat, Event, ExecutionLocation, FenceReason, FileChangeKind,
+    HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction,
+    ReasoningEffort, RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus,
+    WorkspaceId,
 };
 
 /// One adapter grant, as the desktop grants list renders it. Carries no
@@ -1767,16 +1767,6 @@ pub struct CodeTerminalRead {
     pub ended: bool,
 }
 
-/// Unsequenced activity notice published on the updates channel.
-///
-/// Never journaled. A client that missed one just pulls from its last cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-#[allow(dead_code)]
-pub struct CodeTerminalActivityNotice {
-    pub workspace_id: WorkspaceId,
-    pub terminal_id: CodeTerminalId,
-}
-
 /// Cheap per-session digest on `/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -2118,10 +2108,4 @@ pub struct TerminalResizeBody {
 pub struct WorkspaceTerminalPath {
     pub id: WorkspaceId,
     pub tid: CodeTerminalId,
-}
-
-/// Used so capability flags stay reachable from the doctor root.
-#[allow(dead_code)]
-fn _cap_level(level: CapLevel) -> CapLevel {
-    level
 }

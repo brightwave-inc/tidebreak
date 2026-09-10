@@ -267,7 +267,6 @@ async fn fixture(empty_catalog: bool) -> Fixture {
     runtime.adapters.register(Arc::new(InternalAdapter::new(
         state.clone(),
         runtime.db.clone(),
-        runtime.bus.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
     state.events.mirror_into(runtime.bus.clone());

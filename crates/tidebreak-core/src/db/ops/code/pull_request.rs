@@ -348,29 +348,6 @@ pub async fn list_pull_request_facts(
         .collect()
 }
 
-/// Every distinct repository identity holding at least one fact row.
-///
-/// The reconcile sweep reads this to keep cross-repo facts fresh: a
-/// repository discovered through a detected command keeps itself on the
-/// sweep's list without a local checkout.
-pub async fn list_fact_repo_identities(
-    store: &DbStore,
-    owner: &OwnerId,
-) -> Result<Vec<(String, String, String)>> {
-    let rows: Vec<(String, String, String)> = entities::code_pull_request::Entity::find()
-        .select_only()
-        .column(entities::code_pull_request::Column::Host)
-        .column(entities::code_pull_request::Column::RepoOwner)
-        .column(entities::code_pull_request::Column::RepoName)
-        .distinct()
-        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
-        .into_tuple()
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(rows)
-}
-
 /// Every distinct `(owner, host, repo_owner, repo_name)` holding at least
 /// one fact row.
 ///

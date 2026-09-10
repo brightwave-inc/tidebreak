@@ -25,7 +25,7 @@ pub struct InterruptedSessionRecovery {
 /// process restart. Other engines lose the in-memory wait with the worker,
 /// so you still close those turns as interrupted.
 #[must_use]
-pub fn resumes_parked_turn_after_restart(
+fn resumes_parked_turn_after_restart(
     status: TurnStatus,
     park_ref: Option<&str>,
     durable_parks: CapLevel,
