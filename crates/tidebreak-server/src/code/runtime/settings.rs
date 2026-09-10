@@ -180,13 +180,19 @@ impl CodeRuntime {
         }
 
         if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
-            // The sandbox carries the engine. Persist the mode on the row and
+            // The sandbox carries the engine. Durably replace the mode, but
             // do not relaunch a host harness against the empty worktree.
-            let mut session = session;
-            session.permission_mode = mode;
-            self.validate_remote_execution(&session)?;
-            crate::code::attention::persist_session(&self.db, &self.bus, &session).await?;
-            return Ok(session);
+            let mut requested = session.clone();
+            requested.permission_mode = mode;
+            self.validate_remote_execution(&requested)?;
+            return replace_sandbox_permission_mode(&self.db, owner, &session, mode)
+                .await?
+                .ok_or_else(|| {
+                    ServerError::conflict_kind(
+                        "permission_mode_changed",
+                        "the session changed before the permission mode could be stored",
+                    )
+                });
         }
 
         // Refuse a mode this engine cannot honor here, not at the next turn,
@@ -351,7 +357,16 @@ impl CodeRuntime {
         )
         .await;
         if !confirm_permission_mode_change(&self.db, owner, &intent).await? {
-            let _ = discard_permission_mode_change(&self.db, owner, &intent).await;
+            let reason = permission_mode_fence_reason(&intent);
+            let fenced = fence_permission_mode_change(&self.db, owner, &intent, &reason).await?;
+            if let Some(fenced) = fenced {
+                crate::code::attention::emit_digest(&self.db, &self.bus, &fenced).await;
+                return Err(ServerError::conflict_kind(
+                    "permission_mode_unconfirmed",
+                    "the session changed while its worker stopped for the permission mode update; reap the fenced session before another turn",
+                ));
+            }
+            let _ = discard_permission_mode_change(&self.db, owner, &intent).await?;
             return Err(ServerError::conflict_kind(
                 "permission_mode_changed",
                 "the session changed while its worker stopped for the permission mode update",

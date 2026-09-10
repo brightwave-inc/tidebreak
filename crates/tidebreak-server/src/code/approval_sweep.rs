@@ -135,7 +135,9 @@ pub(crate) async fn abandon_for_restart(
 async fn parks_are_durable(db: &DbStore, owner: &OwnerId, session_id: SessionId) -> bool {
     matches!(
         get_session(db, owner, session_id).await,
-        Ok(Some(session)) if session.harness_kind == tidebreak_core::HarnessKind::Internal
+        Ok(Some(session))
+            if crate::code::recovery::durable_parks_for(session.harness_kind)
+                == tidebreak_core::CapLevel::Supported
     )
 }
 

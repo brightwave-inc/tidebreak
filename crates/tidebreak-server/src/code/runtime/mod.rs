@@ -38,7 +38,7 @@ use tidebreak_core::db::code::{
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
-    replace_session_execution_settings, save_repo, save_workspace,
+    replace_sandbox_permission_mode, replace_session_execution_settings, save_repo, save_workspace,
     set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
     ClaimedApprovalSettlement, PermissionModeChangeIntent, SessionExecutionSettings,
     MAX_REPLAY_EVENTS,
@@ -776,7 +776,6 @@ impl CodeRuntime {
         self
     }
 
-    /// Refuse local engines on a hosted deployment that requires isolation.
     /// The operator's permission policy for channel-bound sessions on this
     /// machine's engine: the default mode and the ceiling a channel may ask
     /// for. Config validated the pair at boot, so the ceiling is never below

@@ -140,8 +140,7 @@ impl CodeRuntime {
         probe
     }
 
-    /// Drop every memoized probe so the next read is cold. The doctor's
-    /// refresh is the on-demand re-probe decision 0034 describes.
+    /// Record the latest managed pin-install result for one harness.
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn record_pin_install(&self, kind: HarnessKind, result: Result<(), String>) {
         let mut errors = self.pin_install_errors.lock().expect("pin install errors");
