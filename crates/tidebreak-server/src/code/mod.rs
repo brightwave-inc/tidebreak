@@ -14,6 +14,7 @@ pub mod checkpoint;
 pub mod chrome;
 pub mod ci_logs;
 pub mod clone;
+pub mod conversation_tools;
 pub mod delivery;
 pub mod forge_rest;
 pub mod fork;

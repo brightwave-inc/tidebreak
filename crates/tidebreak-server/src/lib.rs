@@ -1330,8 +1330,10 @@ async fn bind_inner(
         cancellation_acceleration,
     );
     let session_tools = Arc::new(code::self_drive::SessionTools::default());
+    let conversation_tools = Arc::new(code::conversation_tools::ConversationTools::default());
     let mut tools = tools;
     session_tools.register(&mut tools);
+    conversation_tools.register(&mut tools);
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
     // runtime, so it is injected at assembly rather than patched in after:
@@ -1490,6 +1492,7 @@ async fn bind_inner(
     };
     let code = Arc::new(runtime);
     session_tools.attach(&code);
+    conversation_tools.attach(&code);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
