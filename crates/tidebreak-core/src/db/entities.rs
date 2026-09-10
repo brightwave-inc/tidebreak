@@ -1889,6 +1889,34 @@ pub mod code_external_grant_retired_refresh {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_conversation_request {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_conversation_request")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub grant_id: Uuid,
+        pub binding_id: Uuid,
+        pub call_key: String,
+        pub operation: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result: Option<Json>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_connect_handshake {
     use sea_orm::entity::prelude::*;
 

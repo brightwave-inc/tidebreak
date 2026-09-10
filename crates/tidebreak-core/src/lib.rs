@@ -203,7 +203,7 @@ pub use code::{
     ApprovalKind, ApprovalState, BoundedError, CapLevel, CheckpointHint, CodeBindingId,
     CodeChannelRepositoryConfirm, CodeChannelRepositoryState, CodeConnectHandshake,
     CodeConnectState, CodeExternalBinding, CodeExternalGrant, CodeGrantId, CodeGrantKind,
-    CodeGrantProfile, CodeHandshakeId, CodeIncarnationId, CodePullRequestAttribution,
+    CodeGrantProfile, ConversationRequest, CodeHandshakeId, CodeIncarnationId, CodePullRequestAttribution,
     CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState,
     CodePullRequestRelation, CodePullRequestState, CodeRepo, CodeSessionIncarnation,
     CodeSubagentStatus, CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction,

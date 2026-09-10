@@ -97,6 +97,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260908_000016_code_channel_repository_confirm",
             "m20260908_000017_external_thread_context",
             "m20260909_000001_session_context",
+            "m20260910_000001_code_conversation_requests",
         ]
     );
     assert!(db

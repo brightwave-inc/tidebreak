@@ -47,6 +47,7 @@ blob-object = ["dep:object_store", "dep:tokio"]
 [dependencies]
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 async-stream = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
 cap-std = { workspace = true, optional = true }

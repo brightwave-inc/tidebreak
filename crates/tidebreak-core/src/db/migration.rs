@@ -25,6 +25,7 @@
 
 mod baseline;
 mod channel_repository_confirm;
+mod code_conversation_request;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
@@ -101,6 +102,7 @@ impl MigratorTrait for Migrator {
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
             Box::new(external_thread_context::ExternalThreadContext),
             Box::new(session_context::SessionContext),
+            Box::new(code_conversation_request::CodeConversationRequests),
         ]
     }
 }
