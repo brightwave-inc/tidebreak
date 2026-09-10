@@ -1446,7 +1446,7 @@ impl LegDriver {
         let memory_digest = self
             .pinned_memory_digest(&chat, &turn, owner.as_ref())
             .await;
-        let surface = freeze_foreground_turn_surface_with_folders(
+        let mut surface = freeze_foreground_turn_surface_with_folders(
             tools,
             &turn_agent_config,
             &exec_folders,
@@ -1464,6 +1464,12 @@ impl LegDriver {
             web_search,
             memory_digest.as_deref(),
         );
+        let channel_instructions =
+            crate::code::channel_preferences::frozen_instructions(self.store.as_ref(), chat.id)
+                .await?;
+        if let Some(prompt) = surface.agent_config.system_prompt.as_mut() {
+            crate::code::channel_preferences::append_instructions(prompt, &channel_instructions);
+        }
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             tracing::debug!(
                 "tidebreak: turn {} operating_prompt={}",

@@ -68,9 +68,7 @@ impl MigrationTrait for CodeConversationRequests {
                             .json_binary()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(idens::CodeConversationRequest::Result).json_binary(),
-                    )
+                    .col(ColumnDef::new(idens::CodeConversationRequest::Result).json_binary())
                     .col(
                         ColumnDef::new(idens::CodeConversationRequest::CreatedAt)
                             .timestamp_with_time_zone()
@@ -98,7 +96,10 @@ impl MigrationTrait for CodeConversationRequests {
                                 idens::CodeConversationRequest::Table,
                                 idens::CodeConversationRequest::GrantId,
                             )
-                            .to(idens::CodeExternalGrant::Table, idens::CodeExternalGrant::Id),
+                            .to(
+                                idens::CodeExternalGrant::Table,
+                                idens::CodeExternalGrant::Id,
+                            ),
                     )
                     .foreign_key(
                         ForeignKey::create()
@@ -156,4 +157,3 @@ impl MigrationTrait for CodeConversationRequests {
         Ok(())
     }
 }
-
