@@ -520,9 +520,16 @@ impl ProcessTreeChild {
             };
             let mut guard = ProcessGroupGuard::new(Some(process_group));
             guard.signal(libc::SIGINT)?;
-            sleep(grace).await;
-            guard.kill()?;
-            let status = self.child_mut().wait().await;
+            let status = tokio::select! {
+                status = self.child_mut().wait() => {
+                    guard.kill()?;
+                    status
+                },
+                () = sleep(grace) => {
+                    guard.kill()?;
+                    self.child_mut().wait().await
+                }
+            };
             if status.is_ok() {
                 unregister_spawned_process(self.process_id, &self.process_identity);
                 guard.disarm();
@@ -1446,20 +1453,18 @@ wait
     }
 
     #[tokio::test]
-    async fn cancelling_interrupt_still_escalates_and_closes_descendant_pipes() {
+    async fn interrupt_returns_when_the_leader_exits_before_the_grace_period() {
         let (mut child, mut stdout) = spawn_shell_tree().await;
 
-        let cancelled = timeout(
-            Duration::from_millis(10),
+        let status = timeout(
+            Duration::from_secs(1),
             child.interrupt(Duration::from_secs(5)),
         )
-        .await;
-        assert!(cancelled.is_err(), "interrupt unexpectedly completed");
+        .await
+        .expect("interrupt waited for the full grace period")
+        .unwrap();
+        assert!(!status.success());
         assert_pipe_reaches_eof(&mut stdout).await;
-        timeout(ASSERTION_TIMEOUT, child.wait())
-            .await
-            .expect("cancelled interrupt left the root running")
-            .unwrap();
     }
 
     #[tokio::test]

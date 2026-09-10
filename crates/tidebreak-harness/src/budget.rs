@@ -2,6 +2,8 @@
 //!
 //! Parsing is O(new bytes). Overflow is counted, never silently dropped.
 
+use std::borrow::Cow;
+
 /// Default chunk size for one read from an engine pipe.
 pub const DEFAULT_CHUNK_SIZE: usize = 8_192;
 /// Default number of chunks processed before yielding.
@@ -42,7 +44,7 @@ pub struct BudgetTick {
 /// Partial-line buffer with a hard cap. Overflow is counted.
 #[derive(Debug, Default)]
 pub struct StreamLineBuffer {
-    pending: String,
+    pending: Vec<u8>,
     /// Whether the line currently being buffered has already hit the cap, so
     /// the rest of it is dropped until its newline arrives.
     overflowing: bool,
@@ -57,20 +59,19 @@ impl StreamLineBuffer {
         Self::default()
     }
 
-    /// Push `bytes` (lossy UTF-8) and take any complete lines.
+    /// Push `bytes` and take complete lines, decoding only at line boundaries.
     ///
     /// A line longer than `budget.max_partial_line` is emitted truncated at
     /// its cap once its newline arrives, and the bytes beyond the cap are
     /// counted as overflow. The stream keeps flowing either way: one oversized
     /// line must never stop later lines from being delivered.
     pub fn push(&mut self, bytes: &[u8], budget: StreamBudget) -> BudgetTick {
-        let incoming = String::from_utf8_lossy(bytes);
-        let mut rest: &str = incoming.as_ref();
+        let mut rest = bytes;
         let mut lines = Vec::new();
         let mut overflow_chunks = 0;
 
         while !rest.is_empty() {
-            let (segment, tail) = match rest.find('\n') {
+            let (segment, tail) = match rest.iter().position(|byte| *byte == b'\n') {
                 Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
                 None => (rest, None),
             };
@@ -83,27 +84,31 @@ impl StreamLineBuffer {
             } else {
                 let room = budget.max_partial_line.saturating_sub(self.pending.len());
                 if segment.len() > room {
-                    let end = crate::text::floor_char_boundary(segment, room);
-                    self.pending.push_str(&segment[..end]);
+                    self.pending.extend_from_slice(&segment[..room]);
+                    if let Err(error) = std::str::from_utf8(&self.pending) {
+                        if error.error_len().is_none() {
+                            self.pending.truncate(error.valid_up_to());
+                        }
+                    }
                     self.overflowing = true;
                     overflow_chunks += 1;
                     self.overflow_chunks += 1;
                 } else {
-                    self.pending.push_str(segment);
+                    self.pending.extend_from_slice(segment);
                 }
             }
 
             match tail {
                 Some(tail) => {
                     let mut line = std::mem::take(&mut self.pending);
-                    if line.ends_with('\r') {
+                    if line.ends_with(b"\r") {
                         line.pop();
                     }
-                    lines.push(line);
+                    lines.push(String::from_utf8_lossy(&line).into_owned());
                     self.overflowing = false;
                     rest = tail;
                 }
-                None => rest = "",
+                None => rest = b"",
             }
         }
 
@@ -115,8 +120,8 @@ impl StreamLineBuffer {
 
     /// Remaining partial line, if any.
     #[must_use]
-    pub fn pending(&self) -> &str {
-        &self.pending
+    pub fn pending(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.pending)
     }
 }
 
@@ -133,6 +138,18 @@ mod tests {
         let tick = buf.push(b"ee\n", StreamBudget::default());
         assert_eq!(tick.lines, ["three"]);
         assert!(buf.pending().is_empty());
+    }
+
+    #[test]
+    fn decodes_a_character_split_across_chunks_at_the_line_boundary() {
+        let mut buf = StreamLineBuffer::new();
+        let emoji = "🙂".as_bytes();
+        assert!(buf
+            .push(&emoji[..2], StreamBudget::default())
+            .lines
+            .is_empty());
+        let tick = buf.push(&[emoji[2], emoji[3], b'\n'], StreamBudget::default());
+        assert_eq!(tick.lines, ["🙂"]);
     }
 
     #[test]

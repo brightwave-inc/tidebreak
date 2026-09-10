@@ -101,16 +101,34 @@ fn captured_acp_updates_keep_command_results_and_terminal_outcomes() {
 }
 
 #[test]
-fn approval_capabilities_are_only_enabled_for_the_captured_pin() {
-    for version in ["1.0.13", "grok 1.0.13 (5e9a58528b76)"] {
+fn approval_capabilities_follow_the_captured_version_line() {
+    for version in ["1.0.13", "1.0.14", "grok 1.0.13 (5e9a58528b76)"] {
         assert!(supports_version(version));
         assert!(refuse_versioned_mode(PermissionMode::Ask, version).is_ok());
         assert!(refuse_versioned_mode(PermissionMode::Plan, version).is_err());
     }
-    for version in ["1.0.4", "1.0.14", "unknown", "1.0.130"] {
+    for version in ["1.0.4", "2.0.0", "unknown", "1.0.12"] {
         assert!(!supports_version(version));
         assert!(refuse_versioned_mode(PermissionMode::Ask, version).is_err());
     }
+}
+
+#[test]
+fn captured_resume_replays_load_model_mode_and_resume_loss() {
+    let frames = frames("acp-resume.ndjson");
+    let methods: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["direction"] == "client")
+        .filter_map(|frame| frame["value"]["method"].as_str())
+        .collect();
+    for method in ["session/load", "session/set_model", "session/set_mode"] {
+        assert!(methods.contains(&method), "capture is missing {method}");
+    }
+    let mapped = GrokSession::map_resume_error(
+        true,
+        HarnessError::Other("Failed to restore session fixture-session".into()),
+    );
+    assert!(matches!(mapped, HarnessError::ResumeLost(_)));
 }
 
 #[test]

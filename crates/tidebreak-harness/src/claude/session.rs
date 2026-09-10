@@ -391,7 +391,14 @@ impl EngineChannel {
         let Some(mut child) = child else {
             return Ok(None);
         };
-        let status = child.interrupt(grace).await?;
+        let status = match child.interrupt(grace).await {
+            Ok(status) => status,
+            Err(error) => {
+                let status = child.terminate().await.ok();
+                *self.reaped.lock().expect("claude child exit") = status;
+                return Err(error);
+            }
+        };
         *self.reaped.lock().expect("claude child exit") = Some(status);
         Ok(Some(status))
     }
@@ -996,7 +1003,7 @@ impl ClaudeSession {
             tokio::task::yield_now().await;
         }
         if eof && !reader.lines.pending().is_empty() {
-            let pending = reader.lines.pending().to_owned();
+            let pending = reader.lines.pending().into_owned();
             saw_terminal |= emit_parsed(self, &mut reader.parser, &self.resume_ref, &pending).await;
         }
         if eof {
