@@ -85,7 +85,7 @@ async fn model_gateway(empty_catalog: bool) -> (String, GatewayCalls) {
                 };
                 Json(serde_json::json!({
                     "models": models.into_iter().map(|id| serde_json::json!({
-                        "id": id, "name": id, "protocols": ["anthropic_messages"],
+                        "id": id, "name": format!("Display {id}"), "protocols": ["anthropic_messages"],
                         "aliases": [], "supports_tools": true, "supports_vision": false,
                         "context_window": 200_000, "max_output_tokens": 8_000,
                         "provider_name": "Anthropic",
@@ -628,4 +628,65 @@ async fn external_channel_harness_models_use_grant_compat_catalog_without_chat_r
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+}
+
+#[tokio::test]
+async fn external_snapshot_labels_the_saved_model_after_channel_default_changes() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let fixture = fixture(false).await;
+    let (status, created) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/display", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id = created["session_id"].as_str().unwrap();
+    assert!(created["model"]
+        .as_str()
+        .unwrap()
+        .contains("__tidebreak_gateway_v1."));
+    crate::code::channel_preferences::write(
+        &fixture.runtime.db,
+        &fixture.grant,
+        "C1",
+        &crate::code::channel_preferences::ChannelPreferences {
+            harness: Some(tidebreak_core::HarnessKind::Internal),
+            model: Some("model_gateway::grant-selected".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    crate::model_roles::write_selection(
+        &*fixture.state.store,
+        crate::model_roles::ModelRole::Chat,
+        Some("model_gateway::grant-selected"),
+    )
+    .await
+    .unwrap();
+    let address = super::code::serve(fixture.router.clone()).await;
+    let mut request = format!("ws://{address}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", fixture.bearer).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(
+        frame["snapshot"]["model_display_name"],
+        "Display grant-default"
+    );
+    assert_eq!(frame["snapshot"]["model"], created["model"]);
+    socket.close(None).await.unwrap();
 }

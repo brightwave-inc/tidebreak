@@ -814,6 +814,38 @@ pub async fn external_session_access(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Resolve the saved session selection without consulting channel or chat defaults.
+async fn external_session_model_display_name(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    session: &tidebreak_core::Session,
+) -> Option<String> {
+    let selection = session.model.as_deref()?;
+    if !session.harness_kind.is_in_process() {
+        return Some(selection.to_owned());
+    }
+    let runtime = state.code.as_ref()?;
+    let snapshot = if let Some(relay) = runtime.harness_llm() {
+        let result = if relay.external_delegations().is_some() {
+            relay.catalog_for_grant(&grant.owner, grant.id).await
+        } else {
+            relay.catalog(&grant.owner).await
+        };
+        // A label lookup must not prevent the adapter from reading session state.
+        match result {
+            Ok(snapshot) => snapshot,
+            Err(_) => return None,
+        }
+    } else {
+        None
+    };
+    crate::providers::resolve_model_policy(&*state.store, selection, true, snapshot.as_ref())
+        .await
+        .ok()
+        .flatten()
+        .map(|policy| policy.display_name)
+}
+
 /// `WS /external/code/sessions/{id}/events?after=` — the desktop event
 /// stream, scoped by grant, prefixed with a session snapshot (lifecycle
 /// and attention), and severed the moment the grant is revoked.
@@ -828,6 +860,7 @@ pub async fn external_events(
     let session = runtime.get_session(&grant.owner, id).await?;
     let bindings =
         tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
+    let model_display_name = external_session_model_display_name(&state, &grant, &session).await;
     let mut session_snapshot = SessionSnapshot::from(session);
     session_snapshot.set_external_origins(
         bindings
@@ -852,9 +885,10 @@ pub async fn external_events(
         // The renderer needs the session's standing before the journal:
         // lifecycle and the attention snapshot arrive first, as their own
         // frame shape.
-        let snapshot = serde_json::json!({
+        let mut snapshot = serde_json::json!({
             "snapshot": session_snapshot,
         });
+        snapshot["snapshot"]["model_display_name"] = serde_json::json!(model_display_name);
         if let Ok(json) = serde_json::to_string(&snapshot) {
             if socket
                 .send(axum::extract::ws::Message::Text(json.into()))
