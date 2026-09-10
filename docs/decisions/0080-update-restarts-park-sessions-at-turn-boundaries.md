@@ -136,3 +136,8 @@ hands the `code_turn` lease back and boot recovery leaves a pid-less
 running turn for the claim scan. Every other adapter declares
 `Unsupported` and still waits for a turn boundary. D4a keeps both halves
 wired; D4b unifies them on this flag.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

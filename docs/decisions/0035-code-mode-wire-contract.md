@@ -143,3 +143,8 @@ need.
 - A plausible wrong implementation publishes live events before the journal
   write commits and passes happy-path streaming tests; the reconnect test
   must inject a crash between publish and commit to fail it.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

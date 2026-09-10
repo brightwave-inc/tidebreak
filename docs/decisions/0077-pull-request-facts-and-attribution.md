@@ -179,3 +179,8 @@ produced.
 - An upsert against an existing row updates the snapshot and
   `last_seen_at` but never moves `first_seen_at` — the anchor a wrong
   implementation would silently reset on every sweep.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

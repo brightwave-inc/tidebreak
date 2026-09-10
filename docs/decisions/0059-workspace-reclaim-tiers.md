@@ -115,3 +115,8 @@ The case a plausible wrong implementation still passes: dropping the branch
 inside the same step that writes the bundle looks correct until the write
 fails. The ordering is asserted by the refused-release test, which checks the
 branch still exists after `branch_unmerged`.
+
+
+## Amended 2026-09-10
+
+PR #2970 made archive the single cleanup action so one action reclaims all safe local storage: local workspaces proceed through release after removal, while the `Archived` state remains for remote workspaces. PR #2865 also shipped transcript search, so it is no longer excluded.

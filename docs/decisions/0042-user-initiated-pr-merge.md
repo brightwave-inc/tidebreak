@@ -68,3 +68,8 @@ it refuses everything except `pr merge` (GraphQL included) while the dedicated
 operation runs `pr merge --squash` / `--merge --auto`. A wrong implementation
 that merged through the general runner, or ran arbitrary commands through the
 merge runner, fails those tests.
+
+
+## Amended 2026-09-10
+
+The delivery action endpoint added a second user-initiated merge path through `POST /code/delivery/pull-requests/action`, including an admin merge option. Its brokered forge path also uses a GraphQL `enablePullRequestAutoMerge` mutation, so GraphQL is no longer absent from every Tidebreak path.
