@@ -139,6 +139,33 @@ describe("monitorRuns", () => {
     expect(queries).toHaveLength(1);
     expect(queries[0]?.kinds).toEqual(["workflow_run"]);
   });
+
+  it("caps each pass and returns the cursor for the next pass", async () => {
+    let page = 0;
+    const queryCodeDeliveryRuns = vi.fn(async () => {
+      page += 1;
+      return {
+        capability: { found: true, authenticated: true, remediation: "" },
+        items: [],
+        errors: [],
+        fetched_at: "2026-08-20T12:00:00.000Z",
+        next_cursor: `cursor-${page}`,
+      };
+    });
+
+    const batch = await monitorRuns(
+      { queryCodeDeliveryRuns },
+      [],
+      "2026-08-20T00:00:00.000Z",
+    );
+
+    expect(queryCodeDeliveryRuns).toHaveBeenCalledTimes(5);
+    expect(batch).toEqual({
+      items: [],
+      complete: false,
+      nextCursor: "cursor-5",
+    });
+  });
 });
 
 describe("monitorSince", () => {

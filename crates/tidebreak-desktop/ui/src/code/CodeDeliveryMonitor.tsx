@@ -57,6 +57,17 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     let rerunRequested = false;
     let timer: number | null = null;
     let queryController: AbortController | null = null;
+    let continuation: {
+      startedAt: string;
+      targetKey: string;
+      since: string;
+      pullRequests: CodeDeliveryPullRequestSummary[];
+      runs: CodeDeliveryRunSummary[];
+      pullRequestCursor?: string;
+      runCursor?: string;
+      pullRequestsComplete: boolean;
+      runsComplete: boolean;
+    } | null = null;
     const isCurrent = () =>
       !cancelled && isCodeClientGenerationActive(clientGeneration);
 
@@ -86,7 +97,10 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       initial.setPollState(true, null);
       try {
         const discovered = await initial.loadRepositories(client);
-        if (!isCurrent()) return;
+        if (!isCurrent()) {
+          initial.setPollState(false);
+          return;
+        }
         const current = useCodeDeliveryStore.getState();
         if (
           !discovered.capability.found ||
@@ -110,7 +124,10 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
               errors: discovered.errors,
             },
           );
-          if (!isCurrent()) return;
+          if (!isCurrent()) {
+            initial.setPollState(false);
+            return;
+          }
           if (migrationComplete) {
             useCodeDeliveryStore
               .getState()
@@ -120,64 +137,87 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
 
         const targets = repositories.map(codeDeliveryRepositoryTarget);
         if (targets.length === 0) {
+          continuation = null;
           current.completeDeliveryPoll([], [], startedAt);
           return;
         }
 
-        queryController = new AbortController();
-        const since = monitorSince(current.lastPollAt, Date.parse(startedAt));
-        const pullRequests: CodeDeliveryPullRequestSummary[] = [];
-        const runs: CodeDeliveryRunSummary[] = [];
-        let pullRequestCursor: string | undefined;
-        let runCursor: string | undefined;
-        let pullRequestsComplete = false;
-        let runsComplete = false;
-
-        while (!pullRequestsComplete || !runsComplete) {
-          const batches: [
-            MonitorBatch<CodeDeliveryPullRequestSummary>,
-            MonitorBatch<CodeDeliveryRunSummary>,
-          ] = await Promise.all([
-            pullRequestsComplete
-              ? Promise.resolve<MonitorBatch<CodeDeliveryPullRequestSummary>>({
-                  items: [],
-                  complete: true,
-                })
-              : monitorPullRequests(
-                  client,
-                  targets,
-                  since,
-                  pullRequestCursor,
-                  queryController.signal,
-                ),
-            runsComplete
-              ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
-                  items: [],
-                  complete: true,
-                })
-              : monitorRuns(
-                  client,
-                  targets,
-                  since,
-                  runCursor,
-                  queryController.signal,
-                ),
-          ]);
-          const [pullRequestBatch, runBatch] = batches;
-          pullRequests.push(...pullRequestBatch.items);
-          runs.push(...runBatch.items);
-          pullRequestsComplete = pullRequestBatch.complete;
-          runsComplete = runBatch.complete;
-          pullRequestCursor = pullRequestBatch.nextCursor;
-          runCursor = runBatch.nextCursor;
+        const targetKey = JSON.stringify(targets);
+        if (!continuation || continuation.targetKey !== targetKey) {
+          continuation = {
+            startedAt,
+            targetKey,
+            since: monitorSince(current.lastPollAt, Date.parse(startedAt)),
+            pullRequests: [],
+            runs: [],
+            pullRequestsComplete: false,
+            runsComplete: false,
+          };
         }
+        const pending = continuation;
+        queryController = new AbortController();
+        const batches: [
+          MonitorBatch<CodeDeliveryPullRequestSummary>,
+          MonitorBatch<CodeDeliveryRunSummary>,
+        ] = await Promise.all([
+          pending.pullRequestsComplete
+            ? Promise.resolve<MonitorBatch<CodeDeliveryPullRequestSummary>>({
+                items: [],
+                complete: true,
+              })
+            : monitorPullRequests(
+                client,
+                targets,
+                pending.since,
+                pending.pullRequestCursor,
+                queryController.signal,
+              ),
+          pending.runsComplete
+            ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
+                items: [],
+                complete: true,
+              })
+            : monitorRuns(
+                client,
+                targets,
+                pending.since,
+                pending.runCursor,
+                queryController.signal,
+              ),
+        ]);
+        const [pullRequestBatch, runBatch] = batches;
+        pending.pullRequests.push(...pullRequestBatch.items);
+        pending.runs.push(...runBatch.items);
+        pending.pullRequestsComplete = pullRequestBatch.complete;
+        pending.runsComplete = runBatch.complete;
+        pending.pullRequestCursor = pullRequestBatch.nextCursor;
+        pending.runCursor = runBatch.nextCursor;
 
-        if (!isCurrent()) return;
+        if (!isCurrent()) {
+          initial.setPollState(false);
+          return;
+        }
+        if (!pending.pullRequestsComplete || !pending.runsComplete) {
+          // Keep one pass bounded. Very large aggregates continue immediately
+          // from these cursors and refresh across several passes.
+          rerunRequested = true;
+          initial.setPollState(false);
+          return;
+        }
+        continuation = null;
         useCodeDeliveryStore
           .getState()
-          .completeDeliveryPoll(pullRequests, runs, startedAt);
+          .completeDeliveryPoll(
+            pending.pullRequests,
+            pending.runs,
+            pending.startedAt,
+          );
       } catch (error) {
-        if (!isCurrent() || isAbortError(error)) return;
+        continuation = null;
+        if (!isCurrent() || isAbortError(error)) {
+          initial.setPollState(false);
+          return;
+        }
         useCodeDeliveryStore
           .getState()
           .setPollState(false, deliveryErrorMessage(error));

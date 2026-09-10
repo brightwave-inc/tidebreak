@@ -14,10 +14,7 @@ import type {
 
 const STORAGE_KEY = "tidebreak.code-delivery";
 const STORAGE_VERSION = 1;
-const MAX_NOTIFICATIONS = 500;
 const MAX_KNOWN_AUTHORS = 50;
-const MAX_SEEN_FINGERPRINTS = 5_000;
-const MAX_NOTIFICATION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const REPOSITORY_CACHE_MS = 2 * 60 * 1_000;
 const MAX_PULL_REQUEST_PAGE_CACHE = 8;
 
@@ -97,34 +94,6 @@ export type CodeDeliveryNotificationRule = {
   tidebreakLinkedOnly: boolean;
 };
 
-export type CodeDeliveryNotificationTarget =
-  | {
-      kind: "pull_request";
-      repository: CodeGitHubRepositoryTarget;
-      number: number;
-    }
-  | {
-      kind: "run";
-      repository: CodeGitHubRepositoryTarget;
-      runKind: CodeDeliveryRunKind;
-      id: number;
-    };
-
-export type CodeDeliveryNotification = {
-  id: string;
-  fingerprint: string;
-  rule: CodeDeliveryNotificationRuleKind;
-  title: string;
-  detail: string;
-  repositoryName: string;
-  occurredAt: string;
-  receivedAt: string;
-  readAt?: string;
-  url: string;
-  workspaceId?: string;
-  target: CodeDeliveryNotificationTarget;
-};
-
 const LEGACY_DEFAULT_NOTIFICATION_RULES: CodeDeliveryNotificationRule[] = [
   {
     id: "pull_request_attention",
@@ -151,8 +120,6 @@ type StoredCodeDeliveryState = {
   excludedRegisteredRepoIds: string[];
   pinnedRepositoryKeys: string[];
   savedViews: CodeDeliverySavedView[];
-  notifications: CodeDeliveryNotification[];
-  seenFingerprints: Record<string, string>;
   lastPollAt: string | null;
   knownAuthors: CodeDeliveryAuthor[];
 };
@@ -166,6 +133,7 @@ type PersistedCodeDeliveryState = StoredCodeDeliveryState & {
 type HydratedCodeDeliveryState = StoredCodeDeliveryState & {
   /** Old rules stay here until every mapped server trigger is armed. */
   legacyNotificationRules: CodeDeliveryNotificationRule[] | null;
+  notificationRulesMigrated: boolean;
 };
 
 type CodeDeliveryStore = HydratedCodeDeliveryState & {
@@ -192,23 +160,13 @@ type CodeDeliveryStore = HydratedCodeDeliveryState & {
   completeNotificationRuleMigration: (
     rules: CodeDeliveryNotificationRule[],
   ) => void;
-  ingestDeliveryPoll: (
-    pullRequests: readonly CodeDeliveryPullRequestSummary[],
-    runs: readonly CodeDeliveryRunSummary[],
-    receivedAt?: string,
-  ) => number;
   completeDeliveryPoll: (
     pullRequests: readonly CodeDeliveryPullRequestSummary[],
     runs: readonly CodeDeliveryRunSummary[],
     at: string,
-  ) => number;
+  ) => void;
   rememberDeliveryAuthors: (authors: readonly CodeDeliveryAuthor[]) => void;
-  markNotificationRead: (id: string, read?: boolean) => void;
-  markAllNotificationsRead: () => void;
-  clearNotifications: () => void;
   setPollState: (polling: boolean, error?: string | null) => void;
-  finishPoll: (at: string) => void;
-  reset: () => void;
 };
 
 function emptyPersistedState(): HydratedCodeDeliveryState {
@@ -217,11 +175,10 @@ function emptyPersistedState(): HydratedCodeDeliveryState {
     excludedRegisteredRepoIds: [],
     pinnedRepositoryKeys: [],
     savedViews: [],
-    notifications: [],
-    seenFingerprints: {},
     lastPollAt: null,
     knownAuthors: [],
     legacyNotificationRules: null,
+    notificationRulesMigrated: false,
   };
 }
 
@@ -244,13 +201,13 @@ function persist(state: CodeDeliveryStore): string | null {
     excludedRegisteredRepoIds: state.excludedRegisteredRepoIds,
     pinnedRepositoryKeys: state.pinnedRepositoryKeys,
     savedViews: state.savedViews,
-    notifications: state.notifications,
-    seenFingerprints: state.seenFingerprints,
     lastPollAt: state.lastPollAt,
     knownAuthors: state.knownAuthors,
     ...(state.legacyNotificationRules
       ? { notificationRules: state.legacyNotificationRules }
-      : { notificationRulesMigrated: true }),
+      : state.notificationRulesMigrated
+        ? { notificationRulesMigrated: true }
+        : {}),
   };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -393,29 +350,11 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
     },
     completeNotificationRuleMigration: (rules) => {
       if (get().legacyNotificationRules !== rules) return;
-      set({ legacyNotificationRules: null });
+      set({ legacyNotificationRules: null, notificationRulesMigrated: true });
       persistCurrent();
     },
-    ingestDeliveryPoll: (
-      pullRequests,
-      runs,
-      receivedAt = new Date().toISOString(),
-    ) => {
-      const next = buildDeliveryPoll(get(), pullRequests, runs, receivedAt);
-      if (next.changed) {
-        set({
-          notifications: next.notifications,
-          seenFingerprints: next.seenFingerprints,
-        });
-        persistCurrent();
-      }
-      return next.added;
-    },
     completeDeliveryPoll: (pullRequests, runs, at) => {
-      const next = buildDeliveryPoll(get(), pullRequests, runs, at);
       set({
-        notifications: next.notifications,
-        seenFingerprints: next.seenFingerprints,
         knownAuthors: mergeKnownAuthors(
           get().knownAuthors,
           deliveryAuthorSightings(pullRequests, runs),
@@ -426,7 +365,6 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
         lastSuccessfulPollAt: at,
       });
       persistCurrent();
-      return next.added;
     },
     rememberDeliveryAuthors: (authors) => {
       const merged = mergeKnownAuthors(get().knownAuthors, authors);
@@ -442,63 +380,8 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
       set({ knownAuthors: merged });
       persistCurrent();
     },
-    markNotificationRead: (id, read = true) => {
-      const at = new Date().toISOString();
-      set({
-        notifications: get().notifications.map((notification) =>
-          notification.id === id
-            ? {
-                ...notification,
-                ...(read ? { readAt: at } : { readAt: undefined }),
-              }
-            : notification,
-        ),
-      });
-      persistCurrent();
-    },
-    markAllNotificationsRead: () => {
-      const at = new Date().toISOString();
-      set({
-        notifications: get().notifications.map((notification) => ({
-          ...notification,
-          readAt: notification.readAt ?? at,
-        })),
-      });
-      persistCurrent();
-    },
-    clearNotifications: () => {
-      set({ notifications: [] });
-      persistCurrent();
-    },
     setPollState: (polling, error = get().monitorError) => {
       set({ polling, monitorError: error });
-    },
-    finishPoll: (at) => {
-      set({
-        polling: false,
-        monitorError: null,
-        lastPollAt: at,
-        lastSuccessfulPollAt: at,
-      });
-      persistCurrent();
-    },
-    reset: () => {
-      repositoryGeneration += 1;
-      repositoryRequest = null;
-      const fresh = emptyPersistedState();
-      set({
-        ...fresh,
-        polling: false,
-        monitorError: null,
-        lastSuccessfulPollAt: null,
-        repositorySnapshot: null,
-        repositoryLoading: false,
-        repositoryError: null,
-        repositoryFetchedAt: null,
-        persistenceError: null,
-        lastPullRequestPages: [],
-      });
-      persistCurrent();
     },
   };
 });
@@ -543,197 +426,10 @@ export function rememberedPullRequestPage(
   return pages.find((page) => page.key === key);
 }
 
-function buildDeliveryPoll(
-  state: Pick<CodeDeliveryStore, "notifications" | "seenFingerprints">,
-  pullRequests: readonly CodeDeliveryPullRequestSummary[],
-  runs: readonly CodeDeliveryRunSummary[],
-  receivedAt: string,
-): {
-  notifications: CodeDeliveryNotification[];
-  seenFingerprints: Record<string, string>;
-  added: number;
-  changed: boolean;
-} {
-  const now = Date.parse(receivedAt);
-  const cutoff = now - MAX_NOTIFICATION_AGE_MS;
-  const seen = { ...state.seenFingerprints };
-  const incoming: CodeDeliveryNotification[] = [];
-
-  for (const pullRequest of pullRequests) {
-    if (Date.parse(pullRequest.updated_at) < cutoff) continue;
-    if (pullRequest.attention_reasons.length > 0) {
-      const fingerprint = [
-        "pr-attention",
-        pullRequest.id,
-        pullRequest.head_sha ?? "",
-        [...pullRequest.attention_reasons].sort().join(","),
-      ].join(":");
-      maybeAddNotification(
-        incoming,
-        seen,
-        pullRequest,
-        fingerprint,
-        receivedAt,
-        {
-          rule: "pull_request_attention",
-          title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} needs attention`,
-          detail: pullRequest.title,
-        },
-      );
-    }
-    if (pullRequest.ready_to_merge) {
-      const fingerprint = [
-        "pr-ready",
-        pullRequest.id,
-        pullRequest.head_sha ?? "",
-      ].join(":");
-      maybeAddNotification(
-        incoming,
-        seen,
-        pullRequest,
-        fingerprint,
-        receivedAt,
-        {
-          rule: "pull_request_ready",
-          title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} is ready`,
-          detail: pullRequest.title,
-        },
-      );
-    }
-  }
-
-  for (const run of runs) {
-    if (
-      Date.parse(run.updated_at) < cutoff ||
-      run.attention_reasons.length === 0
-    ) {
-      continue;
-    }
-    const fingerprint = [
-      "run-failure",
-      run.id,
-      run.run_attempt ?? run.updated_at,
-      run.status,
-      run.conclusion ?? "",
-    ].join(":");
-    maybeAddRunNotification(incoming, seen, run, fingerprint, receivedAt);
-  }
-
-  const notifications = [...incoming, ...state.notifications]
-    .filter((notification) => Date.parse(notification.occurredAt) >= cutoff)
-    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-    .slice(0, MAX_NOTIFICATIONS);
-  const seenFingerprints = Object.fromEntries(
-    Object.entries(seen)
-      .filter(([, at]) => Date.parse(at) >= cutoff)
-      .sort((left, right) => right[1].localeCompare(left[1]))
-      .slice(0, MAX_SEEN_FINGERPRINTS),
-  );
-  return {
-    notifications,
-    seenFingerprints,
-    added: incoming.length,
-    changed:
-      !sameNotifications(state.notifications, notifications) ||
-      !sameStringRecord(state.seenFingerprints, seenFingerprints),
-  };
-}
-
-function sameNotifications(
-  left: readonly CodeDeliveryNotification[],
-  right: readonly CodeDeliveryNotification[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every(
-      (notification, index) =>
-        notification.id === right[index]?.id &&
-        notification.readAt === right[index]?.readAt,
-    )
-  );
-}
-
-function sameStringRecord(
-  left: Record<string, string>,
-  right: Record<string, string>,
-): boolean {
-  const entries = Object.entries(left);
-  return (
-    entries.length === Object.keys(right).length &&
-    entries.every(([key, value]) => right[key] === value)
-  );
-}
-
 function deliveryErrorMessage(error: unknown): string {
   return error instanceof Error
     ? error.message
     : "Could not load GitHub repositories.";
-}
-
-function maybeAddNotification(
-  incoming: CodeDeliveryNotification[],
-  seen: Record<string, string>,
-  pullRequest: CodeDeliveryPullRequestSummary,
-  fingerprint: string,
-  receivedAt: string,
-  copy: {
-    rule: "pull_request_attention" | "pull_request_ready";
-    title: string;
-    detail: string;
-  },
-): void {
-  if (seen[fingerprint]) return;
-  seen[fingerprint] = receivedAt;
-  incoming.push({
-    id: fingerprint,
-    fingerprint,
-    rule: copy.rule,
-    title: copy.title,
-    detail: copy.detail,
-    repositoryName: pullRequest.repository.name_with_owner,
-    occurredAt: pullRequest.updated_at,
-    receivedAt,
-    url: pullRequest.url,
-    ...(pullRequest.workspace_links[0]
-      ? { workspaceId: pullRequest.workspace_links[0].workspace_id }
-      : {}),
-    target: {
-      kind: "pull_request",
-      repository: codeDeliveryRepositoryTarget(pullRequest.repository),
-      number: pullRequest.number,
-    },
-  });
-}
-
-function maybeAddRunNotification(
-  incoming: CodeDeliveryNotification[],
-  seen: Record<string, string>,
-  run: CodeDeliveryRunSummary,
-  fingerprint: string,
-  receivedAt: string,
-): void {
-  if (seen[fingerprint]) return;
-  seen[fingerprint] = receivedAt;
-  incoming.push({
-    id: fingerprint,
-    fingerprint,
-    rule: "run_failure",
-    title: `${run.repository.name_with_owner} ${run.name} failed`,
-    detail: run.conclusion ?? run.status,
-    repositoryName: run.repository.name_with_owner,
-    occurredAt: run.updated_at,
-    receivedAt,
-    url: run.url,
-    ...(run.workspace_links[0]
-      ? { workspaceId: run.workspace_links[0].workspace_id }
-      : {}),
-    target: {
-      kind: "run",
-      repository: codeDeliveryRepositoryTarget(run.repository),
-      runKind: run.kind,
-      id: run.github_id,
-    },
-  });
 }
 
 export function codeDeliveryRepositoryKey(
@@ -786,15 +482,6 @@ export function trackedCodeDeliveryRepositories(
       },
     );
   });
-}
-
-export function unreadCodeDeliveryNotifications(
-  state: Pick<CodeDeliveryStore, "notifications">,
-): number {
-  return state.notifications.reduce(
-    (count, notification) => count + (notification.readAt ? 0 : 1),
-    0,
-  );
 }
 
 /**
@@ -886,27 +573,10 @@ function parsePersistedState(value: unknown): HydratedCodeDeliveryState | null {
   if (!isRecord(value) || value.version !== STORAGE_VERSION) return null;
   const manualRepositories = parseRepositoryRefs(value.manualRepositories);
   const savedViews = parseSavedViews(value.savedViews);
-  const notifications = parseNotifications(value.notifications);
   const rulesMigrated = value.notificationRulesMigrated === true;
   const notificationRules = rulesMigrated
     ? null
     : parseNotificationRules(value.notificationRules);
-  if (
-    !manualRepositories ||
-    !stringArray(value.excludedRegisteredRepoIds) ||
-    !stringArray(value.pinnedRepositoryKeys) ||
-    !savedViews ||
-    !(
-      value.notificationRulesMigrated === undefined ||
-      value.notificationRulesMigrated === true
-    ) ||
-    (!rulesMigrated && !notificationRules) ||
-    !notifications ||
-    !isStringRecord(value.seenFingerprints) ||
-    !(value.lastPollAt === null || typeof value.lastPollAt === "string")
-  ) {
-    return null;
-  }
   const byRule = new Map(
     (notificationRules ?? []).map((rule) => [rule.id, rule]),
   );
@@ -917,19 +587,25 @@ function parsePersistedState(value: unknown): HydratedCodeDeliveryState | null {
   }
   return {
     manualRepositories,
-    excludedRegisteredRepoIds: [...value.excludedRegisteredRepoIds],
-    pinnedRepositoryKeys: [...value.pinnedRepositoryKeys],
+    excludedRegisteredRepoIds: stringArray(value.excludedRegisteredRepoIds)
+      ? [...value.excludedRegisteredRepoIds]
+      : [],
+    pinnedRepositoryKeys: stringArray(value.pinnedRepositoryKeys)
+      ? [...value.pinnedRepositoryKeys]
+      : [],
     savedViews,
-    notifications,
-    seenFingerprints: { ...value.seenFingerprints },
-    lastPollAt: value.lastPollAt,
+    lastPollAt:
+      value.lastPollAt === null || typeof value.lastPollAt === "string"
+        ? value.lastPollAt
+        : null,
     knownAuthors: parseKnownAuthors(value.knownAuthors),
     legacyNotificationRules: rulesMigrated ? null : [...byRule.values()],
+    notificationRulesMigrated: rulesMigrated,
   };
 }
 
-function parseRepositoryRefs(value: unknown): CodeGitHubRepositoryRef[] | null {
-  if (!Array.isArray(value)) return null;
+function parseRepositoryRefs(value: unknown): CodeGitHubRepositoryRef[] {
+  if (!Array.isArray(value)) return [];
   const parsed: CodeGitHubRepositoryRef[] = [];
   for (const item of value) {
     if (
@@ -948,7 +624,7 @@ function parseRepositoryRefs(value: unknown): CodeGitHubRepositoryRef[] | null {
         typeof item.tidebreak_repo_id === "string"
       )
     ) {
-      return null;
+      continue;
     }
     parsed.push({
       host: item.host,
@@ -967,8 +643,8 @@ function parseRepositoryRefs(value: unknown): CodeGitHubRepositoryRef[] | null {
   return parsed;
 }
 
-function parseSavedViews(value: unknown): CodeDeliverySavedView[] | null {
-  if (!Array.isArray(value)) return null;
+function parseSavedViews(value: unknown): CodeDeliverySavedView[] {
+  if (!Array.isArray(value)) return [];
   const views: CodeDeliverySavedView[] = [];
   for (const item of value) {
     if (
@@ -978,11 +654,11 @@ function parseSavedViews(value: unknown): CodeDeliverySavedView[] | null {
       !nonEmpty(item.createdAt) ||
       !isRecord(item.filters)
     ) {
-      return null;
+      continue;
     }
     if (item.kind === "pull_requests") {
       const filters = parsePrFilters(item.filters);
-      if (!filters) return null;
+      if (!filters) continue;
       views.push({
         id: item.id,
         kind: item.kind,
@@ -992,7 +668,7 @@ function parseSavedViews(value: unknown): CodeDeliverySavedView[] | null {
       });
     } else if (item.kind === "runs") {
       const filters = parseRunFilters(item.filters);
-      if (!filters) return null;
+      if (!filters) continue;
       views.push({
         id: item.id,
         kind: item.kind,
@@ -1001,7 +677,7 @@ function parseSavedViews(value: unknown): CodeDeliverySavedView[] | null {
         filters,
       });
     } else {
-      return null;
+      continue;
     }
   }
   return views;
@@ -1086,8 +762,8 @@ function parseRunFilters(
 
 function parseNotificationRules(
   value: unknown,
-): CodeDeliveryNotificationRule[] | null {
-  if (!Array.isArray(value)) return null;
+): CodeDeliveryNotificationRule[] {
+  if (!Array.isArray(value)) return [];
   const rules: CodeDeliveryNotificationRule[] = [];
   for (const item of value) {
     if (
@@ -1097,7 +773,7 @@ function parseNotificationRules(
       !stringArray(item.repositoryKeys) ||
       typeof item.tidebreakLinkedOnly !== "boolean"
     ) {
-      return null;
+      continue;
     }
     rules.push({
       id: item.id,
@@ -1107,90 +783,6 @@ function parseNotificationRules(
     });
   }
   return rules;
-}
-
-function parseNotifications(value: unknown): CodeDeliveryNotification[] | null {
-  if (!Array.isArray(value)) return null;
-  const notifications: CodeDeliveryNotification[] = [];
-  for (const item of value) {
-    if (
-      !isRecord(item) ||
-      !nonEmpty(item.id) ||
-      !nonEmpty(item.fingerprint) ||
-      !isRuleKind(item.rule) ||
-      !nonEmpty(item.title) ||
-      typeof item.detail !== "string" ||
-      !nonEmpty(item.repositoryName) ||
-      !nonEmpty(item.occurredAt) ||
-      !nonEmpty(item.receivedAt) ||
-      !(item.readAt === undefined || typeof item.readAt === "string") ||
-      !nonEmpty(item.url) ||
-      !(
-        item.workspaceId === undefined || typeof item.workspaceId === "string"
-      ) ||
-      !isRecord(item.target)
-    ) {
-      return null;
-    }
-    const target = parseNotificationTarget(item.target);
-    if (!target) return null;
-    notifications.push({
-      id: item.id,
-      fingerprint: item.fingerprint,
-      rule: item.rule,
-      title: item.title,
-      detail: item.detail,
-      repositoryName: item.repositoryName,
-      occurredAt: item.occurredAt,
-      receivedAt: item.receivedAt,
-      url: item.url,
-      target,
-      ...(item.readAt !== undefined ? { readAt: item.readAt } : {}),
-      ...(item.workspaceId !== undefined
-        ? { workspaceId: item.workspaceId }
-        : {}),
-    });
-  }
-  return notifications;
-}
-
-function parseNotificationTarget(
-  value: Record<string, unknown>,
-): CodeDeliveryNotificationTarget | null {
-  if (!isRecord(value.repository)) return null;
-  const repository = value.repository;
-  if (
-    !nonEmpty(repository.host) ||
-    !nonEmpty(repository.owner) ||
-    !nonEmpty(repository.name)
-  ) {
-    return null;
-  }
-  const targetRepository = {
-    host: repository.host,
-    owner: repository.owner,
-    name: repository.name,
-  };
-  if (value.kind === "pull_request" && Number.isSafeInteger(value.number)) {
-    return {
-      kind: "pull_request",
-      repository: targetRepository,
-      number: value.number as number,
-    };
-  }
-  if (
-    value.kind === "run" &&
-    (value.runKind === "workflow_run" || value.runKind === "deployment") &&
-    Number.isSafeInteger(value.id)
-  ) {
-    return {
-      kind: "run",
-      repository: targetRepository,
-      runKind: value.runKind,
-      id: value.id as number,
-    };
-  }
-  return null;
 }
 
 function isRuleKind(value: unknown): value is CodeDeliveryNotificationRuleKind {
@@ -1204,13 +796,6 @@ function isRuleKind(value: unknown): value is CodeDeliveryNotificationRuleKind {
 function stringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) && value.every((item) => typeof item === "string")
-  );
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return (
-    isRecord(value) &&
-    Object.values(value).every((item) => typeof item === "string")
   );
 }
 
