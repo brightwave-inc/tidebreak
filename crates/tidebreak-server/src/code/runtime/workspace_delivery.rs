@@ -1223,7 +1223,26 @@ impl CodeRuntime {
         if number != digest.number {
             return;
         }
-        let live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
+        let mut live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
+        // A REST list that never loaded reviews marks the field unknown so
+        // this write keeps the row's decision, the same way an unloaded
+        // check rollup keeps the checks.
+        if live.review_decision.as_deref() == Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN)
+        {
+            live.review_decision = match tidebreak_core::db::code::get_pull_request_fact(
+                &self.db,
+                owner,
+                &host,
+                &repo_owner,
+                &repo_name,
+                number,
+            )
+            .await
+            {
+                Ok(Some(fact)) => fact.live.and_then(|live| live.review_decision),
+                _ => None,
+            };
+        }
         let (changed, stored) = match tidebreak_core::db::code::set_pull_request_live_state(
             &self.db,
             owner,
@@ -1257,6 +1276,11 @@ impl CodeRuntime {
                 .as_deref()
                 .map(tidebreak_core::PullRequestCheckCounts::from_checks);
             digest.checks = stored.checks;
+        }
+        if digest.review_decision.as_deref()
+            == Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN)
+        {
+            digest.review_decision = stored.review_decision.clone();
         }
         let digest = &digest;
         // One delivery nudge per real change (decision 66): the delivery
@@ -1830,6 +1854,98 @@ mod remote_pr_tests {
         resolve_external_machine_session(&runtime.db, owner, grant.id, "slack", identity, &session)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_rest_review_decision_keeps_the_live_tier() {
+        use tidebreak_core::db::code::{
+            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
+        };
+        use tidebreak_core::{
+            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
+            PullRequestDigest,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, _) = fixture(dir.path()).await;
+        let now = Utc::now();
+        let fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: owner.clone(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 17,
+            url: "https://github.com/acme/tools/pull/17".into(),
+            title: "Stored title".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feat".into(),
+            base_branch: "main".into(),
+            head_sha: Some("abc".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        };
+        save_pull_request_fact(&runtime.db, &fact).await.unwrap();
+        set_pull_request_live_state(
+            &runtime.db,
+            &owner,
+            "github.com",
+            "acme",
+            "tools",
+            17,
+            &CodePullRequestLiveState {
+                checks_summary: None,
+                checks: None,
+                review_decision: Some("changes_requested".into()),
+                mergeable: None,
+                merge_state_status: None,
+                auto_merge_enabled: None,
+                in_merge_queue: None,
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+        runtime
+            .record_pull_request_live_state(
+                &owner,
+                None,
+                &PullRequestDigest {
+                    number: 17,
+                    url: Some("https://github.com/acme/tools/pull/17".into()),
+                    state: "open".into(),
+                    title: Some("Stored title".into()),
+                    checks_summary: None,
+                    check_counts: None,
+                    checks: None,
+                    draft: Some(false),
+                    merged: Some(false),
+                    review_decision: Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN.into()),
+                    mergeable: None,
+                    merge_state_status: None,
+                    head_branch: Some("feat".into()),
+                    base_branch: Some("main".into()),
+                    head_sha: Some("abc".into()),
+                    auto_merge_enabled: None,
+                    in_merge_queue: None,
+                },
+            )
+            .await;
+        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.live.unwrap().review_decision.as_deref(),
+            Some("changes_requested")
+        );
     }
 
     #[tokio::test]

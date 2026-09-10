@@ -283,7 +283,8 @@ pub(crate) async fn delivery_pull_request(
     if !status.is_success() {
         return Err(forge_message(status, &value));
     }
-    let mut fact = fact_value(&value);
+    let reviews = pull_request_reviews(api_base, target, credential, number).await?;
+    let mut fact = fact_value_with_reviews(&value, Some(&reviews));
     let checks = match value.pointer("/head/sha").and_then(Value::as_str) {
         Some(sha) => check_run_values(api_base, target, credential, sha).await?,
         None => Vec::new(),
@@ -325,7 +326,14 @@ pub(crate) async fn delivery_pull_requests(
     let pulls = value.as_array().cloned().unwrap_or_default();
     stream::iter(pulls)
         .map(|pull| async move {
-            let mut fact = fact_value(&pull);
+            let number = pull.get("number").and_then(Value::as_u64);
+            let reviews = match number {
+                Some(number) if checks_loaded => {
+                    Some(pull_request_reviews(api_base, target, credential, number).await?)
+                }
+                _ => None,
+            };
+            let mut fact = fact_value_with_reviews(&pull, reviews.as_ref());
             if checks_loaded {
                 let checks = match pull.pointer("/head/sha").and_then(Value::as_str) {
                     Some(sha) => check_run_values(api_base, target, credential, sha).await?,
@@ -714,6 +722,12 @@ pub(crate) async fn pull_request_digest(
     } else {
         Some(false)
     };
+    let review_decision = if open {
+        let reviews = pull_request_reviews(api_base, target, credential, number).await?;
+        derived_review_decision(Some(&reviews))
+    } else {
+        None
+    };
     let text = |pointer: &str| {
         detail
             .pointer(pointer)
@@ -733,9 +747,7 @@ pub(crate) async fn pull_request_digest(
         check_counts: Some(counts),
         checks: (!checks.is_empty()).then_some(checks),
         draft: detail.get("draft").and_then(Value::as_bool),
-        // REST has no review-decision projection; the field stays unstated
-        // rather than approximated from raw reviews.
-        review_decision: None,
+        review_decision,
         mergeable: match detail.get("mergeable") {
             Some(Value::Bool(true)) => Some("mergeable".to_owned()),
             Some(Value::Bool(false)) => Some("conflicting".to_owned()),
@@ -894,11 +906,57 @@ pub(crate) fn queue_membership_from_timeline(value: &Value) -> Option<bool> {
     Some(last == Some("added_to_merge_queue"))
 }
 
+/// Review list was not loaded; the live-tier writer keeps the row's value.
+pub(crate) const REVIEW_DECISION_UNKNOWN: &str = "unknown";
+
+/// One page of reviews for a pull request — the same bound the conditional
+/// fetcher uses.
+async fn pull_request_reviews(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/pulls/{number}/reviews?per_page=100",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(value)
+}
+
+fn derived_review_decision(reviews: Option<&Value>) -> Option<String> {
+    reviews.and_then(|reviews| {
+        super::pr_fetch::derive_review_decision(None, &super::pr_fetch::tally_reviews(reviews))
+    })
+}
+
+fn review_decision_json(reviews: Option<&Value>) -> Value {
+    match reviews {
+        None => Value::String(REVIEW_DECISION_UNKNOWN.to_owned()),
+        Some(_) => derived_review_decision(reviews)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    }
+}
+
 /// One REST pull request restated in the `gh --json` fact shape
 /// ([`super::gh::PR_FACT_FIELDS`]), so the fact store parses one vocabulary
 /// however the host was asked. `state` stays REST's own `open`/`closed`;
 /// the parser already reads closed-with-merged-at as merged.
 pub(crate) fn fact_value(pr: &Value) -> Value {
+    fact_value_with_reviews(pr, None)
+}
+
+pub(crate) fn fact_value_with_reviews(pr: &Value, reviews: Option<&Value>) -> Value {
     let head_repository = pr.pointer("/head/repo").map_or(Value::Null, |repository| {
         serde_json::json!({
             "nameWithOwner": repository.get("full_name").cloned().unwrap_or(Value::Null),
@@ -924,7 +982,7 @@ pub(crate) fn fact_value(pr: &Value) -> Value {
             "login": pr.pointer("/user/login").cloned().unwrap_or(Value::Null),
             "avatarUrl": pr.pointer("/user/avatar_url").cloned().unwrap_or(Value::Null),
         },
-        "reviewDecision": Value::Null,
+        "reviewDecision": review_decision_json(reviews),
         "mergeable": mergeable,
         "mergeStateStatus": pr.get("mergeable_state").cloned().unwrap_or(Value::Null),
         "autoMergeRequest": pr.get("auto_merge").cloned().unwrap_or(Value::Null),
@@ -973,6 +1031,26 @@ mod tests {
         assert_eq!(fact["author"]["login"], "mira-chen");
         assert_eq!(fact["headRefName"], "feature");
         assert_eq!(fact["headRefOid"], "abc123");
+        assert_eq!(fact["reviewDecision"], REVIEW_DECISION_UNKNOWN);
+    }
+
+    #[test]
+    fn a_changes_requested_review_yields_the_classifier_word() {
+        let rest = serde_json::json!({
+            "number": 7,
+            "html_url": "https://github.com/acme/demo/pull/7",
+            "title": "Add the thing",
+            "state": "open",
+            "draft": false,
+            "user": { "login": "mira-chen" },
+            "head": { "ref": "feature", "sha": "abc123" },
+            "base": { "ref": "main" },
+        });
+        let reviews = serde_json::json!([
+            { "user": { "login": "reviewer" }, "state": "CHANGES_REQUESTED" }
+        ]);
+        let fact = fact_value_with_reviews(&rest, Some(&reviews));
+        assert_eq!(fact["reviewDecision"], "changes_requested");
     }
 
     /// github.com maps to the public API origin; any other forge host keeps
