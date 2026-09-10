@@ -22,7 +22,9 @@ use crate::OwnerId;
 use super::super::super::{entities, store_err, DbStore};
 use super::super::agent_run::database_now;
 
-fn request_from_model(model: entities::code_conversation_request::Model) -> Result<ConversationRequest> {
+fn request_from_model(
+    model: entities::code_conversation_request::Model,
+) -> Result<ConversationRequest> {
     Ok(ConversationRequest {
         id: model.id,
         binding_id: CodeBindingId(model.binding_id),
@@ -122,7 +124,11 @@ fn bounded_optional_string(value: Option<&Value>, max: usize, kind: &str) -> Res
 /// Validate a completed `read`/`export` result against the original request
 /// limits so a hostile or buggy adapter result cannot blow a model's context.
 /// Counts and text honor the requested bounds as well as the hard caps.
-fn validate_export_result(result: &Value, request_arguments: &Value, operation: &str) -> Result<()> {
+fn validate_export_result(
+    result: &Value,
+    request_arguments: &Value,
+    operation: &str,
+) -> Result<()> {
     let messages = result
         .get("messages")
         .and_then(Value::as_array)
@@ -176,16 +182,18 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
             "result message id",
         )?;
         bounded_string(
-            message
-                .get("timestamp")
-                .ok_or_else(|| AgentError::InvalidTarget("result message timestamp is required".into()))?,
+            message.get("timestamp").ok_or_else(|| {
+                AgentError::InvalidTarget("result message timestamp is required".into())
+            })?,
             128,
             "result message timestamp",
         )?;
         let author = message
             .get("author")
             .and_then(Value::as_object)
-            .ok_or_else(|| AgentError::InvalidTarget("result message author must be an object".into()))?;
+            .ok_or_else(|| {
+                AgentError::InvalidTarget("result message author must be an object".into())
+            })?;
         bounded_string(
             author
                 .get("id")
@@ -194,37 +202,34 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
             "result author id",
         )?;
         bounded_string(
-            author
-                .get("name")
-                .ok_or_else(|| AgentError::InvalidTarget("result author name is required".into()))?,
+            author.get("name").ok_or_else(|| {
+                AgentError::InvalidTarget("result author name is required".into())
+            })?,
             512,
             "result author name",
         )?;
         bounded_string(
-            author
-                .get("kind")
-                .ok_or_else(|| AgentError::InvalidTarget("result author kind is required".into()))?,
+            author.get("kind").ok_or_else(|| {
+                AgentError::InvalidTarget("result author kind is required".into())
+            })?,
             64,
             "result author kind",
         )?;
         let text = bounded_string(
-            message
-                .get("text")
-                .ok_or_else(|| AgentError::InvalidTarget("result message text is required".into()))?,
+            message.get("text").ok_or_else(|| {
+                AgentError::InvalidTarget("result message text is required".into())
+            })?,
             usize::try_from(text_cap).unwrap_or(usize::MAX),
             "result message text",
         )?;
         total_text = total_text.saturating_add(text.len() as u64);
         bounded_optional_string(message.get("permalink"), 4_096, "result message permalink")?;
-        let attachments: &[Value] = match message.get("attachments") {
-            Some(Value::Array(values)) => values,
-            None | Some(Value::Null) => &[],
-            Some(_) => {
-                return Err(AgentError::InvalidTarget(
-                    "result message attachments must be an array".into(),
-                ));
-            }
-        };
+        let attachments = message
+            .get("attachments")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AgentError::InvalidTarget("result message attachments must be an array".into())
+            })?;
         if attachments.len() > 20 {
             return Err(AgentError::InvalidTarget(
                 "result message has too many attachments".into(),
@@ -232,22 +237,30 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
         }
         for attachment in attachments {
             bounded_string(
-                attachment
-                    .get("id")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment id is required".into()))?,
+                attachment.get("id").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment id is required".into())
+                })?,
                 512,
                 "result attachment id",
             )?;
             bounded_string(
-                attachment
-                    .get("name")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment name is required".into()))?,
+                attachment.get("name").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment name is required".into())
+                })?,
                 1_024,
                 "result attachment name",
             )?;
-            bounded_optional_string(attachment.get("mime_type"), 256, "result attachment mime_type")?;
+            bounded_optional_string(
+                attachment.get("mime_type"),
+                256,
+                "result attachment mime_type",
+            )?;
             bounded_optional_string(attachment.get("kind"), 128, "result attachment kind")?;
-            bounded_optional_string(attachment.get("permalink"), 4_096, "result attachment permalink")?;
+            bounded_optional_string(
+                attachment.get("permalink"),
+                4_096,
+                "result attachment permalink",
+            )?;
             if let Some(size) = attachment.get("size") {
                 if !size.is_u64() {
                     return Err(AgentError::InvalidTarget(
@@ -258,7 +271,7 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
             if !attachment
                 .get("readable")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
+                .is_some()
             {
                 return Err(AgentError::InvalidTarget(
                     "result attachment readable must be a boolean".into(),
@@ -280,13 +293,9 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
         bounded_string(cursor, 4_096, "result next_cursor")?;
     }
     for flag in ["has_more", "truncated"] {
-        if !result
-            .get(flag)
-            .and_then(Value::as_bool)
-            .is_some_and(|value| value == true)
-        {
+        if !result.get(flag).and_then(Value::as_bool).is_some() {
             return Err(AgentError::InvalidTarget(format!(
-                "result {flag} must be true"
+                "result {flag} must be a boolean"
             )));
         }
     }
@@ -296,11 +305,7 @@ fn validate_export_result(result: &Value, request_arguments: &Value, operation: 
 /// Validate the three result envelopes against the request's operation and
 /// requested bounds. The error envelope is small; attachment decodes before
 /// storage so a >2 MiB payload is rejected rather than persisted.
-fn validate_operation_result(
-    operation: &str,
-    arguments: &Value,
-    result: &Value,
-) -> Result<()> {
+fn validate_operation_result(operation: &str, arguments: &Value, result: &Value) -> Result<()> {
     if let Some(_error) = result.get("error") {
         let error = result
             .get("error")
@@ -314,9 +319,9 @@ fn validate_operation_result(
             "result error code",
         )?;
         bounded_string(
-            error
-                .get("message")
-                .ok_or_else(|| AgentError::InvalidTarget("result error message is required".into()))?,
+            error.get("message").ok_or_else(|| {
+                AgentError::InvalidTarget("result error message is required".into())
+            })?,
             4_096,
             "result error message",
         )?;
@@ -335,45 +340,49 @@ fn validate_operation_result(
             let attachment = result
                 .get("attachment")
                 .and_then(Value::as_object)
-                .ok_or_else(|| AgentError::InvalidTarget("result attachment must be an object".into()))?;
+                .ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment must be an object".into())
+                })?;
             bounded_string(
-                attachment
-                    .get("id")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment id is required".into()))?,
+                attachment.get("id").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment id is required".into())
+                })?,
                 512,
                 "result attachment id",
             )?;
             bounded_string(
-                attachment
-                    .get("name")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment name is required".into()))?,
+                attachment.get("name").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment name is required".into())
+                })?,
                 1_024,
                 "result attachment name",
             )?;
             bounded_string(
-                attachment
-                    .get("mime_type")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment mime_type is required".into()))?,
+                attachment.get("mime_type").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment mime_type is required".into())
+                })?,
                 256,
                 "result attachment mime_type",
             )?;
             bounded_string(
-                attachment
-                    .get("kind")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment kind is required".into()))?,
+                attachment.get("kind").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment kind is required".into())
+                })?,
                 128,
                 "result attachment kind",
             )?;
             let data = bounded_string(
-                attachment
-                    .get("data_base64")
-                    .ok_or_else(|| AgentError::InvalidTarget("result attachment data_base64 is required".into()))?,
+                result.get("data_base64").ok_or_else(|| {
+                    AgentError::InvalidTarget("result attachment data_base64 is required".into())
+                })?,
                 ConversationRequest::MAX_JSON_BYTES,
                 "result attachment data_base64",
             )?;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(data)
-                .map_err(|_| AgentError::InvalidTarget("result attachment data_base64 is invalid".into()))?;
+                .map_err(|_| {
+                    AgentError::InvalidTarget("result attachment data_base64 is invalid".into())
+                })?;
             if decoded.len() > ConversationRequest::ATTACHMENT_MAX_DECODED_BYTES {
                 return Err(AgentError::InvalidTarget(format!(
                     "result attachment decodes to {} bytes; the cap is {}",
@@ -516,7 +525,14 @@ pub async fn list_pending_conversation_requests(
         return Ok(Vec::new());
     }
     for binding in bindings {
-        require_live_scope(&store.conn, owner, session, grant, CodeBindingId(binding.id)).await?;
+        require_live_scope(
+            &store.conn,
+            owner,
+            session,
+            grant,
+            CodeBindingId(binding.id),
+        )
+        .await?;
     }
     let now = database_now(&store.conn).await?;
     let rows = entities::code_conversation_request::Entity::find()
@@ -600,7 +616,9 @@ pub async fn complete_conversation_request(
     let updated = entities::code_conversation_request::Entity::update_many()
         .col_expr(
             entities::code_conversation_request::Column::Result,
-            sea_orm::sea_query::Expr::value(serde_json::to_value(result).map_err(AgentError::Serde)?),
+            sea_orm::sea_query::Expr::value(
+                serde_json::to_value(result).map_err(AgentError::Serde)?,
+            ),
         )
         .col_expr(
             entities::code_conversation_request::Column::UpdatedAt,

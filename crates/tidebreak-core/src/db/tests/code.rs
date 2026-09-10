@@ -6472,7 +6472,6 @@ async fn external_context_cannot_follow_a_message_that_was_retracted() {
     ));
 }
 
-
 /// Conversation-tool requests are durable, idempotent per call key, and
 /// scoped to the exact live owner/session/grant/binding that created them.
 #[tokio::test]
@@ -6487,10 +6486,11 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
     let session_id = seed_external_session(&store, &owner, "conversation-requests").await;
-    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
-        .await
-        .unwrap()
-        .unwrap();
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
+            .await
+            .unwrap()
+            .unwrap();
     let grant = binding.grant_id;
 
     let request = create_conversation_request(
@@ -6532,14 +6532,7 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         ("read", serde_json::json!({"count": 1, "channel": "C1"})),
     ] {
         let error = create_conversation_request(
-            &store,
-            &owner,
-            session_id,
-            grant,
-            binding.id,
-            operation,
-            &arguments,
-            "call-1",
+            &store, &owner, session_id, grant, binding.id, operation, &arguments, "call-1",
         )
         .await
         .unwrap_err();
@@ -6557,20 +6550,18 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         duplicate
     );
     let other_grant = CodeGrantId::new();
-    assert!(get_conversation_request(&store, &owner, session_id, other_grant, request.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(get_conversation_request(
-        &store,
-        &owner,
-        SessionId::new(),
-        grant,
-        request.id,
-    )
-    .await
-    .unwrap()
-    .is_none());
+    assert!(
+        get_conversation_request(&store, &owner, session_id, other_grant, request.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_conversation_request(&store, &owner, SessionId::new(), grant, request.id,)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let pending = list_pending_conversation_requests(&store, &owner, session_id, grant)
         .await
@@ -6592,34 +6583,24 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
         "truncated": true,
         "source": "slack"
     });
-    let completed = complete_conversation_request(
-        &store,
-        &owner,
-        session_id,
-        grant,
-        request.id,
-        &result,
-    )
-    .await
-    .unwrap()
-    .expect("the pending request completes");
+    let completed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("the pending request completes");
     assert_eq!(completed.result.as_ref(), Some(&result));
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    let replayed = complete_conversation_request(
-        &store,
-        &owner,
-        session_id,
-        grant,
-        request.id,
-        &result,
-    )
-    .await
-    .unwrap()
-    .expect("an equal replay is idempotent");
+    let replayed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("an equal replay is idempotent");
     assert_eq!(replayed.result.as_ref(), Some(&result));
 
     let conflict = complete_conversation_request(
@@ -6648,7 +6629,8 @@ async fn conversation_requests_are_durable_idempotent_and_scoped() {
     .unwrap()
     .is_none());
 
-    let oversized = serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
+    let oversized =
+        serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
     let error = create_conversation_request(
         &store,
         &owner,
@@ -6678,10 +6660,11 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
     let session_id = seed_external_session(&store, &owner, "conversation-ttl").await;
-    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
-        .await
-        .unwrap()
-        .unwrap();
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
+            .await
+            .unwrap()
+            .unwrap();
     let grant = binding.grant_id;
     let request = create_conversation_request(
         &store,
@@ -6710,10 +6693,12 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
         .exec(&store.conn)
         .await
         .unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let error = complete_conversation_request(
         &store,
         &owner,
@@ -6743,11 +6728,13 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     crate::db::code::revoke_external_grant(&store, &owner, grant, "revoked for test")
         .await
         .unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("grant"));
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("grant")
+    );
     assert!(complete_conversation_request(
         &store,
         &owner,
@@ -6785,12 +6772,16 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
         .unwrap()
         .unwrap();
     stored.lifecycle = SessionLifecycle::Ended;
-    crate::db::code::save_session(&store, &stored).await.unwrap();
-    assert!(list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+    crate::db::code::save_session(&store, &stored)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("session"));
+        .unwrap();
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session")
+    );
     assert!(complete_conversation_request(
         &store,
         &owner,
@@ -6803,4 +6794,165 @@ async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
     .unwrap_err()
     .to_string()
     .contains("session"));
+}
+
+/// Result validation is operation-aware: a read cannot return more than its
+/// requested count or 32 KiB of text, an export cannot exceed its requested
+/// bytes or 1,000 messages, and an attachment cannot exceed 2 MiB decoded.
+#[tokio::test]
+async fn conversation_request_results_honor_operation_bounds() {
+    use crate::code::ConversationRequest;
+    use crate::db::code::{complete_conversation_request, create_conversation_request};
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "conversation-validation").await;
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-validation")
+            .await
+            .unwrap()
+            .unwrap();
+    let grant = binding.grant_id;
+    let blank = || {
+        serde_json::json!({
+            "messages": [],
+            "has_more": false,
+            "truncated": false,
+            "source": "slack"
+        })
+    };
+
+    let read = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 50}),
+        "validate-read",
+    )
+    .await
+    .unwrap();
+
+    // 51 messages are refused for a read, even though export would allow them.
+    let mut too_many = blank();
+    too_many["messages"] = serde_json::json!(vec![
+        serde_json::json!({
+            "id": "m", "timestamp": "0", "author": {"id": "u", "name": "n", "kind": "user"},
+            "text": "", "attachments": []
+        });
+        51
+    ]);
+    assert!(
+        complete_conversation_request(&store, &owner, session_id, grant, read.id, &too_many,)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("51 messages")
+    );
+
+    // 50 short messages with a requested max_bytes of 16 KiB are refused by
+    // the requested text cap, not silently accepted at the 32 KiB hard cap.
+    let mut requested_bytes = blank();
+    requested_bytes["messages"] = serde_json::json!(vec![
+        serde_json::json!({
+            "id": "m", "timestamp": "0", "author": {"id": "u", "name": "n", "kind": "user"},
+            "text": "a".repeat(1_000), "attachments": []
+        });
+        30
+    ]);
+    let export = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "export",
+        &serde_json::json!({"max_messages": 1_000, "max_bytes": 2 * 1024 * 1024}),
+        "validate-export",
+    )
+    .await
+    .unwrap();
+    assert!(
+        complete_conversation_request(
+            &store,
+            &owner,
+            session_id,
+            grant,
+            export.id,
+            &requested_bytes,
+        )
+        .await
+        .is_ok(),
+        "export may carry 30 KiB even when a read with the same request shape would not"
+    );
+
+    // A read request that asks for 16 KiB must refuse a 17 KiB aggregate.
+    let bounded_read = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 2, "max_bytes": 16 * 1024}),
+        "validate-read-bytes",
+    )
+    .await
+    .unwrap();
+    let mut too_much_text = blank();
+    too_much_text["messages"] = serde_json::json!(vec![
+        serde_json::json!({
+            "id": "m", "timestamp": "0", "author": {"id": "u", "name": "n", "kind": "user"},
+            "text": "a".repeat(9 * 1024), "attachments": []
+        });
+        2
+    ]);
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        bounded_read.id,
+        &too_much_text,
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("text totals"));
+
+    // Attachment payloads decode before storage and reject >2 MiB.
+    let attachment = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "attachment",
+        &serde_json::json!({"attachment_id": "a1"}),
+        "validate-attachment",
+    )
+    .await
+    .unwrap();
+    use base64::Engine as _;
+    let big = vec![0_u8; ConversationRequest::ATTACHMENT_MAX_DECODED_BYTES + 1];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&big);
+    let oversized = serde_json::json!({
+        "attachment": {"id": "a1", "name": "big.bin", "mime_type": "application/octet-stream", "kind": "file"},
+        "data_base64": encoded,
+    });
+    let error =
+        complete_conversation_request(&store, &owner, session_id, grant, attachment.id, &oversized)
+            .await
+            .unwrap_err();
+    assert!(error.to_string().contains("decodes to"), "{error}");
+
+    // has_more/truncated are required bools; false is valid and accepted.
+    let ok = blank();
+    assert!(
+        complete_conversation_request(&store, &owner, session_id, grant, bounded_read.id, &ok,)
+            .await
+            .is_ok()
+    );
 }
