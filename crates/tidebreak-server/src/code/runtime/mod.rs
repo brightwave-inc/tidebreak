@@ -224,6 +224,12 @@ pub struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
+    /// Protected remote-tool bridge's conversation executor. Parent installs
+    /// `conversation_tools`; until then conversation names refuse loudly.
+    pub conversation_tools: Arc<dyn super::sandbox_tools::RemoteConversationTools>,
+    /// Process tool registry for the protected sandbox bridge. `None` in
+    /// hosts that never installed the session coordinator tools.
+    pub tools: Option<Arc<tidebreak_core::ToolRegistry>>,
     /// The mode a channel-bound session takes on this machine's engine when
     /// the channel names none, and the most permissive mode a channel may
     /// name (decision 88). Both default to `ask`.
@@ -505,6 +511,8 @@ impl CodeRuntime {
             harness_llm,
             gateway_runtime: None,
             remote: None,
+            conversation_tools: Arc::new(super::sandbox_tools::UnavailableConversationTools),
+            tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -676,6 +684,8 @@ impl CodeRuntime {
             harness_llm: None,
             gateway_runtime: None,
             remote: None,
+            conversation_tools: Arc::new(super::sandbox_tools::UnavailableConversationTools),
+            tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -761,6 +771,13 @@ impl CodeRuntime {
         remote: Arc<super::remote::service::RemoteSessions>,
     ) -> Self {
         self.remote = Some(remote);
+        self
+    }
+
+    /// Attach the process tool registry for the protected sandbox bridge.
+    #[must_use]
+    pub fn with_tool_registry(mut self, tools: Arc<tidebreak_core::ToolRegistry>) -> Self {
+        self.tools = Some(tools);
         self
     }
 
