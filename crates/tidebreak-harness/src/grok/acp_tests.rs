@@ -254,6 +254,7 @@ fn session(dir: &Path, mode: PermissionMode, duplicate: bool) -> (Arc<GrokSessio
         sink: sink.clone(),
         browser: None,
         native: None,
+        apps: None,
     };
     (Arc::new(GrokSession::new(spec, "1.0.13".into())), sink)
 }
@@ -883,4 +884,22 @@ async fn acp_queued_approval_observes_stop_before_interrupt_gets_the_lock() {
         .unwrap()
         .iter()
         .any(|event| { matches!(event, HarnessEvent::TurnCompleted { .. }) }));
+}
+
+#[test]
+fn acp_session_requests_carry_the_apps_bridge_as_an_http_server() {
+    assert_eq!(acp_mcp_servers(None), json!([]));
+    let apps = crate::AppsChannelSpec {
+        mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
+        token: "apps-token".into(),
+    };
+    let servers = acp_mcp_servers(Some(&apps));
+    assert_eq!(servers[0]["name"], "tb-apps");
+    assert_eq!(servers[0]["type"], "http");
+    assert_eq!(
+        servers[0]["url"],
+        "http://127.0.0.1:9999/code/mcp/connected-apps"
+    );
+    assert_eq!(servers[0]["headers"][0]["name"], "Authorization");
+    assert_eq!(servers[0]["headers"][0]["value"], "Bearer apps-token");
 }

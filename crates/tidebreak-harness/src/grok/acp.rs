@@ -321,7 +321,7 @@ impl GrokSession {
             ));
         }
         let resume = self.resume_ref.lock().expect("grok resume").clone();
-        let mut params = json!({"cwd":self.spec.worktree,"mcpServers":[],"_meta":{"yoloMode":false,"autoMode":false}});
+        let mut params = json!({"cwd":self.spec.worktree,"mcpServers":acp_mcp_servers(self.spec.apps.as_ref()),"_meta":{"yoloMode":false,"autoMode":false}});
         let method = if let Some(id) = &resume {
             params["sessionId"] = json!(id);
             "session/load"
@@ -735,6 +735,17 @@ fn map_update(update: &Value) -> Option<Value> {
         | "current_mode_update"
         | "config_option_update" => None,
         _ => Some(json!({"type":format!("acp/{kind}")})),
+    }
+}
+
+/// The `mcpServers` an ACP `session/new` or `session/load` request carries:
+/// the connected-apps bridge when the server wired one, else none. Grok
+/// mounts the bridge the same way it would any HTTP MCP server, so every
+/// app Tidebreak serves reaches it too.
+pub(crate) fn acp_mcp_servers(apps: Option<&crate::AppsChannelSpec>) -> Value {
+    match apps {
+        Some(spec) => json!([spec.acp_mcp_server()]),
+        None => json!([]),
     }
 }
 

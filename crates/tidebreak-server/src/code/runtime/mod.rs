@@ -57,6 +57,7 @@ use tidebreak_harness::{
 };
 
 use super::approval_bridge::ApprovalBridge;
+use super::apps_bridge::AppsBridge;
 use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
@@ -182,6 +183,8 @@ pub struct CodeRuntime {
     pub clone_parent_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
+    /// Session-scoped bearers for the loopback connected-apps bridge.
+    pub apps: Arc<AppsBridge>,
     pub browser_tokens: BrowserTokenRegistry,
     /// The session-native capability registry used by harness bridges.
     pub native_tokens: NativeTokenRegistry,
@@ -231,7 +234,7 @@ pub struct CodeRuntime {
     /// Live fan-out for adapter-grant revocations, so an event stream
     /// holding a revoked grant drops immediately (docs/slack-sessions.md).
     pub grant_revocations: Arc<super::grants::GrantRevocations>,
-    loopback_base: Mutex<Option<String>>,
+    pub(in crate::code) loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
     /// Last pin-install failure per kind. Cleared on a successful install.
@@ -490,6 +493,7 @@ impl CodeRuntime {
             worktree_root_default,
             clone_parent_default: None,
             approvals: ApprovalBridge::new(),
+            apps: AppsBridge::new(),
             browser_tokens,
             browser_runtime,
             browser_bridge_command,
@@ -664,6 +668,7 @@ impl CodeRuntime {
             worktree_root_default: None,
             clone_parent_default: None,
             approvals: ApprovalBridge::new(),
+            apps: AppsBridge::new(),
             browser_tokens,
             browser_runtime,
             browser_bridge_command,

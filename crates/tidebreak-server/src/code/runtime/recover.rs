@@ -121,6 +121,7 @@ impl CodeRuntime {
         self.browser_tokens.revoke(session_id);
         self.native_tokens.revoke(session_id);
         self.approvals.revoke_session(session_id);
+        self.apps.revoke_session(session_id);
         if let Some(relay) = &self.harness_llm {
             relay.revoke(session_id);
         }

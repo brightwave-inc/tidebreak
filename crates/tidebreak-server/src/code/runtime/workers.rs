@@ -248,6 +248,15 @@ impl CodeRuntime {
             )
         };
 
+        // Every external engine inherits the connected apps the in-process
+        // engine already sees, through the loopback bridge. The in-process
+        // engine reads the MCP runtime directly and needs no channel.
+        let apps = if session.harness_kind.is_in_process() {
+            None
+        } else {
+            self.apps_channel(&attached.owner, attached.id, attached.spawn_epoch)
+        };
+
         // Mint a browser channel only when both halves are present: the
         // native BrowserRuntime (the desktop adapter) and the trusted
         // bridge executable (the CLI sidecar). If either is absent, browser
@@ -403,6 +412,7 @@ impl CodeRuntime {
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
             native,
+            apps,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {

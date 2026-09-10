@@ -292,6 +292,7 @@ pub(crate) struct ServeLaunch<'a> {
     pub port: u16,
     pub browser: Option<&'a BrowserChannelSpec>,
     pub native: Option<&'a crate::NativeChannelSpec>,
+    pub apps: Option<&'a crate::AppsChannelSpec>,
     /// The exact host-wired key used by shell tools to borrow forge credentials.
     pub relay_key_env: Option<&'a str>,
 }
@@ -307,6 +308,7 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
         port,
         browser,
         native,
+        apps,
         relay_key_env,
     } = launch;
     let mut argv = vec![
@@ -336,7 +338,7 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
         .iter()
         .rev()
         .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT));
-    if browser.is_some() || native.is_some() {
+    if browser.is_some() || native.is_some() || apps.is_some() {
         // Snapshot-only config takes the merge path only when a channel is
         // present. With no channel, apply_child_env_tokio already preserves
         // the snapshot unchanged, so plan.env must not copy it or reject it
@@ -352,6 +354,12 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
             entries.push((
                 NATIVE_MCP_SERVER,
                 native_mcp_config_json(spec.bridge_command())?,
+            ));
+        }
+        if let Some(spec) = apps {
+            entries.push((
+                crate::AppsChannelSpec::MCP_SERVER,
+                spec.opencode_mcp_config_entry(),
             ));
         }
         let existing_config = effective_existing_config_str(snapshot_env, extra_env)?;
@@ -551,6 +559,7 @@ impl OpencodeSession {
             port,
             browser: self.spec.browser.as_ref(),
             native: self.spec.native.as_ref(),
+            apps: None,
             relay_key_env: self.spec.relay_key_env.as_deref(),
         })?;
         let mut command = Command::new(&plan.argv[0]);
@@ -1132,6 +1141,7 @@ mod tests {
             sink: std::sync::Arc::new(Discard),
             browser: None,
             native: None,
+            apps: None,
         })
     }
 
@@ -1327,6 +1337,7 @@ mod tests {
                 port: 1234,
                 browser: None,
                 native: None,
+                apps: None,
                 relay_key_env,
             })
             .unwrap();
@@ -1372,6 +1383,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1401,6 +1413,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap_err();
@@ -1418,6 +1431,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap_err();
@@ -1532,6 +1546,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1559,6 +1574,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1641,6 +1657,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: Some(&native),
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1681,6 +1698,7 @@ mod tests {
             port: 4096,
             browser: Some(&browser),
             native: Some(&native),
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1710,6 +1728,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1742,6 +1761,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1827,6 +1847,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1884,6 +1905,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1931,6 +1953,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -1972,6 +1995,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -2003,6 +2027,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -2048,6 +2073,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap_err();
@@ -2074,6 +2100,7 @@ mod tests {
             port: 4096,
             browser: None,
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap();
@@ -2108,6 +2135,7 @@ mod tests {
             port: 4096,
             browser: Some(&spec),
             native: None,
+            apps: None,
             relay_key_env: None,
         })
         .unwrap_err();
@@ -2116,5 +2144,39 @@ mod tests {
             message.contains("not valid UTF-8"),
             "non-UTF-8 bridge path must fail clearly: {message}"
         );
+    }
+
+    #[test]
+    fn apps_channel_is_a_remote_mcp_entry_in_the_config_overlay() {
+        let apps = crate::AppsChannelSpec {
+            mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
+            token: "apps-token".into(),
+        };
+        let plan = compose_serve_plan(ServeLaunch {
+            binary: std::path::Path::new("/usr/bin/opencode"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            snapshot_env: &[],
+            extra_env: &[],
+            port: 4096,
+            browser: None,
+            native: None,
+            apps: Some(&apps),
+            relay_key_env: None,
+        })
+        .unwrap();
+        let (_, overlay) = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .expect("an apps channel alone produces the config overlay");
+        let config: serde_json::Value = serde_json::from_str(overlay).unwrap();
+        let entry = &config["mcp"]["tb-apps"];
+        assert_eq!(entry["type"], "remote");
+        assert_eq!(
+            entry["url"],
+            "http://127.0.0.1:9999/code/mcp/connected-apps"
+        );
+        assert_eq!(entry["headers"]["Authorization"], "Bearer apps-token");
     }
 }

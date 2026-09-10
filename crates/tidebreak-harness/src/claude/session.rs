@@ -583,6 +583,7 @@ impl ClaudeSession {
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
             self.spec.native.as_ref(),
+            self.spec.apps.as_ref(),
         )? {
             argv.extend(flags);
         }
@@ -1486,6 +1487,7 @@ mod tests {
             sink,
             browser: None,
             native: None,
+            apps: None,
         })
     }
 
@@ -1661,6 +1663,7 @@ done
             sink: Arc::new(Discard),
             browser: None,
             native: None,
+            apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
@@ -1867,6 +1870,7 @@ done
             sink: Arc::new(Discard),
             browser: Some(browser),
             native: None,
+            apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         assert_eq!(
@@ -1925,6 +1929,7 @@ done
             sink: Arc::new(Discard),
             browser: None,
             native: None,
+            apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan
