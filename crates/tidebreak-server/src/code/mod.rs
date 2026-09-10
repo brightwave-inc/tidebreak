@@ -10,6 +10,7 @@ pub mod attention;
 pub mod browser_channel;
 pub mod browser_runtime;
 pub mod bus;
+pub mod channel_preferences;
 pub mod checkpoint;
 pub mod chrome;
 pub mod ci_logs;

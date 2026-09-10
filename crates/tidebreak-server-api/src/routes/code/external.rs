@@ -125,6 +125,10 @@ pub struct ExternalSessionBody {
 
 #[derive(serde::Serialize)]
 pub struct ExternalSessionResponse {
+    pub harness: HarnessKind,
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_path: Option<String>,
     /// `created`, `existing`, or `ended`.
     pub status: &'static str,
     pub session_id: SessionId,
@@ -145,16 +149,28 @@ pub struct ExternalSessionResponse {
 
 /// Freeze the chat default against the connection that admitted this session.
 /// Browser credentials never select or authorize an external conversation's model.
+#[cfg(test)]
 pub(crate) async fn resolve_external_model(
     state: &AppState,
     grant: &CodeExternalGrant,
 ) -> Result<String, ServerError> {
+    resolve_external_model_selection(state, grant, None).await
+}
+
+async fn resolve_external_model_selection(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    selection: Option<&str>,
+) -> Result<String, ServerError> {
     use crate::model_roles::{self, ModelRole};
-    let (selected, explicit) =
+    let (selected, explicit) = if let Some(model) = selection {
+        (model.to_owned(), true)
+    } else {
         match model_roles::read_selection(&*state.store, ModelRole::Chat).await? {
             Some(model) => (model, true),
             None => (state.agent_config.model.clone(), false),
-        };
+        }
+    };
     let runtime = state
         .code
         .as_ref()
@@ -308,6 +324,16 @@ pub async fn external_get_or_create(
         return Ok((
             StatusCode::OK,
             Json(ExternalSessionResponse {
+                harness: session.harness_kind,
+                model: session.model.clone(),
+                settings_path: tidebreak_core::db::code::session_context(
+                    &runtime.db,
+                    &grant.owner,
+                    session.id,
+                )
+                .await?
+                .and_then(|context| context.channel_id)
+                .map(|channel| crate::code::channel_preferences::settings_path(&grant, &channel)),
                 status: if ended { "ended" } else { "existing" },
                 session_id: binding.session_id,
                 binding_id: (!ended).then_some(binding.id),
@@ -318,6 +344,12 @@ pub async fn external_get_or_create(
             }),
         ));
     }
+    let preferences = match body.channel_id.as_deref() {
+        Some(channel) if grant.channel_kind == "slack" => {
+            crate::code::channel_preferences::read(&runtime.db, &grant, channel).await?
+        }
+        _ => Default::default(),
+    };
     let registered = match body.repo_id {
         Some(id) => Some(runtime.get_repo(&grant.owner, id).await?),
         None => None,
@@ -359,13 +391,16 @@ pub async fn external_get_or_create(
     };
     // Keep repository orchestration on the internal engine by default until
     // external engines carry the same tools. An explicit harness is honored.
-    let harness = body.harness.unwrap_or(if repo_id.is_none() {
-        HarnessKind::Internal
-    } else {
-        HarnessKind::ClaudeCode
-    });
-    let model = if harness.is_in_process() {
-        Some(resolve_external_model(&state, &grant).await?)
+    let harness = body
+        .harness
+        .or(preferences.harness)
+        .unwrap_or(if repo_id.is_none() {
+            HarnessKind::Internal
+        } else {
+            HarnessKind::ClaudeCode
+        });
+    let model = if harness.is_in_process() || preferences.model.is_some() {
+        Some(resolve_external_model_selection(&state, &grant, preferences.model.as_deref()).await?)
     } else {
         None
     };
@@ -396,8 +431,34 @@ pub async fn external_get_or_create(
     {
         repair_original_context(&runtime, &grant, binding, body.channel_id.as_deref()).await?;
     }
+    if let ExternalSessionResolution::Created(binding) = &resolution {
+        crate::code::channel_preferences::freeze_instructions(
+            &runtime.db,
+            &grant.owner,
+            binding.session_id,
+            &preferences.instructions,
+        )
+        .await?;
+    }
+    let resolved_session_id = match &resolution {
+        ExternalSessionResolution::Created(binding)
+        | ExternalSessionResolution::Existing(binding) => binding.session_id,
+        ExternalSessionResolution::Ended { session_id } => *session_id,
+        ExternalSessionResolution::GrantMismatch => {
+            return Err(ServerError::not_found("code session not found"))
+        }
+    };
+    let actual = runtime
+        .get_session(&grant.owner, resolved_session_id)
+        .await?;
     let response_from =
         |status: &'static str, session_id: SessionId, binding_id| ExternalSessionResponse {
+            harness: actual.harness_kind,
+            model: actual.model.clone(),
+            settings_path: body
+                .channel_id
+                .as_deref()
+                .map(|channel| crate::code::channel_preferences::settings_path(&grant, channel)),
             status,
             session_id,
             binding_id,
