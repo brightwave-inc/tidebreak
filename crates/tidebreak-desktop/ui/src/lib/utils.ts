@@ -1,6 +1,8 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+import { HttpError } from "../api/client/http";
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -8,13 +10,20 @@ export function cn(...inputs: ClassValue[]) {
 /**
  * A caught value as something worth showing a reader.
  *
- * The backend returns human-readable strings, so the caught message is usually
- * the best copy available. Anything empty or long enough to be a stack trace or
- * a serialized payload falls back to the caller's own wording.
+ * Prefer `Error.message` over `String(error)` so `HttpError` (whose `name` is
+ * `"HttpError"`) does not leak a `"HttpError: "` prefix. The HTTP client
+ * prefixes the status (`"409: …"`); strip that when the body already carries
+ * the server's `message`. Server detail is already bounded (git stderr up to
+ * 4 KB); keep the 240-character cap only for unknown shapes so a toast stays
+ * readable.
  */
 export function friendlyErrorMessage(error: unknown, fallback: string): string {
-  const message = String(error)
+  let message = (error instanceof Error ? error.message : String(error))
     .replace(/^Error:\s*/, "")
     .trim();
+  if (error instanceof HttpError) {
+    message = message.replace(/^\d{3}:\s*/, "").trim();
+    return message || fallback;
+  }
   return message && message.length <= 240 ? message : fallback;
 }
