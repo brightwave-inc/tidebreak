@@ -493,6 +493,10 @@ pub fn app(state: AppState) -> Router {
     // `require_token` like the inference relay above.
     let external_adapter_api = Router::new()
         .route(
+            "/external/code/channels/{channel_id}/preferences",
+            get(routes::code::external_channel_preferences),
+        )
+        .route(
             "/external/code/sessions",
             post(routes::code::external_get_or_create),
         )
@@ -924,6 +928,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::decide_approval),
         )
         .route("/code/grants", get(routes::code::list_grants))
+        .route(
+            "/code/grants/{id}/channels/{channel_id}/preferences",
+            get(routes::code::get_channel_preferences).put(routes::code::put_channel_preferences),
+        )
         .route(
             "/code/grants/workspace",
             post(routes::code::start_workspace_grant),
