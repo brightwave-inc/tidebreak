@@ -127,6 +127,30 @@ impl RemoteConversationTools for UnavailableConversationTools {
     }
 }
 
+#[async_trait]
+impl super::remote::driver::HostToolExecutor for CodeRuntime {
+    async fn execute(
+        &self,
+        session_id: tidebreak_core::SessionId,
+        request: &tidebreak_core::code::SupervisorToolRequest,
+    ) -> Result<Option<super::remote::wire::SupervisorToolResult>, tidebreak_core::AgentError> {
+        let result = self.execute_sandbox_tool(session_id, request).await?;
+        Ok(Some(super::remote::wire::SupervisorToolResult {
+            request_id: result.request_id,
+            output: result.output,
+            artifacts: result
+                .artifacts
+                .into_iter()
+                .map(|artifact| super::remote::wire::SupervisorArtifact {
+                    path: artifact.path,
+                    media_type: artifact.media_type,
+                    bytes: artifact.bytes,
+                })
+                .collect(),
+        }))
+    }
+}
+
 impl CodeRuntime {
     /// The current conversation-tool executor. Default refuses loudly until
     /// parent installs `conversation_tools`.

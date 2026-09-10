@@ -144,6 +144,18 @@ pub enum RemoteTurnOutcome {
     },
 }
 
+/// Executes one allowlisted protected tool for a supervised sandbox and
+/// returns the typed bridge result for delivery through the sandbox inbox.
+#[async_trait::async_trait]
+pub trait HostToolExecutor: Send + Sync {
+    /// Run the tool under the session's durable authority.
+    async fn execute(
+        &self,
+        session_id: tidebreak_core::SessionId,
+        request: &super::wire::SupervisorToolRequest,
+    ) -> Result<Option<super::wire::SupervisorToolResult>, tidebreak_core::AgentError>;
+}
+
 /// The driver one remote session's lifecycle calls go through: the store,
 /// the live bus, the transport, and the spawn settings, borrowed together
 /// so every operation reads the same world.
@@ -156,6 +168,8 @@ pub struct RemoteDriver<'a> {
     pub provisioner: &'a dyn SandboxProvisioner,
     /// Spawn-time settings.
     pub settings: &'a RemoteSpawnSettings,
+    /// Optional protected-tool executor served through the inbox.
+    pub host_tool: Option<Arc<dyn HostToolExecutor>>,
 }
 
 /// Surface the sign-in need on the session's attention.
@@ -777,6 +791,43 @@ impl RemoteDriver<'_> {
         };
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
+
+        // Protected tool requests ride the durable event stream. Serve each
+        // through the authoritative host executor and deliver the result
+        // through the same sandbox inbox the steering messages use.
+        if let Some(host) = self.host_tool.as_ref() {
+            for event in &read.events {
+                if event.kind != "host_tool_request" {
+                    continue;
+                }
+                let request: super::wire::SupervisorToolRequest =
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            warn!(session = %session.id, %error, "a malformed host tool request was skipped");
+                            continue;
+                        }
+                    };
+                match host.execute(session.id, &request).await {
+                    Ok(Some(result)) => {
+                        let message = super::wire::SandboxMessage {
+                            body: super::wire::SupervisorMessageBody::Tool(result),
+                            interrupt: false,
+                        };
+                        if let Err(error) = provisioner
+                            .send(&owner, session.id, &sandbox_id, &message)
+                            .await
+                        {
+                            warn!(session = %session.id, %error, "could not deliver a host tool result");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(session = %session.id, %error, "a host tool request failed");
+                    }
+                }
+            }
+        }
 
         let turn_settled =
             settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
