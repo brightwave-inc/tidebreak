@@ -128,14 +128,6 @@ tempfile = "=3.27.0"
 trash = { version = "=5.2.7", default-features = false, features = ["coinit_apartmentthreaded"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
-# Symphonia 0.6.0 cannot demux the WebM a browser MediaRecorder produces: it
-# writes into a non-seekable sink, so every Cluster carries the unknown-size
-# vint, and the EBML iterator failed to recognise that the next Cluster ends the
-# current one — reading stopped at the first cluster boundary with "encountered
-# an unexpected element". Upstream fixed it in 619c680 (Symphonia #541) but has
-# not cut a release; `vendor/symphonia-format-mkv` carries that fix. Drop this
-# patch and the vendor directory for a plain version bump once 0.6.1 ships.
-
 tracing = "=0.1.44"
 # `serde` matches what the tauri plugins already enable in the desktop graph,
 # so every build selection resolves one url instead of two.
@@ -151,4 +143,3 @@ dom_query = "=0.28.0"
 # does not use and keeps the snapshot library test-only.
 [patch.crates-io]
 brush-parser = { path = "vendor/brush-parser" }
-symphonia-format-mkv = { path = "vendor/symphonia-format-mkv" }
