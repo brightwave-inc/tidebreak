@@ -231,7 +231,6 @@ pub(crate) async fn api_get(
     credential: &GitCredential,
     endpoint: &str,
 ) -> Result<Value, String> {
-    validate_endpoint(endpoint)?;
     let (status, value) = request(
         reqwest::Method::GET,
         format!("{api_base}/{endpoint}"),
@@ -243,13 +242,6 @@ pub(crate) async fn api_get(
         return Err(forge_message(status, &value));
     }
     Ok(value)
-}
-
-fn validate_endpoint(endpoint: &str) -> Result<(), String> {
-    if endpoint.contains(['?', '#']) {
-        return Err("the forge REST endpoint must not contain a query or fragment".to_owned());
-    }
-    Ok(())
 }
 
 fn pulls_for_head_url(
@@ -1018,13 +1010,6 @@ mod tests {
             pulls_for_head_url("https://api.github.com", &target, "fix/a&b#c%+d", "5"),
             "https://api.github.com/repos/acme/demo/pulls?head=acme%3Afix%2Fa%26b%23c%25%2Bd&state=all&per_page=5"
         );
-    }
-
-    #[test]
-    fn generic_endpoints_reject_queries_and_fragments() {
-        assert!(validate_endpoint("repos/acme/demo/issues").is_ok());
-        assert!(validate_endpoint("repos/acme/demo/issues?state=open").is_err());
-        assert!(validate_endpoint("repos/acme/demo/issues#latest").is_err());
     }
 
     /// The pull-request merge endpoint's status contract is independent of
