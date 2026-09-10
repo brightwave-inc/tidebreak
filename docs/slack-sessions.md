@@ -228,13 +228,11 @@ before it stores the pending row and presents on status and completion. This
 keeps an arbitrary caller from manufacturing a convincing approval and keeps
 a forwarded approval link from completing without the adapter.
 
-State the compromise honestly: a compromised adapter can submit prompts
-to existing sessions of every connected user and read those sessions'
-events. It cannot pick repositories freely, because session creation in a
-repository requires per-repository owner confirmation (see Choosing the
-repository) — the confirmation state lives on the machine, keyed by
-grant, so the adapter cannot forge it. That is the bound, and it is only
-as good as that confirmation gate.
+A compromised adapter can submit prompts to sessions and read their events under
+its connected grants. A workspace grant can select any repository allowed by the
+instance's configured GitHub App. Approving that workspace connection grants this
+shared authority to its admitted channels. GitHub App installation permissions,
+grant revocation, and adapter membership checks define that boundary.
 
 ## Identity and connect
 
@@ -301,10 +299,10 @@ session; the adapter posts it in the thread, with the connect card when
 the connection ended, so a push that stops is never a bare authentication
 failure nobody can act on.
 
-The shared identity's forge credential is the ceiling; the admin
-confirmation per channel and repository is the gate. A person grant still
-spends that person's forge access. A workspace grant spends the
-deployment credential the service principal already uses (decision 89).
+The configured GitHub App installation defines the shared instance's repository
+access. Every connected channel inherits that access. A person grant uses that
+person's forge access. A workspace grant uses the deployment credential the
+service principal already uses (decisions 89 and 96).
 
 Only the session owner's messages reach a person-grant session. Anyone
 else's reply gets an acknowledging reaction from the bot and, once per
@@ -440,21 +438,11 @@ on the workspace:
 
 Bare GitHub URLs in prose are context, never clone intent.
 
-The first use of any repository under a person grant requires owner
-confirmation: an owner-only button ("Run in `org/name`? Set by @who as
-this channel's default"), verified by the interaction payload's user id,
-recorded machine-side against the grant. Under a workspace grant the
-same pair is an admin confirmation per channel and repository. This is
-the gate that makes the channel default safe — Slack exposes no reliable
-channel-authority concept, so in practice any member can set a default,
-and without the gate a default is a routing attack: point it at a
-readable repository whose contents prompt-inject an engine holding the
-shared identity's forge credential. With the gate, a changed default
-cannot silently redirect anyone. Setting or changing a default also
-posts a visible notice naming who changed it. This confirmation is
-session-lifecycle consent, not an engine approval. You still approve
-engine actions from Slack when a machine session parks on a card; the
-repository gate is a different question.
+The first use of a channel repository under a person grant keeps its owner
+confirmation. Workspace grants use the instance's configured GitHub App directly:
+selecting a repository, starting a child, or attaching a task to another channel
+requires no channel approval. Setting or changing a channel default posts a
+visible notice naming who changed it. Engine action approvals remain separate.
 
 The GitHub App installation intersected with the person's access is the
 allowlist, refused with a human-readable rendering: outside the App
@@ -672,8 +660,9 @@ channels — external organizations. In externally shared channels the
 adapter degrades to link-only artifacts or DMs the owner. All adapter
 posts set `unfurl_links: false, unfurl_media: false`, so a private
 repository's metadata is not expanded into the channel by an unfurl app.
-The per-repository confirmation is where "you are about to run a private
-repository in a public channel" gets said.
+Administrators choose which repositories the shared instance may use through its
+GitHub App installation. All admitted channels inherit that access; connecting a
+workspace grants that shared authority.
 
 Slack rate limits are budgeted per app per workspace, not per message:
 the adapter runs a per-(workspace, method) token bucket and degrades by
@@ -809,7 +798,8 @@ new workspaces with `code_session_create` (each with a stable
 the parent's owner, grant, and forge identity. Machine children keep the parent's
 permission mode; configured sandbox children use Allow under sandbox confinement.
 A revoked grant refuses discovery, creation, and child reads. Workspace grants
-require channel repository confirmation before cloning.
+use the instance's GitHub App access across channels. The machine checks that
+access before admitting a repository, including a cached checkout.
 
 The following work remains:
 
@@ -913,32 +903,26 @@ must already hold the session. Repeating an attachment returns the existing
 binding; a destination held by another session or grant returns not found.
 Ended sessions return `409 ended`. `GET` on the same route lists the bindings.
 
-A workspace grant also sends `channel_id` and names the person requesting a
-new repository confirmation in `set_by: {identity, display}`. An unconfirmed
-destination creates a pending approval and returns `409 repository_unconfirmed`.
-After an administrator confirms the repository, the adapter retries attachment. The adapter
+A workspace grant also sends `channel_id` for conversation routing. The machine
+checks the instance's configured GitHub App access to the session's repository;
+the destination channel needs no separate repository approval. The adapter
 checks workspace membership before calling; attachment does not change the
 session's access rows. Each bound thread reads the same event stream with its
 own cursor. Snapshots expose `external_origins` and preserve `external_origin`
 as the first thread for older clients. Decision 93 records the boundary.
 
-### Approve a channel’s repository scope
+### Repository access across channels
 
-After connecting the Slack workspace, open Tidebreak **Settings > Channels** as
-an administrator. Add the Slack channel ID and the GitHub repositories that the
-channel may use, then approve them together. You can do this before anyone starts
-a task. You can also approve the repositories that a task has already requested
-together from the channel’s pending list.
+Choose the repositories that the instance's GitHub App can access in the GitHub
+App installation settings. Every Slack channel connected to that instance can
+use those repositories. You do not enter repository names or approve them in
+Tidebreak Channels.
 
-The agent can choose any repository in that channel’s approved scope and work
-across several repositories without asking for the same approval again. The
-GitHub connection must still permit each repository. Approvals apply only to the
-selected channel and workspace grant; revoking the grant cuts off that scope.
-Adding repositories preserves existing approvals. A chat answer does not grant
-access: after the administrator saves the scope, retry the waiting task.
+The agent can discover and choose several repositories without a channel default.
+A channel default only selects where work starts. To add or remove repository
+access, change the GitHub App installation. The machine checks the configured
+forge before starting repository work or attaching a task to another channel.
 
-Administrators can also add scope through
-`POST /deployment/code/grants/workspace/{id}/channels/{channel_id}/repositories/approve`
-with `{"repositories":["acme/frontend","acme/backend"]}`. The endpoint accepts
-1–100 explicit repository names or GitHub URLs, canonicalizes them, and commits
-the whole batch together. Wildcards are not accepted.
+Historical channel approval records and endpoints remain compatible with older
+clients, but do not determine repository access. Decision 96 supersedes the
+per-channel approval policy in decisions 92, 93, and 94.

@@ -1,6 +1,6 @@
 # 92. Workspace grants
 
-- Status: Accepted
+- Status: Accepted; per-channel repository approval superseded by [decision 96](0096-slack-channels-share-the-instance-github-app-repository-access.md)
 - Date: 2026-09-08
 - Owners: thet
 - Related: [0086](0086-session-access-is-separate-from-ownership.md); [0088](0088-a-slack-session-runs-where-the-deployment-can-run-it.md); [0089](0089-service-principals.md); `docs/slack-sessions.md`; tidebreak #3178 (track D), #3190

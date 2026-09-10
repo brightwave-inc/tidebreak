@@ -115,20 +115,10 @@ pub struct ExternalSessionBody {
     /// Required under a workspace grant.
     #[serde(default)]
     pub channel_id: Option<String>,
-    /// Who named this repository as the channel default. Required when a
-    /// workspace grant creates a pending confirmation.
-    #[serde(default)]
-    pub set_by: Option<ExternalSetBy>,
     /// Whose forge identity this conversation should act as. A service-owned
     /// session or a workspace grant ignores this and always acts as the bot.
     #[serde(default)]
     pub acts_as: Option<tidebreak_core::ActsAs>,
-}
-
-#[derive(serde::Deserialize)]
-pub struct ExternalSetBy {
-    pub identity: String,
-    pub display: String,
 }
 
 #[derive(serde::Serialize)]
@@ -331,7 +321,7 @@ pub async fn external_get_or_create(
         None => None,
     };
     let repository = match registered.as_ref() {
-        Some(repo) if grant.kind.is_workspace() => Some(workspace_repository_scope(repo)?),
+        Some(repo) if grant.kind.is_workspace() => Some(workspace_repository_origin(repo)?),
         Some(repo) => match (repo.origin_owner.as_deref(), repo.origin_name.as_deref()) {
             (Some(owner), Some(name)) => Some(format!("{owner}/{name}")),
             _ => body.repository.clone(),
@@ -342,58 +332,6 @@ pub async fn external_get_or_create(
             .map(tidebreak_server_core::code::runtime::CodeRuntime::canonical_external_repository)
             .transpose()?,
     };
-    if grant.kind.is_workspace() {
-        let channel_id = body
-            .channel_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                ServerError::bad_request_kind(
-                    "channel_id_required",
-                    "a workspace grant names the channel that will run this session",
-                )
-            })?;
-        if body.repo_id.is_some() || repository.is_some() {
-            let repository = repository.as_deref().ok_or_else(|| {
-                ServerError::bad_request_kind(
-                    "repo_origin_unknown",
-                    "The repository records no origin to confirm.",
-                )
-            })?;
-            // New workspace conversations need consent before cloning.
-            if !tidebreak_core::db::code::channel_repository_is_confirmed(
-                &runtime.db,
-                &grant.owner,
-                grant.id,
-                channel_id,
-                repository,
-            )
-            .await?
-            {
-                let set_by = body.set_by.as_ref().ok_or_else(|| {
-                    ServerError::bad_request_kind(
-                        "set_by_required",
-                        "name who set this channel's repository",
-                    )
-                })?;
-                tidebreak_core::db::code::ensure_pending_channel_repository(
-                    &runtime.db,
-                    &grant.owner,
-                    grant.id,
-                    channel_id,
-                    repository,
-                    &set_by.identity,
-                    &set_by.display,
-                )
-                .await?;
-                return Err(ServerError::conflict_kind(
-                    "repository_unconfirmed",
-                    "an admin has not confirmed this channel's repository",
-                ));
-            }
-        }
-    }
     let owner_kind = state
         .principal_authenticator
         .session_owner_kind_for(&grant.owner);
@@ -483,8 +421,6 @@ pub struct ExternalBindingBody {
     pub external_key: String,
     #[serde(default)]
     pub channel_id: Option<String>,
-    #[serde(default)]
-    pub set_by: Option<ExternalSetBy>,
 }
 
 /// Attach a conversation to the session this grant already holds.
@@ -503,14 +439,7 @@ pub async fn external_attach_binding(
         ));
     }
     if grant.kind.is_workspace() {
-        require_binding_repository(
-            &runtime,
-            &grant,
-            id,
-            body.channel_id.as_deref(),
-            body.set_by.as_ref(),
-        )
-        .await?;
+        require_binding_repository(&runtime, &grant, id, body.channel_id.as_deref()).await?;
     }
     match tidebreak_core::db::code::attach_external_binding(
         &runtime.db,
@@ -534,28 +463,8 @@ pub async fn external_attach_binding(
     }
 }
 
-/// An unqualified channel approval names a repository on github.com only.
-fn workspace_repository_scope(repo: &tidebreak_core::CodeRepo) -> Result<String, ServerError> {
-    let origin_unknown = || {
-        ServerError::conflict_kind(
-            "repo_origin_unknown",
-            "channel repository approval requires a recorded github.com origin",
-        )
-    };
-    if !repo
-        .origin_host
-        .as_deref()
-        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-    {
-        return Err(origin_unknown());
-    }
-    let (Some(owner), Some(name)) = (repo.origin_owner.as_deref(), repo.origin_name.as_deref())
-    else {
-        return Err(origin_unknown());
-    };
-    tidebreak_server_core::code::runtime::CodeRuntime::canonical_external_repository(&format!(
-        "{owner}/{name}"
-    ))
+fn workspace_repository_origin(repo: &tidebreak_core::CodeRepo) -> Result<String, ServerError> {
+    tidebreak_server_core::code::runtime::CodeRuntime::workspace_repository_origin(repo)
 }
 
 async fn require_binding_repository(
@@ -563,9 +472,8 @@ async fn require_binding_repository(
     grant: &CodeExternalGrant,
     id: SessionId,
     channel_id: Option<&str>,
-    set_by: Option<&ExternalSetBy>,
 ) -> Result<(), ServerError> {
-    let channel_id = channel_id
+    channel_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -578,37 +486,10 @@ async fn require_binding_repository(
     if let Some(workspace_id) = session.workspace_id {
         let workspace = runtime.get_workspace(&grant.owner, workspace_id).await?;
         let repo = runtime.get_repo(&grant.owner, workspace.repo_id).await?;
-        let repository = workspace_repository_scope(&repo)?;
-        if !tidebreak_core::db::code::channel_repository_is_confirmed(
-            &runtime.db,
-            &grant.owner,
-            grant.id,
-            channel_id,
-            &repository,
-        )
-        .await?
-        {
-            let set_by = set_by.ok_or_else(|| {
-                ServerError::bad_request_kind(
-                    "set_by_required",
-                    "name who set this channel's repository",
-                )
-            })?;
-            tidebreak_core::db::code::ensure_pending_channel_repository(
-                &runtime.db,
-                &grant.owner,
-                grant.id,
-                channel_id,
-                &repository,
-                &set_by.identity,
-                &set_by.display,
-            )
+        let repository = workspace_repository_origin(&repo)?;
+        runtime
+            .require_workspace_repository_access(&grant.owner, grant.id, &repository)
             .await?;
-            return Err(ServerError::conflict_kind(
-                "repository_unconfirmed",
-                "an administrator must confirm this repository for the destination channel",
-            ));
-        }
     }
     Ok(())
 }

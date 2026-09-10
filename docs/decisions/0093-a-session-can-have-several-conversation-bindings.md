@@ -1,6 +1,6 @@
 # 93. A session can have several conversation bindings
 
-- Status: Accepted
+- Status: Accepted; per-channel repository approval superseded by [decision 96](0096-slack-channels-share-the-instance-github-app-repository-access.md)
 - Date: 2026-09-08
 - Owners: thet
 - Related: [0092](0092-workspace-grants.md); `docs/slack-sessions.md`; #3198

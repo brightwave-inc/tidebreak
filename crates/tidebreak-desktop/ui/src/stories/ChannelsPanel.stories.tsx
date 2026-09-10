@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
+import { expect, within } from "storybook/test";
 
 import type { ApiClient, CodeGrantSnapshot } from "@/api";
 import { ChannelsPanel } from "@/settings/ChannelsPanel";
@@ -148,144 +148,34 @@ const workspace: CodeGrantSnapshot = {
   ],
 };
 
-function approvalClient({
-  failSave = false,
-  failRefresh = false,
-  initialGrant = workspace,
-}: {
-  failSave?: boolean;
-  failRefresh?: boolean;
-  initialGrant?: CodeGrantSnapshot;
-} = {}): ApiClient {
-  let grants = [structuredClone(initialGrant), live];
-  let saved = false;
-  return {
-    listCodeGrants: async () => {
-      if (saved && failRefresh)
-        throw new Error("The connection was lost while refreshing grants.");
-      return grants;
-    },
-    approveWorkspaceGrantChannelRepositories: async (
-      grantId: string,
-      channelId: string,
-      repositories: string[],
-    ) => {
-      if (failSave) throw new Error("403: administrator access required");
-      saved = true;
-      grants = grants.map((grant) => {
-        if (grant.id !== grantId) return grant;
-        const channels = (grant.channels ?? []).filter(
-          (entry) =>
-            entry.channel_id !== channelId ||
-            !repositories.includes(entry.repository),
-        );
-        return {
-          ...grant,
-          channels: [
-            ...channels,
-            ...repositories.map((repository) => ({
-              channel_id: channelId,
-              repository,
-              state: "confirmed",
-              set_by_identity: "U04CASEY",
-              set_by_display: "Casey Nakamura",
-            })),
-          ],
-        };
-      });
-    },
-  } as unknown as ApiClient;
-}
-
-export const ChannelRepositories: Story = {
-  render: () => <ChannelsPanel client={approvalClient()} />,
-};
-
-export const BeforeFirstTask: Story = {
-  render: () => (
-    <ChannelsPanel
-      client={approvalClient({ initialGrant: { ...workspace, channels: [] } })}
-    />
-  ),
+export const WorkspaceGitHubAccess: Story = {
+  args: { client: stubClient([workspace, live]) },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Add channel" }),
-    );
+    await expect(await canvas.findByText("Workspace Acme Corp")).toBeVisible();
     await expect(
-      canvas.getByRole("textbox", { name: /Slack channel ID/ }),
+      canvas.getByText(
+        /Every channel uses the repositories available to this instance’s GitHub App/,
+      ),
     ).toBeVisible();
-  },
-};
-
-export const ApprovalFailed: Story = {
-  render: () => <ChannelsPanel client={approvalClient({ failSave: true })} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", {
-        name: "Approve all pending repositories",
-      }),
-    );
-    await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "administrator access required",
-    );
-  },
-};
-
-export const ApprovedButRefreshFailed: Story = {
-  render: () => (
-    <ChannelsPanel client={approvalClient({ failRefresh: true })} />
-  ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", {
-        name: "Approve all pending repositories",
-      }),
-    );
-    await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "Repositories were approved, but the list could not refresh.",
-    );
-    await expect(canvas.getByRole("status")).toHaveTextContent(
-      "Repositories approved for C04ENGINEERING.",
-    );
-  },
-};
-
-export const ApprovedRepositories: Story = {
-  render: () => <ChannelsPanel client={approvalClient()} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", {
-        name: "Approve all pending repositories",
-      }),
-    );
-    await expect(await canvas.findByRole("status")).toHaveTextContent(
-      "Repositories approved for C04ENGINEERING.",
-    );
+    await expect(canvas.queryByRole("textbox")).not.toBeInTheDocument();
     await expect(
       canvas.queryByText("Pending approval"),
     ).not.toBeInTheDocument();
   },
 };
 
-export const LongRepositories: Story = {
+export const BeforeFirstTask: Story = {
+  args: { client: stubClient([{ ...workspace, channels: [] }]) },
+};
+
+export const LongWorkspaceName: Story = {
   args: {
     client: stubClient([
       {
         ...workspace,
-        channels: [
-          {
-            channel_id: "C04ENGINEERING",
-            repository:
-              "acme-platform-engineering/customer-identity-and-shared-access-management-service",
-            state: "confirmed",
-            set_by_identity: "U04CASEY",
-            set_by_display: "Casey Nakamura",
-          },
-        ],
+        workspace_name:
+          "Acme platform engineering and shared infrastructure development",
       },
     ]),
   },

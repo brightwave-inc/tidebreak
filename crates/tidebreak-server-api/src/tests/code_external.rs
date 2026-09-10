@@ -24,6 +24,9 @@ use crate::code::remote::{RemoteSandboxError, SandboxProvisioner};
 use crate::code::CodeRuntime;
 use tidebreak_core::db::code::insert_repo;
 use tidebreak_core::{CodeRepo, OwnerId, RepoId};
+use tidebreak_server_core::obo_gateway::{
+    test_support::FakeLender, GitCredentialLender, GitForgeError,
+};
 
 const ADAPTER_BOOTSTRAP_TOKEN: &str = "adapter-bootstrap-token-padded-to-forty-eight-characters";
 
@@ -2608,6 +2611,12 @@ async fn a_refused_borrow_answers_the_helper_and_journals_the_reason() {
 }
 
 async fn workspace_grant_app() -> (Router, Arc<CodeRuntime>, RepoId, OwnerId, tempfile::TempDir) {
+    workspace_grant_app_with_lender(Arc::new(FakeLender::offering("channel-bot"))).await
+}
+
+async fn workspace_grant_app_with_lender(
+    lender: Arc<dyn GitCredentialLender>,
+) -> (Router, Arc<CodeRuntime>, RepoId, OwnerId, tempfile::TempDir) {
     let (dir, store) = temp_db_store("workspace-grant.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -2623,6 +2632,7 @@ async fn workspace_grant_app() -> (Router, Arc<CodeRuntime>, RepoId, OwnerId, te
             None,
             None,
         )
+        .with_git_credentials(lender)
         .with_remote_sessions(RemoteSessions::new(fake.clone(), remote_settings())),
     );
     let service = OwnerId::new("user:channel").unwrap();
@@ -2723,7 +2733,151 @@ async fn repository_scope_workspace_grant(
 }
 
 #[tokio::test]
-async fn channel_repository_preapproval_is_additive_and_scoped_before_session_attempts() {
+async fn workspace_channels_inherit_all_three_github_app_repositories_without_approvals() {
+    let lender = Arc::new(FakeLender::offering("channel-bot"));
+    let (router, runtime, first, service, dir) =
+        workspace_grant_app_with_lender(lender.clone()).await;
+    let token = "instance-repository-token";
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", token).await;
+    let mut repos = vec![first];
+    for name in ["api", "web"] {
+        let mut repo = runtime.get_repo(&service, first).await.unwrap();
+        repo.id = RepoId::new();
+        repo.root_path = dir.path().join(name).display().to_string();
+        repo.origin_name = Some(name.into());
+        insert_repo(&runtime.db, &repo).await.unwrap();
+        repos.push(repo.id);
+    }
+    for channel in ["C1", "C2"] {
+        for (index, repo) in repos.iter().enumerate() {
+            let (status, body) = call_json(&router, "POST", "/external/code/sessions", token, Some(serde_json::json!({
+                "external_key": format!("T1/{channel}/{index}.1"), "repo_id": repo, "channel_id": channel
+            }))).await;
+            assert_eq!(status, StatusCode::CREATED, "{channel}: {body}");
+            assert_eq!(body["acts_as"], "bot");
+        }
+    }
+    assert_eq!(
+        lender.minted(),
+        [
+            "acme/tools",
+            "acme/api",
+            "acme/web",
+            "acme/tools",
+            "acme/api",
+            "acme/web"
+        ]
+    );
+    assert!(runtime
+        .list_channel_repository_confirms(&service, grant.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn workspace_github_refusals_apply_to_cached_repositories_and_channel_attachment() {
+    let lender = Arc::new(FakeLender::offering("channel-bot"));
+    let (router, runtime, repo, service, _dir) =
+        workspace_grant_app_with_lender(lender.clone()).await;
+    let token = "instance-refused-token";
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", token).await;
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        token,
+        Some(serde_json::json!({
+            "external_key":"T1/C1/1.1", "repo_id":repo, "channel_id":"C1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let session = body["session_id"].as_str().unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!(
+            "/deployment/code/grants/workspace/{}/channels/C2/repositories/approve",
+            grant.id
+        ),
+        ALICE_TOKEN,
+        Some(serde_json::json!({"repositories":["acme/tools"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    *lender.mint_refusal.lock().unwrap() = Some(GitForgeError::RepositoryNotInstalled);
+    for (path, request) in [
+        (
+            "/external/code/sessions".to_owned(),
+            serde_json::json!({"external_key":"T1/C2/1.1", "repo_id":repo, "channel_id":"C2"}),
+        ),
+        (
+            format!("/external/code/sessions/{session}/bindings"),
+            serde_json::json!({"external_key":"T1/C2/2.1", "channel_id":"C2"}),
+        ),
+        (
+            "/external/code/sessions".to_owned(),
+            serde_json::json!({"external_key":"T1/C2/3.1", "repository":"acme/unregistered", "channel_id":"C2"}),
+        ),
+    ] {
+        let (status, body) = call_json(&router, "POST", &path, token, Some(request)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            body["kind"], "git_forge_refused",
+            "historical channel approval cannot override the GitHub App: {body}"
+        );
+    }
+    let refused = runtime
+        .prepare_external_repository(
+            &service,
+            grant.id,
+            "acme/tools",
+            tidebreak_server_core::obo_gateway::GitForgeAttributionRequest::Installation,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        "git_forge_refused",
+        "cached checkouts must check the configured forge inside the runtime"
+    );
+    let refused = runtime
+        .external_get_or_create(
+            &service,
+            Some("service"),
+            grant.id,
+            "slack",
+            "T1/C2/direct",
+            repo,
+            None,
+            tidebreak_core::HarnessKind::ClaudeCode,
+            crate::code::runtime::NewSessionSettings {
+                permission_mode: tidebreak_core::PermissionMode::Allow,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                permission_mode_ceiling: None,
+                acts_as: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        "git_forge_refused",
+        "direct runtime admission must check the configured forge"
+    );
+    assert!(runtime
+        .repo_by_origin(&service, "acme/unregistered")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn legacy_channel_repository_approvals_do_not_limit_instance_access() {
     let (router, runtime, first_repo_id, service, dir) = workspace_grant_app().await;
     let token = "workspace-preapproval-token";
     let grant = repository_scope_workspace_grant(&runtime, &service, "T1", token).await;
@@ -2853,10 +3007,10 @@ async fn channel_repository_preapproval_is_additive_and_scoped_before_session_at
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(
-        body["kind"], "repository_unconfirmed",
-        "another channel has no inherited scope"
+        status,
+        StatusCode::CREATED,
+        "another channel inherits the configured GitHub App access: {body}"
     );
 
     let other_token = "other-workspace-preapproval-token";
@@ -2872,10 +3026,10 @@ async fn channel_repository_preapproval_is_additive_and_scoped_before_session_at
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(
-        body["kind"], "repository_unconfirmed",
-        "another grant has no inherited scope"
+        status,
+        StatusCode::CREATED,
+        "another workspace using the same instance inherits its GitHub App access: {body}"
     );
     assert!(!tidebreak_core::db::code::channel_repository_is_confirmed(
         &runtime.db,
@@ -3215,53 +3369,6 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     let grant_token = completed["token"].as_str().unwrap().to_owned();
     let grant_id = completed["grant"]["id"].as_str().unwrap().to_owned();
 
-    let (status, missing) = call_json(
-        &router,
-        "POST",
-        "/external/code/sessions",
-        &grant_token,
-        Some(serde_json::json!({
-            "external_key":"T1/C-missing/1.1", "repository":"ACME/Unregistered",
-            "channel_id":"C-missing", "set_by":{"identity":"U1", "display":"Casey"}
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(
-        missing["kind"], "repository_unconfirmed",
-        "an unregistered repository must reach channel consent before cloning"
-    );
-    assert!(runtime
-        .repo_by_origin(&service, "acme/unregistered")
-        .await
-        .is_err());
-
-    let (status, body) = call_json(
-        &router,
-        "POST",
-        "/external/code/sessions",
-        &grant_token,
-        Some(serde_json::json!({
-            "external_key": "T1/C1/1.1",
-            "repo_id": repo_id,
-            "channel_id": "C1",
-            "set_by": { "identity": "U1", "display": "Casey" },
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["kind"], "repository_unconfirmed");
-
-    let (status, _) = call_json(
-        &router,
-        "POST",
-        &format!("/deployment/code/grants/workspace/{grant_id}/channels/C1/repositories/confirm"),
-        ALICE_TOKEN,
-        Some(serde_json::json!({ "repository": "acme/tools" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-
     let (status, _) = call_json(
         &router,
         "POST",
@@ -3281,25 +3388,7 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
     let bindings_url = format!("/external/code/sessions/{session_id}/bindings");
     let destination = serde_json::json!({"external_key":"T1/C2/2.2", "channel_id":"C2", "set_by":{"identity":"U1", "display":"Casey"}});
-    let (status, _) = call_json(
-        &router,
-        "POST",
-        &bindings_url,
-        &grant_token,
-        Some(destination.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    let (status, _) = call_json(
-        &router,
-        "POST",
-        &format!("/deployment/code/grants/workspace/{grant_id}/channels/C2/repositories/confirm"),
-        ALICE_TOKEN,
-        Some(serde_json::json!({"repository":"acme/tools"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call_json(
+    let (status, body) = call_json(
         &router,
         "POST",
         &bindings_url,
@@ -3307,7 +3396,11 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
         Some(destination),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "another channel needs no repository approval: {body}"
+    );
 
     // Simulate a crash after committing the source binding but before its
     // channel context. An attached destination cannot claim the missing origin.

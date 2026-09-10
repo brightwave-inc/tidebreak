@@ -1,6 +1,6 @@
 # 94. Repository-optional conversations on the internal engine
 
-- Status: Accepted
+- Status: Accepted; per-channel repository approval superseded by [decision 96](0096-slack-channels-share-the-instance-github-app-repository-access.md)
 - Date: 2026-09-09
 - Owners: server, code mode
 - Related: [0030](0030-code-mode-separate-surface.md), [0048](0048-one-interaction-model.md), [0090](0090-a-session-acts-as-one-forge-identity.md); `docs/slack-sessions.md`; `docs/code-mode.md`; #3185, #3191, #3192
