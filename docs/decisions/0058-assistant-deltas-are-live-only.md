@@ -190,3 +190,8 @@ the same treatment becomes available to it.
   the newest events rather than the oldest.
 - `list_events` with a window that fits exactly reports no truncation, which a
   naive `limit(n)` implementation would get wrong.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

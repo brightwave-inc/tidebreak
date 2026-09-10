@@ -801,25 +801,8 @@ A revoked grant refuses discovery, creation, and child reads. Workspace grants
 use the instance's GitHub App access across channels. The machine checks that
 access before admitting a repository, including a cached checkout.
 
-The following work remains:
-
-- The Slack adapter side defaults to the no-repository form and defers
-  `repository_preparing` retries in the gateway's Slack code
-  (brightwave-inc/model-gateway#1980); this repository supplies the
-  machine contract it calls.
-- `code_wait` is a bounded 20-second polling read, not the designed
-  durable child wait park. A parent whose children run longer must call
-  the tool again, and a process restart does not resume a parked parent
-  wait for these child sessions yet.
-- Grant-bound children use the configured machine or sandbox placement. The
-  broader sandbox-child tool contract (`spawn_sandbox_run`), tree budgets,
-  and session tree UI remain in #3193, #3194, and #3195.
-- `agent-mcp` mounting inside external harness sessions, a session-scoped
-  capability token, and the child UI are not implemented; the native
-  tools and `agent-mcp` share some names but still need compatible schemas.
-- A conversation with no workspace is still a code session: its web link
-  is the session page (`/c/{session_id}`); a workspace child links through
-  its workspace (`/code/w/{workspace_id}`).
+Decision [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md)
+keeps the current list of work that remains for self-drive child sessions.
 
 ## Later
 
