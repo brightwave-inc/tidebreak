@@ -22,7 +22,12 @@ export function friendlyErrorMessage(error: unknown, fallback: string): string {
     .replace(/^Error:\s*/, "")
     .trim();
   if (error instanceof HttpError) {
-    message = message.replace(/^\d{3}:\s*/, "").trim();
+    // The client builds the message as `${status}: ${server message}`, so
+    // strip exactly that status, never digits the server itself wrote.
+    const prefix = `${error.status}:`;
+    if (message.startsWith(prefix)) {
+      message = message.slice(prefix.length).trim();
+    }
     return message || fallback;
   }
   return message && message.length <= 240 ? message : fallback;

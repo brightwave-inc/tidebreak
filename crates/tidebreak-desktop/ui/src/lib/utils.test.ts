@@ -13,6 +13,15 @@ describe("friendlyErrorMessage", () => {
     ).toBe("repository already registered");
   });
 
+  it("strips only the client's own status prefix, never digits the server wrote", () => {
+    expect(
+      friendlyErrorMessage(
+        new HttpError(500, "500: 404: file not found", "internal"),
+        "fallback",
+      ),
+    ).toBe("404: file not found");
+  });
+
   it("yields a plain Error's message", () => {
     expect(friendlyErrorMessage(new Error("disk full"), "Could not save")).toBe(
       "disk full",
