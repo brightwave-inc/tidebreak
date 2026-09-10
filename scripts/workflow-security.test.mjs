@@ -1524,6 +1524,36 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
     /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/tidebreak-sandbox-agent-documents$/m,
   );
   assert.match(publish, /PUBLISHED_IMAGE_DIGEST/);
+
+  // The pin job rewrites source files by path. A moved file makes the job
+  // die with FileNotFoundError before it proposes anything (PR #3172 moved
+  // the digest pin and nothing noticed for five weeks), so every path the
+  // job names must exist and carry the constant it looks for.
+  const pinTargets = new Map([
+    [
+      /^\s*path = "([^"]+)"$/m,
+      /const PUBLISHED_IMAGE_DIGEST: Option<&str> =/,
+    ],
+    [
+      /"(crates\/tidebreak-code-execution\/src\/sandbox_image\.rs)": \{/,
+      /const DOCUMENTS_IMAGE: &str = "/,
+    ],
+    [
+      /"(crates\/tidebreak-code-execution\/src\/daytona\.rs)": \{/,
+      /const DOCUMENTS_SNAPSHOT: &str = "/,
+    ],
+  ]);
+  for (const [locator, marker] of pinTargets) {
+    const found = publish.match(locator);
+    assert.ok(found, `pin job names a target for ${locator}`);
+    const target = join(repositoryRoot, found[1]);
+    assert.ok(existsSync(target), `pin target exists: ${found[1]}`);
+    assert.match(
+      readFileSync(target, "utf8"),
+      marker,
+      `pin target ${found[1]} carries its pinned constant`,
+    );
+  }
 });
 
 test("sandbox images are scanned in a read-only job before the version tag is published, and the pin loop never touches main", () => {
