@@ -449,7 +449,10 @@ export function CodeSessionPane({
     message: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
   ) {
-    const pendingReasoningEffort = pendingReasoningEffortRef.current;
+    const pendingReasoningEffort = canManage
+      ? pendingReasoningEffortRef.current
+      : null;
+    const requestedModel = canManage ? (model ?? undefined) : undefined;
     const recoveryAtSend = firstTurnRecovery;
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
@@ -464,14 +467,14 @@ export function CodeSessionPane({
         ? client.submitCodeTurn(
             session.id,
             message,
-            model ?? undefined,
+            requestedModel,
             attachments,
             pendingReasoningEffort.value,
           )
         : client.submitCodeTurn(
             session.id,
             message,
-            model ?? undefined,
+            requestedModel,
             attachments,
           ),
     ).then((outcome) => {

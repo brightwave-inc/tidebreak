@@ -4462,6 +4462,133 @@ async fn repositoryless_external_sessions_honor_explicit_harness_and_private_scr
 }
 
 #[tokio::test]
+async fn repositoryless_external_harnesses_respect_sandbox_placement_before_launch() {
+    use tidebreak_core::{ExecutionLocation, ExternalSessionResolution, HarnessKind};
+    use tidebreak_harness::HarnessAdapter;
+
+    let adapters: Vec<_> = [
+        HarnessKind::ClaudeCode,
+        HarnessKind::Codex,
+        HarnessKind::Internal,
+    ]
+    .into_iter()
+    .map(|harness| {
+        Arc::new(
+            crate::scripted_harness::ScriptedAdapter::new(
+                crate::scripted_harness::plain_text_script(),
+            )
+            .with_kind(harness)
+            .with_approvals(tidebreak_core::CapLevel::Supported),
+        )
+    })
+    .collect();
+    let fake = Arc::new(FakeProvisioner::default());
+    let (router, runtime, _, directory) = machine_app_built(|mut runtime| {
+        for adapter in &adapters {
+            runtime.adapters.register(adapter.clone());
+        }
+        runtime.with_remote_sessions(RemoteSessions::new(fake.clone(), remote_settings()))
+    })
+    .await;
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    for adapter in &adapters[..2] {
+        let harness = adapter.kind();
+        let key = format!("T1/D1/sandbox-{harness}");
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({"external_key": key, "harness": harness})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["kind"], "repositoryless_harness_requires_machine");
+        assert_eq!(adapter.probe_count(), 0, "refuse before probing {harness}");
+        assert!(
+            adapter.launched_approvals().is_empty(),
+            "no host launch for {harness}"
+        );
+        assert!(
+            tidebreak_core::db::code::get_external_binding(&runtime.db, &owner, "slack", &key,)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(runtime.list_sessions(&owner).await.unwrap().is_empty());
+    assert!(!directory.path().join("code/private/sessions").exists());
+    assert!(fake.spawns.lock().unwrap().is_empty());
+
+    let key = "T1/D1/internal-default";
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({"external_key": key})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = serde_json::from_value(body["session_id"].clone()).unwrap();
+    let mut session = runtime.get_session(&owner, id).await.unwrap();
+    assert_eq!(session.harness_kind, HarnessKind::Internal);
+    assert_eq!(session.execution_location, ExecutionLocation::Machine);
+    assert_eq!(adapters[2].launched_approvals().len(), 1);
+
+    // Runtime callers must resolve retries before applying the admission gate.
+    for ended in [false, true] {
+        if ended {
+            session.lifecycle = tidebreak_core::SessionLifecycle::Ended;
+            assert!(
+                tidebreak_core::db::code::save_session(&runtime.db, &session)
+                    .await
+                    .unwrap()
+            );
+        }
+        let (resolution, _) = runtime
+            .external_get_or_create(
+                &owner,
+                None,
+                grant.id,
+                "slack",
+                key,
+                None,
+                None,
+                HarnessKind::Codex,
+                crate::code::runtime::NewSessionSettings {
+                    permission_mode: tidebreak_core::PermissionMode::Ask,
+                    model: None,
+                    reasoning_effort: None,
+                    fast_mode: false,
+                    permission_mode_ceiling: None,
+                    acts_as: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        match resolution {
+            ExternalSessionResolution::Existing(binding) if !ended => {
+                assert_eq!(binding.session_id, id);
+            }
+            ExternalSessionResolution::Ended { session_id } if ended => {
+                assert_eq!(session_id, id);
+            }
+            other => panic!("retry must preserve its binding: {other:?}"),
+        }
+    }
+    assert_eq!(runtime.list_sessions(&owner).await.unwrap().len(), 1);
+    assert!(adapters[1].launched_approvals().is_empty());
+    assert!(fake.spawns.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn repositoryless_explicit_harness_refuses_missing_authentication() {
     let (router, runtime, _, _directory) = machine_app_built(|mut runtime| {
         let adapter = crate::scripted_harness::ScriptedAdapter::new(

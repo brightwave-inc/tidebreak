@@ -24,7 +24,11 @@ function ResolveChatRoute({ chatId }: { chatId: string }) {
       .getCodeSession(chatId)
       .then((session) => {
         if (cancelled) return;
-        if (session.is_owner === false) {
+        if (
+          session.is_owner === false ||
+          session.workspace_id !== null ||
+          session.harness_kind !== "internal"
+        ) {
           void navigate({
             to: "/code/s/$sessionId",
             params: { sessionId: chatId },
