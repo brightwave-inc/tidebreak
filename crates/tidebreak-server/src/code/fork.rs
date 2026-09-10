@@ -230,8 +230,8 @@ pub struct WrittenTranscript {
 ///
 /// Every fork writes a fresh generation directory named by a UUID, so a
 /// child keeps reading a whole, immutable handoff no matter how many later
-/// forks the same session produces. The generation is kept for the worktree
-/// lifecycle; a failure before the transcript publishes removes the whole
+/// forks the same session produces. The generation is kept; nothing removes
+/// it today. A failure before the transcript publishes removes the whole
 /// directory rather than leaving a partial handoff for the child to trip
 /// over.
 pub(crate) async fn write_transcript(

@@ -1,9 +1,10 @@
 //! Host-owned Chrome computer use for coding harnesses.
 //!
-//! The three adapters (in-app browser, native apps, Chrome) share one
-//! `computer_session` wire. This module provides the Chrome half: a direct
-//! CDP driver and a dispatch service that binds owner/session/connection/tab/
-//! origin, validates every call, rechecks grants at act time, and returns
+//! Native apps and Chrome share one `computer_session` wire; the in-app
+//! browser keeps its own channel. This module provides the Chrome half: a
+//! direct CDP driver and a dispatch service that binds
+//! owner/session/connection/tab/origin, validates every call, clones the
+//! grant once at connect and rechecks the fence at act time, and returns
 //! request-id outcomes through the shared transport types.
 
 pub mod cdp;

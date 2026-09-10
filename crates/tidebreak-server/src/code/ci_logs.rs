@@ -4,7 +4,8 @@
 //! The fix-errors action used to hand an agent check names and URLs and let it
 //! find the logs itself: two or three `gh` calls before it saw an error line,
 //! and then a whole multi-megabyte job log in one read. This module does that
-//! fetch on the agent's behalf and bounds it.
+//! fetch on the agent's behalf. The fetch itself is unbounded; only the
+//! rendered output is capped.
 //!
 //! Files land under the workspace's private root, beside fork transcripts, so
 //! Git cannot index them and the session's `allowed_read_roots` already covers
