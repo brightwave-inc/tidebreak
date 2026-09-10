@@ -329,7 +329,11 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
     ) -> bool {
         use crate::code::pr_fetch::{read_branch_rules, EndpointRead, FetchTransport};
         let read = match self {
-            Self::Gh { observation, runtime, .. } => {
+            Self::Gh {
+                observation,
+                runtime,
+                ..
+            } => {
                 read_branch_rules(
                     &runtime.host_gate,
                     FetchTransport::Gh {
