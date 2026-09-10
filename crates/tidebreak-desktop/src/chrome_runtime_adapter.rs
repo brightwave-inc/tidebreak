@@ -25,7 +25,8 @@ use tidebreak_core::chrome_connection::{
 use tidebreak_core::computer_session::{ComputerUseCall, ComputerUseOutcome, ComputerUseResult};
 use tidebreak_core::{CancelToken, ChromeConnectionGrant, OwnerId, SessionId, WorkspaceId};
 use tidebreak_server::chrome::{
-    cdp::CdpSession, ChromeComputerUseService, ChromeConnectionSpec, ChromeScope,
+    cdp::CdpSession, validate_websocket_endpoint, ChromeComputerUseService, ChromeConnectionSpec,
+    ChromeScope,
 };
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use uuid::Uuid;
@@ -913,6 +914,7 @@ async fn connect_profile(
     mode: ChromeConnectionMode,
 ) -> Result<(String, CdpSession), String> {
     let endpoint = wait_for_endpoint(profile, child).await?;
+    validate_websocket_endpoint(&endpoint)?;
     // A failed connection can mean the user declined Chrome's own prompt.
     // Never reconnect automatically or repeatedly ask for that permission.
     let cdp = CdpSession::connect(&endpoint).await.map_err(|error| {
