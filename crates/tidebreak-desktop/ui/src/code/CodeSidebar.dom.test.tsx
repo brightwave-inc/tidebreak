@@ -209,7 +209,7 @@ describe("CodeSidebar", () => {
     );
   });
 
-  it("does not link shared internal sessions to the owner-only chat route", async () => {
+  it("hides conversations that the server does not mark as openable", async () => {
     useCodeUpdatesStore.setState({
       conversationsWithoutWorkspace: {
         shared: {

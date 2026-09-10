@@ -4810,7 +4810,7 @@ export type SessionDigest = {
  */
 workspace: WorkspaceId | null,
 /**
- * Whether this viewer can open the owner-scoped chat route.
+ * Whether this viewer can open the conversation through the authorized session route.
  */
 can_open_chat?: boolean, session: SessionId, kind: SessionKind,
 /**

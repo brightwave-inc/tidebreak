@@ -1797,7 +1797,7 @@ pub struct CodeTerminalActivityNotice {
 pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
-    /// Whether this viewer can open the owner-scoped chat route.
+    /// Whether this viewer can open the conversation through the authorized session route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub can_open_chat: Option<bool>,
