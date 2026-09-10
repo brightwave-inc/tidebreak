@@ -11,8 +11,8 @@ mod platform {
     use crate::wire::SupervisorToolRequest;
     use serde_json::Value;
     use tidebreak_core::code::supervisor_tools::{
-        frame_request_id, is_result_frame, validate_request, ResultAssembler, MAX_OUTPUT_BYTES,
-        MAX_REQUEST_BYTES,
+        MAX_OUTPUT_BYTES, MAX_REQUEST_BYTES, ResultAssembler, frame_request_id, is_result_frame,
+        validate_request,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
@@ -22,7 +22,7 @@ mod platform {
     const MAX_ACTIVE: usize = 8;
     const MAX_COMPLETED: usize = 128;
     const MAX_CONNECTIONS: usize = 16;
-    const MAX_REPLY_BYTES: usize = MAX_OUTPUT_BYTES + 16 * 1024;
+    const MAX_REPLY_BYTES: usize = MAX_OUTPUT_BYTES + MAX_REQUEST_BYTES;
     const READ_TIMEOUT: Duration = Duration::from_secs(10);
     const CALL_TIMEOUT: Duration = Duration::from_secs(180);
     type Reply = Result<Value, String>;
@@ -307,7 +307,7 @@ mod platform {
     mod tests {
         use super::*;
         use tidebreak_core::code::supervisor_tools::{
-            encode_result_frames, SupervisorArtifact, SupervisorToolResult,
+            SupervisorArtifact, SupervisorToolResult, encode_result_frames,
         };
 
         async fn drain_one(bridge: &mut LocalToolBridge) -> Vec<SupervisorToolRequest> {
@@ -389,11 +389,13 @@ mod platform {
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            assert!(second
-                .await
-                .unwrap()
-                .unwrap_err()
-                .contains("different arguments"));
+            assert!(
+                second
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("different arguments")
+            );
             std::fs::create_dir(root.path().join("conversation")).unwrap();
             std::fs::write(root.path().join("conversation/file"), b"original").unwrap();
             let result = SupervisorToolResult {
@@ -405,9 +407,11 @@ mod platform {
                     bytes: b"replacement".to_vec(),
                 }],
             };
-            assert!(bridge
-                .receive_frame(&encode_result_frames(&result).unwrap()[0])
-                .is_err());
+            assert!(
+                bridge
+                    .receive_frame(&encode_result_frames(&result).unwrap()[0])
+                    .is_err()
+            );
             assert!(first.await.unwrap().is_err());
             assert_eq!(
                 std::fs::read(root.path().join("conversation/file")).unwrap(),
