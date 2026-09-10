@@ -40,7 +40,7 @@ pub async fn external_conversation_requests(
     Ok(Json(ConversationRequestsResponse {
         requests: pending
             .into_iter()
-            .map(|request| ConversationRequestWire::from(request))
+            .map(ConversationRequestWire::from)
             .collect(),
     }))
 }

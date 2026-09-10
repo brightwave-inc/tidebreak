@@ -1312,10 +1312,6 @@ pub fn app(state: AppState) -> Router {
             "/code/mcp/approval-prompt",
             post(routes::code::approval_prompt),
         )
-        .route(
-            "/code/sandbox/tools/call",
-            post(routes::code::sandbox_tool_call),
-        )
         .with_state(frame_state);
 
     let root = Router::new()

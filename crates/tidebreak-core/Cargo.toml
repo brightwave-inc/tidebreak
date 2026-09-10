@@ -45,7 +45,6 @@ blob-fs = ["dep:async-stream", "dep:tokio", "dep:windows-sys"]
 blob-object = ["dep:object_store", "dep:tokio"]
 
 [dependencies]
-base64 = { workspace = true }
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 async-trait = { workspace = true }
 base64 = { workspace = true }

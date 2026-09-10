@@ -52,7 +52,7 @@ impl RemoteWorkspaceTask {
         };
         let envelope: Self = serde_json::from_str(json)
             .map_err(|error| format!("the workspace task envelope is invalid: {error}"))?;
-        if envelope.version != VERSION {
+        if !matches!(envelope.version, 1 | VERSION) || (envelope.version == 1 && envelope.scratch) {
             return Err("the workspace task envelope version is unsupported".into());
         }
         if envelope.task.trim().is_empty() {
@@ -65,9 +65,6 @@ impl RemoteWorkspaceTask {
             || envelope.branch.contains("@{")
         {
             return Err("the workspace branch is invalid".into());
-        }
-        if envelope.scratch {
-            return Ok(Some(envelope));
         }
         Ok(Some(envelope))
     }
@@ -88,6 +85,18 @@ mod tests {
     }
 
     #[test]
+    fn version_one_repository_tasks_remain_compatible() {
+        let parsed = RemoteWorkspaceTask::parse(&format!(
+            "{PREFIX}{}",
+            r#"{"version":1,"task":"work","branch":"thet/task"}"#
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.task, "work");
+        assert!(!parsed.scratch);
+    }
+
+    #[test]
     fn a_scratch_envelope_runs_without_a_repository() {
         let task = "Synthesize a report";
         let encoded = RemoteWorkspaceTask::encode_scratch(task, "scratch/one").unwrap();
@@ -100,7 +109,8 @@ mod tests {
     #[test]
     fn invalid_envelopes_fail_instead_of_becoming_engine_instructions() {
         for body in [
-            r#"{"version":2,"task":"work","branch":"task"}"#,
+            r#"{"version":3,"task":"work","branch":"task"}"#,
+            r#"{"version":1,"task":"work","branch":"task","scratch":true}"#,
             r#"{"version":1,"task":"work","branch":"task","extra":true}"#,
             r#"{"version":1,"task":" ","branch":"task"}"#,
             r#"{"version":1,"task":"work","branch":"-reset"}"#,

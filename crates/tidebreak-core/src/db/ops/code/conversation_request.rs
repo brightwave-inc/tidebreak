@@ -29,8 +29,8 @@ fn request_from_model(
         id: model.id,
         binding_id: CodeBindingId(model.binding_id),
         operation: model.operation,
-        arguments: model.arguments.into(),
-        result: model.result.map(Into::into),
+        arguments: model.arguments,
+        result: model.result,
     })
 }
 
@@ -449,6 +449,7 @@ fn validate_operation_result(operation: &str, arguments: &Value, result: &Value)
 /// reconnect or retry with the same call key answers the same row. A replay
 /// naming different operation or arguments is refused rather than silently
 /// overwritten.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_conversation_request(
     store: &DbStore,
     owner: &OwnerId,
@@ -495,7 +496,7 @@ pub async fn create_conversation_request(
                 "the conversation request has expired".into(),
             ));
         }
-        let stored: Value = row.arguments.clone().into();
+        let stored: Value = row.arguments.clone();
         if row.operation != operation || stored != *arguments {
             transaction.commit().await.map_err(store_err)?;
             return Err(AgentError::InvalidTarget(
@@ -662,9 +663,9 @@ pub async fn complete_conversation_request(
             "the conversation request has expired".into(),
         ));
     }
-    validate_operation_result(&row.operation, &Value::from(row.arguments.clone()), result)?;
+    validate_operation_result(&row.operation, &row.arguments, result)?;
     if let Some(ref stored) = row.result {
-        let stored: Value = stored.clone().into();
+        let stored: Value = stored.clone();
         let request = request_from_model(row)?;
         transaction.commit().await.map_err(store_err)?;
         if stored == *result {

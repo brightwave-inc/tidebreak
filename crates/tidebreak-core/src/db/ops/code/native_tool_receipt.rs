@@ -1,9 +1,13 @@
 //! Native tool receipts fence replay before any side effect runs.
 use super::super::super::{entities, store_err, DbStore};
+use super::super::agent_run::database_now;
 use crate::code::{CodeIncarnationId, SessionId};
 use crate::error::{AgentError, Result};
 use crate::{CallId, OwnerId};
 use entities::code_native_tool_receipt as receipt;
+
+/// Retry admission after existing receipts free space; do not discard the event.
+pub const NATIVE_TOOL_QUEUE_FULL: &str = "native tool request queue is full";
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, TransactionTrait,
@@ -40,6 +44,8 @@ pub struct NativeToolReceipt {
     pub result: Option<Value>,
     /// Execution state.
     pub status: NativeToolStatus,
+    /// Database time of the first claim. Missing time cannot authorize a retry.
+    pub claimed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The remote transport accepted the complete result.
     pub delivered: bool,
 }
@@ -74,6 +80,7 @@ fn convert(row: receipt::Model) -> Result<NativeToolReceipt> {
             "completed" => NativeToolStatus::Completed,
             _ => return Err(invalid("invalid native tool receipt status")),
         },
+        claimed_at: row.claimed_at,
         delivered: row.delivered,
     })
 }
@@ -224,26 +231,29 @@ pub async fn enqueue_native_tool_request(
         .one(&tx)
         .await
         .map_err(store_err)?;
-    if let Some(row) = prior {
+    if let Some(mut row) = prior {
         if row.tool != tool || row.arguments != *arguments || row.grant_id != grant {
             return Err(invalid(
                 "native tool request replay changed its payload or grant",
             ));
         }
+        if row.status == "completed" && row.delivered {
+            require_capacity(&tx, owner, session, incarnation).await?;
+            receipt::Entity::update_many()
+                .col_expr(
+                    receipt::Column::Delivered,
+                    sea_orm::sea_query::Expr::value(false),
+                )
+                .filter(receipt::Column::Id.eq(row.id))
+                .exec(&tx)
+                .await
+                .map_err(store_err)?;
+            row.delivered = false;
+        }
         tx.commit().await.map_err(store_err)?;
         return convert(row);
     }
-    let outstanding = receipt::Entity::find()
-        .filter(receipt::Column::Owner.eq(owner.as_str()))
-        .filter(receipt::Column::SessionId.eq(session.0))
-        .filter(receipt::Column::IncarnationId.eq(incarnation.0))
-        .filter(receipt::Column::Delivered.eq(false))
-        .count(&tx)
-        .await
-        .map_err(store_err)?;
-    if outstanding >= 64 {
-        return Err(invalid("native tool request queue is full"));
-    }
+    require_capacity(&tx, owner, session, incarnation).await?;
     let row = receipt::ActiveModel {
         id: Set(uuid::Uuid::new_v4()),
         owner: Set(owner.to_string()),
@@ -256,6 +266,7 @@ pub async fn enqueue_native_tool_request(
         arguments: Set(arguments.clone()),
         result: Set(None),
         status: Set("pending".into()),
+        claimed_at: Set(None),
         delivered: Set(false),
     }
     .insert(&tx)
@@ -297,6 +308,7 @@ pub async fn claim_native_tool_request(
     let mut row = load(&tx, owner, prior).await?;
     let outcome = match row.status {
         NativeToolStatus::Pending => {
+            let claimed_at = database_now(&tx).await?;
             let updated = receipt::Entity::update_many()
                 .col_expr(
                     receipt::Column::Status,
@@ -304,6 +316,10 @@ pub async fn claim_native_tool_request(
                 )
                 .filter(receipt::Column::Id.eq(row.id))
                 .filter(receipt::Column::Status.eq("pending"))
+                .col_expr(
+                    receipt::Column::ClaimedAt,
+                    sea_orm::sea_query::Expr::value(claimed_at),
+                )
                 .exec(&tx)
                 .await
                 .map_err(store_err)?;
@@ -311,6 +327,7 @@ pub async fn claim_native_tool_request(
                 return Err(invalid("native tool execution claim changed concurrently"));
             }
             row.status = NativeToolStatus::Running;
+            row.claimed_at = Some(claimed_at);
             NativeToolClaim::Claimed(row)
         }
         NativeToolStatus::Running => NativeToolClaim::Running(row),
@@ -464,4 +481,24 @@ mod tests {
         changed["artifacts"] = json!(vec![result["artifacts"][0].clone(); 17]);
         assert!(validate_result("one", &changed).is_err());
     }
+}
+
+async fn require_capacity<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    owner: &OwnerId,
+    session: SessionId,
+    incarnation: CodeIncarnationId,
+) -> Result<()> {
+    let outstanding = receipt::Entity::find()
+        .filter(receipt::Column::Owner.eq(owner.as_str()))
+        .filter(receipt::Column::SessionId.eq(session.0))
+        .filter(receipt::Column::IncarnationId.eq(incarnation.0))
+        .filter(receipt::Column::Delivered.eq(false))
+        .count(conn)
+        .await
+        .map_err(store_err)?;
+    if outstanding >= 64 {
+        return Err(invalid(NATIVE_TOOL_QUEUE_FULL));
+    }
+    Ok(())
 }

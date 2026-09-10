@@ -2461,6 +2461,7 @@ pub mod code_native_tool_receipt {
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub result: Option<Json>,
         pub status: String,
+        pub claimed_at: Option<DateTimeUtc>,
         pub delivered: bool,
     }
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

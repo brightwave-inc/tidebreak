@@ -242,6 +242,43 @@ pub async fn list_turns(
     Ok(turns)
 }
 
+/// Bounded text from the original task and six recent turns for a fresh sandbox.
+/// SQL clips each field before loading it; attachments and spilled input are omitted.
+pub async fn sandbox_resume_context(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Vec<(i64, String, Option<String>)>> {
+    use sea_orm::sea_query::Expr;
+    let query = entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::Ordinal)
+        .expr_as(Expr::cust("substr(user_input, 1, 4096)"), "user_input")
+        .expr_as(Expr::cust("substr(narrative, 1, 4096)"), "narrative")
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0));
+    let mut rows = query
+        .clone()
+        .order_by_asc(entities::turn::Column::Ordinal)
+        .limit(1)
+        .into_tuple::<(i64, String, Option<String>)>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    rows.extend(
+        query
+            .order_by_desc(entities::turn::Column::Ordinal)
+            .limit(6)
+            .into_tuple::<(i64, String, Option<String>)>()
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?,
+    );
+    rows.sort_by_key(|row| row.0);
+    rows.dedup_by_key(|row| row.0);
+    Ok(rows)
+}
+
 /// Every turn that belongs to one owner, newest first, projected for reports.
 pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<TurnMetric>> {
     let rows = entities::turn::Entity::find()

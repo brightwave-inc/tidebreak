@@ -235,7 +235,7 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::{json, Value};
 
-    use super::super::wire::SandboxState;
+    use super::super::wire::{SandboxState, SupervisorMessageBody};
     use super::super::RuntimeToken;
     use super::*;
 

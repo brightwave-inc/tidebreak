@@ -7172,6 +7172,7 @@ async fn native_receipt_replay_contract(store: &crate::DbStore, label: &str) {
     .unwrap();
     assert_eq!(row.call_id, replay.call_id);
     assert_eq!(row.status, NativeToolStatus::Pending);
+    assert!(row.claimed_at.is_none());
     let binding = get_external_binding(store, &owner, "slack", label)
         .await
         .unwrap()
@@ -7203,6 +7204,17 @@ async fn native_receipt_replay_contract(store: &crate::DbStore, label: &str) {
         claim_native_tool_request(store, &owner, &replay)
     );
     let outcomes = [first.unwrap(), second.unwrap()];
+    let times: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            NativeToolClaim::Claimed(receipt)
+            | NativeToolClaim::Running(receipt)
+            | NativeToolClaim::Completed(receipt) => receipt.claimed_at,
+        })
+        .collect();
+    assert!(times[0].is_some());
+    assert_eq!(times[0], times[1]);
+
     assert_eq!(
         outcomes
             .iter()
@@ -7274,8 +7286,21 @@ async fn native_receipt_replay_contract(store: &crate::DbStore, label: &str) {
     )
     .await
     .unwrap();
-    assert!(replay.delivered);
+    assert!(!replay.delivered);
+    assert_eq!(replay.status, NativeToolStatus::Completed);
+    assert_eq!(replay.call_id, row.call_id);
     assert_eq!(replay.result, Some(result));
+    let resend = list_native_tool_requests(store, &owner, session, incarnation)
+        .await
+        .unwrap();
+    assert_eq!(resend.len(), 1);
+    assert_eq!(resend[0].call_id, row.call_id);
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &replay)
+            .await
+            .unwrap(),
+        NativeToolClaim::Completed(_)
+    ));
 }
 
 #[tokio::test]

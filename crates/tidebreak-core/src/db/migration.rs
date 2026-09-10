@@ -106,6 +106,7 @@ impl MigratorTrait for Migrator {
             Box::new(code_conversation_request::CodeConversationRequests),
             Box::new(IncarnationToolBridge),
             Box::new(native_tool_receipt::NativeToolReceipts),
+            Box::new(native_tool_receipt::NativeToolClaimTime),
         ]
     }
 }

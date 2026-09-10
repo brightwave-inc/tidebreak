@@ -91,3 +91,35 @@ impl MigrationTrait for NativeToolReceipts {
         Ok(())
     }
 }
+
+/// Existing running receipts remain uncertain until an operator resolves them.
+pub(super) struct NativeToolClaimTime;
+impl MigrationName for NativeToolClaimTime {
+    fn name(&self) -> &str {
+        "m20260910_000026_native_tool_claim_time"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for NativeToolClaimTime {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager
+            .has_column("code_native_tool_receipt", "claimed_at")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Receipt::Table)
+                        .add_column(
+                            ColumnDef::new(Alias::new("claimed_at")).timestamp_with_time_zone(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
+    }
+}
