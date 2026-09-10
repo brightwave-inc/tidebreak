@@ -16,6 +16,7 @@ mod access;
 mod analytics;
 mod approvals;
 mod browser;
+mod conversation;
 mod delivery;
 mod external;
 #[cfg(test)]
@@ -54,6 +55,7 @@ pub(crate) use delivery::{
     query_pull_requests as query_delivery_pull_requests, query_runs as query_delivery_runs,
     resolve_repositories as resolve_delivery_repositories, run_detail as delivery_run_detail,
 };
+pub(crate) use conversation::{external_conversation_request_result, external_conversation_requests};
 pub(crate) use external::{
     external_approval, external_approval_decision, external_attach_binding, external_bindings,
     external_events, external_get_or_create, external_interrupt, external_messages,

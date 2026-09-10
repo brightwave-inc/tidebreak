@@ -67,7 +67,7 @@ impl FromRequestParts<AppState> for ExternalGrantAuth {
 }
 
 /// Refuse a session the grant does not tag, with the not-found shape.
-async fn require_bound(
+pub(super) async fn require_bound(
     state: &AppState,
     grant: &CodeExternalGrant,
     session: SessionId,

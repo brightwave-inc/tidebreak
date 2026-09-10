@@ -5695,11 +5695,25 @@ async fn seed_external_session(
     .await
     .unwrap()
     .unwrap();
+    let grant = crate::db::code::mint_external_grant(
+        store,
+        owner,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: label,
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
+        &fake_hash(&format!("token-{label}")),
+        &fake_hash(&format!("refresh-{label}")),
+    )
+    .await
+    .unwrap();
     let (external_workspace, external_session) = external_pair(owner, workspace.repo_id, label);
     match crate::db::code::resolve_external_session(
         store,
         owner,
-        crate::code::CodeGrantId::new(),
+        grant.id,
         "slack",
         label,
         &external_workspace,
@@ -6456,4 +6470,337 @@ async fn external_context_cannot_follow_a_message_that_was_retracted() {
             ..
         })
     ));
+}
+
+
+/// Conversation-tool requests are durable, idempotent per call key, and
+/// scoped to the exact live owner/session/grant/binding that created them.
+#[tokio::test]
+async fn conversation_requests_are_durable_idempotent_and_scoped() {
+    use crate::code::{CodeGrantId, ConversationRequest, SessionId};
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request, get_conversation_request,
+        list_pending_conversation_requests,
+    };
+    use crate::error::AgentError;
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "conversation-requests").await;
+    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
+        .await
+        .unwrap()
+        .unwrap();
+    let grant = binding.grant_id;
+
+    let request = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 20, "channel": "C1"}),
+        "call-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(request.binding_id, binding.id);
+    assert_eq!(request.operation, "read");
+    assert_eq!(
+        request.arguments,
+        serde_json::json!({"count": 20, "channel": "C1"})
+    );
+    assert_eq!(request.result, None);
+
+    let duplicate = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 20, "channel": "C1"}),
+        "call-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate.id, request.id, "the call key must be idempotent");
+
+    for (operation, arguments) in [
+        ("export", serde_json::json!({"count": 20, "channel": "C1"})),
+        ("read", serde_json::json!({"count": 1, "channel": "C1"})),
+    ] {
+        let error = create_conversation_request(
+            &store,
+            &owner,
+            session_id,
+            grant,
+            binding.id,
+            operation,
+            &arguments,
+            "call-1",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, AgentError::InvalidTarget(_)),
+            "a mismatched replay must refuse: {error}"
+        );
+    }
+
+    assert_eq!(
+        get_conversation_request(&store, &owner, session_id, grant, request.id)
+            .await
+            .unwrap()
+            .expect("the stored request reads back"),
+        duplicate
+    );
+    let other_grant = CodeGrantId::new();
+    assert!(get_conversation_request(&store, &owner, session_id, other_grant, request.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(get_conversation_request(
+        &store,
+        &owner,
+        SessionId::new(),
+        grant,
+        request.id,
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let pending = list_pending_conversation_requests(&store, &owner, session_id, grant)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, request.id);
+
+    let result = serde_json::json!({
+        "messages": [
+            {
+                "id": "m1",
+                "timestamp": "1700000001.000100",
+                "author": {"id": "U1", "name": "Mira", "kind": "user"},
+                "text": "hello",
+                "attachments": []
+            }
+        ],
+        "has_more": true,
+        "truncated": true,
+        "source": "slack"
+    });
+    let completed = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &result,
+    )
+    .await
+    .unwrap()
+    .expect("the pending request completes");
+    assert_eq!(completed.result.as_ref(), Some(&result));
+    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let replayed = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &result,
+    )
+    .await
+    .unwrap()
+    .expect("an equal replay is idempotent");
+    assert_eq!(replayed.result.as_ref(), Some(&result));
+
+    let conflict = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &serde_json::json!({"error": {"code": "not_found", "message": "gone"}}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(conflict, AgentError::ConversationRequestConflict(_)),
+        "a different result must conflict: {conflict}"
+    );
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        uuid::Uuid::new_v4(),
+        &serde_json::json!({"error": {"code": "unknown", "message": "no"}}),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let oversized = serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
+    let error = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "attachment",
+        &oversized,
+        "call-too-large",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::InvalidTarget(_)));
+}
+
+/// Expired jobs disappear from the poll and cannot be completed; revoked or
+/// fenced/ended scope refuses every read and completion.
+#[tokio::test]
+async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
+    use crate::code::{ConversationRequest, SessionLifecycle};
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request,
+        list_pending_conversation_requests,
+    };
+    use crate::error::AgentError;
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "conversation-ttl").await;
+    let binding = crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
+        .await
+        .unwrap()
+        .unwrap();
+    let grant = binding.grant_id;
+    let request = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "ttl-call",
+    )
+    .await
+    .unwrap();
+
+    let expired = chrono::Utc::now() - ConversationRequest::TTL - chrono::Duration::seconds(1);
+    entities::code_conversation_request::Entity::update_many()
+        .col_expr(
+            entities::code_conversation_request::Column::CreatedAt,
+            sea_orm::sea_query::Expr::value(expired),
+        )
+        .col_expr(
+            entities::code_conversation_request::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(expired),
+        )
+        .filter(entities::code_conversation_request::Column::Id.eq(request.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
+        .await
+        .unwrap()
+        .is_empty());
+    let error = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::InvalidTarget(_)));
+
+    // A different live request proves scope failure is tied to the row.
+    let live = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "live-call",
+    )
+    .await
+    .unwrap();
+
+    crate::db::code::revoke_external_grant(&store, &owner, grant, "revoked for test")
+        .await
+        .unwrap();
+    assert!(list_pending_conversation_requests(&store, &owner, session_id, grant)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("grant"));
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        live.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("grant"));
+
+    // Ending a session must refuse even under a grant that is still live.
+    let session_two = seed_external_session(&store, &owner, "conversation-ttl-ended").await;
+    let binding_two =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl-ended")
+            .await
+            .unwrap()
+            .unwrap();
+    let live_two = create_conversation_request(
+        &store,
+        &owner,
+        session_two,
+        binding_two.grant_id,
+        binding_two.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "live-call-ended",
+    )
+    .await
+    .unwrap();
+    let mut stored = crate::db::code::get_session(&store, &owner, session_two)
+        .await
+        .unwrap()
+        .unwrap();
+    stored.lifecycle = SessionLifecycle::Ended;
+    crate::db::code::save_session(&store, &stored).await.unwrap();
+    assert!(list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("session"));
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_two,
+        binding_two.grant_id,
+        live_two.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("session"));
 }
