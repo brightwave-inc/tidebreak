@@ -40,7 +40,7 @@ use tidebreak_core::{AgentError, HarnessKind, OwnerId, SessionId};
 
 use std::path::Path;
 
-use crate::obo_gateway::{GatewayCompatModel, OboGateway};
+use crate::obo_gateway::{harness::HarnessIdentity, GatewayCompatModel, OboGateway};
 
 /// Whose inference a relay key spends.
 #[derive(Clone)]
@@ -104,7 +104,13 @@ pub struct HarnessLlmRelay {
 #[derive(Default)]
 struct RelayState {
     by_session: HashMap<SessionId, String>,
-    keys: HashMap<String, HarnessLlmSubject>,
+    keys: HashMap<String, RelayEntry>,
+}
+
+#[derive(Clone)]
+struct RelayEntry {
+    subject: HarnessLlmSubject,
+    harness: Option<HarnessIdentity>,
 }
 
 impl HarnessLlmRelay {
@@ -237,12 +243,34 @@ impl HarnessLlmRelay {
     /// session held. Reissue-on-attach is what keeps a reaped or relaunched
     /// worker from extending the life of a key an old child still knows.
     pub fn issue(&self, subject: HarnessLlmSubject) -> String {
+        self.issue_entry(RelayEntry {
+            subject,
+            harness: None,
+        })
+    }
+
+    /// Bind inference to the persisted session and the executable that its worker launches.
+    pub(crate) fn issue_for_session(
+        &self,
+        session: &tidebreak_core::Session,
+        probe: &tidebreak_harness::HarnessProbe,
+    ) -> String {
+        self.issue_entry(RelayEntry {
+            subject: HarnessLlmSubject {
+                owner: session.owner.clone(),
+                session: session.id,
+            },
+            harness: HarnessIdentity::from_probe(session.id, session.harness_kind, probe),
+        })
+    }
+
+    fn issue_entry(&self, entry: RelayEntry) -> String {
         let key = generate_key();
         let mut state = self.state.lock().expect("harness llm registry");
-        if let Some(old) = state.by_session.insert(subject.session, key.clone()) {
+        if let Some(old) = state.by_session.insert(entry.subject.session, key.clone()) {
             state.keys.remove(&old);
         }
-        state.keys.insert(key.clone(), subject);
+        state.keys.insert(key.clone(), entry);
         key
     }
 
@@ -262,6 +290,10 @@ impl HarnessLlmRelay {
     }
 
     fn subject_for_key(&self, key: &str) -> Option<HarnessLlmSubject> {
+        self.entry_for_key(key).map(|entry| entry.subject)
+    }
+
+    fn entry_for_key(&self, key: &str) -> Option<RelayEntry> {
         self.state
             .lock()
             .expect("harness llm registry")
@@ -289,18 +321,22 @@ impl HarnessLlmRelay {
                 "missing harness relay key",
             ));
         };
-        let Some(subject) = self.subject_for_key(key) else {
+        let Some(entry) = self.entry_for_key(key) else {
             return Err(endpoint.error_response(
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
                 "unknown or revoked harness relay key",
             ));
         };
+        let subject = &entry.subject;
         let bearer = async {
-            self.gateway_for_session(&subject.owner, subject.session)
-                .await?
-                .bearer_for(&subject.owner)
-                .await
+            let gateway = self
+                .gateway_for_session(&subject.owner, subject.session)
+                .await?;
+            match entry.harness.as_ref() {
+                Some(harness) => gateway.bearer_for_harness(&subject.owner, harness).await,
+                None => gateway.bearer_for(&subject.owner).await,
+            }
         }
         .await;
         match bearer {

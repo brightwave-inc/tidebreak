@@ -169,7 +169,7 @@ pub(crate) fn workspace_root(
 /// Create the private root for one session that binds no workspace, under
 /// the same tree as workspace roots: `{data_dir}/code/private/sessions/{id}`.
 ///
-/// The in-process engine's working directory. Nothing in it is a checkout,
+/// The engine uses this as its working directory. It contains no checkout,
 /// and no other session shares it.
 pub(crate) fn session_root(
     data_dir: &Path,

@@ -334,10 +334,7 @@ impl CodeRuntime {
                     .ok_or_else(|| {
                         ServerError::internal("harness LLM relay: loopback base not set")
                     })?;
-                let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
-                    owner: session.owner.clone(),
-                    session: session.id,
-                });
+                let key = relay.issue_for_session(&session, &probe);
                 let (argv, mut env) = if relay.forwards_inference() {
                     crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
                 } else {
@@ -387,8 +384,7 @@ impl CodeRuntime {
         let spec = SessionSpec {
             owner: session.owner.clone(),
             session_id: session.id,
-            // With no workspace the private root doubles as the working
-            // directory; the in-process engine keeps its own scratch there.
+            // With no workspace the private root is the engine's working directory.
             worktree: match &workspace {
                 Some(workspace) => PathBuf::from(&workspace.worktree_path),
                 None => private_root.path().to_path_buf(),

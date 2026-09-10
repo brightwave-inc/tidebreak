@@ -34,6 +34,7 @@
 //!   [`crate::providers::collect_routes`].
 
 pub mod external;
+pub(crate) mod harness;
 pub mod static_lender;
 
 pub use static_lender::StaticGitCredentialLender;
@@ -126,6 +127,7 @@ impl CachedToken {
 struct UserSlot {
     subject: std::sync::Mutex<Arc<str>>,
     token: tokio::sync::Mutex<Option<CachedToken>>,
+    harness_tokens: std::sync::Mutex<harness::HarnessTokenSlots>,
     catalog: tokio::sync::Mutex<Option<CachedCatalog>>,
     git_forge: tokio::sync::Mutex<HashMap<GitForgeAttributionRequest, CachedGitForge>>,
 }
@@ -171,6 +173,9 @@ struct OAuthError {
 struct ExchangeResponse {
     access_token: String,
     expires_in: u64,
+    engine: Option<String>,
+    engine_version: Option<String>,
+    engine_session_id: Option<SessionId>,
 }
 
 /// The forge identity a hosted machine's git operations act as.
@@ -456,6 +461,7 @@ impl OboGateway {
                     Arc::new(UserSlot {
                         subject: std::sync::Mutex::new(bearer),
                         token: tokio::sync::Mutex::new(None),
+                        harness_tokens: std::sync::Mutex::new(HashMap::new()),
                         catalog: tokio::sync::Mutex::new(None),
                         git_forge: tokio::sync::Mutex::new(HashMap::new()),
                     }),
@@ -552,12 +558,43 @@ impl OboGateway {
     /// handles. Every other non-success is a refusal too — this never retries
     /// onto another credential.
     async fn exchange(&self, subject: &str, audience: &str) -> Result<CachedToken> {
-        let form: [(&str, &str); 4] = [
+        self.exchange_with_harness(subject, audience, None).await
+    }
+
+    async fn exchange_with_harness(
+        &self,
+        subject: &str,
+        audience: &str,
+        harness: Option<&harness::HarnessIdentity>,
+    ) -> Result<CachedToken> {
+        let mut form = vec![
             ("grant_type", TOKEN_EXCHANGE_GRANT),
             ("subject_token", subject),
             ("subject_token_type", SUBJECT_TOKEN_TYPE),
             ("audience", audience),
         ];
+        let session;
+        if let Some(harness) = harness {
+            let (client_id, client_secret) =
+                self.machine_credentials.as_ref().ok_or_else(|| {
+                    AgentError::config(
+                        "harness inference requires this machine's registered gateway client",
+                    )
+                })?;
+            if audience != INFERENCE_AUDIENCE {
+                return Err(AgentError::config(
+                    "a harness identity only authorizes inference",
+                ));
+            }
+            session = harness.session.to_string();
+            form.extend([
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+                ("engine", harness.kind.as_str()),
+                ("engine_version", harness.version.as_str()),
+                ("engine_session_id", session.as_str()),
+            ]);
+        }
         let response = self
             .client
             .post(self.token_url.clone())
@@ -577,6 +614,16 @@ impl OboGateway {
                 "the Model Gateway returned an unreadable token exchange response: {error}"
             ))
         })?;
+        if let Some(harness) = harness {
+            if exchanged.engine.as_deref() != Some(harness.kind.as_str())
+                || exchanged.engine_version.as_deref() != Some(harness.version.as_str())
+                || exchanged.engine_session_id != Some(harness.session)
+            {
+                return Err(AgentError::config(
+                    "the Model Gateway did not confirm this session's installed harness; update the gateway before retrying",
+                ));
+            }
+        }
         if exchanged.access_token.is_empty() {
             return Err(AgentError::msg(
                 "the Model Gateway returned an empty on-behalf-of token",
