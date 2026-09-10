@@ -1,110 +1,201 @@
-//! Safe materialization of bounded host artifacts into the sandbox scratch.
-//!
-//! Conversation export and attachment results leave the host as bounded
-//! bytes with a safe generated relative path. The agent writes them into its
-//! private scratch directory so the returned paths the engine sees are real
-//! files, never server-only paths pretending to work remotely.
+//! Publish bounded conversation artifacts without following links or replacing files.
 
-use std::path::{Component, Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::Path;
+
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
+use cap_std::fs::{Dir, OpenOptions};
+use tidebreak_core::code::supervisor_tools::{validate_artifact_path, SupervisorToolResult};
 
 use crate::wire::SupervisorArtifact;
 
-/// Ceiling on one artifact, matching the host contract (2 MiB).
-pub const MAX_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
-
-/// Writes each artifact under `scratch_root`, refusing any path that escapes
-/// it. Returns the count materialized; a refusal is loud and prevents the
-/// sandbox from reporting a fake remote path.
-pub fn materialize_artifacts(
-    scratch_root: &Path,
-    artifacts: &[SupervisorArtifact],
-) -> Result<usize, String> {
-    let root = scratch_root.canonicalize().unwrap_or_else(|_| scratch_root.to_path_buf());
-    let mut written = 0;
-    for artifact in artifacts {
-        let relative = safe_relative(&artifact.path)?;
-        if artifact.bytes.len() > MAX_ARTIFACT_BYTES {
-            return Err(format!(
-                "artifact {} exceeds the {} byte ceiling",
-                artifact.path,
-                MAX_ARTIFACT_BYTES
-            ));
-        }
-        let target = root.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("artifact {} parent could not be created: {error}", artifact.path)
-            })?;
-        }
-        std::fs::write(&target, &artifact.bytes).map_err(|error| {
-            format!("artifact {} could not be written: {error}", artifact.path)
-        })?;
-        written += 1;
-    }
-    Ok(written)
+/// A pinned directory capability for one sandbox's conversation artifacts.
+pub struct Scratch {
+    root: Dir,
 }
 
-/// Accepts only empty or relative, normal, non-dotdot paths.
-fn safe_relative(path: &str) -> Result<PathBuf, String> {
-    if path.is_empty() {
-        return Err("artifact path is empty".to_owned());
+impl Scratch {
+    /// Pins the workspace directory before the engine can change its path.
+    pub fn open(root: &Path) -> Result<Self, String> {
+        Dir::open_ambient_dir(root, cap_std::ambient_authority())
+            .map(|root| Self { root })
+            .map_err(|error| format!("could not open conversation scratch: {error}"))
     }
-    let candidate = Path::new(path);
-    if candidate.is_absolute() {
-        return Err(format!("artifact path is absolute: {path}"));
-    }
-    for component in candidate.components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("artifact path escapes scratch: {path}"));
-            }
+
+    /// Validate the whole batch, then publish each artifact once. Exact retries succeed.
+    pub fn materialize(&self, artifacts: &[SupervisorArtifact]) -> Result<usize, String> {
+        SupervisorToolResult {
+            request_id: "scratch-validation".into(),
+            output: serde_json::Value::Null,
+            artifacts: artifacts.to_vec(),
         }
+        .validate()?;
+        for artifact in artifacts {
+            self.publish(artifact)?;
+        }
+        Ok(artifacts.len())
     }
-    Ok(candidate.to_path_buf())
+
+    fn publish(&self, artifact: &SupervisorArtifact) -> Result<(), String> {
+        validate_artifact_path(&artifact.path)?;
+        let mut parts = artifact.path.split('/').peekable();
+        let mut parent = self.root.try_clone().map_err(|error| error.to_string())?;
+        let file_name = loop {
+            let part = parts.next().ok_or("artifact must name a file")?;
+            if parts.peek().is_none() {
+                break part;
+            }
+            match parent.create_dir(part) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.to_string()),
+            }
+            parent = parent.open_dir_nofollow(part).map_err(|error| {
+                format!("artifact parent must be a directory without symlinks: {error}")
+            })?;
+        };
+        let temp_name = format!(".tidebreak-{}.tmp", uuid::Uuid::new_v4());
+        let result = (|| -> Result<(), String> {
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .nonblock(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = parent
+                .open_with(&temp_name, &options)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&artifact.bytes)
+                .map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            drop(file);
+            match parent.hard_link(&temp_name, &parent, file_name) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let mut options = OpenOptions::new();
+                    options.read(true).nonblock(true).follow(FollowSymlinks::No);
+                    let file = parent
+                        .open_with(file_name, &options)
+                        .map_err(|error| error.to_string())?;
+                    let metadata = file.metadata().map_err(|error| error.to_string())?;
+                    if !metadata.is_file() || metadata.len() != artifact.bytes.len() as u64 {
+                        return Err("artifact path already exists with different content".into());
+                    }
+                    let mut existing = Vec::new();
+                    file.take(artifact.bytes.len() as u64 + 1)
+                        .read_to_end(&mut existing)
+                        .map_err(|error| error.to_string())?;
+                    if existing == artifact.bytes {
+                        Ok(())
+                    } else {
+                        Err("artifact path already exists with different content".into())
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        })();
+        let _ = parent.remove_file(&temp_name);
+        result?;
+        #[cfg(unix)]
+        parent
+            .open(".")
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+/// Publish artifacts under one workspace; drivers should retain a pinned [`Scratch`].
+pub fn materialize_artifacts(
+    root: &Path,
+    artifacts: &[SupervisorArtifact],
+) -> Result<usize, String> {
+    Scratch::open(root)?.materialize(artifacts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidebreak_core::code::supervisor_tools::MAX_ARTIFACT_BYTES;
+
+    fn artifact(path: &str, bytes: &[u8]) -> SupervisorArtifact {
+        SupervisorArtifact {
+            path: path.into(),
+            media_type: "text/plain".into(),
+            bytes: bytes.to_vec(),
+        }
+    }
 
     #[test]
-    fn artifacts_write_under_scratch_and_parents_are_created() {
-        let dir = tempfile::tempdir().unwrap();
-        let artifacts = vec![
-            SupervisorArtifact {
-                path: "exports/thread.jsonl".to_owned(),
-                media_type: "application/jsonl".to_owned(),
-                bytes: b"{\"ok\":true}\n".to_vec(),
-            },
-            SupervisorArtifact {
-                path: "images/photo.png".to_owned(),
-                media_type: "image/png".to_owned(),
-                bytes: vec![1, 2, 3],
-            },
-        ];
-        assert_eq!(materialize_artifacts(dir.path(), &artifacts).unwrap(), 2);
+    fn publishes_nested_files_and_accepts_only_exact_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = Scratch::open(root.path()).unwrap();
+        let file = artifact("conversation/export/thread.jsonl", b"one\n");
+        assert_eq!(scratch.materialize(std::slice::from_ref(&file)).unwrap(), 1);
+        assert_eq!(scratch.materialize(&[file]).unwrap(), 1);
+        assert!(scratch
+            .materialize(&[artifact("conversation/export/thread.jsonl", b"two\n")])
+            .is_err());
         assert_eq!(
-            std::fs::read(dir.path().join("exports/thread.jsonl")).unwrap(),
-            b"{\"ok\":true}\n"
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("images/photo.png")).unwrap(),
-            vec![1, 2, 3]
+            std::fs::read(root.path().join("conversation/export/thread.jsonl")).unwrap(),
+            b"one\n"
         );
     }
 
     #[test]
-    fn escaping_artifact_paths_are_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        for path in ["../escape", "/abs", "a/../../up", ".."] {
-            let artifacts = vec![SupervisorArtifact {
-                path: path.to_owned(),
-                media_type: "text/plain".to_owned(),
-                bytes: vec![],
-            }];
-            assert!(materialize_artifacts(dir.path(), &artifacts).is_err(), "{path}");
+    fn validates_all_paths_and_aggregate_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = Scratch::open(root.path()).unwrap();
+        for path in [
+            "../escape",
+            "/abs",
+            "conversation/../up",
+            "conversation/a/./b",
+            "other/file",
+        ] {
+            assert!(scratch
+                .materialize(&[
+                    artifact("conversation/first", b"ok"),
+                    artifact(path, b"bad")
+                ])
+                .is_err());
+            assert!(!root.path().join("conversation").exists());
         }
+        assert!(scratch
+            .materialize(&[
+                artifact("conversation/a", &vec![0; MAX_ARTIFACT_BYTES / 2 + 1]),
+                artifact("conversation/b", &vec![0; MAX_ARTIFACT_BYTES / 2 + 1]),
+            ])
+            .is_err());
+        assert!(!root.path().join("conversation").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_parents_and_existing_symlink_files() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("conversation")).unwrap();
+        let scratch = Scratch::open(root.path()).unwrap();
+        assert!(scratch
+            .materialize(&[artifact("conversation/file", b"secret")])
+            .is_err());
+        assert!(!outside.path().join("file").exists());
+        std::fs::remove_file(root.path().join("conversation")).unwrap();
+        std::fs::create_dir(root.path().join("conversation")).unwrap();
+        std::fs::write(outside.path().join("file"), b"same").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("file"),
+            root.path().join("conversation/file"),
+        )
+        .unwrap();
+        assert!(scratch
+            .materialize(&[artifact("conversation/file", b"same")])
+            .is_err());
+        assert_eq!(std::fs::read(outside.path().join("file")).unwrap(), b"same");
     }
 }

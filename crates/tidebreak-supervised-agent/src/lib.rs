@@ -4,7 +4,7 @@
 //! Tidebreak does not provision — starts this agent, owns the durable event
 //! stream, and exposes a control endpoint. The agent initiates outbound polls
 //! to that endpoint, drives an engine CLI through `tidebreak-harness`, and
-//! reports lifecycle events outward. It runs no listener, accepts no attach,
+//! reports lifecycle events outward. It accepts no network attach,
 //! and keeps no durable state of its own: the endpoint's cursor is the truth.
 //!
 //! The crate ships one binary, `tidebreak-supervised-agent`, assembled from
@@ -25,6 +25,7 @@ pub mod harness_engine;
 pub mod inputs;
 pub mod registration;
 pub mod scratch;
+pub mod tool_bridge;
 pub mod trust;
 pub mod wip;
 pub mod wire;

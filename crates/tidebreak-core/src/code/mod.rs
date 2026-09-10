@@ -6,6 +6,7 @@
 mod caps;
 mod event;
 mod remote_task;
+pub mod supervisor_tools;
 
 pub use remote_task::RemoteWorkspaceTask;
 
@@ -944,7 +945,6 @@ impl CodeWorkspace {
     pub fn remote_worktree_marker(id: WorkspaceId) -> String {
         format!("remote:{id}")
     }
-
 }
 
 /// Coarse lifecycle of an observed pull request (decision 77).
