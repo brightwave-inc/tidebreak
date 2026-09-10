@@ -1,11 +1,10 @@
-use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::code::runtime::ApprovalDecisionRequest;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
-use crate::extract::{Json, Path};
+use crate::extract::{Json, Path, Query};
 use tidebreak_core::ApprovalId;
 
 use super::types::{ApprovalDecision, ApprovalDecisionBody, ApprovalSnapshot, ListApprovalsQuery};

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tidebreak_core::OwnerId;
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, ProbeCapture};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -129,7 +129,7 @@ where
         Ok(Some(provider)) => CodeSubscriptionUsage {
             source: UsageSource::Direct,
             providers: vec![provider],
-            diagnostics: Vec::new(),
+            diagnostics,
         },
         Ok(None) => {
             diagnostics.push("Codex returned no subscription usage.".into());
@@ -157,17 +157,48 @@ async fn collect_modelctl() -> Result<Option<CodeSubscriptionUsage>, String> {
         .map_err(|error| error.to_string())?;
     let mut command = command_from_probe(&probe);
     command.args(["--json", "usage"]);
-    let output = timeout(COMMAND_TIMEOUT, command.output())
-        .await
-        .map_err(|_| "usage command timed out".to_owned())?
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("could not run usage command: {error}"))?;
-    if !output.status.success() {
-        return Err(bounded_text(&output.stderr, 320));
+    let stdout = child.stdout.take().ok_or("usage command has no stdout")?;
+    let stderr = child.stderr.take().ok_or("usage command has no stderr")?;
+    let collect = async {
+        let stdout_read = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take((MAX_JSON_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| format!("could not read usage response: {error}"))?;
+            Ok::<_, String>(bytes)
+        };
+        let stderr_read = async {
+            let mut bytes = Vec::new();
+            stderr
+                .take(321)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| format!("could not read usage error: {error}"))?;
+            Ok::<_, String>(bytes)
+        };
+        let (stdout, stderr, status) = tokio::try_join!(stdout_read, stderr_read, async {
+            child
+                .wait()
+                .await
+                .map_err(|error| format!("could not wait for usage command: {error}"))
+        })?;
+        Ok::<_, String>((stdout, stderr, status))
+    };
+    let (stdout, stderr, status) = timeout(COMMAND_TIMEOUT, collect)
+        .await
+        .map_err(|_| "usage command timed out".to_owned())??;
+    if !status.success() {
+        return Err(bounded_text(&stderr, 320));
     }
-    if output.stdout.len() > MAX_JSON_BYTES {
+    if stdout.len() > MAX_JSON_BYTES {
         return Err("usage response was too large".into());
     }
-    let raw: ModelctlUsage = serde_json::from_slice(&output.stdout)
+    let raw: ModelctlUsage = serde_json::from_slice(&stdout)
         .map_err(|error| format!("could not decode usage response: {error}"))?;
     Ok(Some(normalize_modelctl(raw)))
 }
@@ -443,8 +474,10 @@ fn codex_window(limit_id: &str, limit_label: &str, slot: &str, window: CodexWind
 }
 
 fn format_window_duration(minutes: i64) -> String {
-    if minutes % 10_080 == 0 {
-        format!("Weekly ({}d)", minutes / 1_440)
+    if minutes <= 0 {
+        format!("{minutes}m")
+    } else if minutes == 10_080 {
+        "Weekly (7d)".to_owned()
     } else if minutes % 1_440 == 0 {
         format!("{}d", minutes / 1_440)
     } else if minutes % 60 == 0 {
@@ -549,7 +582,17 @@ mod tests {
 
         assert_eq!(report.source, UsageSource::Direct);
         assert_eq!(report.providers, vec![direct]);
-        assert!(report.diagnostics.is_empty());
+        assert_eq!(
+            report.diagnostics,
+            vec!["Model Gateway usage is unavailable."]
+        );
+    }
+
+    #[test]
+    fn duration_labels_handle_zero_and_multiple_weeks() {
+        assert_eq!(format_window_duration(0), "0m");
+        assert_eq!(format_window_duration(10_080), "Weekly (7d)");
+        assert_eq!(format_window_duration(20_160), "14d");
     }
 
     #[test]

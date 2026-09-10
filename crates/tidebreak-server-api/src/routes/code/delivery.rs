@@ -1,11 +1,10 @@
 //! Cross-repository GitHub delivery routes.
 
-use axum::extract::Query;
 use serde::Deserialize;
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
-use crate::extract::Json;
+use crate::extract::{Json, Query};
 
 use super::types::{
     CodeDeliveryActionResult, CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail,
