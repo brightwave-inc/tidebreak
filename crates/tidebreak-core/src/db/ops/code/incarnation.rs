@@ -51,20 +51,19 @@ fn incarnation_from_model(
         events_cursor: model.events_cursor,
         task_output: model.task_output,
         last_wip_ref: model.last_wip_ref,
-        tool_requests: model.tool_requests_json
+        tool_requests: model
+            .tool_requests_json
             .map(|value| {
-                serde_json::from_value(value).map_err(|err| {
-                    AgentError::Store(format!("incarnation tool requests: {err}"))
-                })
+                serde_json::from_value(value)
+                    .map_err(|err| AgentError::Store(format!("incarnation tool requests: {err}")))
             })
             .transpose()?
             .unwrap_or_default(),
         tool_ack_seqs: model
             .tool_ack_seqs_json
             .map(|value| {
-                serde_json::from_value(value).map_err(|err| {
-                    AgentError::Store(format!("incarnation tool ack seqs: {err}"))
-                })
+                serde_json::from_value(value)
+                    .map_err(|err| AgentError::Store(format!("incarnation tool ack seqs: {err}")))
             })
             .transpose()?
             .unwrap_or_default(),

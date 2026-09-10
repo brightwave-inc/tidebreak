@@ -11,8 +11,8 @@ mod platform {
     use crate::wire::SupervisorToolRequest;
     use serde_json::Value;
     use tidebreak_core::code::supervisor_tools::{
-        MAX_OUTPUT_BYTES, MAX_REQUEST_BYTES, ResultAssembler, frame_request_id, is_result_frame,
-        validate_request,
+        frame_request_id, is_result_frame, validate_request, ResultAssembler, MAX_OUTPUT_BYTES,
+        MAX_REQUEST_BYTES,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
@@ -307,7 +307,7 @@ mod platform {
     mod tests {
         use super::*;
         use tidebreak_core::code::supervisor_tools::{
-            SupervisorArtifact, SupervisorToolResult, encode_result_frames,
+            encode_result_frames, SupervisorArtifact, SupervisorToolResult,
         };
 
         async fn drain_one(bridge: &mut LocalToolBridge) -> Vec<SupervisorToolRequest> {
@@ -389,13 +389,11 @@ mod platform {
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            assert!(
-                second
-                    .await
-                    .unwrap()
-                    .unwrap_err()
-                    .contains("different arguments")
-            );
+            assert!(second
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("different arguments"));
             std::fs::create_dir(root.path().join("conversation")).unwrap();
             std::fs::write(root.path().join("conversation/file"), b"original").unwrap();
             let result = SupervisorToolResult {
@@ -407,11 +405,9 @@ mod platform {
                     bytes: b"replacement".to_vec(),
                 }],
             };
-            assert!(
-                bridge
-                    .receive_frame(&encode_result_frames(&result).unwrap()[0])
-                    .is_err()
-            );
+            assert!(bridge
+                .receive_frame(&encode_result_frames(&result).unwrap()[0])
+                .is_err());
             assert!(first.await.unwrap().is_err());
             assert_eq!(
                 std::fs::read(root.path().join("conversation/file")).unwrap(),
