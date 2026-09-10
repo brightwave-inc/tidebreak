@@ -1251,7 +1251,14 @@ export type CodeDeliveryRunsPage = { capability: CodeGitHubCapability, items: Ar
 /**
  * One repository-level failure in an otherwise usable aggregate response.
  */
-export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget, kind: string, message: string, retry_at?: string, };
+export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget, kind: string, message: string,
+/**
+ * Absolute retry time when the transport preserves a host reset header.
+ * The current `gh` and forge delivery error strings do not, so ordinary
+ * aggregate failures leave this absent; conditional reads park inside
+ * the server's host gate instead.
+ */
+retry_at?: string, };
 
 /**
  * One layer of a pull-request stack, in bottom-to-top order.
