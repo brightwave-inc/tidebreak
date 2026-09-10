@@ -224,9 +224,6 @@ pub struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
-    /// Protected remote-tool bridge's conversation executor. Parent installs
-    /// `conversation_tools`; until then conversation names refuse loudly.
-    pub conversation_tools: Arc<dyn super::sandbox_tools::RemoteConversationTools>,
     /// Process tool registry for the protected sandbox bridge. `None` in
     /// hosts that never installed the session coordinator tools.
     pub tools: Option<Arc<tidebreak_core::ToolRegistry>>,
@@ -511,7 +508,6 @@ impl CodeRuntime {
             harness_llm,
             gateway_runtime: None,
             remote: None,
-            conversation_tools: Arc::new(super::sandbox_tools::UnavailableConversationTools),
             tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
@@ -684,7 +680,6 @@ impl CodeRuntime {
             harness_llm: None,
             gateway_runtime: None,
             remote: None,
-            conversation_tools: Arc::new(super::sandbox_tools::UnavailableConversationTools),
             tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
@@ -803,6 +798,46 @@ impl CodeRuntime {
     #[must_use]
     pub fn external_permission_policy(&self) -> ExternalPermissionPolicy {
         self.external_permission
+    }
+
+    /// An omitted Slack harness uses the declared runtime engine after admission.
+    /// Legacy runtimes without engine declarations keep the machine default.
+    pub fn default_channel_sandbox_harness(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Option<HarnessKind>, ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Ok(None);
+        };
+        let Some(engine) = remote.settings.engine else {
+            if remote.settings.engines.is_some() || remote.settings.embedded_engine_registration {
+                return Err(ServerError::unprocessable_kind(
+                    "sandbox_settings_unavailable",
+                    "this sandbox profile must declare a default engine",
+                ));
+            }
+            return Ok(None);
+        };
+        if engine.is_in_process() {
+            return Err(ServerError::unprocessable_kind("sandbox_settings_unavailable", "this sandbox profile must select an external harness as its default; choose Internal explicitly to run on the machine"));
+        }
+        let session = Self::remote_session_value(
+            owner,
+            None,
+            WorkspaceId::new(),
+            engine,
+            NewSessionSettings {
+                permission_mode: PermissionMode::Allow,
+                ..Default::default()
+            },
+        );
+        remote
+            .settings
+            .validate_execution(&session)
+            .map_err(|message| {
+                ServerError::unprocessable_kind("sandbox_settings_unavailable", message)
+            })?;
+        Ok(Some(engine))
     }
 
     /// Channel choices use the same admission rule as a sandbox session.

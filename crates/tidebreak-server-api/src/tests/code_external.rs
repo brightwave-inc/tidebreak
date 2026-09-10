@@ -1758,6 +1758,13 @@ async fn machine_app() -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) 
 async fn machine_app_built(
     customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
 ) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
+    machine_app_built_with_config(customize, |_| {}).await
+}
+
+async fn machine_app_built_with_config(
+    customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
+    configure: impl FnOnce(&mut Config),
+) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -1800,8 +1807,10 @@ async fn machine_app_built(
         origin_name: None,
     };
     insert_repo(&runtime.db, &repo).await.unwrap();
+    let mut config = Config::desktop(dir.path());
+    configure(&mut config);
     let mut state = AppState::new(
-        Config::desktop(dir.path()),
+        config,
         store_trait,
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
@@ -4518,16 +4527,24 @@ async fn repositoryless_external_harnesses_use_sandbox_placement_when_configured
             session.workspace_id.is_none(),
             "repositoryless sandbox sessions carry no fake workspace row"
         );
-        assert_eq!(adapter.probe_count(), 0, "no host probe for a sandbox {harness}");
+        assert_eq!(
+            adapter.probe_count(),
+            0,
+            "no host probe for a sandbox {harness}"
+        );
         assert!(
             adapter.launched_approvals().is_empty(),
             "no host launch for {harness}"
         );
     }
-    assert_eq!(fake.spawns.lock().unwrap().len(), 0, "sandbox spawns happen on the first turn, not create");
+    assert_eq!(
+        fake.spawns.lock().unwrap().len(),
+        0,
+        "sandbox spawns happen on the first turn, not create"
+    );
 
-    // The internal coordinator stays on the machine even with a runtime: the
-    // native tools live server-side and must not silently disappear.
+    // A legacy runtime with no declared engine keeps the machine-side
+    // Internal default.
     let key = "T1/D1/internal-default";
     let (status, body) = call_json(
         &router,
@@ -4710,5 +4727,197 @@ async fn channel_preferences_preserve_supervised_model_ids() {
         assert_eq!(status, StatusCode::CREATED, "{created}");
         assert_eq!(created["harness"], harness);
         assert_eq!(created["model"], model);
+    }
+}
+
+#[tokio::test]
+async fn repositoryless_slack_defaults_to_configured_sandbox_and_preserves_internal_choices() {
+    use tidebreak_core::{ExecutionLocation, HarnessKind};
+    for sandbox in [true, false] {
+        let fake = Arc::new(FakeProvisioner::default());
+        let (router, runtime, _, _directory) = machine_app_built_with_config(
+            |mut runtime| {
+                runtime.adapters.register(Arc::new(
+                    crate::scripted_harness::ScriptedAdapter::new(
+                        crate::scripted_harness::plain_text_script(),
+                    )
+                    .with_kind(HarnessKind::Internal)
+                    .with_approvals(tidebreak_core::CapLevel::Supported),
+                ));
+                if sandbox {
+                    let mut settings = remote_settings();
+                    settings.engine = Some(HarnessKind::Codex);
+                    settings.engines = Some(vec![HarnessKind::Codex]);
+                    settings.embedded_engine_registration = true;
+                    runtime.with_remote_sessions(RemoteSessions::new(fake.clone(), settings))
+                } else {
+                    runtime
+                }
+            },
+            |config| {
+                // Runtime admission, rather than a copied config value, owns the default.
+                config.runtime_engine = if sandbox {
+                    None
+                } else {
+                    Some(HarnessKind::Codex)
+                };
+            },
+        )
+        .await;
+        let owner = OwnerId::local();
+        let (grant, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        for (suffix, harness, expected) in [
+            (
+                "default",
+                None,
+                if sandbox {
+                    HarnessKind::Codex
+                } else {
+                    HarnessKind::Internal
+                },
+            ),
+            (
+                "explicit",
+                Some(HarnessKind::Internal),
+                HarnessKind::Internal,
+            ),
+        ] {
+            let mut request =
+                serde_json::json!({"external_key":format!("T1/C1/{suffix}"), "channel_id":"C1"});
+            if let Some(harness) = harness {
+                request["harness"] = serde_json::to_value(harness).unwrap();
+            }
+            let (status, body) = call_json(
+                &router,
+                "POST",
+                "/external/code/sessions",
+                &pair.token,
+                Some(request),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let session = runtime
+                .get_session(
+                    &owner,
+                    serde_json::from_value(body["session_id"].clone()).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(session.harness_kind, expected);
+            assert_eq!(
+                session.execution_location,
+                if expected == HarnessKind::Internal {
+                    ExecutionLocation::Machine
+                } else {
+                    ExecutionLocation::Sandbox
+                }
+            );
+            assert!(session.workspace_id.is_none());
+        }
+        crate::code::channel_preferences::write(
+            &runtime.db,
+            &grant,
+            "C1",
+            &crate::code::channel_preferences::ChannelPreferences {
+                harness: Some(HarnessKind::Internal),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({"external_key":"T1/C1/channel-default", "channel_id":"C1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let session = runtime
+            .get_session(
+                &owner,
+                serde_json::from_value(body["session_id"].clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.harness_kind, HarnessKind::Internal);
+        assert_eq!(session.execution_location, ExecutionLocation::Machine);
+        assert!(
+            fake.spawns.lock().unwrap().is_empty(),
+            "creation defers sandbox provisioning until the first turn"
+        );
+    }
+}
+
+#[tokio::test]
+async fn repositoryless_slack_refuses_invalid_sandbox_defaults_without_machine_fallback() {
+    use tidebreak_core::HarnessKind;
+    for (engine, engines) in [
+        (
+            Some(HarnessKind::Internal),
+            Some(vec![HarnessKind::Internal]),
+        ),
+        (
+            Some(HarnessKind::Codex),
+            Some(vec![HarnessKind::ClaudeCode]),
+        ),
+        (None, Some(vec![HarnessKind::Codex])),
+    ] {
+        let fake = Arc::new(FakeProvisioner::default());
+        let declared = engines.clone();
+        let (router, runtime, _, _directory) = machine_app_built_with_config(
+            |mut runtime| {
+                runtime.adapters.register(Arc::new(
+                    crate::scripted_harness::ScriptedAdapter::new(
+                        crate::scripted_harness::plain_text_script(),
+                    )
+                    .with_kind(HarnessKind::Internal)
+                    .with_approvals(tidebreak_core::CapLevel::Supported),
+                ));
+                let mut settings = remote_settings();
+                settings.engine = engine;
+                settings.engines = engines;
+                settings.embedded_engine_registration = true;
+                runtime.with_remote_sessions(RemoteSessions::new(fake.clone(), settings))
+            },
+            |config| {
+                config.runtime_engine = engine;
+                config.runtime_engines = declared;
+                config.runtime_embedded_engine_registration = true;
+            },
+        )
+        .await;
+        let owner = OwnerId::local();
+        let (_, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({"external_key":"T1/C1/invalid-default"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(runtime.list_sessions(&owner).await.unwrap().is_empty());
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(
+                serde_json::json!({"external_key":"T1/C1/explicit-internal", "harness":"internal"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["harness"], "internal");
+        assert!(fake.spawns.lock().unwrap().is_empty());
     }
 }

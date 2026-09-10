@@ -458,16 +458,16 @@ pub async fn external_get_or_create(
             )
         }
     };
-    // Keep repository orchestration on the internal engine by default until
-    // external engines carry the same tools. An explicit harness is honored.
-    let harness = body
-        .harness
-        .or(preferences.harness)
-        .unwrap_or(if repo_id.is_none() {
-            HarnessKind::Internal
-        } else {
-            HarnessKind::ClaudeCode
-        });
+    // Explicit choices retain their placement, including machine-side Internal.
+    // Only omitted choices consult the admitted default of the actual runtime.
+    let harness = match body.harness.or(preferences.harness) {
+        Some(harness) => harness,
+        None if repo_id.is_none() && grant.channel_kind == "slack" => runtime
+            .default_channel_sandbox_harness(&grant.owner)?
+            .unwrap_or(HarnessKind::Internal),
+        None if repo_id.is_none() => HarnessKind::Internal,
+        None => HarnessKind::ClaudeCode,
+    };
     let model =
         resolve_external_harness_model(&state, &grant, harness, preferences.model.as_deref())
             .await?;
