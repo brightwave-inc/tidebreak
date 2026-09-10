@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, LoaderCircle } from "lucide-react";
+import { CircleAlert } from "lucide-react";
 
 import type { ApiClient } from "@/api/client";
 import type {
@@ -9,6 +9,7 @@ import type {
   CodeTriggerSnapshot,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { CodeTriggerRules, type CodeTriggerTarget } from "./CodeTriggerRules";
 
@@ -147,7 +148,7 @@ export function RepositoryTriggerRules({
             {repository.name_with_owner}
           </p>
         </div>
-        {loading && <LoaderCircle className="size-4 animate-spin" />}
+        {loading && <Spinner className="size-4" />}
       </div>
       {error && (
         <div className="notice-surface notice-critical mb-4 flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-xs">

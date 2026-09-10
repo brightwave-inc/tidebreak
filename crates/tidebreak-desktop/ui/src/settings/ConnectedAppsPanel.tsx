@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
-  Loader2,
   Pencil,
   Plus,
   RefreshCw,
@@ -25,6 +24,7 @@ import {
   NoPublicDocumentGuidance,
 } from "./OpenApiDiscovery";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -817,7 +817,7 @@ export function ConnectedAppsPanel({
             disabled={saving || discovering || previewing}
             onClick={() => void findOpenApiDocument()}
           >
-            {discovering && <Loader2 size={14} className="animate-spin" />}
+            {discovering && <Spinner className="size-3.5" />}
             {discovering ? "Searching…" : "Find the OpenAPI document"}
           </Button>
         </div>
@@ -929,7 +929,7 @@ export function ConnectedAppsPanel({
               disabled={saving || previewing}
               onClick={() => void loadOperations()}
             >
-              {previewing && <Loader2 size={14} className="animate-spin" />}
+              {previewing && <Spinner className="size-3.5" />}
               {previewing ? "Fetching…" : "Fetch operations"}
             </Button>
           </div>
@@ -958,7 +958,7 @@ export function ConnectedAppsPanel({
             disabled={saving || previewing}
             onClick={() => void loadOperations()}
           >
-            {previewing && <Loader2 size={14} className="animate-spin" />}
+            {previewing && <Spinner className="size-3.5" />}
             {previewing ? "Loading…" : "Select operations…"}
           </Button>
           {formError && <SettingsError>{formError}</SettingsError>}
@@ -1041,7 +1041,7 @@ export function ConnectedAppsPanel({
           }
           onClick={() => void save()}
         >
-          {saving && <Loader2 size={14} className="animate-spin" />}
+          {saving && <Spinner className="size-3.5" />}
           {saving ? "Saving…" : "Save"}
         </Button>
         <Button

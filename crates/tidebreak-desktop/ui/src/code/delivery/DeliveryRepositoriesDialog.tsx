@@ -12,7 +12,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { LoaderCircle, Pin, PinOff, RefreshCw, X } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
+import { Pin, PinOff, RefreshCw, X } from "lucide-react";
 import { RepositorySettings } from "../RepositorySettings";
 import { RepositoryTriggerRules } from "../RepositoryTriggerRules";
 import {
@@ -215,7 +216,7 @@ export function DeliveryRepositoriesDialog({
                 disabled={resolving || !input.trim()}
                 onClick={() => void add()}
               >
-                {resolving && <LoaderCircle className="animate-spin" />}
+                {resolving && <Spinner />}
                 Add
               </Button>
             </div>

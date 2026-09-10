@@ -21,7 +21,6 @@ import {
   History,
   Info,
   Laptop,
-  LoaderCircle,
   LockKeyhole,
   MoreHorizontal,
   Pause,
@@ -35,6 +34,7 @@ import {
 
 import { useConfirm } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -321,7 +321,7 @@ export function BrowserToolbar({
               onFocus={(event) => event.currentTarget.select()}
             />
             {session.loadState === "loading" ? (
-              <LoaderCircle className="size-3.5 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none" />
+              <Spinner className="size-3.5 text-muted-foreground motion-reduce:animate-none" />
             ) : !compactToolbar ? (
               <Search className="size-3.5 shrink-0 text-muted-foreground/70" />
             ) : null}
@@ -453,7 +453,7 @@ export function BrowserToolbar({
                   }
                 >
                   {resetInProgress ? (
-                    <LoaderCircle className="animate-spin motion-reduce:animate-none" />
+                    <Spinner className="motion-reduce:animate-none" />
                   ) : (
                     <MoreHorizontal />
                   )}

@@ -11,7 +11,6 @@ import {
   ChevronDown,
   Gauge,
   List,
-  LoaderCircle,
   Search,
   Sparkles,
   Zap,
@@ -40,15 +39,9 @@ import { reasoningEffortOptions } from "../ModelMenu";
 import { familyForModelId } from "../modelFamilies";
 import { providerLabel } from "../ModelSelection";
 import { PermissionModeMenu } from "../PermissionModeMenu";
-import {
-  ClaudeIcon,
-  OpenAIIcon,
-  OpenCodeIcon,
-  ProviderIcon,
-  XaiIcon,
-} from "../ProviderIcons";
-import { Logomark } from "../Logomark";
+import { ProviderIcon } from "../ProviderIcons";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -69,6 +62,7 @@ import {
   PERMISSION_MODE_UNAVAILABLE_REASON,
   SESSION_PERMISSION_MODE_LOCKED,
 } from "./labels";
+import { HARNESS_ICONS } from "./HarnessPicker";
 
 const MODES: PermissionMode[] = ["plan", "ask", "auto", "allow"];
 
@@ -168,14 +162,6 @@ export function PermissionModePicker({
 
 /** Rail entry that lifts the vendor filter off a mixed catalog. */
 const ALL_MODELS = "all";
-
-const HARNESS_ICONS: Record<HarnessKind, typeof ClaudeIcon> = {
-  claude_code: ClaudeIcon,
-  codex: OpenAIIcon,
-  opencode: OpenCodeIcon,
-  grok: XaiIcon,
-  internal: Logomark,
-};
 
 /** The mark for one picker row: vendor, then open-model family, then the engine. */
 function CodeModelMark({
@@ -578,7 +564,7 @@ export function FastModeToggle({
       onClick={() => onChange(!value)}
     >
       {pending ? (
-        <LoaderCircle className="size-4 animate-spin" />
+        <Spinner className="size-4" />
       ) : (
         <Zap className={cn("size-4", !value && "opacity-50")} />
       )}
@@ -624,7 +610,7 @@ export function ReasoningEffortMenu({
           data-ultra={topSelected ? "on" : undefined}
         >
           {pending ? (
-            <LoaderCircle className="size-4 animate-spin" />
+            <Spinner className="size-4" />
           ) : topSelected ? (
             <Sparkles className="size-4" />
           ) : (

@@ -26,7 +26,8 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { GitPullRequest, LoaderCircle } from "lucide-react";
+import { GitPullRequest } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { PendingDetailPane } from "./PendingDetail";
 import { PullRequestDetailPane } from "../PullRequestDetail";
 import type { PullRequestGrouping } from "./views";
@@ -259,7 +260,7 @@ export function PullRequestsSurface({
                 disabled={loadingMore}
                 onClick={() => void query(nextCursor, true)}
               >
-                {loadingMore && <LoaderCircle className="animate-spin" />}
+                {loadingMore && <Spinner />}
                 Load more
               </Button>
             </div>

@@ -14,7 +14,6 @@ import {
   GitPullRequest,
   GitPullRequestClosed,
   GitPullRequestDraft,
-  LoaderCircle,
   MoreHorizontal,
   RefreshCw,
   ShieldAlert,
@@ -1045,7 +1044,7 @@ function PrAgentMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button type="button" size="xs" variant="outline" disabled={starting}>
-          {starting ? <LoaderCircle className="animate-spin" /> : <Bot />}
+          {starting ? <Spinner /> : <Bot />}
           Fix with an agent
         </Button>
       </DropdownMenuTrigger>
@@ -1236,7 +1235,7 @@ function PrMergeBox({
               disabled={Boolean(busy)}
               onClick={() => onRun("ready", { type: "mark_ready" })}
             >
-              {busy === "ready" && <LoaderCircle className="animate-spin" />}
+              {busy === "ready" && <Spinner />}
               Mark ready
             </Button>
           )}
@@ -1261,9 +1260,7 @@ function PrMergeBox({
                   })
                 }
               >
-                {busy === mergeAction.kind && (
-                  <LoaderCircle className="animate-spin" />
-                )}
+                {busy === mergeAction.kind && <Spinner />}
                 {mergeAction.kind === "merge" ? <GitMerge /> : null}
                 {mergeAction.label}
               </Button>
@@ -1282,9 +1279,7 @@ function PrMergeBox({
                 disabled={Boolean(busy)}
                 onClick={() => setConfirmingStackMerge(true)}
               >
-                {busy === "merge-stack" && (
-                  <LoaderCircle className="animate-spin" />
-                )}
+                {busy === "merge-stack" && <Spinner />}
                 <GitMerge />
                 Merge stack ({mergeableStackLayers.length} layers)
               </Button>
@@ -1315,11 +1310,7 @@ function PrMergeBox({
                 })
               }
             >
-              {busy === "rerun" ? (
-                <LoaderCircle className="animate-spin" />
-              ) : (
-                <RefreshCw />
-              )}
+              {busy === "rerun" ? <Spinner /> : <RefreshCw />}
               Rerun failed
             </Button>
           )}
@@ -1331,7 +1322,7 @@ function PrMergeBox({
               disabled={Boolean(busy)}
               onClick={() => onRun("reopen", { type: "reopen" })}
             >
-              {busy === "reopen" && <LoaderCircle className="animate-spin" />}
+              {busy === "reopen" && <Spinner />}
               Reopen
             </Button>
           )}
@@ -1346,7 +1337,7 @@ function PrMergeBox({
                   aria-label="More pull request actions"
                 >
                   {busy === "close" || busy === "admin-merge" ? (
-                    <LoaderCircle className="animate-spin" />
+                    <Spinner />
                   ) : (
                     <MoreHorizontal />
                   )}
@@ -1523,7 +1514,7 @@ function ConfirmStrip({
           disabled={busy}
           onClick={onConfirm}
         >
-          {busy && <LoaderCircle className="animate-spin" />}
+          {busy && <Spinner />}
           {confirmLabel}
         </Button>
         <Button
@@ -1708,7 +1699,7 @@ function PrConversation({
               disabled={Boolean(busy) || !draft.trim()}
               onClick={onComment}
             >
-              {busy === "comment" && <LoaderCircle className="animate-spin" />}
+              {busy === "comment" && <Spinner />}
               Comment
             </Button>
           </div>

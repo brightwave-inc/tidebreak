@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, LoaderCircle, Plus, X } from "lucide-react";
+import { CircleAlert, Plus, X } from "lucide-react";
 
 import type { ApiClient } from "@/api/client";
 import type { CodeRepoSnapshot, QuickAction } from "@/api/types";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 
 type RepoSettingsClient = Pick<ApiClient, "getCodeRepo" | "patchCodeRepo">;
@@ -222,9 +223,7 @@ export function RepositorySettings({
             checkout in place and marks the workspace Setup failed.
           </p>
         </div>
-        {(loading || busy) && (
-          <LoaderCircle className="size-3.5 shrink-0 animate-spin" />
-        )}
+        {(loading || busy) && <Spinner className="size-3.5" />}
       </div>
       {error && (
         <div className="notice-surface notice-critical mb-4 flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">

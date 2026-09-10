@@ -1,4 +1,6 @@
-import { Loader2, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
+
+import { Spinner } from "@/components/ui/spinner";
 
 import type { CodeHarnessInstallSnapshot } from "../api/types";
 import { HARNESS_LABELS } from "./labels";
@@ -21,7 +23,7 @@ export function HarnessInstallNote({
   const version = install.version ? ` ${install.version}` : "";
   if (install.error) {
     return (
-      <p className="text-destructive flex items-start gap-1.5 text-xs">
+      <p className="text-critical flex items-start gap-1.5 text-xs">
         <TriangleAlert
           className="mt-0.5 size-3.5 shrink-0"
           aria-hidden="true"
@@ -38,7 +40,7 @@ export function HarnessInstallNote({
       className="text-muted-foreground flex items-center gap-1.5 text-xs"
       role="status"
     >
-      <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
+      <Spinner className="size-3.5" aria-hidden="true" />
       <span>
         Downloading {label}
         {version}. This runs once, and takes a few minutes.
