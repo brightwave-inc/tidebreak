@@ -215,6 +215,10 @@ impl Drop for Fixture {
 }
 
 async fn fixture(empty_catalog: bool) -> Fixture {
+    fixture_with_channel_runtime(empty_catalog, false).await
+}
+
+async fn fixture_with_channel_runtime(empty_catalog: bool, sandbox: bool) -> Fixture {
     let (directory, db) = temp_db_store("external-model.db").await;
     let db = Arc::new(db);
     let store: Arc<dyn Store> = db.clone();
@@ -284,18 +288,33 @@ async fn fixture(empty_catalog: bool) -> Fixture {
         runtime.bus.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
-    for kind in [
-        tidebreak_core::HarnessKind::ClaudeCode,
-        tidebreak_core::HarnessKind::Codex,
-        tidebreak_core::HarnessKind::Opencode,
-    ] {
-        runtime.adapters.register(Arc::new(
-            crate::scripted_harness::ScriptedAdapter::new(
-                crate::scripted_harness::plain_text_script(),
-            )
-            .with_kind(kind)
-            .with_approvals(tidebreak_core::CapLevel::Supported),
+    if sandbox {
+        runtime = runtime.with_remote_sessions(crate::code::remote::service::RemoteSessions::new(
+            Arc::new(super::code_external::FakeProvisioner::default()),
+            crate::code::remote::driver::RemoteSpawnSettings {
+                profile: "channel-test".into(),
+                engine: Some(tidebreak_core::HarnessKind::Codex),
+                engines: Some(vec![tidebreak_core::HarnessKind::Codex]),
+                embedded_engine_registration: true,
+                incarnation_cap: 1,
+                spend_ceiling_microusd: None,
+                session_spend_ceiling_microusd: None,
+            },
         ));
+    } else {
+        for kind in [
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+            tidebreak_core::HarnessKind::Opencode,
+        ] {
+            runtime.adapters.register(Arc::new(
+                crate::scripted_harness::ScriptedAdapter::new(
+                    crate::scripted_harness::plain_text_script(),
+                )
+                .with_kind(kind)
+                .with_approvals(tidebreak_core::CapLevel::Supported),
+            ));
+        }
     }
     state.events.mirror_into(runtime.bus.clone());
     let runtime = Arc::new(runtime);
@@ -689,4 +708,47 @@ async fn external_snapshot_labels_the_saved_model_after_channel_default_changes(
     );
     assert_eq!(frame["snapshot"]["model"], created["model"]);
     socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_sandbox_catalog_uses_grant_without_local_cli_and_rejects_other_engines() {
+    use axum::extract::FromRequestParts;
+    let fixture = fixture_with_channel_runtime(false, true).await;
+    assert!(fixture
+        .runtime
+        .adapters
+        .get(tidebreak_core::HarnessKind::Codex)
+        .is_none());
+    let (mut parts, _) = Request::builder().body(()).unwrap().into_parts();
+    parts.extensions.insert(crate::principal::AuthContext {
+        principal: crate::principal::Principal::User {
+            id: crate::principal::UserId::new(USER).unwrap(),
+            kind: crate::principal::PrincipalKind::Person,
+            role: crate::principal::Role::Admin,
+        },
+        client_executor: false,
+    });
+    let code = crate::code::ScopedCode::from_request_parts(&mut parts, &fixture.state)
+        .await
+        .unwrap();
+    let result = crate::routes::code::get_channel_harness_catalog(
+        code.clone(),
+        crate::extract::Path((fixture.grant.id, "C1".into())),
+        axum::extract::Query(serde_json::from_value(serde_json::json!({"kind":"codex"})).unwrap()),
+    )
+    .await
+    .unwrap();
+    let catalog = serde_json::to_value(result.0).unwrap();
+    assert_eq!(catalog["harnesses"], serde_json::json!(["codex"]));
+    assert_eq!(catalog["models"][0]["id"], "compat-openai-alias");
+    assert_eq!(catalog["use_chat_catalog"], false);
+    assert!(crate::routes::code::get_channel_harness_catalog(
+        code,
+        crate::extract::Path((fixture.grant.id, "C1".into())),
+        axum::extract::Query(
+            serde_json::from_value(serde_json::json!({"kind":"claude_code"})).unwrap()
+        ),
+    )
+    .await
+    .is_err());
 }

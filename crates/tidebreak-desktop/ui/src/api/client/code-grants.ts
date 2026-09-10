@@ -1,9 +1,13 @@
 import type {
   ChannelPreferences,
   ChannelPreferencesSnapshot,
+  ChannelHarnessCatalog,
 } from "../../settings/channelPreferences";
-import { parseChannelPreferences } from "../../settings/channelPreferences";
-import type { CodeConnectPage, CodeGrantSnapshot } from "../types";
+import {
+  parseChannelPreferences,
+  parseChannelHarnessCatalog,
+} from "../../settings/channelPreferences";
+import type { CodeConnectPage, CodeGrantSnapshot, HarnessKind } from "../types";
 import {
   parseCodeConnectPage,
   parseCodeGrant,
@@ -16,6 +20,23 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
   Base: TBase,
 ) {
   return class extends Base {
+    async getChannelHarnessCatalog(
+      grant: string,
+      channel: string,
+      kind?: HarnessKind,
+    ): Promise<ChannelHarnessCatalog> {
+      const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+      return requireParsed(
+        parseChannelHarnessCatalog(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/harnesses${query}`,
+            { headers: this.headers() },
+          ),
+        ),
+        "channel harness catalog",
+      );
+    }
+
     async getChannelPreferences(
       grant: string,
       channel: string,

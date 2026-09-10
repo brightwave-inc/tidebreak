@@ -18,7 +18,8 @@ mod approvals;
 mod browser;
 mod channel_preferences;
 pub(crate) use channel_preferences::{
-    external_channel_preferences, get_channel_preferences, put_channel_preferences,
+    external_channel_preferences, get_channel_harness_catalog, get_channel_preferences,
+    put_channel_preferences,
 };
 mod conversation;
 mod delivery;

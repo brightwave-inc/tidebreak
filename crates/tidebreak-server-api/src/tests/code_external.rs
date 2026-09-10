@@ -31,7 +31,7 @@ use tidebreak_server_core::obo_gateway::{
 const ADAPTER_BOOTSTRAP_TOKEN: &str = "adapter-bootstrap-token-padded-to-forty-eight-characters";
 
 #[derive(Default)]
-struct FakeProvisioner {
+pub(super) struct FakeProvisioner {
     spawns: StdMutex<Vec<SpawnArguments>>,
     sends: StdMutex<Vec<SandboxMessage>>,
     event_reads: StdMutex<VecDeque<SandboxEvents>>,

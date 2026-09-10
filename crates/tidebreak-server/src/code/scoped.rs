@@ -1406,6 +1406,11 @@ impl ScopedCode {
         self.runtime.harness_llm()
     }
 
+    /// Only the configured runtime's admitted engines appear in channel setup.
+    pub fn channel_sandbox_harnesses(&self) -> Option<Vec<HarnessKind>> {
+        self.runtime.channel_sandbox_harnesses(&self.owner)
+    }
+
     pub async fn gateway_model_snapshot(&self) -> Option<crate::providers::GatewayModelSnapshot> {
         self.runtime.gateway_model_snapshot(&self.owner).await
     }

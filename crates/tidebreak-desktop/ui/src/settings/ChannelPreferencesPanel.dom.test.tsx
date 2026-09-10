@@ -23,6 +23,13 @@ function client() {
       ...value,
     })),
     getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+    getChannelHarnessCatalog: vi.fn(
+      async (_grant: string, _channel: string, kind?: HarnessKind) => ({
+        harnesses: ["internal", "codex"] as HarnessKind[],
+        models: [] as { id: string; label: string }[],
+        use_chat_catalog: kind === "internal",
+      }),
+    ),
     listModels: vi.fn(async () => ({
       models: [
         {
@@ -144,6 +151,46 @@ describe("Channel preferences", () => {
         "grant",
         "C1",
         expect.objectContaining({ model: "model_gateway::tools" }),
+      ),
+    );
+  });
+  it("uses the channel catalog without requiring a local harness", async () => {
+    const api = client();
+    api.getChannelPreferences.mockResolvedValue({
+      ...preferences,
+      harness: "codex",
+    });
+    api.getChannelHarnessCatalog.mockResolvedValue({
+      harnesses: ["codex"],
+      models: [{ id: "remote-model", label: "Remote model" }],
+      use_chat_catalog: false,
+    });
+    const user = userEvent.setup();
+    render(
+      <ChannelPreferencesPanel
+        client={api as unknown as ApiClient}
+        grantId="grant"
+        channelId="C1"
+      />,
+    );
+    await waitFor(() =>
+      expect(api.getChannelHarnessCatalog).toHaveBeenCalledWith(
+        "grant",
+        "C1",
+        "codex",
+      ),
+    );
+    expect(api.getHarnessDoctor).not.toHaveBeenCalled();
+    expect(api.listCodeHarnessModels).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("combobox", { name: "Model" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Remote model" }),
+    );
+    await waitFor(() =>
+      expect(api.setChannelPreferences).toHaveBeenCalledWith(
+        "grant",
+        "C1",
+        expect.objectContaining({ model: "remote-model" }),
       ),
     );
   });

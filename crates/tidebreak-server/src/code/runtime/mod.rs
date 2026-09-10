@@ -805,6 +805,30 @@ impl CodeRuntime {
         self.external_permission
     }
 
+    /// Channel choices use the same admission rule as a sandbox session.
+    pub(crate) fn channel_sandbox_harnesses(&self, owner: &OwnerId) -> Option<Vec<HarnessKind>> {
+        let remote = self.remote_sessions()?;
+        Some(
+            HarnessKind::ALL
+                .iter()
+                .copied()
+                .filter(|kind| {
+                    let session = Self::remote_session_value(
+                        owner,
+                        None,
+                        WorkspaceId::new(),
+                        *kind,
+                        NewSessionSettings {
+                            permission_mode: PermissionMode::Allow,
+                            ..Default::default()
+                        },
+                    );
+                    remote.settings.validate_execution(&session).is_ok()
+                })
+                .collect(),
+        )
+    }
+
     /// The remote-session context, when this deployment configured one.
     pub fn remote_sessions(&self) -> Option<Arc<super::remote::service::RemoteSessions>> {
         self.remote.clone()

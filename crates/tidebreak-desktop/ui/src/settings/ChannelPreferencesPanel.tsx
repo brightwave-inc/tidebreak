@@ -68,19 +68,6 @@ export function ChannelPreferencesPanel({
       .finally(() => {
         if (generation.current === current) setLoading(false);
       });
-    void client
-      .getHarnessDoctor()
-      .then((doctor) => {
-        if (generation.current === current)
-          setHarnesses(
-            doctor.harnesses
-              .filter((h) => h.found || h.installable)
-              .map((h) => h.kind),
-          );
-      })
-      .catch((err: unknown) => {
-        if (generation.current === current) setCatalogError(String(err));
-      });
     return () => {
       generation.current++;
     };
@@ -90,21 +77,29 @@ export function ChannelPreferencesPanel({
     setModels([]);
     setCatalogError(null);
     const harness = preferences?.harness;
-    if (harness)
-      void (
-        harness === "internal"
-          ? client
-              .listModels()
-              .then((catalog) =>
-                catalog.models
-                  .filter((model) => model.available && model.supports_tools)
-                  .map((model) => ({
-                    id: model.key,
-                    label: model.display_name,
-                  })),
-              )
-          : client.listCodeHarnessModels(harness).then((list) => list.models)
-      )
+    if (preferences)
+      void client
+        .getChannelHarnessCatalog(grantId, channelId)
+        .then(async (available) => {
+          if (!active) return [];
+          setHarnesses(available.harnesses);
+          if (!harness) return [];
+          if (!available.harnesses.includes(harness)) {
+            throw new Error(
+              "The saved harness is unavailable for this channel. Choose an available harness.",
+            );
+          }
+          const catalog = await client.getChannelHarnessCatalog(
+            grantId,
+            channelId,
+            harness,
+          );
+          if (!catalog.use_chat_catalog) return catalog.models;
+          const chat = await client.listModels();
+          return chat.models
+            .filter((model) => model.available && model.supports_tools)
+            .map((model) => ({ id: model.key, label: model.display_name }));
+        })
         .then((models) => {
           if (active) setModels(models);
         })
@@ -114,7 +109,7 @@ export function ChannelPreferencesPanel({
     return () => {
       active = false;
     };
-  }, [client, preferences?.harness]);
+  }, [client, grantId, channelId, preferences?.harness]);
   async function save(changes: Partial<ChannelPreferences>) {
     if (!preferences || saving || !preferences.can_edit) return;
     const current = generation.current;

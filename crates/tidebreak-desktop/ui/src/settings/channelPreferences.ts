@@ -39,3 +39,37 @@ export function parseChannelPreferences(
     return null;
   return v as ChannelPreferencesSnapshot;
 }
+
+export type ChannelHarnessCatalog = {
+  harnesses: HarnessKind[];
+  models: { id: string; label: string }[];
+  use_chat_catalog: boolean;
+};
+export function parseChannelHarnessCatalog(
+  value: unknown,
+): ChannelHarnessCatalog | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (
+    !Array.isArray(v.harnesses) ||
+    !v.harnesses.every((kind) =>
+      ["internal", "claude_code", "codex", "opencode", "grok"].includes(
+        String(kind),
+      ),
+    )
+  )
+    return null;
+  if (
+    !Array.isArray(v.models) ||
+    !v.models.every(
+      (model) =>
+        model &&
+        typeof model === "object" &&
+        typeof model.id === "string" &&
+        typeof model.label === "string",
+    )
+  )
+    return null;
+  if (typeof v.use_chat_catalog !== "boolean") return null;
+  return v as ChannelHarnessCatalog;
+}

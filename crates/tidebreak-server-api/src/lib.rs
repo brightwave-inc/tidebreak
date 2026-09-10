@@ -945,6 +945,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_channel_preferences).put(routes::code::put_channel_preferences),
         )
         .route(
+            "/code/grants/{id}/channels/{channel_id}/harnesses",
+            get(routes::code::get_channel_harness_catalog),
+        )
+        .route(
             "/code/grants/workspace",
             post(routes::code::start_workspace_grant),
         )

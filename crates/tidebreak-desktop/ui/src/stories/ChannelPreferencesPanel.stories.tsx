@@ -22,6 +22,18 @@ const client = {
     value: object,
   ) => ({ ...preferences, ...value }),
   getHarnessDoctor: async () => harnessDoctor,
+  getChannelHarnessCatalog: async (
+    _grant: string,
+    _channel: string,
+    kind?: string,
+  ) => ({
+    harnesses: ["internal", "claude_code", "codex"],
+    models:
+      kind === "internal"
+        ? [{ id: "model_gateway::example", label: "Example model" }]
+        : [{ id: "example-model", label: "Example model" }],
+    use_chat_catalog: false,
+  }),
   listModels: async () => ({
     models: [
       {
