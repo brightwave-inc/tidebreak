@@ -833,7 +833,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     assert_eq!(completed + 1, types.len(), "{types:?}");
     assert!(steered < completed);
     // Three legs: the opening run, then one resume per park.
-    assert_journaled_once(&events, 3);
+    assert_journaled_once(&events, 3, "all done");
     let plan_decision = serde_json::to_value(&events[plan_resolved].event).unwrap();
     assert_eq!(plan_decision["decision"]["type"], "plan_decided");
     let grant_decision = serde_json::to_value(&events[tool_resolved].event).unwrap();
@@ -842,12 +842,13 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     assert_chat_replay_is_the_journal(&runtime.db, session_id, &events).await;
 }
 
-/// Every fact the lane journals once: one `TurnStarted` per leg the lane
-/// ran (a resumed park starts the stream again, and the chat surface has
-/// always replayed that), one terminal row, and no `AssistantMessage`
-/// beside the deltas that carry the answer (the whole message lives on the
-/// transcript row, not a second journal row).
-fn assert_journaled_once(events: &[tidebreak_core::code::SequencedEvent], legs: usize) {
+/// The journal has one start per leg and one complete answer immediately
+/// before the terminal event. Streaming deltas retain their original order.
+fn assert_journaled_once(
+    events: &[tidebreak_core::code::SequencedEvent],
+    legs: usize,
+    expected_answer: &str,
+) {
     let types = event_types(events);
     let count = |kind: &str| types.iter().filter(|entry| entry.as_str() == kind).count();
     assert_eq!(count("turn_started"), legs, "{types:?}");
@@ -857,7 +858,19 @@ fn assert_journaled_once(events: &[tidebreak_core::code::SequencedEvent], legs: 
         0,
         "{types:?}"
     );
-    assert_eq!(count("assistant_message"), 0, "{types:?}");
+    assert_eq!(count("assistant_message"), 1, "{types:?}");
+    let completed = position(&types, "turn_completed", 0);
+    let answer = position(&types, "assistant_message", 0);
+    assert_eq!(answer + 1, completed, "{types:?}");
+    assert!(
+        matches!(
+            &events[answer].event,
+            tidebreak_core::Event::AssistantMessage { text, parent_call_id: None }
+                if text == expected_answer
+        ),
+        "the journal preserves the final answer: {:?}",
+        events[answer]
+    );
 }
 
 /// The assistant text a journal streams, concatenated.
@@ -1659,7 +1672,7 @@ async fn a_plain_internal_turn_is_journaled_once() {
     );
 
     let events = super::code::journaled_events(&runtime.db, hosted).await;
-    assert_journaled_once(&events, 1);
+    assert_journaled_once(&events, 1, "just the answer");
     assert_eq!(streamed_text(&events), "just the answer");
     let types = event_types(&events);
     let started = position(&types, "turn_started", 0);

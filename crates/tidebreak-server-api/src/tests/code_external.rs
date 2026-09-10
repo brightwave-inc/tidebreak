@@ -4434,7 +4434,7 @@ async fn repositoryless_external_sessions_honor_explicit_harness_and_private_scr
                 .join(id.to_string());
             assert_eq!(launch.harness, harness);
             assert_eq!(launch.cwd, scratch);
-            assert_eq!(launch.read_roots, [scratch.clone()]);
+            assert_eq!(launch.read_roots.as_slice(), std::slice::from_ref(&scratch));
             assert!(launch.model.is_none());
             assert!(scratch.is_dir());
             assert!(!scratch.join(".git").exists());
