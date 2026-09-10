@@ -74,6 +74,7 @@ test("the workload installs both exact pins and checks each installed binary", (
     return "";
   });
   assert.equal(calls[0].command, "/managed/npm");
+  assert.ok(calls[0].args.includes("--engine-strict"), "unsupported package engines must fail installation");
   assert.deepEqual(calls[0].args.slice(-2), [
     `@anthropic-ai/claude-code@${claudeVersion}`,
     `@openai/codex@${codexVersion}`,
@@ -156,4 +157,33 @@ test("the built workload starts as UID 65532 with pinned tools and no server", {
   const missingInput = spawnSync("docker", ["run", "--rm", "--network=none", "--entrypoint", "/usr/local/bin/tidebreak-supervised-agent", image], { encoding: "utf8", timeout: 60000 });
   assert.equal(missingInput.status, 64, missingInput.stderr);
   assert.match(missingInput.stderr, /MODEL_GATEWAY_SANDBOX_TASK/);
+});
+
+test("the built workload Node satisfies both installed harness requirements", { skip: !image }, () => {
+  const probe = `
+    const assert = require("node:assert/strict");
+    const { realpathSync, readFileSync } = require("node:fs");
+    const { execFileSync } = require("node:child_process");
+    const { createRequire } = require("node:module");
+    assert.equal(process.execPath, "/usr/local/bin/node", "PATH must select the workload Node runtime");
+    for (const binary of ["npm", "npx"]) {
+      const path = execFileSync("/bin/sh", ["-c", 'command -v "$1"', "probe", binary], { encoding: "utf8" }).trim();
+      assert.equal(path, "/usr/local/bin/" + binary);
+      const target = realpathSync(path);
+      assert.equal(target, "/usr/local/lib/node_modules/npm/bin/" + binary + "-cli.js");
+      assert(readFileSync(target, "utf8").startsWith("#!/usr/bin/env node\\n"), binary + " must use the workload Node through PATH");
+    }
+    const { satisfies } = createRequire(realpathSync("/usr/local/bin/npm"))("semver");
+    for (const name of ${JSON.stringify(workloadPins.map((pin) => pin.package))}) {
+      const manifest = require("/usr/local/lib/node_modules/" + name + "/package.json");
+      const required = manifest.engines?.node;
+      if (required) {
+        assert(satisfies(process.version, required), name + " requires Node " + required + ", found " + process.version);
+      }
+      console.log(name + ": Node " + process.version + " satisfies " + (required ?? "any version"));
+    }
+  `;
+  const supported = spawnSync("docker", ["run", "--rm", "--network=none", "--entrypoint", "/usr/bin/env", image, "node", "-e", probe], { encoding: "utf8", timeout: 60000 });
+  assert.equal(supported.status, 0, supported.stderr);
+  for (const pin of workloadPins) assert.ok(supported.stdout.includes(pin.package));
 });

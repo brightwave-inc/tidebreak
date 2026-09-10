@@ -22,7 +22,7 @@ export function workloadHarnessPins(source) {
 export function installWorkloadHarnesses(source, npmPath, run = execFileSync) {
   // Validate every pin before installing any package.
   const pins = workloadHarnessPins(source);
-  run(npmPath, ["install", "--global", "--prefix", "/usr/local", "--omit=dev", "--no-fund", "--no-audit", "--no-progress", ...pins.map((pin) => `${pin.package}@${pin.version}`)], { stdio: "inherit" });
+  run(npmPath, ["install", "--global", "--engine-strict", "--prefix", "/usr/local", "--omit=dev", "--no-fund", "--no-audit", "--no-progress", ...pins.map((pin) => `${pin.package}@${pin.version}`)], { stdio: "inherit" });
   for (const pin of pins) {
     const actual = run(`/usr/local/bin/${pin.binary}`, ["--version"], { encoding: "utf8" }).trim();
     const expected = pin.kind === "Codex" ? `codex-cli ${pin.version}` : `${pin.version} (Claude Code)`;
