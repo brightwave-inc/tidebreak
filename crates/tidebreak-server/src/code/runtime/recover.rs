@@ -211,6 +211,9 @@ impl CodeRuntime {
         }
         let recovered_sessions = list_sessions_all_owners(&self.db).await?;
         for session in &recovered_sessions {
+            if session.lifecycle == SessionLifecycle::Ended {
+                continue;
+            }
             crate::code::approval_sweep::abandon_for_restart(
                 &self.db,
                 &self.bus,

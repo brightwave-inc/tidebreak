@@ -644,6 +644,10 @@ impl CodeRuntime {
             .lock()
             .expect("worktree turn locks")
             .remove(&workspace_id);
+        self.workspace_lifecycles
+            .lock()
+            .expect("workspace lifecycle locks")
+            .remove(&workspace_id);
     }
 
     fn workspace_creation_lock(&self, repo_id: RepoId) -> Arc<tokio::sync::Mutex<()>> {
@@ -1058,6 +1062,7 @@ impl CodeRuntime {
         let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         for mut session in sessions {
             if session.lifecycle == SessionLifecycle::Ended {
+                self.bus.forget(session.id);
                 continue;
             }
             let handle = self
@@ -1119,6 +1124,7 @@ impl CodeRuntime {
                 )
                 .await;
             }
+            self.bus.forget(current.id);
         }
         Ok(all_stopped)
     }

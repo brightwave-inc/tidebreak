@@ -1380,6 +1380,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.permission_mode, PermissionMode::Ask);
+        let stored = runtime.get_session(&owner, session.id).await.unwrap();
+        assert_eq!(stored.permission_mode, PermissionMode::Ask);
         assert!(fake.spawns.lock().unwrap().is_empty());
     }
 

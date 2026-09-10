@@ -1,3 +1,4 @@
+use sea_orm::sea_query::ExprTrait as _;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect, Set, TransactionTrait,
@@ -384,6 +385,44 @@ pub async fn replace_session_execution_settings(
     current.reasoning_effort = next.reasoning_effort;
     current.fast_mode = next.fast_mode;
     Ok(Some(current))
+}
+
+/// Replace a sandbox session's permission mode while its exact durable state
+/// still matches the caller's copy.
+pub async fn replace_sandbox_permission_mode(
+    store: &DbStore,
+    owner: &OwnerId,
+    expected: &Session,
+    requested_mode: PermissionMode,
+) -> Result<Option<Session>> {
+    if &expected.owner != owner || expected.execution_location != ExecutionLocation::Sandbox {
+        return Ok(None);
+    }
+    let updated = entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::PermissionMode,
+            sea_orm::sea_query::Expr::value(requested_mode.as_str()),
+        )
+        .col_expr(
+            entities::session::Column::PermissionModeRevision,
+            sea_orm::sea_query::Expr::col(entities::session::Column::PermissionModeRevision).add(1),
+        )
+        .filter(entities::session::Column::Id.eq(expected.id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::Lifecycle.eq(expected.lifecycle.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(expected.spawn_epoch))
+        .filter(entities::session::Column::PermissionMode.eq(expected.permission_mode.as_str()))
+        .filter(entities::session::Column::PermissionModeIntent.is_null())
+        .filter(
+            entities::session::Column::ExecutionLocation.eq(ExecutionLocation::Sandbox.as_str()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Ok(None);
+    }
+    get_session(store, owner, expected.id).await
 }
 
 /// Persist a versioned mode-change intent before any live engine mutation.

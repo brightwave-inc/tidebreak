@@ -235,6 +235,12 @@ fn write_capfile(
     if let Err(e) = std::fs::create_dir_all(parent) {
         return Err(format!("could not create native capfile directory: {e}"));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("could not set native capfile directory mode: {e}"))?;
+    }
     let tmp_path = parent.join(format!(
         ".{}.tmp-{}",
         path.file_name()
@@ -243,18 +249,15 @@ fn write_capfile(
         generate_file_id()
     ));
     let result = (|| {
-        use std::fs::OpenOptions;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
             .open(&tmp_path)
             .map_err(|e| format!("could not create native capfile temp file: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("could not set native capfile temp mode: {e}"))?;
-        }
         let payload = serde_json::json!({
             "version": version,
             "endpoint": format!("{loopback_base}/code/native"),
@@ -409,6 +412,15 @@ mod tests {
             #[cfg(unix)]
             assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         }
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(reg.capfile_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert!(leaf.is_dir() || !leaf.exists());
     }
 }

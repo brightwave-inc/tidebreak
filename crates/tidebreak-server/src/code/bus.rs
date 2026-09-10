@@ -319,6 +319,15 @@ impl CodeEventBus {
             .map(|live| live.last_activity)
     }
 
+    /// Drop the live channel and transient tail for a session that ended.
+    /// A late publisher safely creates a fresh entry through [`Self::with_session`].
+    pub fn forget(&self, session: SessionId) {
+        self.channels
+            .lock()
+            .expect("code event bus lock")
+            .remove(&session);
+    }
+
     /// Whether this session might be carrying [`AttentionState::Stalled`].
     ///
     /// A hint, not an answer: it starts pessimistic and is corrected by the
@@ -350,8 +359,8 @@ impl CodeEventBus {
     /// Subscribe to one owner's updates. The receiver is the only view of the
     /// channel available to an `/updates` socket, and it carries nothing else.
     ///
-    /// Subscribing also wakes [`Self::updates_attached`] waiters. A
-    /// A client says it is looking by opening an `/updates` socket. Sweeps
+    /// Subscribing also wakes [`Self::updates_attached`] waiters. A client
+    /// says it is looking by opening an `/updates` socket. Sweeps
     /// that back off while nobody is looking use that moment to return to
     /// their fast cadence.
     pub fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
@@ -470,5 +479,25 @@ mod tests {
                 .is_err(),
             "a drop is not an attach"
         );
+    }
+
+    #[test]
+    fn forgetting_a_session_drops_its_channel_and_late_publish_recreates_it() {
+        let bus = CodeEventBus::default();
+        let session = SessionId::new();
+
+        let _receiver = bus.attach(session).0;
+        assert!(bus.last_activity(session).is_some());
+
+        bus.forget(session);
+        assert!(bus.last_activity(session).is_none());
+
+        bus.publish_transient(
+            session,
+            Event::AssistantDelta {
+                text: "late".into(),
+            },
+        );
+        assert!(bus.last_activity(session).is_some());
     }
 }
