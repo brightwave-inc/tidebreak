@@ -24,6 +24,7 @@ pub mod engine;
 pub mod harness_engine;
 pub mod inputs;
 pub mod registration;
+pub mod scratch;
 pub mod trust;
 pub mod wip;
 pub mod wire;

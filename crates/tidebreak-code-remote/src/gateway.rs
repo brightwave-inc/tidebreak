@@ -622,7 +622,7 @@ mod tests {
                 SessionId::new(),
                 "6b8e7f2c-1d0a-4b3c-9e5f-2a1b3c4d5e6f",
                 &SandboxMessage {
-                    body: "  ".to_owned(),
+                    body: SupervisorMessageBody::Input("  ".to_owned()),
                     interrupt: false,
                 },
             )
@@ -643,7 +643,7 @@ mod tests {
                 SessionId::new(),
                 sandbox,
                 &SandboxMessage {
-                    body: "also check the retry path".to_owned(),
+                    body: SupervisorMessageBody::Input("also check the retry path".to_owned()),
                     interrupt: false,
                 },
             )
@@ -704,7 +704,7 @@ mod tests {
                 session,
                 sandbox,
                 &SandboxMessage {
-                    body: "continue".into(),
+                    body: SupervisorMessageBody::Input("continue".into()),
                     interrupt: false,
                 },
             )

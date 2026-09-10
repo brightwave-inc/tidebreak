@@ -380,7 +380,7 @@ mod tests {
     #[derive(Default)]
     struct FakeProvisioner {
         spawns: StdMutex<Vec<SpawnArguments>>,
-        sends: StdMutex<Vec<String>>,
+        sends: StdMutex<Vec<super::wire::SupervisorMessageBody>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
         /// Every events read issued, scripted or not.
         event_reads_issued: StdMutex<usize>,
@@ -977,7 +977,14 @@ mod tests {
         // Deliver against the stale snapshot, as a sweep that raced the edit
         // would.
         driver
-            .submit_turn_from(&mut live, &workspace, &repo, &stale.message, Some(&stale))
+            .submit_turn_from(
+                &mut live,
+                Some(&workspace),
+                Some(&repo),
+                None,
+                &stale.message,
+                Some(&stale),
+            )
             .await
             .unwrap();
         let delivered = latest_turn(&runtime.db, &owner, session.id)
@@ -1931,8 +1938,9 @@ mod tests {
         let outcome = driver
             .submit_turn_from(
                 &mut promoting,
-                &workspace,
-                &stored_repo,
+                Some(&workspace),
+                Some(&stored_repo),
+                None,
                 &stale.message,
                 Some(&stale),
             )

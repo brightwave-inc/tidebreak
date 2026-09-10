@@ -944,6 +944,7 @@ impl CodeWorkspace {
     pub fn remote_worktree_marker(id: WorkspaceId) -> String {
         format!("remote:{id}")
     }
+
 }
 
 /// Coarse lifecycle of an observed pull request (decision 77).
@@ -1720,6 +1721,23 @@ impl QueuedTurn {
     pub const MAX_PER_SESSION: usize = 32;
 }
 
+/// A protected native-tool request from a supervised sandbox, stored until
+/// the server result is delivered.
+///
+/// The sandbox never holds forge credentials or an authoritative registry;
+/// every request is validated and executed server-side against the same
+/// `SessionTools` contract the coordinator uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorToolRequest {
+    /// Stable request id, repeated on agent retries.
+    pub request_id: String,
+    /// Registered server-side tool name.
+    pub tool: String,
+    /// Tool arguments validated by the server's authoritative registry.
+    pub arguments: serde_json::Value,
+}
+
 /// Lifecycle of one sandbox lifetime within a remote session.
 ///
 /// Written in the order the protocol runs: the intent row commits before the
@@ -1796,6 +1814,15 @@ pub struct CodeSessionIncarnation {
     pub task_output: Option<String>,
     /// The last WIP checkpoint ref this incarnation pushed, for resume.
     pub last_wip_ref: Option<String>,
+    /// Typed native-tool requests awaiting server results, by request id.
+    ///
+    /// Kept on the incarnation so a server restart re-answers in-flight
+    /// requests instead of losing them; the sandbox redelivers text bodies
+    /// at-least-once, so retained results stay idempotent.
+    pub tool_requests: Vec<crate::code::SupervisorToolRequest>,
+    /// Highest inbox sequences whose tool results were delivered to the
+    /// sandbox. Results are never held longer than the request they answer.
+    pub tool_ack_seqs: Vec<i64>,
     /// Intent time.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Activation time, when the spawn returned.
