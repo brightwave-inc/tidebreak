@@ -480,7 +480,7 @@ pub async fn external_get_or_create(
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+// Same tolerance as `ExternalSessionBody`: older adapters send channel fields.
 pub struct ExternalBindingBody {
     pub external_key: String,
     #[serde(default)]
