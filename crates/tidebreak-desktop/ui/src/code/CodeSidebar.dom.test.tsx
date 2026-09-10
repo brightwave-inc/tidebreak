@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { useCodeDeliveryStore } from "./CodeDeliveryStore";
+import { resetCodeDeliveryHostState } from "./CodeDeliveryStore";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
@@ -152,7 +152,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
-  useCodeDeliveryStore.getState().reset();
+  resetCodeDeliveryHostState();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({
