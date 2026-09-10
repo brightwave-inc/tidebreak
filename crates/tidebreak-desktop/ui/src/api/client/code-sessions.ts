@@ -23,6 +23,17 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
   Base: TBase,
 ) {
   return class extends Base {
+    async getCodeSession(sessionId: string): Promise<CodeSessionSnapshot> {
+      return requireParsed(
+        parseCodeSession(
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}`, {
+            headers: this.headers(),
+          }),
+        ),
+        "code session",
+      );
+    }
+
     async listCodeWorkspaceSessions(
       workspaceId: string,
     ): Promise<CodeSessionSnapshot[]> {

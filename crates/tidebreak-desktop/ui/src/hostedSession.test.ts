@@ -72,6 +72,20 @@ describe("the handoff fragment", () => {
     expect(win.replaced).toEqual(["/tidebreak/#/connect/nonce-1?source=slack"]);
   });
 
+  it.each(["/code/s/session-1", "/code/w/workspace-1?task=session-2"])(
+    "preserves the exact Slack destination %s through sign-in",
+    (route) => {
+      const win = fakeWindow(
+        `#handoff=mg_at_abc&return_to=${encodeURIComponent(route)}`,
+      );
+      captureHandoffToken(win);
+      expect(win.replaced).toEqual([`/#${route}`]);
+      const restored = fakeWindow(`#${route}`);
+      captureHandoffToken(restored);
+      expect(restored.replaced).toEqual([]);
+    },
+  );
+
   it("leaves a route fragment alone", () => {
     const win = fakeWindow("#/settings/machine");
     captureHandoffToken(win);

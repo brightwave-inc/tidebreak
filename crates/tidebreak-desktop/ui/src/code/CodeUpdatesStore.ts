@@ -360,13 +360,15 @@ export function useWorkspaceDigest(
  * child, so it asks by id rather than taking the workspace's representative.
  */
 export function useSessionDigest(
-  workspaceId: string,
+  workspaceId: string | undefined,
   sessionId: string | null,
 ): CodeSessionDigest | undefined {
   return useCodeUpdatesStore((state) =>
     sessionId
-      ? (state.conversationsByWorkspace[workspaceId]?.[sessionId] ??
-        state.childrenByWorkspace[workspaceId]?.[sessionId])
+      ? workspaceId
+        ? (state.conversationsByWorkspace[workspaceId]?.[sessionId] ??
+          state.childrenByWorkspace[workspaceId]?.[sessionId])
+        : state.conversationsWithoutWorkspace[sessionId]
       : undefined,
   );
 }
