@@ -475,6 +475,7 @@ impl CodeRuntime {
             return Ok(());
         };
         if session.lifecycle == SessionLifecycle::Ended {
+            self.bus.forget(session.id);
             return Ok(());
         }
         if let Ok(Some(workspace)) = self.session_workspace(&session).await {
@@ -545,6 +546,7 @@ impl CodeRuntime {
                 "could not clear the ended session's queued turns"
             );
         }
+        self.bus.forget(current.id);
         Ok(())
     }
 

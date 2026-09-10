@@ -1116,11 +1116,10 @@ impl CodeRuntime {
             branch
         );
         {
-            let cache = self.branch_rules.lock().expect("branch rules");
+            let mut cache = self.branch_rules.lock().expect("branch rules");
+            cache.retain(|_, entry| entry.fetched_at.elapsed() <= BRANCH_RULES_TTL);
             if let Some(entry) = cache.get(&key) {
-                if entry.fetched_at.elapsed() <= BRANCH_RULES_TTL {
-                    return entry.rules;
-                }
+                return entry.rules;
             }
         }
         let rules = match crate::code::pr_fetch::read_branch_rules(
