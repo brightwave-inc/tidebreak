@@ -248,20 +248,24 @@ pub struct SandboxEvent {
 }
 
 /// One message on its way into a running sandbox's inbox.
-#[derive(Clone, Debug, Serialize)]
+///
+/// The environment's message transport carries text only, so typed tool
+/// results travel as a prefixed JSON string and are decoded by the
+/// supervised agent. Ordinary input is sent verbatim.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SandboxMessage {
-    /// Ordinary input for the sandbox's next turn. The environment attaches
-    /// no meaning to it; a typed tool result rides the same field as a
-    /// prefixed JSON envelope.
-    pub body: SupervisorMessageBody,
+    /// Ordinary input, or an encoded [`SupervisorToolResult`].
+    pub body: String,
     /// Whether to preempt the turn in flight rather than wait for it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupt: bool,
 }
 
-/// A typed message body over the text transport.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+/// Prefix marking an encoded host-tool result in an inbox string.
+pub const HOST_TOOL_RESULT_PREFIX: &str = "tidebreak-tool-result\n";
+
+/// A decoded inbox message body.
+#[derive(Clone, Debug, PartialEq)]
 pub enum SupervisorMessageBody {
     /// Ordinary user or queued turn text.
     Input(String),
@@ -297,23 +301,63 @@ pub struct SupervisorArtifact {
 }
 
 impl SandboxMessage {
-    /// Refuses a body the environment would refuse, before the request.
-    pub fn validate(&self) -> Result<(), String> {
-        if let SupervisorMessageBody::Tool(result) = &self.body {
-            if result.request_id.is_empty() || result.request_id.len() > 128 {
-                return Err("sandbox tool result request_id is unusable".to_owned());
-            }
+    /// Builds an ordinary text message.
+    #[must_use]
+    pub fn input(body: impl Into<String>, interrupt: bool) -> Self {
+        Self {
+            body: body.into(),
+            interrupt,
         }
-        let bytes = serde_json::to_vec(&self.body).map_err(|_| "sandbox message body is not serializable".to_owned())?;
-        if bytes.len() > MESSAGE_MAX_BODY_BYTES {
+    }
+
+    /// Builds an encoded protected-tool result message.
+    pub fn tool_result(result: SupervisorToolResult) -> Result<Self, String> {
+        if result.request_id.is_empty() || result.request_id.len() > 128 {
+            return Err("sandbox tool result request_id is unusable".to_owned());
+        }
+        let json = serde_json::to_string(&result)
+            .map_err(|error| format!("sandbox tool result is not serializable: {error}"))?;
+        if json.len() + HOST_TOOL_RESULT_PREFIX.len() > MESSAGE_MAX_BODY_BYTES {
             return Err(format!(
-                "sandbox message body is {} bytes; the ceiling is {MESSAGE_MAX_BODY_BYTES}",
-                bytes.len()
+                "sandbox tool result is {} bytes with its prefix; the inbox ceiling is {MESSAGE_MAX_BODY_BYTES} bytes. Artifact transfer is not available yet; refuse loudly instead of truncating or dropping",
+                json.len() + HOST_TOOL_RESULT_PREFIX.len(),
             ));
         }
-        if let SupervisorMessageBody::Input(body) = &self.body {
-            if body.trim().is_empty() {
-                return Err("sandbox message body is empty".to_owned());
+        Ok(Self {
+            body: format!("{HOST_TOOL_RESULT_PREFIX}{json}"),
+            interrupt: false,
+        })
+    }
+
+    /// Decodes an inbox string into its typed body.
+    pub fn decode_body(body: &str) -> Result<SupervisorMessageBody, String> {
+        if let Some(json) = body.strip_prefix(HOST_TOOL_RESULT_PREFIX) {
+            serde_json::from_str(json)
+                .map(SupervisorMessageBody::Tool)
+                .map_err(|error| format!("the sandbox tool result envelope is invalid: {error}"))
+        } else {
+            Ok(SupervisorMessageBody::Input(body.to_owned()))
+        }
+    }
+
+    /// Refuses a body the environment would refuse, before the request.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.body.len() > MESSAGE_MAX_BODY_BYTES {
+            return Err(format!(
+                "sandbox message body is {} bytes; the ceiling is {MESSAGE_MAX_BODY_BYTES}",
+                self.body.len()
+            ));
+        }
+        match Self::decode_body(&self.body)? {
+            SupervisorMessageBody::Input(body) => {
+                if body.trim().is_empty() {
+                    return Err("sandbox message body is empty".to_owned());
+                }
+            }
+            SupervisorMessageBody::Tool(result) => {
+                if result.request_id.is_empty() || result.request_id.len() > 128 {
+                    return Err("sandbox tool result request_id is unusable".to_owned());
+                }
             }
         }
         Ok(())
@@ -374,10 +418,7 @@ mod tests {
 
     #[test]
     fn a_default_interrupt_is_omitted_from_the_message_body() {
-        let message = SandboxMessage {
-            body: SupervisorMessageBody::Input("steer left".to_owned()),
-            interrupt: false,
-        };
+        let message = SandboxMessage::input("steer left".to_owned(), false);
         let value = serde_json::to_value(&message).unwrap();
         assert!(value.get("interrupt").is_none());
         let message = SandboxMessage {
@@ -416,15 +457,22 @@ mod tests {
 
     #[test]
     fn message_validation_names_the_fault() {
-        let empty = SandboxMessage {
-            body: SupervisorMessageBody::Input("   ".to_owned()),
-            interrupt: false,
-        };
+        let empty = SandboxMessage::input("   ".to_owned(), false);
         assert!(empty.validate().unwrap_err().contains("empty"));
-        let oversized = SandboxMessage {
-            body: SupervisorMessageBody::Input("x".repeat(MESSAGE_MAX_BODY_BYTES + 1)),
-            interrupt: false,
-        };
+        let oversized = SandboxMessage::input("x".repeat(MESSAGE_MAX_BODY_BYTES + 1), false);
         assert!(oversized.validate().unwrap_err().contains("ceiling"));
+        let result = SupervisorToolResult {
+            request_id: "r1".to_owned(),
+            output: serde_json::json!({"ok": true}),
+            artifacts: vec![SupervisorArtifact {
+                path: "exports/thread.jsonl".to_owned(),
+                media_type: "application/jsonl".to_owned(),
+                bytes: vec![0u8; 2 * 1024 * 1024 + 1],
+            }],
+        };
+        assert!(
+            SandboxMessage::tool_result(result).unwrap_err().contains("ceiling"),
+            "large artifact results refuse loudly instead of truncating"
+        );
     }
 }

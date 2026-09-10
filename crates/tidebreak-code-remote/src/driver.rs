@@ -29,7 +29,7 @@ use tidebreak_core::{
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
-use super::wire::{EmbeddedEngine, EventCursor, SandboxMessage, SpawnArguments, SupervisorMessageBody};
+use super::wire::{EmbeddedEngine, EventCursor, SandboxMessage, SpawnArguments};
 use super::{
     apply_attention, fence_session, journal_event, persist_session, reap_session,
     recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
@@ -460,10 +460,7 @@ impl RemoteDriver<'_> {
                         row.id
                     )));
                 };
-                let message = SandboxMessage {
-                    body: SupervisorMessageBody::Input(text.to_owned()),
-                    interrupt: false,
-                };
+                let message = SandboxMessage::input(text.to_owned(), false);
                 message
                     .validate()
                     .map_err(tidebreak_core::AgentError::Store)?;
@@ -810,9 +807,12 @@ impl RemoteDriver<'_> {
                     };
                 match host.execute(session.id, &request).await {
                     Ok(Some(result)) => {
-                        let message = super::wire::SandboxMessage {
-                            body: super::wire::SupervisorMessageBody::Tool(result),
-                            interrupt: false,
+                        let message = match super::wire::SandboxMessage::tool_result(result) {
+                            Ok(message) => message,
+                            Err(error) => {
+                                warn!(session = %session.id, %error, "a host tool result was too large to deliver");
+                                continue;
+                            }
                         };
                         if let Err(error) = provisioner
                             .send(&owner, session.id, &sandbox_id, &message)
@@ -1219,6 +1219,7 @@ mod tests {
                 bus: $bus,
                 provisioner: $fake,
                 settings: $settings,
+                host_tool: None,
             }
         };
     }

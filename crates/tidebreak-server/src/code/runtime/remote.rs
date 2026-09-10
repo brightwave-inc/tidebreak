@@ -1136,25 +1136,22 @@ impl CodeRuntime {
                 "the active incarnation has no sandbox id",
             )
         })?;
-        let message = crate::code::remote::wire::SandboxMessage {
-            body: crate::code::remote::wire::SupervisorMessageBody::Tool(
-                crate::code::remote::wire::SupervisorToolResult {
-                    request_id: result.request_id,
-                    output: result.output,
-                    artifacts: result
-                        .artifacts
-                        .into_iter()
-                        .map(|artifact| crate::code::remote::wire::SupervisorArtifact {
-                            path: artifact.path,
-                            media_type: artifact.media_type,
-                            bytes: artifact.bytes,
-                        })
-                        .collect(),
-                },
-            ),
-            interrupt: false,
-        };
-        message.validate().map_err(ServerError::bad_request)?;
+        let message = crate::code::remote::wire::SandboxMessage::tool_result(
+            crate::code::remote::wire::SupervisorToolResult {
+                request_id: result.request_id,
+                output: result.output,
+                artifacts: result
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| crate::code::remote::wire::SupervisorArtifact {
+                        path: artifact.path,
+                        media_type: artifact.media_type,
+                        bytes: artifact.bytes,
+                    })
+                    .collect(),
+            },
+        )
+        .map_err(ServerError::bad_request)?;
         remote
             .provisioner
             .send(&session.owner, session.id, sandbox_id, &message)
@@ -1191,10 +1188,7 @@ impl CodeRuntime {
                 "there is no active turn to interrupt",
             ));
         };
-        let message = crate::code::remote::wire::SandboxMessage {
-            body: crate::code::remote::wire::SupervisorMessageBody::Input("stop".to_owned()),
-            interrupt: true,
-        };
+        let message = crate::code::remote::wire::SandboxMessage::input("stop".to_owned(), true);
         match remote
             .provisioner
             .send(&session.owner, session.id, sandbox_id, &message)

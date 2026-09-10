@@ -448,7 +448,16 @@ impl<E: Engine> Driver<E> {
                 for message in instructions.messages {
                     if message.seq > self.seen_through {
                         self.seen_through = message.seq;
-                        self.inbox.push_back(message);
+                        match SupervisorMessageBody::decode(&message.body) {
+                            Ok(body) => self.inbox.push_back(SupervisorMessage {
+                                seq: message.seq,
+                                body,
+                                interrupt: message.interrupt,
+                            }),
+                            Err(error) => {
+                                eprintln!("dropping an undecodable supervisor message: {error}");
+                            }
+                        }
                     }
                 }
                 if instructions.stop && self.stop_reason.is_none() {

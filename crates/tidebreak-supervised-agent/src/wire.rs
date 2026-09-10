@@ -116,7 +116,7 @@ pub struct SupervisorInstructions {
     pub cursor: i64,
     /// Undelivered messages after the cursor, oldest first and gap-free.
     #[serde(default)]
-    pub messages: Vec<SupervisorMessage>,
+    pub messages: Vec<SupervisorWireMessage>,
     /// Whether this sandbox has shipped a pull request this run.
     ///
     /// Computed by the environment from traffic it observed directly; the
@@ -125,26 +125,52 @@ pub struct SupervisorInstructions {
     pub acceptance_met: bool,
 }
 
-/// One steering message on its way to the engine.
+/// One steering message on its way to the engine, as the endpoint sends it.
 #[derive(Clone, Debug, Deserialize)]
+pub struct SupervisorWireMessage {
+    /// Per-sandbox monotonic, gap-free sequence number.
+    pub seq: i64,
+    /// Text body; host-tool results are decoded from the prefixed envelope.
+    pub body: String,
+    /// Whether the turn in flight should be preempted to deliver it.
+    #[serde(default)]
+    pub interrupt: bool,
+}
+
+/// One steering message after its body has been decoded.
+#[derive(Clone, Debug)]
 pub struct SupervisorMessage {
     /// Per-sandbox monotonic, gap-free sequence number.
     pub seq: i64,
     /// Ordinary input or a protected server-tool result.
     pub body: SupervisorMessageBody,
     /// Whether the turn in flight should be preempted to deliver it.
-    #[serde(default)]
     pub interrupt: bool,
 }
 
+/// Prefix marking an encoded host-tool result in an inbox string.
+pub const HOST_TOOL_RESULT_PREFIX: &str = "tidebreak-tool-result\n";
+
 /// A typed message body over the endpoint's text transport.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub enum SupervisorMessageBody {
     /// Ordinary input for the engine.
     Input(String),
     /// A protected native-tool result from the host.
     Tool(SupervisorToolResult),
+}
+
+impl SupervisorMessageBody {
+    /// Decodes one inbox body string.
+    pub fn decode(body: &str) -> Result<Self, String> {
+        if let Some(json) = body.strip_prefix(HOST_TOOL_RESULT_PREFIX) {
+            serde_json::from_str(json)
+                .map(Self::Tool)
+                .map_err(|error| format!("the sandbox tool result envelope is invalid: {error}"))
+        } else {
+            Ok(Self::Input(body.to_owned()))
+        }
+    }
 }
 
 /// One protected native-tool request the sandbox asks the host to execute.
