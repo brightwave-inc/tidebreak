@@ -2638,7 +2638,7 @@ export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "sc
 /**
  * How a session of one engine authenticates on this machine.
  */
-export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_relay" | "hosted_unavailable";
+export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_relay";
 
 /**
  * Capability vector for one probed engine version.
