@@ -2,7 +2,8 @@
 //!
 //! Shares the recap material builder. Never blocks the turn.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use tidebreak_core::db::code::{get_session, get_turn, get_workspace, list_recent_events};
 use tidebreak_core::{
     AgentError, DbStore, Event, HarnessNoticeLevel, MemoryAuthor, MemoryBackend, MemoryEvidence,
-    MemoryKind, MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryScope,
-    MemoryStatus, OwnerId, Result, SessionId, TurnId, TurnStatus, MAX_MEMORY_BODY_BYTES,
-    MAX_MEMORY_TITLE_CHARS,
+    MemoryKind, MemoryListFilter, MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId,
+    MemoryScope, MemoryStatus, OwnerId, Result, SessionId, TurnId, TurnStatus,
+    MAX_MEMORY_BODY_BYTES, MAX_MEMORY_TITLE_CHARS,
 };
 
 use crate::chat_titling::{derive_text_with_retries, Proposal};
@@ -33,8 +34,7 @@ const EVIDENCE_READ_BACKOFF: std::time::Duration = std::time::Duration::from_mil
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MemoryProposal {
-    #[schemars(length(max = 32))]
-    kind: Option<String>,
+    kind: Option<MemoryKind>,
     #[schemars(length(max = MAX_MEMORY_TITLE_CHARS))]
     title: Option<String>,
     #[schemars(length(max = MAX_MEMORY_BODY_BYTES))]
@@ -48,7 +48,7 @@ impl Proposal for MemoryProposal {
     fn proposed(self) -> Option<String> {
         let title = self.title.filter(|value| !value.trim().is_empty())?;
         let body = self.body.filter(|value| !value.trim().is_empty())?;
-        let kind = self.kind.unwrap_or_else(|| "fact".to_owned());
+        let kind = self.kind.unwrap_or(MemoryKind::Fact);
         serde_json::to_string(&serde_json::json!({
             "kind": kind,
             "title": title,
@@ -84,6 +84,7 @@ pub(crate) struct TurnMemoryCapturer {
     secrets: Arc<dyn tidebreak_core::SecretProvider>,
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
 }
 
 impl TurnMemoryCapturer {
@@ -97,6 +98,7 @@ impl TurnMemoryCapturer {
             secrets: recap.secrets.clone(),
             provisioned_policy: recap.provisioned_policy.clone(),
             os_policy: recap.os_policy.clone(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
             recap,
         }
     }
@@ -152,29 +154,14 @@ impl TurnMemoryCapturer {
         else {
             return Ok(());
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
-        let title = parsed
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_owned();
-        let body = parsed
-            .get("body")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_owned();
+        let proposal: MemoryProposal = serde_json::from_str(&payload)
+            .map_err(|err| AgentError::msg(format!("parse memory proposal: {err}")))?;
+        let title = proposal.title.unwrap_or_default().trim().to_owned();
+        let body = proposal.body.unwrap_or_default().trim().to_owned();
         if title.is_empty() || body.is_empty() {
             return Ok(());
         }
-        let kind = match parsed.get("kind").and_then(serde_json::Value::as_str) {
-            Some("preference") => MemoryKind::Preference,
-            Some("lesson") => MemoryKind::Lesson,
-            Some("reference") => MemoryKind::Reference,
-            _ => MemoryKind::Fact,
-        };
+        let kind = proposal.kind.unwrap_or(MemoryKind::Fact);
         // A completed turn always has journal rows, but the read can race
         // the journal flush; retry rather than drop a proposal the person
         // would otherwise never see.
@@ -200,6 +187,24 @@ impl TurnMemoryCapturer {
             return Err(AgentError::msg(format!(
                 "no journal evidence for turn {turn_id} after {EVIDENCE_READ_ATTEMPTS} reads"
             )));
+        }
+        let existing = self
+            .db
+            .list(
+                owner,
+                MemoryListFilter {
+                    scope: Some(MemoryScope::Personal),
+                    statuses: Vec::new(),
+                    kinds: Vec::new(),
+                },
+            )
+            .await
+            .map_err(|err| AgentError::msg(format!("list memory proposals: {err}")))?;
+        if existing.iter().any(|record| {
+            record.status != MemoryStatus::Tracking
+                && record.title.trim().eq_ignore_ascii_case(title.trim())
+        }) {
+            return Ok(());
         }
         let now = chrono::Utc::now();
         let record = MemoryRecord {
@@ -265,15 +270,88 @@ impl TurnMemoryCapturer {
 
 impl TurnMemoryCapture for TurnMemoryCapturer {
     fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId) {
+        let Some((mut claim, mut turn_id)) =
+            CaptureClaim::acquire(&self.in_flight, session_id, turn_id)
+        else {
+            return;
+        };
         let capturer = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = capturer.derive(&owner, session_id, turn_id).await {
-                tracing::error!(
-                    "tidebreak: could not capture memory for code turn {turn_id}: {error}"
-                );
-                capturer.report_failure(&owner, session_id, &error).await;
+            loop {
+                if let Err(error) = capturer.derive(&owner, session_id, turn_id).await {
+                    tracing::error!(
+                        "tidebreak: could not capture memory for code turn {turn_id}: {error}"
+                    );
+                    capturer.report_failure(&owner, session_id, &error).await;
+                }
+                let Some(next) = claim.take_pending_or_release() else {
+                    break;
+                };
+                turn_id = next;
             }
         });
+    }
+}
+
+/// A session’s place in `TurnMemoryCapturer::in_flight`, released on drop.
+struct CaptureClaim {
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+    session_id: SessionId,
+    released: bool,
+}
+
+impl CaptureClaim {
+    fn acquire(
+        in_flight: &Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Option<(Self, TurnId)> {
+        let in_flight = in_flight.clone();
+        let mut guard = in_flight
+            .lock()
+            .expect("memory capture claims are never held across a panic");
+        match guard.entry(session_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(None);
+                drop(guard);
+                Some((
+                    Self {
+                        in_flight,
+                        session_id,
+                        released: false,
+                    },
+                    turn_id,
+                ))
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(Some(turn_id));
+                None
+            }
+        }
+    }
+
+    fn take_pending_or_release(&mut self) -> Option<TurnId> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .expect("memory capture claims are never held across a panic");
+        let pending = in_flight.get_mut(&self.session_id).and_then(Option::take);
+        if pending.is_none() {
+            in_flight.remove(&self.session_id);
+            self.released = true;
+        }
+        pending
+    }
+}
+
+impl Drop for CaptureClaim {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(&self.session_id);
+        }
     }
 }
 

@@ -170,9 +170,6 @@ function statusBadge(
     return { label: "Gateway-managed", variant: "success" };
   }
   if (isHarnessReady(entry)) return { label: "Ready", variant: "success" };
-  if (entry.auth_mode === "hosted_unavailable") {
-    return { label: "Unavailable", variant: "warning" };
-  }
   // A state, not an instruction — the instruction is the line below it.
   if (entry.found) {
     return entry.authenticated === false
@@ -258,7 +255,6 @@ function DoctorRow({
     !downloading &&
     // Downloading an engine the relay cannot carry would hand the reader a
     // binary that still cannot run here.
-    entry.auth_mode !== "hosted_unavailable";
   // The same install path, pointed at the registry's newest release. Only
   // the server on the `latest` channel ever reports one.
   const canUpdate =

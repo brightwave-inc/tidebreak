@@ -404,6 +404,12 @@ impl TurnRecapper {
         for sequenced in &events {
             match &sequenced.event {
                 Event::TurnStarted { turn_id: started } if *started == turn_id => break,
+                Event::TurnStarted { .. } => {
+                    closing = None;
+                    activity.clear();
+                    worth_recapping = false;
+                    continue;
+                }
                 Event::AssistantMessage {
                     text,
                     parent_call_id: None,

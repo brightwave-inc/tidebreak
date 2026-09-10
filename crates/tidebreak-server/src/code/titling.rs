@@ -99,7 +99,7 @@ pub fn spawn_for_turn(state: &AppState, owner: &OwnerId, session_id: SessionId, 
                 tracing::info!("tidebreak: named a code workspace: {title}");
             }
             Ok(Outcome::Declined) => {
-                tracing::warn!("tidebreak: left a code workspace on its generated name");
+                tracing::debug!("tidebreak: left a code workspace on its generated name");
             }
             Ok(Outcome::NotApplicable) => {}
             Err(error) => {
@@ -126,10 +126,9 @@ async fn derive_workspace_title(
     let Some(workspace_id) = session.workspace_id else {
         return Ok(Outcome::NotApplicable);
     };
-    let Some(claim) = TitlingClaim::acquire(code, workspace_id) else {
+    let Some(_claim) = TitlingClaim::acquire(code, workspace_id) else {
         return Ok(Outcome::NotApplicable);
     };
-    let _held = claim;
     let Some(workspace) = get_workspace(&code.db, owner, workspace_id).await? else {
         return Ok(Outcome::NotApplicable);
     };

@@ -169,7 +169,7 @@ describe("DoctorList", () => {
               kind: "opencode",
               found: true,
               authenticated: false,
-              auth_mode: "hosted_unavailable",
+              auth_mode: "gateway_relay",
               remediation: "opencode is not available on hosted machines yet.",
             },
           ],

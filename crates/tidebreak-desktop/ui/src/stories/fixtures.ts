@@ -761,7 +761,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       version: "1.18.18",
       tier: "tertiary",
       authenticated: false,
-      auth_mode: "hosted_unavailable",
+      auth_mode: "gateway_relay",
       remediation: "opencode is not available on hosted machines yet.",
       caps: { ...fullCaps, allow_mode: "unknown", reasoning_levels: "unknown" },
     }),
@@ -770,7 +770,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       version: "grok 1.0.5",
       tier: "best_effort",
       authenticated: false,
-      auth_mode: "hosted_unavailable",
+      auth_mode: "gateway_relay",
       remediation: "Grok CLI is not available on hosted machines yet.",
       caps: {
         ...fullCaps,

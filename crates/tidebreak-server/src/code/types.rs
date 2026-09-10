@@ -644,9 +644,6 @@ pub enum HarnessAuthMode {
     /// turns run as the caller through the gateway and no local sign-in is
     /// needed.
     GatewayRelay,
-    /// The relay does not cover this engine yet, so it cannot run on a
-    /// hosted machine.
-    HostedUnavailable,
 }
 
 /// One engine's probe, capabilities, and remediation.

@@ -650,7 +650,7 @@ impl super::runtime::CodeRuntime {
         .await?;
         for grant in &revoked {
             self.grant_revocations().publish(grant.id);
-            self.revoke_gateway_delegation(owner, grant.id).await;
+            self.revoke_gateway_delegation(&grant.owner, grant.id).await;
         }
         Ok(revoked)
     }

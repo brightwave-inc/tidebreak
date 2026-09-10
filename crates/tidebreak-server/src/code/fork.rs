@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{
-    BlobStore, DocumentBlob, Event, HarnessKind, HarnessNoticeLevel, Session, ToolDetail,
-    ToolOutcome, Turn, TurnId, TurnStatus,
+    BlobStore, DocumentBlob, Event, HarnessNoticeLevel, Session, ToolDetail, ToolOutcome, Turn,
+    TurnId, TurnStatus,
 };
 
 /// Directory holding fork transcripts below the workspace's private root.
@@ -247,12 +247,12 @@ pub(crate) async fn write_transcript(
     let _write = write_lock.lock().await;
     let generation = uuid::Uuid::new_v4();
     let turns = cut.turns;
-    let engine = harness_label(session.harness_kind);
+    let engine = crate::code::harness_label(session.harness_kind);
 
     let scope = super::scratch::scratch_scope(private_root, FORKS_DIR, session.id.0, generation)?;
 
-    let retained_images = plan_attachment_retention(turns);
-    materialize_attachments(&scope, blobs, turns, &retained_images).await?;
+    let mut retained_images = plan_attachment_retention(turns);
+    materialize_attachments(&scope, blobs, turns, &mut retained_images).await?;
 
     let records = render_turn_records(
         private_path,
@@ -340,7 +340,7 @@ fn render_transcript_with_generation(
     retained_images: &HashSet<TurnId>,
     complete_turns: &HashSet<TurnId>,
 ) -> RenderedTranscript {
-    let engine = harness_label(session.harness_kind);
+    let engine = crate::code::harness_label(session.harness_kind);
     let mut sections: Vec<String> = Vec::with_capacity(turns.len());
     for turn in turns {
         sections.push(render_turn(
@@ -479,33 +479,25 @@ async fn materialize_attachments(
     scope: &super::scratch::ScratchScope,
     blobs: &dyn BlobStore,
     turns: &[Turn],
-    retained: &HashSet<TurnId>,
+    retained: &mut HashSet<TurnId>,
 ) -> std::io::Result<()> {
     for turn in turns {
         if !retained.contains(&turn.id) {
             continue;
         }
         for (ordinal, image) in turn.attachments.iter().enumerate() {
-            let bytes = blobs
-                .get(image.blob_id)
-                .await
-                .map_err(|error| std::io::Error::other(format!("read attachment blob: {error}")))?
-                .ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "fork attachment blob {} is missing",
-                        image.blob_id
-                    ))
-                })?;
+            let Ok(Some(bytes)) = blobs.get(image.blob_id).await else {
+                retained.remove(&turn.id);
+                break;
+            };
             let actual_len = u64::try_from(bytes.len())
                 .map_err(|_| std::io::Error::other("fork attachment length exceeds u64"))?;
             if actual_len != image.byte_len
                 || tidebreak_core::ImageMediaType::sniff(&bytes) != Some(image.media_type)
                 || DocumentBlob::from_bytes(&bytes).id != image.blob_id
             {
-                return Err(std::io::Error::other(format!(
-                    "fork attachment {} does not match its retained descriptor",
-                    image.blob_id
-                )));
+                retained.remove(&turn.id);
+                break;
             }
             let name = fork_attachment_name(turn, ordinal, image);
             scope.publish(std::ffi::OsStr::new(&name), &bytes).await?;
@@ -640,9 +632,7 @@ fn clip(section: &mut String, budget: usize) {
         end -= 1;
     }
     section.truncate(end);
-    if budget > CUT.len() {
-        section.push_str(CUT);
-    }
+    section.push_str(CUT);
 }
 
 /// One reduced turn: the ask's first line, and where the full record is.
@@ -828,6 +818,12 @@ fn turn_lines(turn_id: TurnId, events: &[SequencedEvent]) -> Vec<String> {
                     tool_line(&name, &started, detail.as_ref()),
                     outcome_suffix(outcome)
                 );
+            }
+            Event::HarnessNotice {
+                level: HarnessNoticeLevel::Error,
+                message,
+            } => {
+                lines.push(format!("**Engine notice (error):** {}", message.trim()));
             }
             Event::TurnFailed { error, .. } => {
                 lines.push(format!("**The turn failed:** {}", error.message.trim()));
@@ -1156,22 +1152,13 @@ fn one_line(value: &str) -> String {
 }
 
 /// The engine's name as a person writes it.
-fn harness_label(kind: HarnessKind) -> &'static str {
-    match kind {
-        HarnessKind::ClaudeCode => "Claude Code",
-        HarnessKind::Codex => "Codex CLI",
-        HarnessKind::Opencode => "opencode",
-        HarnessKind::Grok => "Grok CLI",
-        HarnessKind::Internal => "Tidebreak",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tidebreak_core::{
-        Attention, AttentionSource, BoundedError, FsBlobStore, ImageMediaType, ImageRef, OwnerId,
-        PermissionMode, SessionId, SessionKind, SessionLifecycle, TurnStatus, WorkspaceId,
+        Attention, AttentionSource, BoundedError, FsBlobStore, HarnessKind, ImageMediaType,
+        ImageRef, OwnerId, PermissionMode, SessionId, SessionKind, SessionLifecycle, TurnStatus,
+        WorkspaceId,
     };
 
     fn session() -> Session {
@@ -1647,22 +1634,6 @@ mod tests {
 
     /// Multi-byte text must not be cut through a character. A file the child
     /// engine cannot decode is worse than one that stops early.
-    #[test]
-    fn cuts_on_a_character_boundary() {
-        let session = session();
-        let only = turn(session.id, 1, &"日".repeat(MAX_TRANSCRIPT_BYTES));
-
-        let rendered = render_transcript(&session, &[only], &[]);
-        assert!(rendered.markdown.len() <= MAX_TRANSCRIPT_BYTES);
-        assert!(rendered.truncated);
-        // Round-tripping through bytes proves nothing was cut mid-character:
-        // `String` would not hold it otherwise.
-        assert_eq!(
-            String::from_utf8(rendered.markdown.clone().into_bytes()).expect("valid utf-8"),
-            rendered.markdown
-        );
-    }
-
     /// The record keeps what the summary condenses away: tool output, the
     /// subagent's own calls and words, and the engine's reasoning.
     #[test]

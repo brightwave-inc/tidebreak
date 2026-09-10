@@ -846,7 +846,7 @@ impl CodeRuntime {
         if probe.authenticated != Some(false) {
             return Ok(());
         }
-        if relay_active && crate::code::harness_llm::relay_covered(harness) {
+        if relay_active {
             return Ok(());
         }
         if tidebreak_harness::auth_override_present(harness, &probe.env) {

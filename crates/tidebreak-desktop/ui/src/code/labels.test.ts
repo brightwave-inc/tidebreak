@@ -139,7 +139,7 @@ describe("harnessUnusableReason", () => {
       isHarnessReady({
         found: true,
         authenticated: true,
-        auth_mode: "hosted_unavailable",
+        auth_mode: "gateway_relay",
       }),
     ).toBe(false);
   });
@@ -187,7 +187,7 @@ describe("harnessUnusableReason", () => {
         found: true,
         installable: true,
         authenticated: true,
-        auth_mode: "hosted_unavailable",
+        auth_mode: "gateway_relay",
         caps: caps("supported", "supported", "supported"),
       }),
     ).toBe("Not available on hosted machines yet");
