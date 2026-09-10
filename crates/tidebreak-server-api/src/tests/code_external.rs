@@ -826,7 +826,7 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
             .lock()
             .unwrap()
             .iter()
-            .any(|message| matches!(&message.body, crate::code::remote::wire::SupervisorMessageBody::Input(body) if body == "continue from the browser"))
+            .any(|message| message.body == "continue from the browser")
     })
     .await;
     assert_eq!(fake.spawns.lock().unwrap().len(), 1);
