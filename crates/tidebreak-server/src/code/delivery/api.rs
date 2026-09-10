@@ -327,10 +327,12 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
         target: &CodeGitHubRepositoryTarget,
         base_branch: &str,
     ) -> bool {
-        match self {
-            Self::Gh { observation, runtime, .. } => crate::code::pr_fetch::read_branch_rules(
+        use crate::code::pr_fetch::{read_branch_rules, EndpointRead, FetchTransport};
+        let read = match self {
+            Self::Gh { observation, runtime, .. } => {
+                read_branch_rules(
                     &runtime.host_gate,
-                    crate::code::pr_fetch::FetchTransport::Gh {
+                    FetchTransport::Gh {
                         cwd: Path::new("."),
                         binary: observation
                             .binary
@@ -343,15 +345,15 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
                     base_branch,
                 )
                 .await
-                .ok()
-                .is_some_and(|read| matches!(read, crate::code::pr_fetch::EndpointRead::Fresh { value, .. } if value.has_merge_queue)),
+            }
             Self::Rest {
                 api_base,
                 credential,
                 runtime,
-            } => crate::code::pr_fetch::read_branch_rules(
+            } => {
+                read_branch_rules(
                     &runtime.host_gate,
-                    crate::code::pr_fetch::FetchTransport::Rest {
+                    FetchTransport::Rest {
                         api_base,
                         credential,
                     },
@@ -361,9 +363,12 @@ impl tidebreak_code_delivery::DeliveryApi for ServerDeliveryApi {
                     base_branch,
                 )
                 .await
-                .ok()
-                .is_some_and(|read| matches!(read, crate::code::pr_fetch::EndpointRead::Fresh { value, .. } if value.has_merge_queue)),
-        }
+            }
+        };
+        // Same rule as the fetched path: fresh rules that name no queue spare
+        // the timeline read; a queue, a host without rulesets, or a failed
+        // read pays it rather than reporting a queued PR as idle.
+        !matches!(read, Ok(EndpointRead::Fresh { value, .. }) if !value.has_merge_queue)
     }
 
     async fn merge_queue_membership(

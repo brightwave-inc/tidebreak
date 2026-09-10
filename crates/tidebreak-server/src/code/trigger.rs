@@ -539,15 +539,11 @@ async fn sweep_pull_requests(
                 continue;
             };
             let digest = super::pr_facts::digest_from_fact(fact);
-            let stack_parent_number = repo_facts
-                .iter()
-                .find(|candidate| {
-                    candidate.number != fact.number
-                        && candidate.state == tidebreak_core::CodePullRequestState::Open
-                        && !fact.base_branch.is_empty()
-                        && candidate.head_branch == fact.base_branch
-                })
-                .map(|candidate| candidate.number);
+            // Durable rows record no head repository, so a base branch that
+            // matches another row's head proves nothing (decision 77): the
+            // durable path cannot tell a stacked child from a fork with the
+            // same branch name, and only the fetched path holds one.
+            let stack_parent_number = None;
             for work in repository_work {
                 claim_fires_from_row(runtime, owner, work, &digest, stack_parent_number).await;
             }
