@@ -21,6 +21,7 @@ use super::types::{
 };
 
 const PRICES_AS_OF: &str = "2026-09-03";
+const NO_REPOSITORY_NAME: &str = "no repository";
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct CodeAnalyticsQuery {
@@ -87,22 +88,17 @@ fn build_snapshot(
         .collect();
     let session_by_id: HashMap<SessionId, &Session> = sessions
         .iter()
-        .filter(|session| {
-            session
-                .workspace_id
-                .and_then(|workspace_id| workspace_repos.get(&workspace_id))
-                .is_some_and(|repo_id| repo_filter.is_none_or(|filter| filter == *repo_id))
-        })
+        .filter(|session| session_matches_repo_filter(session, &workspace_repos, repo_filter))
         .map(|session| (session.id, session))
         .collect();
 
     let mut totals = CodeAnalyticsTotals::default();
     let mut pricing = PricingAccumulator::default();
     let mut daily: BTreeMap<NaiveDate, DailyAccumulator> = BTreeMap::new();
-    let mut repo_metrics: HashMap<RepoId, MetricsAccumulator> = repos
+    let mut repo_metrics: HashMap<Option<RepoId>, MetricsAccumulator> = repos
         .iter()
         .filter(|repo| repo_filter.is_none_or(|filter| filter == repo.id))
-        .map(|repo| (repo.id, MetricsAccumulator::default()))
+        .map(|repo| (Some(repo.id), MetricsAccumulator::default()))
         .collect();
     let mut model_metrics: HashMap<ModelKey, ModelAccumulator> = HashMap::new();
     let mut harness_metrics: HashMap<HarnessKind, MetricsAccumulator> = HashMap::new();
@@ -123,11 +119,10 @@ fn build_snapshot(
         if !in_range(turn.started_at, from, through) {
             continue;
         }
-        let Some(repo_id) = session
-            .workspace_id
-            .and_then(|workspace_id| workspace_repos.get(&workspace_id).copied())
-        else {
-            continue;
+        let repo_id = match session_repo_id(session, &workspace_repos) {
+            SessionRepo::MissingWorkspace => continue,
+            SessionRepo::None => None,
+            SessionRepo::Some(repo_id) => Some(repo_id),
         };
         active_sessions.insert(session.id);
         let date = turn.started_at.date_naive();
@@ -167,9 +162,7 @@ fn build_snapshot(
         day.total_tokens = day.total_tokens.saturating_add(tokens.total);
 
         let canonical_model = turn.model.as_deref().and_then(canonical_model_id);
-        let rate = (!turn.fast_mode)
-            .then(|| canonical_model.and_then(price_for_canonical))
-            .flatten();
+        let rate = canonical_model.and_then(price_for_canonical);
         let cost_millimicrousd = rate
             .map(|rate| rate.cost_millimicrousd(tokens))
             .unwrap_or(0);
@@ -212,11 +205,10 @@ fn build_snapshot(
         let Some(session) = session_by_id.get(&session_id).copied() else {
             continue;
         };
-        let Some(repo_id) = session
-            .workspace_id
-            .and_then(|workspace_id| workspace_repos.get(&workspace_id).copied())
-        else {
-            continue;
+        let repo_id = match session_repo_id(session, &workspace_repos) {
+            SessionRepo::MissingWorkspace => continue,
+            SessionRepo::None => None,
+            SessionRepo::Some(repo_id) => Some(repo_id),
         };
         repo_metrics
             .entry(repo_id)
@@ -250,7 +242,7 @@ fn build_snapshot(
                 .or_default();
             day.pull_requests_opened = day.pull_requests_opened.saturating_add(1);
             for repo_id in &matching_repos {
-                let metrics = repo_metrics.entry(*repo_id).or_default();
+                let metrics = repo_metrics.entry(Some(*repo_id)).or_default();
                 metrics.pull_requests_opened = metrics.pull_requests_opened.saturating_add(1);
             }
         }
@@ -260,7 +252,7 @@ fn build_snapshot(
                 let day = daily.entry(merged_at.date_naive()).or_default();
                 day.pull_requests_merged = day.pull_requests_merged.saturating_add(1);
                 for repo_id in &matching_repos {
-                    let metrics = repo_metrics.entry(*repo_id).or_default();
+                    let metrics = repo_metrics.entry(Some(*repo_id)).or_default();
                     metrics.pull_requests_merged = metrics.pull_requests_merged.saturating_add(1);
                 }
             }
@@ -273,7 +265,7 @@ fn build_snapshot(
         .into_iter()
         .filter(|repo| repo_filter.is_none_or(|filter| filter == repo.id))
         .map(|repo| {
-            let metrics = repo_metrics.remove(&repo.id).unwrap_or_default();
+            let metrics = repo_metrics.remove(&Some(repo.id)).unwrap_or_default();
             CodeAnalyticsRepository {
                 repo_id: repo.id,
                 name: repo.display_name,
@@ -292,6 +284,22 @@ fn build_snapshot(
             .cmp(&left.total_tokens)
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
+    if repo_filter.is_none() {
+        if let Some(metrics) = repo_metrics.remove(&None) {
+            if !metrics.sessions.is_empty() || metrics.turns > 0 {
+                repositories.push(CodeAnalyticsRepository {
+                    repo_id: RepoId::from(uuid::Uuid::nil()),
+                    name: NO_REPOSITORY_NAME.to_owned(),
+                    sessions: as_u64(metrics.sessions.len()),
+                    turns: metrics.turns,
+                    total_tokens: metrics.tokens,
+                    estimated_cost_microusd: microusd(metrics.cost_millimicrousd),
+                    pull_requests_opened: metrics.pull_requests_opened,
+                    pull_requests_merged: metrics.pull_requests_merged,
+                });
+            }
+        }
+    }
 
     let mut models = model_metrics
         .into_iter()
@@ -344,6 +352,37 @@ fn build_snapshot(
             priced_tokens: pricing.priced_tokens,
             unpriced_tokens: pricing.unpriced_tokens,
             prices_as_of: PRICES_AS_OF.to_owned(),
+        },
+    }
+}
+
+enum SessionRepo {
+    Some(RepoId),
+    None,
+    MissingWorkspace,
+}
+
+fn session_matches_repo_filter(
+    session: &Session,
+    workspace_repos: &HashMap<WorkspaceId, RepoId>,
+    repo_filter: Option<RepoId>,
+) -> bool {
+    match session_repo_id(session, workspace_repos) {
+        SessionRepo::MissingWorkspace => false,
+        SessionRepo::None => repo_filter.is_none(),
+        SessionRepo::Some(repo_id) => repo_filter.is_none_or(|filter| filter == repo_id),
+    }
+}
+
+fn session_repo_id(
+    session: &Session,
+    workspace_repos: &HashMap<WorkspaceId, RepoId>,
+) -> SessionRepo {
+    match session.workspace_id {
+        None => SessionRepo::None,
+        Some(workspace_id) => match workspace_repos.get(&workspace_id).copied() {
+            Some(repo_id) => SessionRepo::Some(repo_id),
+            None => SessionRepo::MissingWorkspace,
         },
     }
 }
@@ -839,5 +878,132 @@ mod tests {
             total: 4_000_000,
         });
         assert_eq!(microusd(cost), 73_500_000);
+    }
+
+    #[test]
+    fn fast_mode_turn_uses_the_canonical_rate_and_is_priced() {
+        let now = Utc::now();
+        let session = sample_session(None, now);
+        let usage = tidebreak_core::TurnUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            context_tokens: 0,
+            first_call_context_tokens: None,
+        };
+        let turn = tidebreak_core::db::code::TurnMetric {
+            session_id: session.id,
+            status: TurnStatus::Completed,
+            model: Some("claude-sonnet-5".into()),
+            fast_mode: true,
+            usage: Some(usage.clone()),
+            started_at: now,
+        };
+        let snapshot = build_snapshot(
+            CodeAnalyticsRange::All,
+            None,
+            now,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![session],
+            vec![turn],
+            Vec::new(),
+            Vec::new(),
+        );
+        let tokens = UsageTotals::from_usage(&usage);
+        let expected = microusd(
+            price_for_canonical("claude-sonnet-5")
+                .unwrap()
+                .cost_millimicrousd(tokens),
+        );
+        assert!(expected > 0);
+        assert_eq!(snapshot.totals.estimated_cost_microusd, expected);
+        assert_eq!(snapshot.pricing.priced_turns, 1);
+        assert_eq!(snapshot.pricing.unpriced_turns, 0);
+        assert!(snapshot.models[0].fast_mode);
+        assert!(snapshot.models[0].priced);
+        assert_eq!(snapshot.models[0].estimated_cost_microusd, expected);
+    }
+
+    #[test]
+    fn workspace_less_session_turns_count_in_totals_and_no_repository_group() {
+        let now = Utc::now();
+        let session = sample_session(None, now);
+        let usage = tidebreak_core::TurnUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            context_tokens: 0,
+            first_call_context_tokens: None,
+        };
+        let turn = tidebreak_core::db::code::TurnMetric {
+            session_id: session.id,
+            status: TurnStatus::Completed,
+            model: Some("claude-sonnet-5".into()),
+            fast_mode: false,
+            usage: Some(usage),
+            started_at: now,
+        };
+        let snapshot = build_snapshot(
+            CodeAnalyticsRange::All,
+            None,
+            now,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![session],
+            vec![turn],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(snapshot.totals.sessions, 1);
+        assert_eq!(snapshot.totals.turns, 1);
+        assert_eq!(snapshot.totals.completed_turns, 1);
+        assert_eq!(snapshot.totals.total_tokens, 120);
+        let no_repo = snapshot
+            .repositories
+            .iter()
+            .find(|row| row.name == NO_REPOSITORY_NAME)
+            .expect("no repository group");
+        assert_eq!(no_repo.sessions, 1);
+        assert_eq!(no_repo.turns, 1);
+        assert_eq!(no_repo.total_tokens, 120);
+    }
+
+    fn sample_session(
+        workspace_id: Option<tidebreak_core::WorkspaceId>,
+        created_at: DateTime<Utc>,
+    ) -> Session {
+        Session {
+            id: SessionId::new(),
+            owner: tidebreak_core::OwnerId::local(),
+            owner_kind: None,
+            workspace_id,
+            kind: tidebreak_core::SessionKind::Interactive,
+            harness_kind: HarnessKind::Internal,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: tidebreak_core::PermissionMode::Ask,
+            model: Some("claude-sonnet-5".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: tidebreak_core::SessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 0,
+            attention: tidebreak_core::Attention::working(
+                tidebreak_core::AttentionSource::Lifecycle,
+            ),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            visibility: tidebreak_core::SessionVisibility::Private,
+            created_at,
+            execution_location: tidebreak_core::ExecutionLocation::Machine,
+            acts_as: None,
+        }
     }
 }
