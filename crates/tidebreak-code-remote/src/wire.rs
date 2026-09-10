@@ -75,6 +75,21 @@ pub struct SpawnArguments {
     /// Optional turn budget including the spawn-task turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// The session's installed engine for the environment to bind, sent
+    /// only when this machine registers engines (gateway decision 118).
+    /// The environment admits it for the `custom` harness on its managed
+    /// supervised profile and refuses it anywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedded_engine: Option<SpawnEmbeddedEngine>,
+}
+
+/// The engine identity a spawn asserts for the environment to bind.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SpawnEmbeddedEngine {
+    /// Engine token the supervised image installs (`claude_code`, `codex`).
+    pub engine: String,
+    /// The Tidebreak session UUID the engine runs for.
+    pub engine_session_id: String,
 }
 
 /// One git repository a spawn declares.
@@ -311,6 +326,30 @@ mod tests {
             ["harness", "profile", "repository", "task"]
                 .iter()
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// An engine binding travels as its own object beside the harness, in
+    /// the field names the environment defines.
+    #[test]
+    fn spawn_arguments_carry_the_engine_binding_when_declared() {
+        let arguments = SpawnArguments {
+            profile: "tidebreak".to_owned(),
+            harness: "custom".to_owned(),
+            task: "fix the flaky test".to_owned(),
+            embedded_engine: Some(SpawnEmbeddedEngine {
+                engine: "codex".to_owned(),
+                engine_session_id: "018f0000-0000-7000-8000-000000000000".to_owned(),
+            }),
+            ..SpawnArguments::default()
+        };
+        let value = serde_json::to_value(&arguments).unwrap();
+        assert_eq!(
+            value["embedded_engine"],
+            serde_json::json!({
+                "engine": "codex",
+                "engine_session_id": "018f0000-0000-7000-8000-000000000000",
+            })
         );
     }
 

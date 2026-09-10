@@ -152,6 +152,19 @@ impl EmbeddedEngine {
     }
 }
 
+/// What an exchange asserts beyond the subject token.
+#[derive(Clone, Copy)]
+enum ExchangeBinding<'a> {
+    /// Ordinary on-behalf-of inference or a capability read.
+    None,
+    /// This machine's add-on identity alone, so the gateway records runtime
+    /// authority a later spawn can bind an engine under (gateway decision
+    /// 118).
+    Host,
+    /// The installed engine a session runs, signed by the add-on identity.
+    Engine(SessionId, &'a EmbeddedEngine),
+}
+
 /// What this process remembers about one caller.
 ///
 /// `subject` is the most recent machine-bound bearer that caller presented,
@@ -219,6 +232,8 @@ struct ExchangeResponse {
     engine_version: Option<String>,
     #[serde(default)]
     engine_session_id: Option<String>,
+    #[serde(default)]
+    runtime_add_on: Option<String>,
 }
 
 /// The forge identity a hosted machine's git operations act as.
@@ -550,6 +565,7 @@ impl OboGateway {
             gateway: self.clone(),
             audience: format!("runtime:{endpoint_slug}"),
             external: None,
+            authenticate_host: false,
             slots: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -637,7 +653,11 @@ impl OboGateway {
             subject.clone()
         };
         let minted = self
-            .exchange_with(&subject, INFERENCE_AUDIENCE, Some((session, engine)))
+            .exchange_with(
+                &subject,
+                INFERENCE_AUDIENCE,
+                ExchangeBinding::Engine(session, engine),
+            )
             .await?;
         let token = minted.token.to_string();
         cached.retain(|_, held| held.is_fresh());
@@ -653,23 +673,25 @@ impl OboGateway {
     /// handles. Every other non-success is a refusal too — this never retries
     /// onto another credential.
     async fn exchange(&self, subject: &str, audience: &str) -> Result<CachedToken> {
-        self.exchange_with(subject, audience, None).await
+        self.exchange_with(subject, audience, ExchangeBinding::None)
+            .await
     }
 
-    /// The exchange, optionally binding the token to the installed engine a
-    /// session runs (gateway decision 118).
+    /// The exchange, optionally asserting this machine's add-on identity or
+    /// the installed engine a session runs (gateway decision 118).
     ///
-    /// A binding rides this machine's registered add-on identity, so a
-    /// caller's bearer alone never asserts an engine. The gateway echoes the
-    /// engine, version, and session it bound; anything short of an exact
-    /// echo is refused rather than used, because a token the gateway minted
-    /// as ordinary Tidebreak inference would silently run the engine's turns
-    /// off the caller's subscription.
+    /// Either assertion rides the registered add-on credentials, so a
+    /// caller's bearer alone never claims an engine or runtime authority.
+    /// The gateway echoes what it bound: the engine, version, and session,
+    /// or the add-on whose runtime authority it recorded. Anything short of
+    /// an exact echo is refused rather than used, because a token the
+    /// gateway minted as ordinary Tidebreak inference would silently run
+    /// the engine's turns off the caller's subscription.
     async fn exchange_with(
         &self,
         subject: &str,
         audience: &str,
-        engine: Option<(SessionId, &EmbeddedEngine)>,
+        binding: ExchangeBinding<'_>,
     ) -> Result<CachedToken> {
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", TOKEN_EXCHANGE_GRANT),
@@ -677,14 +699,15 @@ impl OboGateway {
             ("subject_token_type", SUBJECT_TOKEN_TYPE),
             ("audience", audience),
         ];
-        let bound = engine.map(|(session, engine)| {
-            (
+        let bound = match binding {
+            ExchangeBinding::Engine(session, engine) => Some((
                 engine.kind.as_str(),
                 engine.version.as_str(),
                 session.as_uuid().to_string(),
-            )
-        });
-        if let Some((kind, version, session)) = &bound {
+            )),
+            ExchangeBinding::None | ExchangeBinding::Host => None,
+        };
+        if !matches!(binding, ExchangeBinding::None) {
             let (client_id, client_secret) =
                 self.machine_credentials.as_ref().ok_or_else(|| {
                     AgentError::config(
@@ -692,11 +715,13 @@ impl OboGateway {
                          set GATEWAY_CLIENT_ID and GATEWAY_CLIENT_SECRET",
                     )
                 })?;
+            form.push(("client_id", client_id.as_str()));
+            form.push(("client_secret", client_secret.as_str()));
+        }
+        if let Some((kind, version, session)) = &bound {
             form.push(("engine", kind));
             form.push(("engine_version", version));
             form.push(("engine_session_id", session.as_str()));
-            form.push(("client_id", client_id.as_str()));
-            form.push(("client_secret", client_secret.as_str()));
         }
         let response = self
             .client
@@ -734,6 +759,15 @@ impl OboGateway {
                         .into(),
                 ));
             }
+        }
+        if matches!(binding, ExchangeBinding::Host)
+            && exchanged.runtime_add_on.as_deref() != Some("tidebreak")
+        {
+            return Err(AgentError::InvalidTarget(
+                "the Model Gateway did not record this machine's runtime authority (gateway \
+                 decision 118); a sandbox spawned on this token could not bind its engine"
+                    .into(),
+            ));
         }
         Ok(CachedToken {
             token: exchanged.access_token.into(),
@@ -1425,6 +1459,9 @@ pub struct RuntimeTokens {
     gateway: Arc<OboGateway>,
     audience: String,
     external: Option<Arc<external::ExternalDelegations>>,
+    /// Whether each exchange asserts the machine's add-on identity, so the
+    /// gateway records runtime authority for engine-bound spawns.
+    authenticate_host: bool,
     slots: std::sync::Mutex<HashMap<(OwnerId, SessionId), RuntimeTokenSlot>>,
 }
 
@@ -1441,6 +1478,21 @@ impl RuntimeTokens {
                 self.gateway.clone(),
                 db,
             ))),
+            authenticate_host: self.authenticate_host,
+            slots: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Assert the machine's add-on identity on every runtime exchange, so a
+    /// spawn on the minted token may name the session's installed engine for
+    /// the gateway to bind (gateway decision 118). Off, the exchange keeps
+    /// the shape a custom profile without registration expects.
+    pub fn authenticating_host(self: Arc<Self>, enabled: bool) -> Arc<Self> {
+        Arc::new(Self {
+            gateway: self.gateway.clone(),
+            audience: self.audience.clone(),
+            external: self.external.clone(),
+            authenticate_host: enabled,
             slots: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -1509,8 +1561,13 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
                 "this machine holds no live Model Gateway session for you; sign in again".into(),
             ));
         };
+        let binding = if self.authenticate_host {
+            ExchangeBinding::Host
+        } else {
+            ExchangeBinding::None
+        };
         let minted = gateway
-            .exchange(&subject, &self.audience)
+            .exchange_with(&subject, &self.audience, binding)
             .await
             .map_err(runtime_token_error)?;
         // Revocation may commit while the exchange is in flight.
@@ -1951,6 +2008,8 @@ mod tests {
         /// The last `(engine, engine_version, engine_session_id)` an
         /// exchange declared.
         last_engine: Arc<std::sync::Mutex<Option<(String, String, String)>>>,
+        /// How many exchanges carried the add-on client credentials.
+        host_auth_exchanges: Arc<AtomicUsize>,
     }
 
     impl FakeGateway {
@@ -1968,6 +2027,7 @@ mod tests {
                 last_attribution: Arc::new(std::sync::Mutex::new(None)),
                 engine_ack: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 last_engine: Arc::new(std::sync::Mutex::new(None)),
+                host_auth_exchanges: Arc::new(AtomicUsize::new(0)),
                 catalog: Arc::new(std::sync::Mutex::new(serde_json::json!({
                     "models": [
                         {
@@ -2061,6 +2121,18 @@ mod tests {
                         }
                         let serial = state.mints.fetch_add(1, Ordering::SeqCst);
                         let engine = form.get("engine").cloned();
+                        let host_authenticated = form.contains_key("client_id");
+                        if host_authenticated {
+                            assert_eq!(
+                                form.get("client_id").map(String::as_str),
+                                Some("tidebreak")
+                            );
+                            assert_eq!(
+                                form.get("client_secret").map(String::as_str),
+                                Some("test-machine-secret")
+                            );
+                            state.host_auth_exchanges.fetch_add(1, Ordering::SeqCst);
+                        }
                         let label = if audience == CATALOG_AUDIENCE {
                             "catalog"
                         } else if audience.starts_with("runtime:") {
@@ -2076,6 +2148,12 @@ mod tests {
                             "expires_in": state.lifetime.load(Ordering::SeqCst),
                             "scope": "inference:invoke",
                         });
+                        if host_authenticated
+                            && audience.starts_with("runtime:")
+                            && state.engine_ack.load(Ordering::SeqCst)
+                        {
+                            body["runtime_add_on"] = serde_json::json!("tidebreak");
+                        }
                         if let Some(engine) = engine {
                             // An engine binding authenticates the add-on with
                             // its client credentials beside the subject
@@ -2470,6 +2548,59 @@ mod tests {
         let again = tokens.runtime_token(&alice, session).await.unwrap();
         assert_eq!(again.secret, token.secret);
         assert_eq!(gateway.served(), 1);
+        server.abort();
+    }
+
+    /// Under registration the runtime exchange asserts the add-on identity
+    /// and requires the gateway to record runtime authority; without a
+    /// machine identity, or without the echo, it refuses rather than
+    /// minting a token no spawn could bind an engine on.
+    #[tokio::test]
+    async fn runtime_tokens_authenticate_the_host_under_registration() {
+        use crate::code::remote::RuntimeTokenSource;
+        let gateway = FakeGateway::new();
+        let (inference, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        let session = SessionId::new();
+
+        // No machine identity: the exchange never runs.
+        inference.record_caller(&alice, "mg_at_alice".into());
+        let tokens = inference
+            .runtime_tokens("tidebreak")
+            .authenticating_host(true);
+        assert!(tokens.runtime_token(&alice, session).await.is_err());
+        assert_eq!(gateway.served(), 0);
+        drop(tokens);
+
+        let inference = Arc::new(
+            Arc::try_unwrap(inference)
+                .ok()
+                .expect("fresh gateway")
+                .with_machine_credentials_for_test("tidebreak", "test-machine-secret"),
+        );
+        inference.record_caller(&alice, "mg_at_alice".into());
+        let tokens = inference
+            .runtime_tokens("tidebreak")
+            .authenticating_host(true);
+        let token = tokens.runtime_token(&alice, session).await.unwrap();
+        assert!(token.secret.starts_with("mg_at_runtime_"));
+        assert_eq!(gateway.host_auth_exchanges.load(Ordering::SeqCst), 1);
+
+        // Off, the exchange keeps its ordinary shape.
+        let plain = inference.runtime_tokens("tidebreak");
+        plain.runtime_token(&alice, SessionId::new()).await.unwrap();
+        assert_eq!(gateway.host_auth_exchanges.load(Ordering::SeqCst), 1);
+
+        // A gateway that mints without recording authority is refused.
+        gateway.engine_ack.store(false, Ordering::SeqCst);
+        let refused = tokens
+            .runtime_token(&alice, SessionId::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("runtime authority"),
+            "{refused:?}"
+        );
         server.abort();
     }
 

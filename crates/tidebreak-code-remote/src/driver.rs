@@ -29,7 +29,7 @@ use tidebreak_core::{
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
-use super::wire::{EventCursor, SandboxMessage, SpawnArguments};
+use super::wire::{EventCursor, SandboxMessage, SpawnArguments, SpawnEmbeddedEngine};
 use super::{
     apply_attention, fence_session, journal_event, persist_session, reap_session,
     recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
@@ -48,6 +48,12 @@ pub struct RemoteSpawnSettings {
     pub profile: String,
     /// Engine and Allow mode supplied by the declared supervised image.
     pub engine: Option<tidebreak_core::HarnessKind>,
+    /// Further engines the supervised image runs, one chosen per session,
+    /// honored only under [`Self::embedded_engine_registration`].
+    pub engines: Vec<tidebreak_core::HarnessKind>,
+    /// Whether spawns name the session's engine for the environment to bind
+    /// (gateway decision 118).
+    pub embedded_engine_registration: bool,
     /// Concurrent live incarnations one owner may hold.
     pub incarnation_cap: usize,
     /// Per-spawn spend ceiling in micro-USD, when one is set.
@@ -63,9 +69,20 @@ impl RemoteSpawnSettings {
         let Some(engine) = self.engine else {
             return Ok(());
         };
-        if session.harness_kind != engine {
+        let admitted =
+            self.embedded_engine_registration && self.engines.contains(&session.harness_kind);
+        if session.harness_kind != engine && !admitted {
+            let choices = if self.embedded_engine_registration && !self.engines.is_empty() {
+                self.engines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            } else {
+                engine.to_string()
+            };
             return Err(format!(
-                "this sandbox profile runs {engine}; select that engine to start the session"
+                "this sandbox profile runs {choices}; select that engine to start the session"
             ));
         }
         if session.permission_mode != tidebreak_core::PermissionMode::Allow {
@@ -75,6 +92,20 @@ impl RemoteSpawnSettings {
             return Err("this sandbox profile does not support fast mode".into());
         }
         Ok(())
+    }
+
+    /// The engine identity a spawn declares for the environment to bind:
+    /// the session's external engine, when this machine registers engines.
+    /// The in-process engine is Tidebreak itself and never binds.
+    #[must_use]
+    pub fn embedded_engine(&self, session: &Session) -> Option<SpawnEmbeddedEngine> {
+        if !self.embedded_engine_registration || session.harness_kind.is_in_process() {
+            return None;
+        }
+        Some(SpawnEmbeddedEngine {
+            engine: session.harness_kind.as_str().to_owned(),
+            engine_session_id: session.id.as_uuid().to_string(),
+        })
     }
 }
 
@@ -546,6 +577,7 @@ impl RemoteDriver<'_> {
             wall_clock_timeout_seconds: None,
             spend_ceiling_microusd: settings.spend_ceiling_microusd,
             max_turns: None,
+            embedded_engine: settings.embedded_engine(session),
         };
         match provisioner.spawn(&owner, session.id, &arguments).await {
             Ok(lease) => {
@@ -1103,6 +1135,8 @@ mod tests {
         RemoteSpawnSettings {
             profile: "tidebreak-remote".to_owned(),
             engine: None,
+            engines: Vec::new(),
+            embedded_engine_registration: false,
             incarnation_cap: 2,
             spend_ceiling_microusd: Some(5_000_000),
             session_spend_ceiling_microusd: None,
@@ -1164,6 +1198,42 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// Under registration the spawn names the session's engine and UUID for
+    /// the environment to bind; without it the spawn stays engine-free, and
+    /// a listed engine other than the default is admitted for the session.
+    #[tokio::test]
+    async fn registration_names_the_session_engine_on_the_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let mut settings = settings();
+        settings.engine = Some(tidebreak_core::HarnessKind::ClaudeCode);
+        settings.engines = vec![
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+        ];
+        session.harness_kind = tidebreak_core::HarnessKind::Codex;
+        assert!(settings.validate_execution(&session).is_err());
+        assert!(settings.embedded_engine(&session).is_none());
+
+        settings.embedded_engine_registration = true;
+        assert!(settings.validate_execution(&session).is_ok());
+        let driver = driver!(&db, &bus, &fake, &settings);
+        driver
+            .submit_turn(&mut session, &workspace, &repo, "build it")
+            .await
+            .unwrap();
+        let spawns = fake.spawns.lock().unwrap();
+        assert_eq!(
+            spawns[0].embedded_engine,
+            Some(SpawnEmbeddedEngine {
+                engine: "codex".to_owned(),
+                engine_session_id: session.id.as_uuid().to_string(),
+            })
+        );
+        assert_eq!(spawns[0].harness, "custom");
     }
 
     /// A first turn on a fresh remote session reserves, spawns from the

@@ -29,6 +29,7 @@ use tidebreak_supervised_agent::harness_engine::{
 use tidebreak_supervised_agent::inputs::{resolve, RawInputs};
 use tidebreak_supervised_agent::trust::TrustOptions;
 use tidebreak_supervised_agent::wip::WipContext;
+use tidebreak_supervised_agent::wire::EmbeddedEngineRegistration;
 use tidebreak_supervised_agent::{bootstrap, effort, EXIT_MISSING_INPUT};
 
 #[tokio::main]
@@ -63,6 +64,27 @@ async fn run() -> i32 {
 
     let host = HostEnv::from_process();
     let probe = adapter.probe(&host).await;
+    // An admitted identity is registered with the exact installed version.
+    // A binary that reports none cannot be registered, and the environment
+    // would refuse every inference request, so stop here instead.
+    let embedded_engine = match inputs.embedded_engine.as_ref() {
+        None => None,
+        Some(identity) => match installed_version(probe.version.as_deref()) {
+            Some(version) => Some(EmbeddedEngineRegistration {
+                engine_session_id: identity.engine_session_id.clone(),
+                engine: identity.engine.as_str().to_owned(),
+                engine_version: version,
+            }),
+            None => {
+                eprintln!(
+                    "the installed {} binary reported no usable version ({:?}), so the \
+                     environment cannot register it and would refuse its inference",
+                    inputs.engine, probe.version
+                );
+                return EXIT_MISSING_INPUT;
+            }
+        },
+    };
     // Resolving the ladder can shell out to the engine's model catalog, so
     // only do it when there is a request to reconcile.
     let effective = match inputs.reasoning_effort.as_deref() {
@@ -151,6 +173,9 @@ async fn run() -> i32 {
     if let Some(wip) = wip {
         driver = driver.with_wip(wip);
     }
+    if let Some(registration) = embedded_engine {
+        driver = driver.with_embedded_engine(registration);
+    }
     match driver.run().await {
         Ok(()) => 0,
         Err(error) => {
@@ -158,6 +183,18 @@ async fn run() -> i32 {
             error.code
         }
     }
+}
+
+/// The version token the environment accepts: the binary's leading version
+/// word, in the bounded vocabulary the registration allows.
+fn installed_version(reported: Option<&str>) -> Option<String> {
+    let version = reported?.split_whitespace().next()?;
+    let allowed = !version.is_empty()
+        && version.len() <= 128
+        && version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".-+_".contains(&c));
+    allowed.then(|| version.to_owned())
 }
 
 /// Resolves symlinks so path comparisons and git commands agree; a path that

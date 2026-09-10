@@ -64,6 +64,8 @@ pub(crate) fn configured_settings(
     RemoteSpawnSettings {
         profile,
         engine: config.runtime_engine,
+        engines: config.runtime_engines.clone(),
+        embedded_engine_registration: config.runtime_embedded_engine_registration,
         incarnation_cap: config.runtime_concurrency_cap,
         spend_ceiling_microusd: config.runtime_spawn_spend_ceiling_microusd,
         session_spend_ceiling_microusd: config.runtime_session_spend_ceiling_microusd,
@@ -471,6 +473,8 @@ mod tests {
         RemoteSpawnSettings {
             profile: "tidebreak-remote".to_owned(),
             engine: None,
+            engines: Vec::new(),
+            embedded_engine_registration: false,
             incarnation_cap: 2,
             spend_ceiling_microusd: None,
             session_spend_ceiling_microusd: None,
