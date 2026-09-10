@@ -324,10 +324,11 @@ impl TurnRecapper {
 
     /// The bounded material one recap call reads.
     ///
-    /// Three parts, oldest context first: what the session was started to do,
-    /// what this turn was asked for, and what the turn actually did. The goal
-    /// is what keeps a recap of the fifth turn from reading as though the work
-    /// began there.
+    /// Four parts, oldest context first: what the session was started to do
+    /// (`<goal>`), what this turn was asked for (`<request>`), what the turn
+    /// actually did (`<did>`), and the engine's closing message (`<said>`).
+    /// The goal is what keeps a recap of the fifth turn from reading as
+    /// though the work began there.
     pub async fn turn_material(
         &self,
         owner: &OwnerId,

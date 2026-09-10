@@ -1,5 +1,7 @@
-//! Bounded scripts run in a Chrome isolated world. Page scripts cannot replace
-//! the reference table; every action checks the same live node and fingerprint.
+//! Snapshot scripts run in a Chrome isolated world. Viewport mapping and
+//! other evals that pass no world run in the page's main world. Page scripts
+//! cannot replace the reference table; every action checks the same live
+//! node and fingerprint.
 
 pub const SNAPSHOT_SCRIPT: &str = r#"(options => {
   const entries = new Map(), nodes = [];

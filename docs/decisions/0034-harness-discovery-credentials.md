@@ -6,6 +6,11 @@
 - Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),
   [`0033-code-mode-approvals.md`](0033-code-mode-approvals.md),
   [`docs/code-mode.md`](../code-mode.md)
+- Amended by: [`0071-hosted-engines-ride-the-callers-inference.md`](0071-hosted-engines-ride-the-callers-inference.md)
+  — children inherit an allowlist (`CHILD_ENV_ALLOWED_NAMES`), not the
+  probed shell environment minus Tidebreak-internal variables; hosted
+  engines receive injected relay credentials, so Tidebreak does inject
+  harness credentials on that path. The rest of this record stands.
 
 ## Context
 

@@ -125,7 +125,9 @@ impl CodeRuntime {
     ///
     /// Answers immediately in every case: the release is already installed,
     /// an install this process started is still running, or a fresh one is
-    /// now detached. Two callers never produce two installs.
+    /// now detached. Callers that share the same resolved version share one
+    /// install; a cold `latest` install (`version` unset) does not dedupe
+    /// against a later click that already knows the version.
     ///
     /// `deliberate` separates the two callers. A picker warms the engine
     /// because a surface opened, so a failed managed-Node install stays
