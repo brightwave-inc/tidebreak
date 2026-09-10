@@ -257,6 +257,12 @@ pub struct Config {
     pub runtime_profile: Option<String>,
     /// Engine packaged in a supervised sandbox profile, when explicitly declared.
     pub runtime_engine: Option<crate::HarnessKind>,
+    /// Explicit engines admitted by the runtime image; absent keeps the single-engine rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_engines: Option<Vec<crate::HarnessKind>>,
+    /// Require authenticated embedded-engine registration for a managed runtime image.
+    #[serde(default)]
+    pub runtime_embedded_engine_registration: bool,
     /// The permission mode an external (channel-bound) session starts in
     /// when it runs on this machine's own engine and the channel names none
     /// (decision 88). `ask` unless the operator says otherwise: an unattended
@@ -414,6 +420,8 @@ impl Config {
             runtime_endpoint: None,
             runtime_profile: None,
             runtime_engine: None,
+            runtime_engines: None,
+            runtime_embedded_engine_registration: false,
             external_permission_mode: crate::PermissionMode::DEFAULT,
             external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
@@ -491,7 +499,16 @@ impl Config {
             std::env::var("TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD").ok(),
         )
         .and_then(|config| {
-            config.with_runtime_engine_var(std::env::var("TIDEBREAK_RUNTIME_ENGINE").ok())
+            config
+                .with_runtime_engine_var(std::env::var("TIDEBREAK_RUNTIME_ENGINE").ok())
+                .and_then(|config| {
+                    config.with_runtime_engines_var(std::env::var("TIDEBREAK_RUNTIME_ENGINES").ok())
+                })
+        })
+        .and_then(|config| {
+            config.with_runtime_embedded_engine_registration_var(
+                std::env::var("TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION").ok(),
+            )
         })
         .and_then(|config| {
             config.with_external_permission_vars(
@@ -518,6 +535,74 @@ impl Config {
                 AgentError::config("TIDEBREAK_RUNTIME_ENGINE must name a supported external engine")
             })?;
         self.runtime_engine = Some(engine);
+        Ok(self)
+    }
+
+    /// Admit requested engines only when the operator declares the image's complete set.
+    pub fn with_runtime_engines_var(mut self, value: Option<String>) -> Result<Self> {
+        let Some(value) = value else {
+            return Ok(self);
+        };
+        let default = self.runtime_engine.ok_or_else(|| AgentError::config(
+            "TIDEBREAK_RUNTIME_ENGINES requires TIDEBREAK_RUNTIME_ENGINE and a sandbox runtime profile",
+        ))?;
+        let mut engines = Vec::new();
+        for value in value.split(',') {
+            let engine = crate::HarnessKind::from_str(value.trim())
+                .filter(|kind| !kind.is_in_process())
+                .ok_or_else(|| {
+                    AgentError::config(
+                        "TIDEBREAK_RUNTIME_ENGINES must list supported external engines",
+                    )
+                })?;
+            if engines.contains(&engine) {
+                return Err(AgentError::config(
+                    "TIDEBREAK_RUNTIME_ENGINES contains a duplicate engine",
+                ));
+            }
+            engines.push(engine);
+        }
+        if !engines.contains(&default) {
+            return Err(AgentError::config(
+                "TIDEBREAK_RUNTIME_ENGINES must include TIDEBREAK_RUNTIME_ENGINE",
+            ));
+        }
+        self.runtime_engines = Some(engines);
+        Ok(self)
+    }
+
+    /// Enable managed registration only through an explicit deployment declaration.
+    pub fn with_runtime_embedded_engine_registration_var(
+        mut self,
+        value: Option<String>,
+    ) -> Result<Self> {
+        self.runtime_embedded_engine_registration = match value.as_deref().map(str::trim) {
+            None | Some("") | Some("false") => false,
+            Some("true") => true,
+            _ => {
+                return Err(AgentError::config(
+                    "TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION must be true or false",
+                ))
+            }
+        };
+        if self.runtime_embedded_engine_registration {
+            let supported = |engine: &crate::HarnessKind| {
+                matches!(
+                    engine,
+                    crate::HarnessKind::ClaudeCode | crate::HarnessKind::Codex
+                )
+            };
+            if self.runtime_endpoint.as_deref() != Some("tidebreak")
+                || self.runtime_profile.is_none()
+                || !self.runtime_engine.as_ref().is_some_and(supported)
+                || self
+                    .runtime_engines
+                    .as_ref()
+                    .is_some_and(|engines| engines.is_empty() || !engines.iter().all(supported))
+            {
+                return Err(AgentError::config("TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION requires the tidebreak runtime endpoint, a profile, and supported claude_code or codex engines"));
+            }
+        }
         Ok(self)
     }
 
@@ -684,6 +769,8 @@ impl Config {
             runtime_endpoint,
             runtime_profile,
             runtime_engine: None,
+            runtime_engines: None,
+            runtime_embedded_engine_registration: false,
             external_permission_mode: crate::PermissionMode::DEFAULT,
             external_permission_ceiling: crate::PermissionMode::DEFAULT,
             runtime_concurrency_cap: default_runtime_concurrency_cap(),
@@ -1071,6 +1158,88 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
         assert_eq!(config.runtime_profile.as_deref(), Some("tidebreak-remote"));
+    }
+
+    #[test]
+    fn runtime_engines_require_an_explicit_set_containing_the_default() {
+        let mut config = Config::desktop("/data");
+        assert!(config
+            .clone()
+            .with_runtime_engines_var(Some("claude_code,codex".into()))
+            .is_err());
+        config.runtime_profile = Some("managed".into());
+        config = config
+            .with_runtime_engine_var(Some("claude_code".into()))
+            .unwrap();
+        assert!(config
+            .clone()
+            .with_runtime_engines_var(None)
+            .unwrap()
+            .runtime_engines
+            .is_none());
+        let admitted = config
+            .clone()
+            .with_runtime_engines_var(Some("claude_code, codex".into()))
+            .unwrap();
+        assert_eq!(
+            admitted.runtime_engines,
+            Some(vec![
+                crate::HarnessKind::ClaudeCode,
+                crate::HarnessKind::Codex
+            ])
+        );
+        for invalid in [
+            "",
+            "codex",
+            "claude_code,unknown",
+            "claude_code,internal",
+            "claude_code,claude_code",
+        ] {
+            assert!(
+                config
+                    .clone()
+                    .with_runtime_engines_var(Some(invalid.into()))
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_registration_is_explicit_and_requires_a_supported_runtime() {
+        let mut config = Config::desktop("/data");
+        assert!(
+            !config
+                .clone()
+                .with_runtime_embedded_engine_registration_var(None)
+                .unwrap()
+                .runtime_embedded_engine_registration
+        );
+        assert!(config
+            .clone()
+            .with_runtime_embedded_engine_registration_var(Some("true".into()))
+            .is_err());
+        config.runtime_endpoint = Some("tidebreak".into());
+        config.runtime_profile = Some("managed".into());
+        config.runtime_engine = Some(crate::HarnessKind::ClaudeCode);
+        assert!(
+            !config
+                .clone()
+                .with_runtime_embedded_engine_registration_var(None)
+                .unwrap()
+                .runtime_embedded_engine_registration
+        );
+        assert!(
+            config
+                .clone()
+                .with_runtime_embedded_engine_registration_var(Some("true".into()))
+                .unwrap()
+                .runtime_embedded_engine_registration
+        );
+        config.runtime_endpoint = Some("primary".into());
+        assert!(config
+            .with_runtime_embedded_engine_registration_var(Some("true".into()))
+            .is_err());
     }
 
     #[test]

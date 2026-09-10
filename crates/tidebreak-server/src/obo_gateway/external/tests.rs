@@ -62,6 +62,7 @@ async fn gateway() -> (String, Gateway) {
             Json(serde_json::json!({
                 "access_token": format!("{prefix}-{}", body["subject_token"]), "expires_in": 600,
                 "engine": body.get("engine"), "engine_version": body.get("engine_version"), "engine_session_id": body.get("engine_session_id"),
+                "runtime_add_on": if body["audience"] == "runtime:tidebreak" { Some("tidebreak") } else { None },
             }))
         }))
         .route("/compat/openai/v1/responses", post(|headers: HeaderMap| async move {
@@ -622,6 +623,7 @@ async fn runtime_tokens_follow_the_session_grant_after_restart_refresh_and_revoc
     let restarted_gateway = obo(&base);
     let tokens = restarted_gateway
         .runtime_tokens("tidebreak")
+        .with_embedded_engine_registration(true)
         .with_external_delegations(db.clone());
     let first = tokens.runtime_token(&owner, session).await.unwrap();
     assert_eq!(first.secret, "runtime-delegated-1");
@@ -633,6 +635,12 @@ async fn runtime_tokens_follow_the_session_grant_after_restart_refresh_and_revoc
         state.exchanges.lock().unwrap().as_slice(),
         &[("delegated-1".into(), "runtime:tidebreak".into())]
     );
+    {
+        let forms = state.exchange_forms.lock().unwrap();
+        assert_eq!(forms[0]["client_id"], "tidebreak");
+        assert_eq!(forms[0]["client_secret"], "test-machine-secret");
+        assert!(!forms[0].contains_key("engine"));
+    }
     // A refreshed delegation invalidates the cached runtime token even while
     // that runtime token is fresh.
     let slot = tokens
@@ -686,6 +694,7 @@ async fn runtime_tokens_refuse_missing_and_wrong_owner_sessions_before_browser_f
     browser.record_caller(&other, "another-browser-session".into());
     let tokens = browser
         .runtime_tokens("tidebreak")
+        .with_embedded_engine_registration(true)
         .with_external_delegations(db);
     for (caller, target) in [(&owner, SessionId::new()), (&other, session)] {
         assert!(matches!(
@@ -740,6 +749,7 @@ async fn cached_runtime_token_refuses_revocation_while_waiting_for_its_slot() {
     let session = bind_runtime_session(&db, &owner, grant.id, None).await;
     let tokens = obo(&base)
         .runtime_tokens("tidebreak")
+        .with_embedded_engine_registration(true)
         .with_external_delegations(db);
     tokens.runtime_token(&owner, session).await.unwrap();
     let slot = tokens

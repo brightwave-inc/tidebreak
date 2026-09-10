@@ -288,6 +288,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_provenance_authenticates_only_the_registered_tidebreak_runtime() {
+        use crate::code::remote::RuntimeTokenSource;
+        let owner = OwnerId::local();
+        for (registered, managed, endpoint, ack, succeeds) in [
+            (
+                true,
+                true,
+                "tidebreak",
+                serde_json::json!({"runtime_add_on":"tidebreak"}),
+                true,
+            ),
+            (true, true, "tidebreak", serde_json::json!({}), false),
+            (
+                true,
+                true,
+                "tidebreak",
+                serde_json::json!({"runtime_add_on":"other"}),
+                false,
+            ),
+            (false, true, "tidebreak", serde_json::json!({}), false),
+            (false, false, "tidebreak", serde_json::json!({}), true),
+            (true, false, "tidebreak", serde_json::json!({}), true),
+            (true, false, "primary", serde_json::json!({}), true),
+        ] {
+            let (gateway, recorded, server) =
+                gateway_with_ack(registered, false, 3600, Some(ack)).await;
+            gateway.record_caller(&owner, "owner-subject".into());
+            let runtime = gateway
+                .runtime_tokens(endpoint)
+                .with_embedded_engine_registration(managed);
+            let session = SessionId::new();
+            for _ in 0..2 {
+                assert_eq!(
+                    runtime.runtime_token(&owner, session).await.is_ok(),
+                    succeeds
+                );
+            }
+            let forms = recorded.lock().unwrap();
+            assert_eq!(
+                forms.len(),
+                if managed && !registered {
+                    0
+                } else if succeeds {
+                    1
+                } else {
+                    2
+                },
+                "refused acknowledgments cannot be cached"
+            );
+            for form in forms.iter() {
+                assert_eq!(form["audience"], format!("runtime:{endpoint}"));
+                assert_eq!(form["subject_token"], "owner-subject");
+                assert_eq!(form.contains_key("client_secret"), managed);
+                if managed {
+                    assert_eq!(form["client_id"], "tidebreak-test-client");
+                    assert_eq!(form["client_secret"], "test-client-secret");
+                }
+                assert!(!form.contains_key("engine"));
+                assert!(!form.contains_key("engine_session_id"));
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn authenticated_engine_tokens_are_single_flight_and_isolated_by_owner_session_engine_version(
     ) {
         let (gateway, recorded, server) = gateway(true, false, 3600).await;

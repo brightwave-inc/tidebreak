@@ -1475,6 +1475,9 @@ async fn bind_inner(
                 &endpoint,
                 gateway
                     .runtime_tokens(&endpoint)
+                    .with_embedded_engine_registration(
+                        state.config.runtime_embedded_engine_registration,
+                    )
                     .with_external_delegations(db.clone()),
             )
             .map_err(|error| AgentError::config(format!("sandbox runtime client: {error}")))?;

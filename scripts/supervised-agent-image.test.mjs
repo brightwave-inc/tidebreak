@@ -4,13 +4,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { installWorkloadHarnesses, workloadHarnessPins } from "../deploy/supervised-agent/install-harness.mjs";
 
 const root = new URL("../", import.meta.url);
 const dockerfile = readFileSync(new URL("deploy/self-host/Dockerfile", root), "utf8");
 const wrapper = readFileSync(new URL("deploy/supervised-agent/entrypoint.sh", root), "utf8");
 const workflow = readFileSync(new URL(".github/workflows/publish-server-image.yml", root), "utf8");
 const pins = readFileSync(new URL("crates/tidebreak-harness/src/pin.rs", root), "utf8");
-const claudeVersion = pins.match(/kind: HarnessKind::ClaudeCode,\s*version: "([^"]+)"/)[1];
+const workloadPins = workloadHarnessPins(pins);
+const claudeVersion = workloadPins.find((pin) => pin.kind === "ClaudeCode").version;
+const codexVersion = workloadPins.find((pin) => pin.kind === "Codex").version;
 
 function runWrapper(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "tidebreak-workload-"));
@@ -40,21 +43,64 @@ function runWrapper(overrides = {}) {
 }
 
 test("the workload guards accept only the public placeholder and supported engine", () => {
-  const valid = runWrapper();
-  assert.equal(valid.status, 0, valid.stderr);
-  assert.equal(valid.stdout.trim(), "agent-started");
+  for (const engine of [undefined, "claude_code", "codex"]) {
+    const valid = runWrapper(engine ? { TIDEBREAK_AGENT_ENGINE: engine } : {});
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.equal(valid.stdout.trim(), "agent-started");
+  }
   for (const override of [
     { MODEL_GATEWAY_SANDBOX_ID: "" },
     { MODEL_GATEWAY_SANDBOX_SUPERVISOR_ENDPOINT: "" },
     { MODEL_GATEWAY_SANDBOX_GATEWAY_URL: "" },
     { MODEL_GATEWAY_SANDBOX_PLACEHOLDER_TOKEN: "private-fixture" },
     { GH_TOKEN: "private-fixture" },
-    { TIDEBREAK_AGENT_ENGINE: "codex" },
+    { TIDEBREAK_AGENT_ENGINE: "internal" },
+    { TIDEBREAK_AGENT_ENGINE: "custom" },
+    { TIDEBREAK_AGENT_ENGINE: "unknown" },
   ]) {
     const refused = runWrapper(override);
     assert.notEqual(refused.status, 0, JSON.stringify(override));
     assert.equal(refused.stdout, "");
     assert.doesNotMatch(refused.stderr, /private-fixture/);
+  }
+});
+
+test("the workload installs both exact pins and checks each installed binary", () => {
+  const calls = [];
+  installWorkloadHarnesses(pins, "/managed/npm", (command, args) => {
+    calls.push({ command, args });
+    if (command === "/usr/local/bin/claude") return `${claudeVersion} (Claude Code)\n`;
+    if (command === "/usr/local/bin/codex") return `codex-cli ${codexVersion}\n`;
+    return "";
+  });
+  assert.equal(calls[0].command, "/managed/npm");
+  assert.deepEqual(calls[0].args.slice(-2), [
+    `@anthropic-ai/claude-code@${claudeVersion}`,
+    `@openai/codex@${codexVersion}`,
+  ]);
+  assert.deepEqual(calls.slice(1), [
+    { command: "/usr/local/bin/claude", args: ["--version"] },
+    { command: "/usr/local/bin/codex", args: ["--version"] },
+  ]);
+});
+
+test("invalid pins and mismatched binaries stop the workload build", () => {
+  for (const source of [
+    pins.replace("HarnessKind::Codex,", "HarnessKind::Unknown,"),
+    pins.replace('package: "@openai/codex"', 'package: "other-package"'),
+    pins + pins,
+  ]) {
+    let invoked = false;
+    assert.throws(() => installWorkloadHarnesses(source, "/managed/npm", () => { invoked = true; }), /package pin is missing or malformed/);
+    assert.equal(invoked, false);
+  }
+  for (const mismatchedEngine of ["claude", "codex"]) {
+    assert.throws(() => installWorkloadHarnesses(pins, "/managed/npm", (command) => {
+      if (command === `/usr/local/bin/${mismatchedEngine}`) return "0.0.0";
+      if (command === "/usr/local/bin/claude") return `${claudeVersion} (Claude Code)`;
+      if (command === "/usr/local/bin/codex") return `codex-cli ${codexVersion}`;
+      return "";
+    }), /installed .* version does not match/);
   }
 });
 
@@ -91,10 +137,11 @@ test("the shared publication workflow has one job per stage and valid shell bloc
 const image = process.env.TIDEBREAK_SUPERVISED_AGENT_IMAGE;
 test("the built workload starts as UID 65532 with pinned tools and no server", { skip: !image }, () => {
   const inspect = spawnSync("docker", ["run", "--rm", "--network=none", "--entrypoint", "/bin/sh", image, "-ec",
-    'test "$(id -u)" = 65532; test -x /usr/local/bin/sandbox-agent; test -x /usr/local/bin/tidebreak-supervised-agent; test ! -e /usr/local/bin/tidebreak; test ! -e /opt/tidebreak/ui; git --version; gh --version; node --version; npm --version; npx --version; rustc --version; cargo --version; python3 --version; claude --version',
+    'test "$(id -u)" = 65532; test -x /usr/local/bin/sandbox-agent; test -x /usr/local/bin/tidebreak-supervised-agent; test ! -e /usr/local/bin/tidebreak; test ! -e /opt/tidebreak/ui; git --version; gh --version; node --version; npm --version; npx --version; rustc --version; cargo --version; python3 --version; claude --version; codex --version',
   ], { encoding: "utf8", timeout: 60000 });
   assert.equal(inspect.status, 0, inspect.stderr);
   assert.match(inspect.stdout, new RegExp(claudeVersion.replaceAll(".", "\\.") + " "));
+  assert.match(inspect.stdout, new RegExp("codex-cli " + codexVersion.replaceAll(".", "\\.")));
   const committed = spawnSync("docker", ["run", "--rm", "--network=none", "--entrypoint", "/bin/sh",
     "--env", "GIT_AUTHOR_NAME=fixture[bot]", "--env", "GIT_COMMITTER_NAME=fixture[bot]",
     "--env", "GIT_AUTHOR_EMAIL=8675309+fixture[bot]@users.noreply.github.com",
