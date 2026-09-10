@@ -31,10 +31,23 @@ pub fn materialize_artifacts(
             ));
         }
         let target = root.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("artifact {} parent could not be created: {error}", artifact.path)
-            })?;
+        create_clean_parents(&root, target.parent().unwrap_or(&root)).map_err(|error| {
+            format!("artifact {} parent could not be created: {error}", artifact.path)
+        })?;
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => {
+                return Err(format!(
+                    "artifact {} already exists; refusing to overwrite scratch state",
+                    artifact.path
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "artifact {} could not be checked: {error}",
+                    artifact.path
+                ));
+            }
         }
         std::fs::write(&target, &artifact.bytes).map_err(|error| {
             format!("artifact {} could not be written: {error}", artifact.path)
@@ -42,6 +55,34 @@ pub fn materialize_artifacts(
         written += 1;
     }
     Ok(written)
+}
+
+/// Creates parent directories one level at a time, refusing any component
+/// that is (or becomes through creation) a symlink so artifact bytes can
+/// never escape the scratch root.
+fn create_clean_parents(root: &Path, parent: &Path) -> Result<(), String> {
+    if !parent.starts_with(root) {
+        return Err("artifact parent escapes scratch".to_owned());
+    }
+    let relative = parent.strip_prefix(root).map_err(|_| "artifact parent escapes scratch".to_owned())?;
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component);
+        let metadata = match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                std::fs::create_dir(&cursor).map_err(|error| error.to_string())?;
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err("artifact parent resolves through a symlink".to_owned());
+        }
+        if !metadata.is_dir() {
+            return Err("artifact parent is not a directory".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Accepts only empty or relative, normal, non-dotdot paths.
@@ -105,6 +146,42 @@ mod tests {
                 bytes: vec![],
             }];
             assert!(materialize_artifacts(dir.path(), &artifacts).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn existing_or_symlinked_parents_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("exports");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("thread.jsonl"), "first").unwrap();
+        let overwrite = vec![SupervisorArtifact {
+            path: "exports/thread.jsonl".to_owned(),
+            media_type: "application/jsonl".to_owned(),
+            bytes: b"second".to_vec(),
+        }];
+        assert!(
+            materialize_artifacts(dir.path(), &overwrite)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("payload"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, dir.path().join("link")).unwrap();
+            let through_link = vec![SupervisorArtifact {
+                path: "link/payload".to_owned(),
+                media_type: "text/plain".to_owned(),
+                bytes: vec![],
+            }];
+            assert!(
+                materialize_artifacts(dir.path(), &through_link)
+                    .unwrap_err()
+                    .contains("symlink"),
+                "a parent symlink must never carry artifact bytes outside scratch"
+            );
         }
     }
 }
