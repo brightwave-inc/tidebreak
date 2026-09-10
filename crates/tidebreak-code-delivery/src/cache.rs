@@ -325,7 +325,7 @@ pub(super) async fn workspace_index(
         }
     }
 
-    loop {
+    for _ in 0..3 {
         let generation = runtime.delivery_cache().owner_cache_generation(&key);
         let catalog = owner_repository_catalog(runtime, owner, force_refresh).await?;
         let workspaces = runtime.list_workspaces(owner, None).await?;
@@ -367,6 +367,38 @@ pub(super) async fn workspace_index(
             return Ok(index);
         }
     }
+    let catalog = owner_repository_catalog(runtime, owner, force_refresh).await?;
+    let workspaces = runtime.list_workspaces(owner, None).await?;
+    let targets: HashMap<_, _> = catalog
+        .entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.repo.id,
+                (entry.target, PathBuf::from(entry.repo.root_path)),
+            )
+        })
+        .collect();
+    Ok(stream::iter(workspaces)
+        .map(|workspace| {
+            let target = targets.get(&workspace.repo_id).cloned();
+            async move {
+                let (target, root) = target?;
+                let head_sha = git_read(&root, &["rev-parse", &workspace.branch_name])
+                    .await
+                    .ok()
+                    .filter(|value| !value.is_empty());
+                Some(WorkspaceIndexEntry {
+                    repository_key: repository_key(&target),
+                    workspace,
+                    head_sha,
+                })
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .filter_map(async move |entry| entry)
+        .collect()
+        .await)
 }
 
 pub(super) fn workspace_status_rank(status: CodeWorkspaceStatus) -> u8 {

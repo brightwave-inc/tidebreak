@@ -3,6 +3,7 @@
 use std::sync::Barrier;
 
 use super::*;
+use crate::stack::StackRepositoryIdentity;
 
 #[test]
 fn repository_inputs_cover_https_ssh_and_short_forms() {
@@ -332,50 +333,6 @@ fn a_single_author_reaches_the_remote_read() {
     // A union of authors is not something `gh pr list` can express.
     query.authors = vec!["mara".into(), "devon".into()];
     assert_eq!(pull_request_remote_plan(&query).author, None);
-}
-
-#[test]
-fn run_sources_keep_rows_and_report_each_failed_source() {
-    let target = repository_target("tidebreak");
-    let workflows = serde_json::json!({
-        "workflow_runs": [{
-            "id": 41,
-            "run_attempt": 3,
-            "status": "completed",
-            "conclusion": "success",
-            "name": "Desktop CI"
-        }]
-    });
-    let fetched = collect_run_sources(
-        &target,
-        &repository_ref(),
-        &[],
-        Ok(Some(workflows)),
-        Err("HTTP 503: Service Unavailable".into()),
-    );
-
-    assert_eq!(fetched.items.len(), 1);
-    assert_eq!(fetched.items[0].kind, CodeDeliveryRunKind::WorkflowRun);
-    assert_eq!(fetched.items[0].run_attempt, Some(3));
-    assert_eq!(fetched.errors.len(), 1);
-    assert!(fetched.errors[0].message.contains("deployments"));
-
-    let deployments = serde_json::json!([{
-        "id": 91,
-        "environment": "production"
-    }]);
-    let fetched = collect_run_sources(
-        &target,
-        &repository_ref(),
-        &[],
-        Err("HTTP 503: Service Unavailable".into()),
-        Ok(Some(deployments)),
-    );
-
-    assert_eq!(fetched.items.len(), 1);
-    assert_eq!(fetched.items[0].kind, CodeDeliveryRunKind::Deployment);
-    assert_eq!(fetched.errors.len(), 1);
-    assert!(fetched.errors[0].message.contains("workflow runs"));
 }
 
 #[test]

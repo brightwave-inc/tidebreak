@@ -111,6 +111,18 @@ pub trait DeliveryApi: Send + Sync {
         etag: Option<&str>,
     ) -> Result<EndpointRead<Vec<Value>>, HostReadError>;
 
+    /// Whether merging into `base_branch` may run a merge queue, so the
+    /// per-pull membership read is worth paying. Answer `false` only when
+    /// the branch rules were read and name no queue; an unknown answer pays
+    /// the read. Implementations that cannot read rules keep the default.
+    async fn has_merge_queue(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _base_branch: &str,
+    ) -> bool {
+        true
+    }
+
     async fn merge_queue_membership(
         &self,
         target: &CodeGitHubRepositoryTarget,

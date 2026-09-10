@@ -539,8 +539,13 @@ async fn sweep_pull_requests(
                 continue;
             };
             let digest = super::pr_facts::digest_from_fact(fact);
+            // Durable rows record no head repository, so a base branch that
+            // matches another row's head proves nothing (decision 77): the
+            // durable path cannot tell a stacked child from a fork with the
+            // same branch name, and only the fetched path holds one.
+            let stack_parent_number = None;
             for work in repository_work {
-                claim_fires_from_row(runtime, owner, work, &digest).await;
+                claim_fires_from_row(runtime, owner, work, &digest, stack_parent_number).await;
             }
         }
         if !stale.is_empty() {
@@ -612,6 +617,7 @@ async fn claim_fires_from_row(
     owner: &OwnerId,
     work: &RepositoryWork,
     digest: &PullRequestDigest,
+    stack_parent_number: Option<u64>,
 ) {
     // Without a head SHA the fire cannot be fingerprinted, and a fire that
     // cannot be bounded would repeat every tick.
@@ -621,6 +627,14 @@ async fn claim_fires_from_row(
     let Some(condition) = classify_trigger_condition(digest) else {
         return;
     };
+    if holds_stacked_child(condition, stack_parent_number) {
+        debug!(
+            number = digest.number,
+            parent = stack_parent_number,
+            "code-mode trigger held a stacked child's durable-row fire"
+        );
+        return;
+    }
     let Some(workspaces) = work.workspaces_by_number.get(&digest.number) else {
         return;
     };
@@ -664,12 +678,7 @@ async fn claim_fires(
     // summary carries the parent from the durable fact set (decision 77).
     // Firing Behind or ReviewRequired at it would send an agent to rebase
     // onto a branch that moves with every parent push.
-    if item.stack_parent_number.is_some()
-        && matches!(
-            condition,
-            CodeTriggerCondition::Behind | CodeTriggerCondition::ReviewRequired
-        )
-    {
+    if holds_stacked_child(condition, item.stack_parent_number) {
         debug!(
             number = item.number,
             parent = item.stack_parent_number,
@@ -699,6 +708,14 @@ async fn claim_fires(
             }
         }
     }
+}
+
+fn holds_stacked_child(condition: CodeTriggerCondition, stack_parent_number: Option<u64>) -> bool {
+    stack_parent_number.is_some()
+        && matches!(
+            condition,
+            CodeTriggerCondition::Behind | CodeTriggerCondition::ReviewRequired
+        )
 }
 
 /// How this fire reaches the agent.
@@ -1243,6 +1260,20 @@ mod tests {
             merged_at: None,
             closed_at: None,
         }
+    }
+
+    #[test]
+    fn durable_row_holds_stacked_children_for_moving_parent_conditions() {
+        assert!(holds_stacked_child(CodeTriggerCondition::Behind, Some(11)));
+        assert!(holds_stacked_child(
+            CodeTriggerCondition::ReviewRequired,
+            Some(11)
+        ));
+        assert!(!holds_stacked_child(
+            CodeTriggerCondition::ChecksFailed,
+            Some(11)
+        ));
+        assert!(!holds_stacked_child(CodeTriggerCondition::Behind, None));
     }
 
     fn link(exact: bool, status: CodeWorkspaceStatus) -> CodeDeliveryWorkspaceLink {

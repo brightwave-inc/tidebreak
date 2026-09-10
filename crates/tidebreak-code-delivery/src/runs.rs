@@ -350,7 +350,23 @@ pub(super) async fn fetch_runs(
     } else {
         Ok(None)
     };
-    let mut fetched = collect_run_sources(target, &repository, workspaces, Ok(None), deployments);
+    let mut fetched = FetchedRuns::default();
+    match deployments {
+        Ok(Some(value)) => fetched.items.extend(
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(MAX_REMOTE_ITEMS_PER_REPO)
+                .filter_map(|deployment| {
+                    parse_deployment(&repository, deployment, None, workspaces)
+                }),
+        ),
+        Ok(None) => {}
+        Err(message) => fetched
+            .errors
+            .push(detail_source_error(target, "deployments", message)),
+    }
     if options.fetch_workflows {
         match load_or_refresh_workflow_runs(
             runtime,
@@ -638,47 +654,6 @@ pub(super) fn summary_from_run_fact(
         created_at: fact.created_at,
         updated_at: fact.updated_at,
     }
-}
-
-pub(super) fn collect_run_sources(
-    target: &CodeGitHubRepositoryTarget,
-    repository: &CodeGitHubRepositoryRef,
-    workspaces: &[WorkspaceIndexEntry],
-    workflow_runs: Result<Option<Value>, String>,
-    deployments: Result<Option<Value>, String>,
-) -> FetchedRuns {
-    let mut fetched = FetchedRuns::default();
-    match workflow_runs {
-        Ok(Some(value)) => {
-            if let Some(runs) = value.get("workflow_runs").and_then(Value::as_array) {
-                fetched.items.extend(
-                    runs.iter()
-                        .filter_map(|run| parse_workflow_run(repository, run, workspaces)),
-                );
-            }
-        }
-        Ok(None) => {}
-        Err(message) => fetched
-            .errors
-            .push(detail_source_error(target, "workflow runs", message)),
-    }
-    match deployments {
-        Ok(Some(value)) => fetched.items.extend(
-            value
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(MAX_REMOTE_ITEMS_PER_REPO)
-                .filter_map(|deployment| {
-                    parse_deployment(repository, deployment, None, workspaces)
-                }),
-        ),
-        Ok(None) => {}
-        Err(message) => fetched
-            .errors
-            .push(detail_source_error(target, "deployments", message)),
-    }
-    fetched
 }
 
 pub(super) fn run_remote_scope(query: &CodeDeliveryRunQuery) -> (&'static str, bool, bool) {
