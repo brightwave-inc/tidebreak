@@ -4629,3 +4629,103 @@ async fn repositoryless_explicit_harness_refuses_missing_authentication() {
     .unwrap()
     .is_none());
 }
+
+#[tokio::test]
+async fn channel_preferences_share_workspace_scope_and_enforce_admin_writes() {
+    let (router, runtime, repo, service, _dir) = workspace_grant_app().await;
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-first").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", grant.id);
+    let prefs = serde_json::json!({"harness":"claude_code", "model":null, "respond_automatically":false, "instructions":"Keep replies brief."});
+    for token in [BOB_TOKEN, CAROL_TOKEN] {
+        let (status, _) = call_json(&router, "PUT", &route, token, Some(prefs.clone())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, saved) = call_json(&router, "PUT", &route, ALICE_TOKEN, Some(prefs.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["instructions"], "Keep replies brief.");
+    let (status, _) = call_json(&router, "GET", &route, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    tidebreak_core::db::code::revoke_external_grant(&runtime.db, &service, grant.id, "reconnect")
+        .await
+        .unwrap();
+    let replacement =
+        repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-second").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", replacement.id);
+    let (status, read) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C1/preferences",
+        "prefs-second",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["respond_automatically"], false);
+    assert_eq!(read["instructions"], "Keep replies brief.");
+    let (_, other_channel) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C2/preferences",
+        "prefs-second",
+        None,
+    )
+    .await;
+    assert_eq!(other_channel["instructions"], "");
+    let _other = repository_scope_workspace_grant(&runtime, &service, "T2", "prefs-other").await;
+    let (_, other_workspace) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C1/preferences",
+        "prefs-other",
+        None,
+    )
+    .await;
+    assert_eq!(other_workspace["instructions"], "");
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &route,
+        ALICE_TOKEN,
+        Some(serde_json::json!({"instructions":"x".repeat(8193)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        "prefs-second",
+        Some(serde_json::json!({"external_key":"T1/C1/prefs", "channel_id":"C1", "repo_id":repo})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["harness"], "claude_code");
+    let session = serde_json::from_value(created["session_id"].clone()).unwrap();
+    assert_eq!(
+        crate::code::channel_preferences::session_instructions(&runtime.db, &service, session)
+            .await
+            .unwrap(),
+        "Keep replies brief."
+    );
+    let mut updated = prefs;
+    updated["instructions"] = "Changed instructions".into();
+    updated["harness"] = "codex".into();
+    let (status, _) = call_json(&router, "PUT", &route, ALICE_TOKEN, Some(updated)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, existing) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        "prefs-second",
+        Some(serde_json::json!({"external_key":"T1/C1/prefs", "channel_id":"C1", "repo_id":repo})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{existing}");
+    assert_eq!(existing["harness"], "claude_code");
+    assert_eq!(
+        crate::code::channel_preferences::session_instructions(&runtime.db, &service, session)
+            .await
+            .unwrap(),
+        "Keep replies brief."
+    );
+}

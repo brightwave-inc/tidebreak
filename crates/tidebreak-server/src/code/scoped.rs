@@ -1059,6 +1059,45 @@ impl ScopedCode {
         self.runtime.list_workspace_grants_all_owners().await
     }
 
+    pub async fn channel_preferences_grant(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        _write: bool,
+    ) -> Result<tidebreak_core::CodeExternalGrant, ServerError> {
+        if !self.is_admin() || self.is_service() {
+            return Err(ServerError::forbidden(
+                "a human administrator must manage shared channel settings",
+            ));
+        }
+        let grant = if self.is_admin() {
+            tidebreak_core::db::code::get_external_grant_all_owners(&self.runtime.db, id).await?
+        } else {
+            tidebreak_core::db::code::get_external_grant(&self.runtime.db, &self.owner, id).await?
+        };
+        grant
+            .filter(|g| g.revoked_at.is_none() && (g.owner == self.owner || g.kind.is_workspace()))
+            .ok_or_else(|| ServerError::not_found("Slack connection not found"))
+    }
+
+    pub async fn channel_preferences(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        channel: &str,
+    ) -> Result<super::channel_preferences::ChannelPreferences, ServerError> {
+        let grant = self.channel_preferences_grant(id, false).await?;
+        super::channel_preferences::read(&self.runtime.db, &grant, channel).await
+    }
+
+    pub async fn set_channel_preferences(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        channel: &str,
+        preferences: &super::channel_preferences::ChannelPreferences,
+    ) -> Result<(), ServerError> {
+        let grant = self.channel_preferences_grant(id, true).await?;
+        super::channel_preferences::write(&self.runtime.db, &grant, channel, preferences).await
+    }
+
     pub async fn list_channel_repository_confirms(
         &self,
         owner: &OwnerId,

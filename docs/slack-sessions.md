@@ -940,3 +940,29 @@ forge before starting repository work or attaching a task to another channel.
 Historical channel approval records and endpoints remain compatible with older
 clients, but do not determine repository access. Decision 96 supersedes the
 per-channel approval policy in decisions 92, 93, and 94.
+
+## Channel behavior settings
+
+Tidebreak owns a Slack channel's harness, model, automatic replies, and added
+instructions. Gateway owns execution permissions, credentials, sandbox resources,
+and spending limits. A channel inherits the instance's GitHub App repository
+access; channel behavior never creates another repository allowlist.
+
+The adapter reads `GET /external/code/channels/{channel_id}/preferences` with
+its live grant. Tidebreak keys the preferences by Slack workspace and channel,
+so reconnecting or rotating a grant keeps the settings. An unset harness or
+model uses the instance's existing selection behavior. Automatic replies default
+to enabled for established Tidebreak threads; they do not start a conversation
+from every channel message. A thread's quiet override remains separate.
+
+The response supplies `settings_path`, which the adapter resolves against the
+Tidebreak UI origin. The authenticated channel page uses the existing harness
+and model catalogs. A human administrator can read or change shared settings.
+A personal Slack connection does not prove membership in a private channel, so
+it does not grant access to that channel's instructions.
+
+A new session freezes its harness, model, and channel instructions. Later channel
+changes leave existing sessions intact. Session creation returns the stored
+`harness` and `model`; a null model means no model has been pinned, rather than
+an inferred default presented as observed execution. The adapter should render
+these values and link to Configure without adding another status message.

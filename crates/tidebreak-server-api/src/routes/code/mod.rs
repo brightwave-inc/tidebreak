@@ -16,6 +16,10 @@ mod access;
 mod analytics;
 mod approvals;
 mod browser;
+mod channel_preferences;
+pub(crate) use channel_preferences::{
+    external_channel_preferences, get_channel_preferences, put_channel_preferences,
+};
 mod delivery;
 mod external;
 #[cfg(test)]

@@ -1,3 +1,8 @@
+import type {
+  ChannelPreferences,
+  ChannelPreferencesSnapshot,
+} from "../../settings/channelPreferences";
+import { parseChannelPreferences } from "../../settings/channelPreferences";
 import type { CodeConnectPage, CodeGrantSnapshot } from "../types";
 import {
   parseCodeConnectPage,
@@ -11,6 +16,41 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
   Base: TBase,
 ) {
   return class extends Base {
+    async getChannelPreferences(
+      grant: string,
+      channel: string,
+    ): Promise<ChannelPreferencesSnapshot> {
+      return requireParsed(
+        parseChannelPreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/preferences`,
+            { headers: this.headers() },
+          ),
+        ),
+        "channel preferences",
+      );
+    }
+
+    async setChannelPreferences(
+      grant: string,
+      channel: string,
+      preferences: ChannelPreferences,
+    ): Promise<ChannelPreferencesSnapshot> {
+      return requireParsed(
+        parseChannelPreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/preferences`,
+            {
+              method: "PUT",
+              headers: this.headers(true),
+              body: JSON.stringify(preferences),
+            },
+          ),
+        ),
+        "channel preferences",
+      );
+    }
+
     /** Every adapter grant the owner holds, revoked rows included. */
     async listCodeGrants(): Promise<CodeGrantSnapshot[]> {
       return requireParsed(
