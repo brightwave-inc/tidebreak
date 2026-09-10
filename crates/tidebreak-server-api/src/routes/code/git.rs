@@ -60,6 +60,11 @@ pub async fn list_workspace_pull_requests(
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspacePullRequests>, ServerError> {
     let facts = code.workspace_pull_requests(id).await?;
+    let fetched_at = facts
+        .iter()
+        .map(|(fact, _)| fact.last_seen_at)
+        .max()
+        .unwrap_or_else(chrono::Utc::now);
     let items = facts
         .into_iter()
         .map(|(fact, relation)| CodeWorkspacePullRequestFact {
@@ -83,10 +88,7 @@ pub async fn list_workspace_pull_requests(
             last_seen_at: fact.last_seen_at,
         })
         .collect();
-    Ok(Json(CodeWorkspacePullRequests {
-        items,
-        fetched_at: chrono::Utc::now(),
-    }))
+    Ok(Json(CodeWorkspacePullRequests { items, fetched_at }))
 }
 
 pub async fn refresh_workspace_pr(

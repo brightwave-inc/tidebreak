@@ -100,6 +100,7 @@ pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevokeGrantBody {
     #[serde(default)]
     pub reason: Option<String>,
@@ -130,6 +131,7 @@ pub async fn revoke_grant(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevokeWorkspaceBody {
     pub channel_kind: String,
     pub workspace_identity: String,
@@ -155,6 +157,7 @@ pub async fn revoke_workspace_grants(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectStartBody {
     pub channel_kind: String,
     pub external_identity: String,
@@ -240,6 +243,7 @@ pub async fn connect_view(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectApproveBody {
     pub csrf: String,
 }
@@ -316,6 +320,7 @@ pub async fn connect_complete(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceGrantStartBody {
     pub channel_kind: String,
     pub workspace_identity: String,
@@ -379,6 +384,7 @@ pub async fn view_workspace_grant(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceApproveBody {
     pub csrf: String,
 }
@@ -396,6 +402,7 @@ pub async fn approve_workspace_grant(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfirmRepositoryBody {
     pub repository: String,
 }

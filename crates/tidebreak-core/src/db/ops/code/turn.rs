@@ -320,8 +320,18 @@ pub async fn get_open_turn(
     owner: &OwnerId,
     session_id: SessionId,
 ) -> Result<Option<Turn>> {
-    let turns = list_turns(store, owner, session_id).await?;
-    Ok(turns.into_iter().rev().find(|turn| turn.status.is_open()))
+    let row = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .filter(
+            entities::turn::Column::Status
+                .is_in(TurnStatus::LIVE.iter().map(|status| status.as_str())),
+        )
+        .order_by_desc(entities::turn::Column::Ordinal)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    row.map(turn_from_row).transpose()
 }
 
 /// Next 1-based ordinal for a new turn on one of the owner's sessions.

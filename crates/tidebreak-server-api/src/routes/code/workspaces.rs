@@ -198,6 +198,19 @@ pub async fn search_workspace(
     Query(query): Query<WorkspaceSearchQuery>,
 ) -> Result<Json<CodeWorkspaceSearch>, ServerError> {
     if query.history {
+        if query
+            .include
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            || query
+                .exclude
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err(ServerError::bad_request(
+                "history search does not support path include or exclude filters",
+            ));
+        }
         let history_query = query.query.trim();
         if history_query.chars().count()
             > tidebreak_core::db::code::MAX_TRANSCRIPT_SEARCH_QUERY_CHARS

@@ -345,9 +345,7 @@ async fn send_frame(
     socket: &mut WebSocket,
     frame: &SequencedEventFrame,
 ) -> Result<(), axum::Error> {
-    let Ok(json) = serde_json::to_string(frame) else {
-        return Ok(());
-    };
+    let json = serde_json::to_string(frame).map_err(axum::Error::new)?;
     socket.send(Message::Text(json.into())).await
 }
 

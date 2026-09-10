@@ -317,7 +317,7 @@ pub async fn post_queue_send_now(
 pub async fn fork_session(
     code: ScopedCode,
     Path(id): Path<SessionId>,
-    body: axum::body::Bytes,
+    RawBytes(body): RawBytes,
 ) -> Result<(StatusCode, Json<CodeForkTranscript>), ServerError> {
     let at_turn = if body.is_empty() {
         None

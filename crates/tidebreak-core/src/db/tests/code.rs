@@ -12,13 +12,14 @@ use crate::db::code::{
     cancel_permission_mode_change, claim_approval, clear_session_harness_resume_ref,
     confirm_permission_mode_change, delete_queued_turn, delete_session_queued_turns,
     discard_permission_mode_change, enqueue_queued_turn, fence_permission_mode_change,
-    get_approval, get_repo, get_repo_by_root_path, get_session, get_turn, get_workspace,
-    insert_approval, insert_approval_for_worker, insert_repo, insert_session, insert_turn,
-    insert_workspace, list_approvals, list_events, list_pending_permission_mode_changes,
-    list_queued_turns, list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
-    promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
-    replace_session_attention, replace_session_execution_settings, save_session, save_turn,
-    save_workspace, search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
+    get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_turn,
+    get_workspace, insert_approval, insert_approval_for_worker, insert_repo, insert_session,
+    insert_turn, insert_workspace, list_approvals, list_events,
+    list_pending_permission_mode_changes, list_queued_turns, list_repos, list_sessions,
+    list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
+    queued_turn_head, recover_interrupted_session, replace_session_attention,
+    replace_session_execution_settings, save_session, save_turn, save_workspace,
+    search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
     set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
     CodeTranscriptSearchSource, JournalError, SessionExecutionSettings, MAX_REPLAY_EVENTS,
@@ -397,6 +398,38 @@ async fn seed_owner(
     .await
     .unwrap();
     (session_id, turn_id)
+}
+
+#[tokio::test]
+async fn turn_open_lookup_ignores_closed_turns() {
+    let (_dir, store, session_id, first_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut first = get_turn(&store, &owner, first_id).await.unwrap().unwrap();
+    first.status = TurnStatus::Completed;
+    first.ended_at = Some(now());
+    assert!(save_turn(&store, &owner, &first).await.unwrap());
+
+    for (ordinal, status) in [(2, TurnStatus::Failed), (3, TurnStatus::Interrupted)] {
+        let mut closed = first.clone();
+        closed.id = TurnId::new();
+        closed.ordinal = ordinal;
+        closed.status = status;
+        insert_turn(&store, &owner, &closed).await.unwrap();
+    }
+    let open_id = TurnId::new();
+    let mut open = first;
+    open.id = open_id;
+    open.ordinal = 4;
+    open.status = TurnStatus::Waiting;
+    open.ended_at = None;
+    insert_turn(&store, &owner, &open).await.unwrap();
+
+    let found = get_open_turn(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .expect("open turn");
+    assert_eq!(found.id, open_id);
+    assert_eq!(found.status, TurnStatus::Waiting);
 }
 
 async fn claimed_trigger_delivery(
@@ -5465,6 +5498,19 @@ async fn reincarnation_counts_up_and_the_ledger_sums_across_incarnations() {
     assert_eq!(latest.incarnation, 2);
     // The predecessor's journaled gate is on its own row, not the latest.
     assert!(!latest.terminal_events_journaled);
+}
+
+#[tokio::test]
+async fn recording_spend_for_a_missing_incarnation_fails() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let missing = crate::code::CodeIncarnationId::new();
+
+    assert!(
+        crate::db::code::record_incarnation_spend(&store, &owner, missing, 1)
+            .await
+            .is_err()
+    );
 }
 
 /// The sweep reads exactly the intents whose spawn outcome nothing recorded:
