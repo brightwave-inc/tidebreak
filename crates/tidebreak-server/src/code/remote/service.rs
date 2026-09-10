@@ -395,7 +395,7 @@ mod tests {
     #[derive(Default)]
     struct FakeProvisioner {
         spawns: StdMutex<Vec<SpawnArguments>>,
-        sends: StdMutex<Vec<super::wire::SupervisorMessageBody>>,
+        sends: StdMutex<Vec<String>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
         /// Every events read issued, scripted or not.
         event_reads_issued: StdMutex<usize>,

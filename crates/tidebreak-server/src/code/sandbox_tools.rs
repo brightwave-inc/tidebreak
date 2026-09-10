@@ -291,3 +291,120 @@ fn output_value(output: ToolOutput, _images: &[BridgeArtifact]) -> serde_json::V
         "data": output.data,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::db::code::insert_session;
+    use tidebreak_core::Session;
+
+    async fn runtime_with_session() -> (tempfile::TempDir, Arc<CodeRuntime>, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            tidebreak_core::DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("bridge.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let mut tools = tidebreak_core::ToolRegistry::new();
+        let session_tools = Arc::new(super::super::self_drive::SessionTools::default());
+        session_tools.register(&mut tools);
+        let runtime = Arc::new(
+            CodeRuntime::new(
+                db,
+                dir.path().to_path_buf(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .with_tool_registry(Arc::new(tools)),
+        );
+        session_tools.attach(&runtime);
+        let mut session = super::super::remote::fixtures::session_value();
+        session.workspace_id = None;
+        session.execution_location = tidebreak_core::ExecutionLocation::Sandbox;
+        session.harness_kind = tidebreak_core::HarnessKind::ClaudeCode;
+        insert_session(&runtime.db, &session).await.unwrap();
+        (dir, runtime, session)
+    }
+
+    async fn grant_bound(runtime: &CodeRuntime, session: &Session) -> tidebreak_core::CodeGrantId {
+        let (grant, _) = runtime
+            .mint_adapter_grant(&session.owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        tidebreak_core::db::code::bind_external_session(
+            &runtime.db,
+            &session.owner,
+            grant.id,
+            "slack",
+            &format!("T1/C1/{}", session.id),
+            session.id,
+        )
+        .await
+        .unwrap();
+        grant.id
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_name_is_refused_before_execution() {
+        let (_dir, runtime, session) = runtime_with_session().await;
+        let err = runtime
+            .execute_sandbox_tool(
+                session.id,
+                &SupervisorToolRequest {
+                    request_id: "r1".into(),
+                    tool: "spawn_sandbox_agent".into(),
+                    arguments: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, tidebreak_core::AgentError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_grant_refuses_bridge_execution() {
+        let (_dir, runtime, session) = runtime_with_session().await;
+        let grant_id = grant_bound(&runtime, &session).await;
+        runtime
+            .revoke_adapter_grant(&session.owner, grant_id, "test revocation")
+            .await
+            .unwrap();
+        let err = runtime
+            .execute_sandbox_tool(
+                session.id,
+                &SupervisorToolRequest {
+                    request_id: "r2".into(),
+                    tool: "code_sessions".into(),
+                    arguments: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, tidebreak_core::AgentError::AccessDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn an_allowlisted_coordinator_tool_executes_through_the_registry() {
+        let (_dir, runtime, session) = runtime_with_session().await;
+        let result = runtime
+            .execute_sandbox_tool(
+                session.id,
+                &SupervisorToolRequest {
+                    request_id: "r3".into(),
+                    tool: "code_sessions".into(),
+                    arguments: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.request_id, "r3");
+        assert_eq!(result.output["sessions"], serde_json::json!([]));
+    }
+}
