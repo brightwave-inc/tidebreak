@@ -321,6 +321,9 @@ type Story = StoryObj<typeof meta>;
  */
 export const Default: Story = {};
 
+/** The autonomous default states its bypass posture before any interaction. */
+export const AllowPostureOnOpen: Story = {};
+
 /** A clipboard image stays attached instead of inserting its local path. */
 export const PastedImage: Story = {};
 

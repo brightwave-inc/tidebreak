@@ -136,6 +136,10 @@ export function WorkspaceWorkflowControl({
     model.pr && resource.mutationError?.includes("Refresh workspace status")
       ? `Pull request #${model.pr.number} changed`
       : model.title;
+  const githubUnavailable = resource.data?.gh_found === false;
+  const githubRemediation = githubUnavailable
+    ? resource.data?.remediation || "Install and connect the GitHub CLI."
+    : undefined;
 
   // Republish the primary action for the command palette, which leads with it.
   // Cleared on unmount so the palette never offers a step for a workspace the
@@ -398,6 +402,10 @@ export function WorkspaceWorkflowControl({
         onOpenSourceControl();
         return;
       case "compose_pr":
+        if (githubRemediation) {
+          toast.error(githubRemediation);
+          return;
+        }
         setDetailsOpen(false);
         if (!runComposerPrompt(workspaceId, composePrPrompt(baseRef))) {
           toast.error("Another agent action is already running");
@@ -435,6 +443,10 @@ export function WorkspaceWorkflowControl({
         }
         return;
       case "create_pr":
+        if (githubRemediation) {
+          toast.error(githubRemediation);
+          return;
+        }
         try {
           const next = await resource.runMutation("create_pr", async () => {
             const created = await client.createCodePullRequest(workspaceId);
@@ -633,7 +645,12 @@ export function WorkspaceWorkflowControl({
             variant="ghost"
             size="sm"
             className="h-control shrink-0 rounded-none border-l border-border-subtle bg-foreground px-2.5 text-background hover:bg-foreground/90 hover:text-background"
-            disabled={disabled || model.stage === "loading"}
+            disabled={
+              disabled ||
+              model.stage === "loading" ||
+              ((primary === "compose_pr" || primary === "create_pr") &&
+                githubUnavailable)
+            }
             aria-busy={busy !== null || agentActionRunning || attachingLogs}
             onClick={() => void run(primary)}
             title={
@@ -641,7 +658,9 @@ export function WorkspaceWorkflowControl({
                 ? "Commit and push your changes to this pull request."
                 : primary === "watch_and_fix"
                   ? "Ask the agent in this conversation to monitor the PR and fix actionable failures."
-                  : undefined
+                  : primary === "compose_pr" || primary === "create_pr"
+                    ? githubRemediation
+                    : undefined
             }
           >
             {busy !== null || agentActionRunning || attachingLogs ? (
@@ -668,7 +687,16 @@ export function WorkspaceWorkflowControl({
                 <DropdownMenuItem
                   key={action}
                   disabled={
-                    disabled && action !== "open_pr" && action !== "open_source"
+                    (disabled &&
+                      action !== "open_pr" &&
+                      action !== "open_source") ||
+                    ((action === "compose_pr" || action === "create_pr") &&
+                      githubUnavailable)
+                  }
+                  title={
+                    action === "compose_pr" || action === "create_pr"
+                      ? githubRemediation
+                      : undefined
                   }
                   onSelect={() => void run(action)}
                 >

@@ -22,6 +22,7 @@ import {
 } from "./delivery/views";
 import {
   deliveryRefreshErrors,
+  DeliveryRetryContext,
   PartialErrorBanner,
   RepositoryRefreshWarning,
 } from "./delivery/status";
@@ -464,42 +465,46 @@ function CodeDeliveryBody({
         />
       )}
 
-      {surface === "pull_requests" ? (
-        <PullRequestsSurface
-          repositories={repositories}
-          capability={capability}
-          loadingRepositories={repositoriesLoading}
-          repositoryLoaded={repositorySnapshot !== null}
-          repositoryError={repositoryError}
-          onRetryRepositories={() => void loadRepositories(true, true)}
-          filters={prFilters}
-          grouping={pullRequestGrouping}
-          target={
-            routeRepository && search.pr
-              ? { repository: routeRepository, number: search.pr }
-              : undefined
-          }
-        />
-      ) : (
-        <RunsSurface
-          repositories={repositories}
-          capability={capability}
-          loadingRepositories={repositoriesLoading}
-          repositoryLoaded={repositorySnapshot !== null}
-          repositoryError={repositoryError}
-          onRetryRepositories={() => void loadRepositories(true, true)}
-          filters={runFilters}
-          target={
-            routeRepository && search.runKind && search.runId
-              ? {
-                  repository: routeRepository,
-                  kind: search.runKind,
-                  id: search.runId,
-                }
-              : undefined
-          }
-        />
-      )}
+      <DeliveryRetryContext.Provider
+        value={() => void loadRepositories(true, true)}
+      >
+        {surface === "pull_requests" ? (
+          <PullRequestsSurface
+            repositories={repositories}
+            capability={capability}
+            loadingRepositories={repositoriesLoading}
+            repositoryLoaded={repositorySnapshot !== null}
+            repositoryError={repositoryError}
+            onRetryRepositories={() => void loadRepositories(true, true)}
+            filters={prFilters}
+            grouping={pullRequestGrouping}
+            target={
+              routeRepository && search.pr
+                ? { repository: routeRepository, number: search.pr }
+                : undefined
+            }
+          />
+        ) : (
+          <RunsSurface
+            repositories={repositories}
+            capability={capability}
+            loadingRepositories={repositoriesLoading}
+            repositoryLoaded={repositorySnapshot !== null}
+            repositoryError={repositoryError}
+            onRetryRepositories={() => void loadRepositories(true, true)}
+            filters={runFilters}
+            target={
+              routeRepository && search.runKind && search.runId
+                ? {
+                    repository: routeRepository,
+                    kind: search.runKind,
+                    id: search.runId,
+                  }
+                : undefined
+            }
+          />
+        )}
+      </DeliveryRetryContext.Provider>
 
       <DeliveryRepositoriesDialog
         open={repositoriesDialogOpen}

@@ -57,6 +57,7 @@ import { AttentionBadge } from "./AttentionBadge";
 import { editorStripDropId, editorTabDragId } from "./editorDrag";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { MAX_WORKSPACE_TERMINALS } from "./workspace/layout";
 
 /** Ids the strip and the two center panels agree on, so tabs name panels. */
 export const CHAT_PANEL_ID = "code-center-panel-chat";
@@ -399,6 +400,11 @@ export function CodeCenterTabs({
             <DropdownMenuItem
               disabled={!canNewTerminal}
               onSelect={onNewTerminal}
+              title={
+                canNewTerminal
+                  ? undefined
+                  : `Up to ${MAX_WORKSPACE_TERMINALS} terminals per workspace`
+              }
             >
               <SquareTerminal />
               New terminal

@@ -18,6 +18,9 @@ import { cn } from "@/lib/utils";
 import { humanize, runTone } from "./helpers";
 import { relativeTime } from "../PullRequestDetail";
 import { STATUS_CHIP, STATUS_TEXT } from "../statusTone";
+import { createContext, useContext } from "react";
+
+export const DeliveryRetryContext = createContext<(() => void) | null>(null);
 
 /**
  * How many rows there are, how old they are, and a way to reread them.
@@ -122,9 +125,13 @@ export function RepositoryRefreshWarning({
 
 export function GitHubUnavailable({
   capability,
+  onRetry,
 }: {
   capability: CodeGitHubCapability;
+  onRetry?: () => void;
 }) {
+  const contextRetry = useContext(DeliveryRetryContext);
+  const retry = onRetry ?? contextRetry;
   return (
     <Empty className="min-h-80">
       <EmptyHeader>
@@ -134,6 +141,11 @@ export function GitHubUnavailable({
         <EmptyTitle>GitHub is not connected</EmptyTitle>
         <EmptyDescription>{capability.remediation}</EmptyDescription>
       </EmptyHeader>
+      {retry && (
+        <Button type="button" variant="outline" onClick={retry}>
+          Try again
+        </Button>
+      )}
     </Empty>
   );
 }

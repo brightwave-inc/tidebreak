@@ -264,7 +264,7 @@ describe("AddRepoPalette", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clone" }));
     await waitFor(() => expect(started).toHaveBeenCalled());
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "starting",
+      "Starting",
     );
     useCodeUpdatesStore.getState().apply({
       type: "clone_progress",
@@ -277,7 +277,7 @@ describe("AddRepoPalette", () => {
     });
     await waitFor(() =>
       expect(screen.getByTestId("clone-phase")).toHaveTextContent(
-        "receiving objects",
+        "Receiving objects",
       ),
     );
     useCodeUpdatesStore.getState().apply({
@@ -298,6 +298,33 @@ describe("AddRepoPalette", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers retry when a finished clone has no repository", async () => {
+    await renderPalette(
+      app({
+        startCodeClone: vi.fn(async () => ({
+          id: "job-without-repo",
+          phase: "done",
+          percent: 100,
+          done: true,
+        })),
+      }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: /Git URL/ }));
+    fireEvent.change(
+      screen.getByPlaceholderText("https://example.com/acme/app.git"),
+      { target: { value: "/tmp/origin.git" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+
+    expect(
+      await screen.findByText("The clone finished without a repository."),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      screen.getByPlaceholderText("https://example.com/acme/app.git"),
+    ).toBeVisible();
+  });
+
   it("does not open New Workspace after clone progress is dismissed", async () => {
     const getCodeRepo = vi.fn(async () => REPO);
     const value = app({
@@ -312,7 +339,7 @@ describe("AddRepoPalette", () => {
 
     await startGitClone();
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "starting",
+      "Starting",
     );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() =>
@@ -877,14 +904,14 @@ describe("AddRepoPalette", () => {
 
     await startGitClone();
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "receiving objects",
+      "Receiving objects",
     );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     fireEvent.click(
       screen.getByRole("button", { name: "Open add repository" }),
     );
     expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
-      "receiving objects",
+      "Receiving objects",
     );
 
     act(() => {
@@ -942,9 +969,8 @@ describe("AddRepoPalette on a machine that answers for itself", () => {
     ).toBeInTheDocument();
     // Absent with no reason reads as a broken dialog; the machine's own
     // sentence is what makes it legible.
-    expect(
-      screen.getAllByText(/This machine has no git\./).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getByText("Not available on this machine")).toBeVisible();
+    expect(screen.getAllByText("This machine has no git.")).toHaveLength(1);
   });
 
   it("asks for no destination when the machine places clones itself", async () => {

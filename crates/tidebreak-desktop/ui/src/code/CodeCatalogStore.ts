@@ -60,6 +60,7 @@ type CodeCatalogState = {
   workspaces: CodeWorkspaceSnapshot[];
   sessionsByWorkspace: Record<string, CodeSessionSnapshot>;
   doctor: HarnessDoctorReport | null;
+  doctorError: string | null;
   modelsByHarness: Partial<Record<HarnessKind, CodeModelOption[]>>;
   /**
    * Each engine's own effort ladder, which is what a code session runs on
@@ -199,6 +200,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   workspaces: [],
   sessionsByWorkspace: {},
   doctor: null,
+  doctorError: null,
   modelsByHarness: {},
   effortsByHarness: {},
   loaded: false,
@@ -252,15 +254,14 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
         client
           .getHarnessDoctor()
           .then((doctor) => {
-            if (requestIsCurrent(context)) set({ doctor });
+            if (requestIsCurrent(context)) set({ doctor, doctorError: null });
           })
-          .catch(() => {
+          .catch((error) => {
             if (!requestIsCurrent(context)) return;
-            // Home waits on a settled report. An empty one leaves the loading
-            // empty and shows the install section instead of spinning forever.
-            if (get().doctor === null) {
-              set({ doctor: { harnesses: [] } });
-            }
+            set({
+              doctorError:
+                error instanceof Error ? error.message : String(error),
+            });
           }),
       ];
       for (const kind of HARNESS_KINDS) {
@@ -281,7 +282,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     const context = requestContext(client);
     if (!requestIsCurrent(context)) return;
     const doctor = await client.refreshHarnessDoctor();
-    if (requestIsCurrent(context)) set({ doctor });
+    if (requestIsCurrent(context)) set({ doctor, doctorError: null });
   },
   // The memoized read, for picking up an engine a download just put on disk.
   // `refreshDoctor` is the doctor's own button: it drops every memoized probe
@@ -291,7 +292,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     const context = requestContext(client);
     if (!requestIsCurrent(context)) return;
     const doctor = await client.getHarnessDoctor();
-    if (requestIsCurrent(context)) set({ doctor });
+    if (requestIsCurrent(context)) set({ doctor, doctorError: null });
   },
   ensureHarnessModels: (client, kind) =>
     loadHarnessModels(client, kind, get, false),
@@ -374,6 +375,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       workspaces: [],
       sessionsByWorkspace: {},
       doctor: null,
+      doctorError: null,
       modelsByHarness: {},
       effortsByHarness: {},
       loaded: false,

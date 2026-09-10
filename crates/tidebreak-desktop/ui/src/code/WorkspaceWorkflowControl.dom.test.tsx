@@ -171,6 +171,35 @@ describe("Create PR", () => {
       "Ship this branch to `main`.",
     );
   });
+
+  it("disables creation with the GitHub remediation when the capability is unavailable", () => {
+    const remediation = "Install GitHub CLI and sign in.";
+    render(
+      <WorkspaceWorkflowControl
+        client={{
+          startCodeWatch: vi.fn(),
+          stopCodeWatch: vi.fn(),
+          writeCodeCheckLogs: vi.fn(),
+          mergeCodePr: vi.fn(),
+          markCodePrReady: vi.fn(),
+          pushCodeWorkspace: vi.fn(),
+          createCodePullRequest: vi.fn(),
+        }}
+        workspaceId="ws-1"
+        branchName="topic"
+        baseRef="main"
+        resource={{
+          ...resource(),
+          data: { ...dirtyLocal, gh_found: false, remediation },
+        }}
+        onOpenSourceControl={vi.fn()}
+      />,
+    );
+
+    const create = screen.getByRole("button", { name: "Create PR" });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAttribute("title", remediation);
+  });
 });
 
 describe("Fix checks", () => {

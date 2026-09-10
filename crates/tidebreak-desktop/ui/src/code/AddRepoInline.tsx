@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { ParentDirField } from "./AddRepoPalette";
-import type { AddRepoInlineState } from "./useAddRepoInline";
+import { displayClonePhase, type AddRepoInlineState } from "./useAddRepoInline";
 
 /**
  * What one submit is about to do with what has been typed.
@@ -109,7 +109,7 @@ export function AddRepoInline({
               className="text-muted-foreground truncate text-xs"
               data-testid="add-repo-clone-phase"
             >
-              {state.phase}
+              {displayClonePhase(state.phase)}
             </span>
             {state.percent !== null && (
               <span className="text-muted-foreground shrink-0 font-mono text-xs">
