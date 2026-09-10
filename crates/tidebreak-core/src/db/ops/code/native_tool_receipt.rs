@@ -451,6 +451,26 @@ fn validate_result(request_id: &str, result: &Value) -> Result<()> {
     Ok(())
 }
 
+async fn require_capacity<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    owner: &OwnerId,
+    session: SessionId,
+    incarnation: CodeIncarnationId,
+) -> Result<()> {
+    let outstanding = receipt::Entity::find()
+        .filter(receipt::Column::Owner.eq(owner.as_str()))
+        .filter(receipt::Column::SessionId.eq(session.0))
+        .filter(receipt::Column::IncarnationId.eq(incarnation.0))
+        .filter(receipt::Column::Delivered.eq(false))
+        .count(conn)
+        .await
+        .map_err(store_err)?;
+    if outstanding >= 64 {
+        return Err(invalid(NATIVE_TOOL_QUEUE_FULL));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_result;
@@ -481,24 +501,4 @@ mod tests {
         changed["artifacts"] = json!(vec![result["artifacts"][0].clone(); 17]);
         assert!(validate_result("one", &changed).is_err());
     }
-}
-
-async fn require_capacity<C: sea_orm::ConnectionTrait>(
-    conn: &C,
-    owner: &OwnerId,
-    session: SessionId,
-    incarnation: CodeIncarnationId,
-) -> Result<()> {
-    let outstanding = receipt::Entity::find()
-        .filter(receipt::Column::Owner.eq(owner.as_str()))
-        .filter(receipt::Column::SessionId.eq(session.0))
-        .filter(receipt::Column::IncarnationId.eq(incarnation.0))
-        .filter(receipt::Column::Delivered.eq(false))
-        .count(conn)
-        .await
-        .map_err(store_err)?;
-    if outstanding >= 64 {
-        return Err(invalid(NATIVE_TOOL_QUEUE_FULL));
-    }
-    Ok(())
 }
