@@ -59,6 +59,8 @@ pub const INCARNATION_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_INCARNATION";
 /// because a typo here would otherwise drive the wrong engine for the whole
 /// run.
 pub const ENGINE_VARIABLE: &str = "TIDEBREAK_AGENT_ENGINE";
+/// Authenticated spawn identity injected by Gateway for managed supervised engines.
+pub const EMBEDDED_ENGINE_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_EMBEDDED_ENGINE";
 
 const DEFAULT_SUPERVISOR_ENDPOINT: &str = "127.0.0.1:15003";
 /// Poll cadence, matching the endpoint's expected liveness rhythm.
@@ -113,6 +115,8 @@ pub struct Inputs {
     pub incarnation: u32,
     /// Engine CLI the agent drives.
     pub engine: HarnessKind,
+    /// Identity this run must register before bootstrap or inference.
+    pub embedded_engine: Option<crate::wire::EmbeddedEngine>,
 }
 
 /// A missing or unusable input, carrying the exit code and the variable name.
@@ -159,6 +163,7 @@ pub struct RawInputs {
     pub sandbox_id: Option<String>,
     pub incarnation: Option<String>,
     pub engine: Option<String>,
+    pub embedded_engine: Option<String>,
 }
 
 impl RawInputs {
@@ -182,6 +187,7 @@ impl RawInputs {
             sandbox_id: var(SANDBOX_ID_VARIABLE),
             incarnation: var(INCARNATION_VARIABLE),
             engine: var(ENGINE_VARIABLE),
+            embedded_engine: var(EMBEDDED_ENGINE_VARIABLE),
         }
     }
 }
@@ -298,6 +304,24 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         })?,
     };
 
+    let embedded_engine =
+        optional(raw.embedded_engine)
+            .map(|value| {
+                let binding: crate::wire::EmbeddedEngine =
+                    serde_json::from_str(&value).map_err(|error| {
+                        InputError::unusable(EMBEDDED_ENGINE_VARIABLE, &error.to_string())
+                    })?;
+                if binding.engine_session_id.as_uuid().is_nil()
+                    || !matches!(binding.engine, HarnessKind::ClaudeCode | HarnessKind::Codex)
+                    || binding.engine != engine
+                {
+                    return Err(InputError::unusable(EMBEDDED_ENGINE_VARIABLE,
+                "expected a nonzero session UUID and the selected claude_code or codex engine"));
+                }
+                Ok(binding)
+            })
+            .transpose()?;
+
     Ok(Inputs {
         task,
         workspace_branch,
@@ -313,6 +337,7 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         sandbox_id: optional(raw.sandbox_id),
         incarnation,
         engine,
+        embedded_engine,
     })
 }
 
@@ -373,6 +398,36 @@ mod tests {
         assert!(inputs.repositories.is_empty());
         assert!(!inputs.forge_push_denied);
         assert_eq!(inputs.incarnation, 1);
+        assert!(inputs.embedded_engine.is_none());
+    }
+
+    #[test]
+    fn managed_input_requires_the_declared_engine_and_persisted_nonzero_session() {
+        let session = tidebreak_core::SessionId::new();
+        let mut raw = minimal();
+        raw.engine = Some("codex".into());
+        raw.embedded_engine = Some(
+            serde_json::json!({
+                "engine": "codex", "engine_session_id": session,
+            })
+            .to_string(),
+        );
+        let parsed = resolve(raw.clone()).unwrap();
+        assert_eq!(parsed.embedded_engine.unwrap().engine_session_id, session);
+        raw.engine = Some("claude_code".into());
+        assert!(resolve(raw.clone())
+            .unwrap_err()
+            .message
+            .contains(EMBEDDED_ENGINE_VARIABLE));
+        raw.engine = Some("codex".into());
+        for binding in [
+            serde_json::json!({"engine":"codex", "engine_session_id":"00000000-0000-0000-0000-000000000000"}),
+            serde_json::json!({"engine":"codex", "engine_session_id":"not-a-uuid"}),
+            serde_json::json!({"engine":"codex"}),
+        ] {
+            raw.embedded_engine = Some(binding.to_string());
+            assert!(resolve(raw.clone()).is_err());
+        }
     }
 
     #[test]

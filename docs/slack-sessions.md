@@ -457,8 +457,8 @@ thread with `repo:owner/name`."
 ## Packaged sandbox runtime
 
 The `supervised-agent` target in `deploy/self-host/Dockerfile` shares the
-server image's verified tools and packages Tidebreak's pinned Claude Code
-engine. The release workflow publishes `tidebreak-supervised-agent` beside
+server image's verified tools and packages Tidebreak's pinned Claude Code and
+Codex engines. The release workflow publishes `tidebreak-supervised-agent` beside
 `tidebreak-server` for both Linux architectures. It includes the existing
 Rust and Python bundles, git, and the GitHub CLI. The supervised image carries
 no server, renderer, or machine authentication store.
@@ -477,9 +477,15 @@ and a nonzero port. Missing or invalid proxy settings fail before the first
 turn; ambient proxy credentials do not pass into the engine.
 
 The machine declares its endpoint and profile through
-`TIDEBREAK_RUNTIME_ENDPOINT` and `TIDEBREAK_RUNTIME_PROFILE`, plus
-`TIDEBREAK_RUNTIME_ENGINE=claude_code` for this image. The configured engine
-uses Allow permissions inside Gateway's confinement. Unsupported engine,
+`TIDEBREAK_RUNTIME_ENDPOINT` and `TIDEBREAK_RUNTIME_PROFILE`.
+`TIDEBREAK_RUNTIME_ENGINE` selects the default engine. Without an allowed-engine
+list, it remains the only engine the runtime accepts. Managed runtime provisioning
+also sets `TIDEBREAK_RUNTIME_ENGINES=claude_code,codex`, so each session can select
+one of the two packaged engines when managed registration is enabled with
+`TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION=true`. Existing custom profiles
+omit that setting, keep their existing token exchange and spawn behavior, and
+continue to use only their declared default engine. Each engine uses Allow permissions inside
+Gateway's confinement. Unsupported engine,
 permission, or fast-mode settings are refused before a remote turn starts.
 The custom-harness contract does not transport tool approvals.
 Choose the model and reasoning level when you create the session. This
@@ -492,10 +498,18 @@ PR API requests use that app's existing identity and policy. A DM does not
 change installation-only credentials into a personal GitHub identity.
 Channel contribution remains owner-only until explicit sharing is enabled.
 
-A custom harness uses Gateway's generic client identity. Anthropic and OpenAI
-consumer subscriptions cannot fund it; a permitted API-funded route must be
-available. The profile uses one pod incarnation because the image does not
-restore the harness conversation across pod replacement.
+An ordinary custom harness keeps Gateway's generic client identity. A managed
+Tidebreak runtime can use an eligible subscription after the registered Tidebreak
+instance authenticates the spawn and the supervised agent confirms the installed
+engine, version, and session. Gateway validates that confirmation against the
+admitted image and the live sandbox before inference starts. Subscription sharing,
+provider compatibility, sandbox exclusions, and quota limits still apply. A
+missing or mismatched confirmation refuses the run.
+
+The default repositoryless Slack coordinator still uses Tidebreak's Internal
+engine. It does not acquire subscription eligibility from a child harness. The
+profile uses one pod incarnation because the image does not restore the harness
+conversation across pod replacement.
 
 The profile pins a supervised-agent digest; it does not track server releases.
 For an upgrade, publish both images from the same release, update the profile

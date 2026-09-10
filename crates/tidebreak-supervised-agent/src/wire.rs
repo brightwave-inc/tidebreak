@@ -23,6 +23,9 @@ pub const SUPERVISOR_POLL_SCHEMA_VERSION: u32 = 1;
 pub struct SupervisorPoll {
     /// Always [`SUPERVISOR_POLL_SCHEMA_VERSION`].
     pub schema_version: u32,
+    /// Probed identity for a managed supervised engine, repeated on every poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedded_engine: Option<EmbeddedEngineRegistration>,
     /// Whether the engine is idle rather than mid-turn. Process state, not
     /// judgement: no engine turn is running.
     pub idle: bool,
@@ -44,11 +47,28 @@ impl SupervisorPoll {
     pub fn new(idle: bool, delivered_through_seq: Option<i64>) -> Self {
         Self {
             schema_version: SUPERVISOR_POLL_SCHEMA_VERSION,
+            embedded_engine: None,
             idle,
             delivered_through_seq,
             events: Vec::new(),
         }
     }
+}
+
+/// Identity Gateway injects from the authenticated spawn request.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedEngine {
+    pub engine_session_id: tidebreak_core::SessionId,
+    pub engine: tidebreak_core::HarnessKind,
+}
+
+/// The installed version the agent registers before using the sandbox.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbeddedEngineRegistration {
+    pub engine_session_id: tidebreak_core::SessionId,
+    pub engine: tidebreak_core::HarnessKind,
+    pub engine_version: String,
 }
 
 /// One event the agent reports about itself.
@@ -82,6 +102,9 @@ impl SupervisorEvent {
 /// on these promptly is tidiness, not correctness.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SupervisorInstructions {
+    /// Gateway must echo the exact registered identity on a managed poll.
+    #[serde(default)]
+    pub embedded_engine: Option<EmbeddedEngineRegistration>,
     /// Whether the agent should stop the engine and exit.
     #[serde(default)]
     pub stop: bool,

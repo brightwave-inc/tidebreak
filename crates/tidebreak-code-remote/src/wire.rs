@@ -35,6 +35,9 @@ pub struct SpawnArguments {
     /// Harness token the sandbox drives headless (`claude_code`, `codex`,
     /// `opencode`, `grok_build`, `custom`).
     pub harness: String,
+    /// Installed engine expected in a registered supervised image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedded_engine: Option<EmbeddedEngine>,
     /// Continuation policy: `goal` or `turn`. Omitted lets the environment
     /// default (`goal` for a first-party harness).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,6 +78,13 @@ pub struct SpawnArguments {
     /// Optional turn budget including the spawn-task turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+}
+
+/// Server-owned identity of a supported engine in a supervised image.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EmbeddedEngine {
+    pub engine_session_id: tidebreak_core::SessionId,
+    pub engine: tidebreak_core::HarnessKind,
 }
 
 /// One git repository a spawn declares.

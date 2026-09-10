@@ -231,6 +231,8 @@ pub(super) async fn code_app_with_options(
             RemoteSpawnSettings {
                 profile: "test-remote".to_owned(),
                 engine: None,
+                engines: None,
+                embedded_engine_registration: false,
                 incarnation_cap: 2,
                 spend_ceiling_microusd: None,
                 session_spend_ceiling_microusd: None,

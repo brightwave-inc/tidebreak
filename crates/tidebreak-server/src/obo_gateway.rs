@@ -176,6 +176,7 @@ struct ExchangeResponse {
     engine: Option<String>,
     engine_version: Option<String>,
     engine_session_id: Option<SessionId>,
+    runtime_add_on: Option<String>,
 }
 
 /// The forge identity a hosted machine's git operations act as.
@@ -506,6 +507,7 @@ impl OboGateway {
         Arc::new(RuntimeTokens {
             gateway: self.clone(),
             audience: format!("runtime:{endpoint_slug}"),
+            embedded_engine_registration: false,
             external: None,
             slots: std::sync::Mutex::new(HashMap::new()),
         })
@@ -567,12 +569,37 @@ impl OboGateway {
         audience: &str,
         harness: Option<&harness::HarnessIdentity>,
     ) -> Result<CachedToken> {
+        self.exchange_with_identity(subject, audience, harness, false)
+            .await
+    }
+
+    async fn exchange_with_identity(
+        &self,
+        subject: &str,
+        audience: &str,
+        harness: Option<&harness::HarnessIdentity>,
+        registered_runtime: bool,
+    ) -> Result<CachedToken> {
         let mut form = vec![
             ("grant_type", TOKEN_EXCHANGE_GRANT),
             ("subject_token", subject),
             ("subject_token_type", SUBJECT_TOKEN_TYPE),
             ("audience", audience),
         ];
+        if registered_runtime {
+            if audience != "runtime:tidebreak" {
+                return Err(AgentError::config(
+                    "managed engine registration requires the tidebreak runtime endpoint",
+                ));
+            }
+            let (client_id, client_secret) = self.machine_credentials.as_ref().ok_or_else(||
+                AgentError::config("managed engine registration requires this machine's registered gateway client")
+            )?;
+            form.extend([
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+            ]);
+        }
         let session;
         if let Some(harness) = harness {
             let (client_id, client_secret) =
@@ -623,6 +650,11 @@ impl OboGateway {
                     "the Model Gateway did not confirm this session's installed harness; update the gateway before retrying",
                 ));
             }
+        }
+        if registered_runtime && exchanged.runtime_add_on.as_deref() != Some("tidebreak") {
+            return Err(AgentError::config(
+                "the Model Gateway did not confirm this machine's Tidebreak runtime; update the gateway before retrying",
+            ));
         }
         if exchanged.access_token.is_empty() {
             return Err(AgentError::msg(
@@ -1318,11 +1350,23 @@ struct SessionRuntimeToken {
 pub struct RuntimeTokens {
     gateway: Arc<OboGateway>,
     audience: String,
+    embedded_engine_registration: bool,
     external: Option<Arc<external::ExternalDelegations>>,
     slots: std::sync::Mutex<HashMap<(OwnerId, SessionId), RuntimeTokenSlot>>,
 }
 
 impl RuntimeTokens {
+    /// Require authenticated runtime provenance when the deployment opts into registration.
+    pub fn with_embedded_engine_registration(self: Arc<Self>, enabled: bool) -> Arc<Self> {
+        Arc::new(Self {
+            gateway: self.gateway.clone(),
+            audience: self.audience.clone(),
+            embedded_engine_registration: enabled,
+            external: self.external.clone(),
+            slots: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
     /// Resolve external sessions through their durable consent on every call.
     pub fn with_external_delegations(
         self: Arc<Self>,
@@ -1331,6 +1375,7 @@ impl RuntimeTokens {
         Arc::new(Self {
             gateway: self.gateway.clone(),
             audience: self.audience.clone(),
+            embedded_engine_registration: self.embedded_engine_registration,
             external: Some(Arc::new(external::ExternalDelegations::new(
                 self.gateway.clone(),
                 db,
@@ -1404,7 +1449,12 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
             ));
         };
         let minted = gateway
-            .exchange(&subject, &self.audience)
+            .exchange_with_identity(
+                &subject,
+                &self.audience,
+                None,
+                self.embedded_engine_registration,
+            )
             .await
             .map_err(runtime_token_error)?;
         // Revocation may commit while the exchange is in flight.

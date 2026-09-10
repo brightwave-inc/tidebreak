@@ -29,7 +29,7 @@ use tidebreak_core::{
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
-use super::wire::{EventCursor, SandboxMessage, SpawnArguments};
+use super::wire::{EmbeddedEngine, EventCursor, SandboxMessage, SpawnArguments};
 use super::{
     apply_attention, fence_session, journal_event, persist_session, reap_session,
     recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
@@ -48,6 +48,10 @@ pub struct RemoteSpawnSettings {
     pub profile: String,
     /// Engine and Allow mode supplied by the declared supervised image.
     pub engine: Option<tidebreak_core::HarnessKind>,
+    /// Explicit image engine set; absent preserves the declared single engine.
+    pub engines: Option<Vec<tidebreak_core::HarnessKind>>,
+    /// The operator admits this profile for authenticated engine registration.
+    pub embedded_engine_registration: bool,
     /// Concurrent live incarnations one owner may hold.
     pub incarnation_cap: usize,
     /// Per-spawn spend ceiling in micro-USD, when one is set.
@@ -61,11 +65,30 @@ impl RemoteSpawnSettings {
     /// Reject settings the declared supervised image cannot apply.
     pub fn validate_execution(&self, session: &Session) -> Result<(), String> {
         let Some(engine) = self.engine else {
-            return Ok(());
+            return if self.embedded_engine_registration || self.engines.is_some() {
+                Err("this sandbox profile must declare a default engine".into())
+            } else {
+                Ok(())
+            };
         };
-        if session.harness_kind != engine {
+        if self.embedded_engine_registration
+            && !matches!(
+                session.harness_kind,
+                tidebreak_core::HarnessKind::ClaudeCode | tidebreak_core::HarnessKind::Codex
+            )
+        {
+            return Err("managed engine registration supports claude_code and codex".into());
+        }
+        if (!self.embedded_engine_registration && session.harness_kind != engine)
+            || !self
+                .engines
+                .as_ref()
+                .map_or(session.harness_kind == engine, |engines| {
+                    engines.contains(&session.harness_kind)
+                })
+        {
             return Err(format!(
-                "this sandbox profile runs {engine}; select that engine to start the session"
+                "this sandbox profile does not admit {}; select an engine declared by the operator (default {engine})", session.harness_kind
             ));
         }
         if session.permission_mode != tidebreak_core::PermissionMode::Allow {
@@ -522,6 +545,12 @@ impl RemoteDriver<'_> {
         let arguments = SpawnArguments {
             profile: settings.profile.clone(),
             harness: "custom".to_owned(),
+            embedded_engine: settings
+                .embedded_engine_registration
+                .then_some(EmbeddedEngine {
+                    engine_session_id: session.id,
+                    engine: session.harness_kind,
+                }),
             mode: Some("turn".to_owned()),
             task: if settings.engine.is_some() {
                 tidebreak_core::code::RemoteWorkspaceTask::encode(text, &workspace.branch_name)
@@ -1103,6 +1132,8 @@ mod tests {
         RemoteSpawnSettings {
             profile: "tidebreak-remote".to_owned(),
             engine: None,
+            engines: None,
+            embedded_engine_registration: false,
             incarnation_cap: 2,
             spend_ceiling_microusd: Some(5_000_000),
             session_spend_ceiling_microusd: None,
@@ -1156,6 +1187,18 @@ mod tests {
         }
         assert!(fake.spawns.lock().unwrap().is_empty());
         assert!(fake.sends.lock().unwrap().is_empty());
+        let mut unregistered_list = settings.clone();
+        unregistered_list.engines = Some(vec![
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+        ]);
+        let mut requested = session.clone();
+        requested.harness_kind = tidebreak_core::HarnessKind::Codex;
+        requested.permission_mode = tidebreak_core::PermissionMode::Allow;
+        assert!(
+            unregistered_list.validate_execution(&requested).is_err(),
+            "an ordinary custom image cannot receive a requested engine selector"
+        );
         assert!(latest_incarnation(&db, &session.owner, session.id)
             .await
             .unwrap()
@@ -1164,6 +1207,45 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_image_engine_set_spawns_the_requested_engine_with_the_session_identity() {
+        for engine in [
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+            session.harness_kind = engine;
+            session.permission_mode = tidebreak_core::PermissionMode::Allow;
+            let fake = FakeProvisioner::default();
+            let mut settings = settings();
+            settings.engine = Some(tidebreak_core::HarnessKind::ClaudeCode);
+            settings.embedded_engine_registration = true;
+            settings.engines = Some(vec![
+                tidebreak_core::HarnessKind::ClaudeCode,
+                tidebreak_core::HarnessKind::Codex,
+            ]);
+            let driver = driver!(&db, &bus, &fake, &settings);
+            driver
+                .submit_turn(&mut session, &workspace, &repo, "start")
+                .await
+                .unwrap();
+            let spawns = fake.spawns.lock().unwrap();
+            assert_eq!(spawns[0].embedded_engine.as_ref().unwrap().engine, engine);
+            assert_eq!(
+                spawns[0]
+                    .embedded_engine
+                    .as_ref()
+                    .unwrap()
+                    .engine_session_id,
+                session.id
+            );
+            let mut rejected = session.clone();
+            rejected.harness_kind = tidebreak_core::HarnessKind::Opencode;
+            assert!(settings.validate_execution(&rejected).is_err());
+        }
     }
 
     /// A first turn on a fresh remote session reserves, spawns from the
@@ -1197,6 +1279,7 @@ mod tests {
         );
         assert_eq!(spawns[0].repository_ref.as_deref(), Some("main"));
         assert_eq!(spawns[0].task, "build it");
+        assert!(spawns[0].embedded_engine.is_none());
         assert_eq!(spawns[0].mode.as_deref(), Some("turn"));
         assert_eq!(spawns[0].spend_ceiling_microusd, Some(5_000_000));
         assert_eq!(session.lifecycle, SessionLifecycle::Running);
@@ -1215,6 +1298,10 @@ mod tests {
             .await
             .unwrap();
         let spawns = fake.spawns.lock().unwrap();
+        assert!(
+            spawns[0].embedded_engine.is_none(),
+            "an existing declared custom image does not opt into managed registration"
+        );
         let task = tidebreak_core::code::RemoteWorkspaceTask::parse(&spawns[0].task)
             .unwrap()
             .unwrap();

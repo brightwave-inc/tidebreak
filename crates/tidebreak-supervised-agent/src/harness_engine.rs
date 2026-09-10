@@ -143,6 +143,8 @@ fn read_trimmed(name: &str) -> Option<String> {
 
 /// Everything [`HarnessEngine`] needs, resolved before the loop starts.
 pub struct HarnessEngineSpec {
+    /// Persistent Tidebreak session identity, or one local identity for standalone runs.
+    pub session_id: tidebreak_core::SessionId,
     /// The adapter for the selected engine.
     pub adapter: Arc<dyn HarnessAdapter>,
     /// The probe the adapter ran against this image.
@@ -262,7 +264,7 @@ impl HarnessEngine {
             .adapter
             .launch(SessionSpec {
                 owner: tidebreak_core::OwnerId::local(),
-                session_id: tidebreak_core::SessionId::new(),
+                session_id: self.spec.session_id,
                 worktree: self.spec.worktree.clone(),
                 allowed_read_roots: self.spec.allowed_read_roots.clone(),
                 permission_mode: PermissionMode::Allow,
@@ -614,6 +616,7 @@ mod tests {
     /// The launch fields the tests assert on.
     #[derive(Default)]
     struct CapturedSpec {
+        session_id: Option<tidebreak_core::SessionId>,
         permission_mode: Option<PermissionMode>,
         worktree: Option<PathBuf>,
         allowed_read_roots: Vec<PathBuf>,
@@ -679,6 +682,7 @@ mod tests {
                 return Err(error);
             }
             *self.captured.lock().unwrap() = CapturedSpec {
+                session_id: Some(spec.session_id),
                 permission_mode: Some(spec.permission_mode),
                 worktree: Some(spec.worktree),
                 allowed_read_roots: spec.allowed_read_roots,
@@ -715,6 +719,7 @@ mod tests {
 
     fn engine_over(adapter: Arc<FakeAdapter>, spec_probe: HarnessProbe) -> HarnessEngine {
         HarnessEngine::new(HarnessEngineSpec {
+            session_id: tidebreak_core::SessionId::new(),
             adapter,
             probe: spec_probe,
             model: Some("fable-5".to_owned()),
@@ -741,6 +746,21 @@ mod tests {
         HarnessEvent::TurnCompleted {
             usage: TurnUsage::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn launch_uses_the_persisted_session_identity() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![completed_event()],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter.clone(), probe(true));
+        let persisted = tidebreak_core::SessionId::new();
+        engine.spec.session_id = persisted;
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+        assert_eq!(adapter.captured.lock().unwrap().session_id, Some(persisted));
     }
 
     #[tokio::test]
@@ -1132,6 +1152,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
             ("GITHUB_TOKEN".into(), "fixture-secret".into()),
         ]);
         let mut engine = HarnessEngine::new(HarnessEngineSpec {
+            session_id: tidebreak_core::SessionId::new(),
             adapter: tidebreak_harness::builtin_registry()
                 .get(HarnessKind::ClaudeCode)
                 .unwrap(),
