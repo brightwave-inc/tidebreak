@@ -238,9 +238,10 @@ pub async fn query_pull_requests(
         &targets,
     );
     let request_started = Instant::now();
-    // A user refresh must reach GitHub. Paging must not: following a cursor
-    // against a freshly reread aggregate would renumber the offsets underneath
-    // the reader and skip or repeat rows.
+    // A user refresh must reach GitHub. Paging may re-read after the short
+    // list cache lapses: the cursor is the last seen sort key, so a longer
+    // or shorter aggregate resumes after that key instead of renumbering
+    // offsets.
     let cached = if force_refresh {
         None
     } else {
@@ -343,7 +344,8 @@ pub(super) fn pull_request_page(
         .into_iter()
         .filter(|item| pull_request_matches(item, query))
         .collect::<Vec<_>>();
-    let (items, next_cursor) = paginate(filtered, query.cursor.as_deref(), query.limit)?;
+    let (items, next_cursor) =
+        paginate_pull_requests(filtered, query.cursor.as_deref(), query.limit)?;
     Ok(CodeDeliveryPullRequestsPage {
         capability,
         items,
@@ -351,6 +353,57 @@ pub(super) fn pull_request_page(
         errors: aggregate.errors,
         fetched_at: Utc::now(),
     })
+}
+
+/// Last seen `(updated_at, id)` in list order: newest `updated_at` first,
+/// then `id` ascending. A re-read aggregate resumes after this key.
+fn encode_pull_request_cursor(item: &CodeDeliveryPullRequestSummary) -> String {
+    format!("{}|{}", item.updated_at.to_rfc3339(), item.id)
+}
+
+fn decode_pull_request_cursor(cursor: &str) -> Result<(DateTime<Utc>, &str), ServerError> {
+    let (stamp, id) = cursor
+        .split_once('|')
+        .ok_or_else(|| ServerError::bad_request("invalid delivery cursor"))?;
+    if id.is_empty() {
+        return Err(ServerError::bad_request("invalid delivery cursor"));
+    }
+    let updated_at = DateTime::parse_from_rfc3339(stamp)
+        .map_err(|_| ServerError::bad_request("invalid delivery cursor"))?
+        .with_timezone(&Utc);
+    Ok((updated_at, id))
+}
+
+fn pull_request_sorts_after(
+    last_updated_at: DateTime<Utc>,
+    last_id: &str,
+    item: &CodeDeliveryPullRequestSummary,
+) -> bool {
+    item.updated_at
+        .cmp(&last_updated_at)
+        .then_with(|| last_id.cmp(&item.id))
+        == std::cmp::Ordering::Less
+}
+
+pub(super) fn paginate_pull_requests(
+    items: Vec<CodeDeliveryPullRequestSummary>,
+    cursor: Option<&str>,
+    limit: Option<u16>,
+) -> Result<(Vec<CodeDeliveryPullRequestSummary>, Option<String>), ServerError> {
+    let limit = usize::from(limit.unwrap_or(50)).clamp(1, MAX_PAGE_SIZE);
+    let start = match cursor {
+        Some(value) => {
+            let (updated_at, id) = decode_pull_request_cursor(value)?;
+            items
+                .iter()
+                .position(|item| pull_request_sorts_after(updated_at, id, item))
+                .unwrap_or(items.len())
+        }
+        None => 0,
+    };
+    let end = (start + limit).min(items.len());
+    let next = (end < items.len()).then(|| encode_pull_request_cursor(&items[end - 1]));
+    Ok((items[start..end].to_vec(), next))
 }
 
 pub async fn pull_request_detail(
