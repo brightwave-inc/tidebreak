@@ -23,7 +23,7 @@ use tidebreak_core::db::code::{get_session, latest_incarnations_of_live_sessions
 use tidebreak_core::{DbStore, IncarnationState, OwnerId, SessionId, SessionLifecycle};
 
 use super::super::runtime::CodeRuntime;
-use super::driver::{sweep_stale_intents, RemoteDriver, RemoteSpawnSettings};
+use super::driver::{sweep_stale_intents, HostToolExecutor, RemoteDriver, RemoteSpawnSettings};
 use super::SandboxProvisioner;
 use crate::retry::LaneBackoff;
 
@@ -79,6 +79,8 @@ pub struct RemoteSessions {
     pub(crate) provisioner: Arc<dyn SandboxProvisioner>,
     /// Spawn-time settings.
     pub(crate) settings: RemoteSpawnSettings,
+    /// Protected-tool executor for supervised sandboxes, when wired.
+    host_tool: Option<Arc<dyn super::super::code_remote::driver::HostToolExecutor>>,
     /// Live pump tasks by session. The sweep prunes finished entries and
     /// spawns missing ones; a pump task removes its own entry on the way out
     /// so the pass it wakes sees the slot free.
@@ -100,10 +102,18 @@ impl RemoteSessions {
         Arc::new(Self {
             provisioner,
             settings,
+            host_tool: None,
             pumps: Mutex::new(HashMap::new()),
             promotion_holds: Mutex::new(HashMap::new()),
             sweep_wake: Notify::new(),
         })
+    }
+
+    /// Attach the protected-tool executor this deployment serves.
+    pub fn with_host_tool(self: &Arc<Self>, host: Arc<dyn HostToolExecutor>) {
+        // May only be set before pumps start; recovery happens after boot
+        // wiring, so this is safe.
+        self.host_tool = Some(host);
     }
 
     /// Ask the sweep for a pass now instead of at its next floor.
@@ -122,6 +132,7 @@ impl RemoteSessions {
             bus,
             provisioner: self.provisioner.as_ref(),
             settings: &self.settings,
+            host_tool: self.host_tool.as_deref(),
         }
     }
 

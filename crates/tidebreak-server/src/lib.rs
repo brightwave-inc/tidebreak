@@ -1494,6 +1494,11 @@ async fn bind_inner(
     let code = Arc::new(runtime.with_tool_registry(process_tools));
     session_tools.attach(&code);
     conversation_tools.attach(&code);
+    // The protected tool bridge is served by the code runtime through the
+    // sandbox's event/inbox transport once pumps start.
+    if let Some(remote) = code.remote_sessions() {
+        remote.with_host_tool(code.clone());
+    }
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
