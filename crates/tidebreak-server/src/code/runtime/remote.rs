@@ -204,6 +204,47 @@ impl CodeRuntime {
         ),
         ServerError,
     > {
+        self.external_get_or_create_with_channel_context(
+            owner,
+            owner_kind,
+            grant_id,
+            channel_kind,
+            external_key,
+            repo_id,
+            title,
+            harness,
+            settings,
+            requested_mode,
+            requested_acts_as,
+            None,
+        )
+        .await
+    }
+
+    /// Capture channel instructions and provenance before a session or worker
+    /// becomes visible to an adapter retry.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn external_get_or_create_with_channel_context(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        grant_id: tidebreak_core::CodeGrantId,
+        channel_kind: &str,
+        external_key: &str,
+        repo_id: impl Into<Option<RepoId>>,
+        title: Option<String>,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+        requested_mode: Option<tidebreak_core::PermissionMode>,
+        requested_acts_as: Option<tidebreak_core::ActsAs>,
+        channel_context: Option<tidebreak_core::db::code::ExternalSessionChannelContext<'_>>,
+    ) -> Result<
+        (
+            tidebreak_core::ExternalSessionResolution,
+            ExternalActsAsView,
+        ),
+        ServerError,
+    > {
         if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
             return Err(ServerError::conflict_kind(
                 "binding_key_invalid",
@@ -337,15 +378,18 @@ impl CodeRuntime {
                     Some(grant_id),
                 )
                 .await?;
-            let resolution = tidebreak_core::db::code::resolve_external_machine_session(
-                &self.db,
-                owner,
-                grant_id,
-                channel_kind,
-                external_key,
-                &session,
-            )
-            .await?;
+            let resolution =
+                tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                    &self.db,
+                    owner,
+                    grant_id,
+                    channel_kind,
+                    external_key,
+                    None,
+                    &session,
+                    channel_context,
+                )
+                .await?;
             if matches!(
                 resolution,
                 tidebreak_core::ExternalSessionResolution::Created(_)
@@ -389,16 +433,18 @@ impl CodeRuntime {
                 let session =
                     Self::remote_session_value(owner, owner_kind, workspace.id, harness, settings);
                 self.validate_remote_execution(&session)?;
-                let resolution = tidebreak_core::db::code::resolve_external_session(
-                    &self.db,
-                    owner,
-                    grant_id,
-                    channel_kind,
-                    external_key,
-                    &workspace,
-                    &session,
-                )
-                .await?;
+                let resolution =
+                    tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                        &self.db,
+                        owner,
+                        grant_id,
+                        channel_kind,
+                        external_key,
+                        Some(&workspace),
+                        &session,
+                        channel_context,
+                    )
+                    .await?;
                 Ok((resolution, identity))
             }
             ExecutionLocation::Machine => {
@@ -449,15 +495,18 @@ impl CodeRuntime {
                         Some(grant_id),
                     )
                     .await?;
-                let resolution = tidebreak_core::db::code::resolve_external_machine_session(
-                    &self.db,
-                    owner,
-                    grant_id,
-                    channel_kind,
-                    external_key,
-                    &session,
-                )
-                .await?;
+                let resolution =
+                    tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                        &self.db,
+                        owner,
+                        grant_id,
+                        channel_kind,
+                        external_key,
+                        None,
+                        &session,
+                        channel_context,
+                    )
+                    .await?;
                 if matches!(
                     resolution,
                     tidebreak_core::ExternalSessionResolution::Created(_)
