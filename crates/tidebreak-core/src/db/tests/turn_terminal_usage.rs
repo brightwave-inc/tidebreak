@@ -308,3 +308,81 @@ async fn provider_blocked_refusal_remains_a_completed_notification() {
     assert_eq!(notifications[0].kind, NotificationKind::AgentCompleted);
     assert_eq!(notifications[0].title, "hello finished");
 }
+
+#[tokio::test]
+async fn terminal_output_is_replayable_once_before_completion_or_refusal() {
+    for refused in [false, true] {
+        let (_dir, store) = temp_store().await;
+        let (chat, turn_id, lease_token, claimed_at) =
+            claimed_turn(&store, "inspect a repository").await;
+        let output = Message {
+            id: MessageId::new(),
+            chat_id: chat.id,
+            turn_id,
+            role: Role::Assistant,
+            reasoning: Default::default(),
+            content: if refused {
+                "The repository is unavailable."
+            } else {
+                "The default branch is main."
+            }
+            .into(),
+            llm_content: None,
+            created_at: claimed_at,
+        };
+        for _ in 0..2 {
+            if refused {
+                store
+                    .complete_refused_turn_with_citations_and_append_event(
+                        turn_id,
+                        lease_token,
+                        0,
+                        claimed_at,
+                        &output,
+                        &[],
+                        1,
+                        Usage::default(),
+                        RefusalOutcome::report_blocked(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+            } else {
+                store
+                    .complete_turn_with_citations_and_append_event(
+                        turn_id,
+                        lease_token,
+                        0,
+                        claimed_at,
+                        &output,
+                        &[],
+                        1,
+                        Usage::default(),
+                        StopReason::EndTurn,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        let page = crate::db::code::list_events(&store, &OwnerId::local(), chat.id, 0, 100)
+            .await
+            .unwrap();
+        let messages: Vec<_> = page
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, crate::Event::AssistantMessage { .. }))
+            .collect();
+        assert_eq!(messages.len(), 1, "retry must not duplicate the answer");
+        assert!(matches!(&messages[0].event,
+            crate::Event::AssistantMessage { text, parent_call_id: None } if text == &output.content
+        ));
+        let terminal = page.events.last().unwrap();
+        assert_eq!(messages[0].seq + 1, terminal.seq);
+        assert!(if refused {
+            matches!(terminal.event, crate::Event::TurnRefused { .. })
+        } else {
+            matches!(terminal.event, crate::Event::TurnCompleted { .. })
+        });
+    }
+}

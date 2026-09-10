@@ -438,6 +438,21 @@ async fn complete_turn_inner(
         return Ok(None);
     }
     super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
+    // Code readers, including Slack, replay the journal without loading the
+    // chat transcript. Commit the answer before its terminal frame under the
+    // same session lock so reconnects retain the final text.
+    if terminal_event.is_some() && !output.content.is_empty() {
+        super::super::code::append_event_on_locked(
+            &transaction,
+            &crate::OwnerId::new(&existing.owner)?,
+            SessionId(existing.session_id),
+            &crate::Event::AssistantMessage {
+                text: output.content.clone(),
+                parent_call_id: None,
+            },
+        )
+        .await?;
+    }
     let sequenced_event = append_terminal_event_on(
         &transaction,
         id,
