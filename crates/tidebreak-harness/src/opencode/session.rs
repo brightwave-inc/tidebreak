@@ -582,8 +582,10 @@ impl OpencodeSession {
         tokio::spawn(async move {
             let _ = drain_capped(stdout, MAX_STDERR_BYTES).await;
         });
-        tokio::spawn(async move {
-            let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let stderr_sink = stderr_tail.clone();
+        let stderr_task = tokio::spawn(async move {
+            drain_capped_into(stderr, MAX_STDERR_BYTES, &stderr_sink).await;
         });
 
         *self.base_url.lock().expect("opencode base url") = format!("http://127.0.0.1:{port}");
@@ -601,7 +603,12 @@ impl OpencodeSession {
             }
             self.child_pid.store(0, Ordering::SeqCst);
             *self.events.lock().await = None;
-            return Err(err);
+            let _ = timeout(Duration::from_secs(1), stderr_task).await;
+            let stderr = {
+                let tail = stderr_tail.lock().expect("opencode stderr");
+                String::from_utf8_lossy(&tail).into_owned()
+            };
+            return Err(HarnessError::Other(format!("{err}; stderr: {stderr}")));
         }
         Ok(())
     }
@@ -617,6 +624,20 @@ impl OpencodeSession {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         let url = format!("{}/global/health", self.base_url());
         loop {
+            {
+                let mut slot = self.child.lock().await;
+                if let Some(child) = slot.as_mut() {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            return Err(HarnessError::Other(format!(
+                                "opencode serve exited before /global/health was ready: {status}"
+                            )));
+                        }
+                        Ok(None) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
             if tokio::time::Instant::now() > deadline {
                 return Err(HarnessError::Other(
                     "timed out waiting for opencode serve /global/health".into(),
@@ -1043,12 +1064,22 @@ async fn drain_capped<R>(mut reader: R, cap: usize) -> String
 where
     R: AsyncReadExt + Unpin,
 {
-    let mut out = Vec::new();
+    let out = Arc::new(Mutex::new(Vec::new()));
+    drain_capped_into(&mut reader, cap, &out).await;
+    let bytes = out.lock().expect("opencode drain").clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+async fn drain_capped_into<R>(mut reader: R, cap: usize, out: &Mutex<Vec<u8>>)
+where
+    R: AsyncReadExt + Unpin,
+{
     let mut buf = [0_u8; 4_096];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                let mut out = out.lock().expect("opencode drain");
                 if out.len() < cap {
                     let room = cap - out.len();
                     out.extend_from_slice(&buf[..n.min(room)]);
@@ -1056,7 +1087,6 @@ where
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]

@@ -229,7 +229,11 @@ pub fn resolve_command_on_path(name: &str, path: &OsStr) -> Option<PathBuf> {
 /// The command is `$SHELL -ilc '…'` with unique sentinel markers so
 /// profile banners cannot forge the result.
 pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, ProbeError> {
-    if name.is_empty() || name.contains(['/', '\\', '\0', '\'', '"', ';', '|', '&']) {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
         return Err(ProbeError::NotFound(name.to_owned()));
     }
     if let Some(declared) = kind_for_command(name).and_then(|kind| host.declared(kind)) {
@@ -963,7 +967,7 @@ pub async fn list_cli_models(
 }
 
 /// Mark the engine's current model from listing markers or its own env.
-pub fn infer_listed_default(
+fn infer_listed_default(
     models: &mut [ListedHarnessModel],
     env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) {
@@ -1356,6 +1360,23 @@ eval "$cmd"
             harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_probe_rejects_non_binary_name_characters() {
+        let host = host_with_path(Path::new("/bin"));
+        for name in [
+            "claude`id`",
+            "$PATH",
+            "tool(name)",
+            "two words",
+            "line\nfeed",
+        ] {
+            assert!(matches!(
+                probe_shell(&host, name).await,
+                Err(ProbeError::NotFound(_))
+            ));
         }
     }
 
