@@ -39,6 +39,11 @@ const fixturePaths = [
   "crates/tidebreak-desktop/src/whisper_install.rs",
   "crates/tidebreak-desktop/scripts/prepare-sidecar.mjs",
   "crates/tidebreak-server/build.rs",
+  // The sandbox-image pin job rewrites these by path; the policy test
+  // asserts they exist and carry their pinned constants.
+  "crates/tidebreak-sandbox-runtime/src/docker.rs",
+  "crates/tidebreak-code-execution/src/sandbox_image.rs",
+  "crates/tidebreak-code-execution/src/daytona.rs",
   "deploy/self-host/Dockerfile",
   "deploy/self-host/Dockerfile.dockerignore",
   "crates/tidebreak-sandbox-agent/Dockerfile.dockerignore",
