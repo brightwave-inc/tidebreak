@@ -285,7 +285,6 @@ async fn fixture_with_channel_runtime(empty_catalog: bool, sandbox: bool) -> Fix
     runtime.adapters.register(Arc::new(InternalAdapter::new(
         state.clone(),
         runtime.db.clone(),
-        runtime.bus.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
     if sandbox {

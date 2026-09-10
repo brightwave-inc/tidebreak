@@ -9,7 +9,6 @@ use super::types::{
     HarnessModel, HarnessModelList, HarnessModelSource, InstallHarnessQuery,
 };
 use crate::code::harness_label;
-use crate::code::harness_llm::relay_covered;
 use crate::obo_gateway::GatewayCompatModel;
 use tidebreak_core::{CapLevel, HarnessKind};
 
@@ -266,8 +265,6 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
             let auth_mode = resolve_auth_mode(hosted, *kind, &probe);
             let remediation = if let Some(err) = install_error {
                 format!("could not download the {kind} binary: {err}")
-            } else if auth_mode == HarnessAuthMode::HostedUnavailable {
-                format!("{label} is not available on hosted machines yet.")
             } else if !probe.found && !installable {
                 format!("this build ships no pinned {kind} binary to download")
             } else if auth_mode == HarnessAuthMode::GatewayRelay {
@@ -343,11 +340,7 @@ fn resolve_auth_mode(
     probe: &tidebreak_harness::HarnessProbe,
 ) -> HarnessAuthMode {
     if hosted {
-        return if relay_covered(kind) {
-            HarnessAuthMode::GatewayRelay
-        } else {
-            HarnessAuthMode::HostedUnavailable
-        };
+        return HarnessAuthMode::GatewayRelay;
     }
     if probe.authenticated != Some(true)
         && tidebreak_harness::observe_auth_mode(kind, &probe.env).is_override()

@@ -25,7 +25,7 @@ use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, Turn
 use crate::inputs::{Inputs, POLL_INTERVAL, RunMode};
 use crate::tool_bridge::LocalToolBridge;
 use crate::wip::{self, CheckpointPoint, WipContext};
-use crate::wire::{SupervisorMessage, SupervisorPoll};
+use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 use tidebreak_core::code::supervisor_tools::is_result_frame;
 
@@ -95,6 +95,9 @@ pub struct Driver<E> {
     push_denied: bool,
     /// Checkpoint state, when the run has clones worth preserving.
     wip: Option<WipContext>,
+    /// The installed engine to register on every poll, when the environment
+    /// admitted an identity for this run.
+    embedded_engine: Option<EmbeddedEngineRegistration>,
 }
 
 impl<E: Engine> Driver<E> {
@@ -127,6 +130,7 @@ impl<E: Engine> Driver<E> {
             research: inputs.repositories.is_empty(),
             push_denied: inputs.forge_push_denied,
             wip: None,
+            embedded_engine: None,
         }
     }
 
@@ -134,6 +138,19 @@ impl<E: Engine> Driver<E> {
     #[must_use]
     pub fn with_tool_bridge(mut self, bridge: LocalToolBridge) -> Self {
         self.bridge = Some(bridge);
+        self
+    }
+
+    /// Registers the installed engine under the environment's admitted
+    /// identity: sent on every poll, required to be echoed exactly, and
+    /// sent once before the first turn because inference is refused until
+    /// the environment has accepted it.
+    #[must_use]
+    pub fn with_embedded_engine(mut self, registration: EmbeddedEngineRegistration) -> Self {
+        self.control = self
+            .control
+            .with_embedded_engine(Some(registration.clone()));
+        self.embedded_engine = Some(registration);
         self
     }
 
@@ -172,6 +189,11 @@ impl<E: Engine> Driver<E> {
 
     /// Runs the loop until the endpoint stops the agent or something fails.
     pub async fn run(mut self) -> Result<(), DriveError> {
+        if self.embedded_engine.is_some() {
+            // Register before any turn: the environment refuses the engine's
+            // inference until it has accepted the installed binary.
+            self.poll(true).await?;
+        }
         self.outbox.push(
             "supervisor_started",
             serde_json::json!({
@@ -415,9 +437,24 @@ impl<E: Engine> Driver<E> {
         }
         let batch = self.outbox.take_batch();
         let mut poll = SupervisorPoll::new(idle, self.delivered_through);
+        poll.embedded_engine.clone_from(&self.embedded_engine);
         poll.events.clone_from(&batch);
         match self.control.poll(&poll).await {
             Ok(instructions) => {
+                if self.embedded_engine.is_some()
+                    && instructions.embedded_engine != self.embedded_engine
+                {
+                    // A reply without the exact echo left the registration
+                    // unaccepted, and the engine's turns would each fail on
+                    // refused inference. Stop loudly instead.
+                    return Err(DriveError {
+                        code: EXIT_CONTROL_FATAL,
+                        message: "the control endpoint did not acknowledge the installed \
+                                  engine registration; inference stays unavailable, so the run \
+                                  stops rather than failing every turn"
+                            .to_owned(),
+                    });
+                }
                 self.consecutive_failures = 0;
                 for message in instructions.messages {
                     if message.seq > self.seen_through {
@@ -658,6 +695,9 @@ mod tests {
     /// Everything the mock supervisor records and serves.
     #[derive(Default)]
     struct MockSupervisor {
+        /// Withhold the engine registration echo, as an environment that did
+        /// not accept it would.
+        withhold_engine_ack: bool,
         events: Vec<(String, serde_json::Value)>,
         polls: Vec<serde_json::Value>,
         messages: Vec<(i64, String, bool)>,
@@ -721,7 +761,13 @@ mod tests {
         if !messages.is_empty() {
             supervisor.message_batches += 1;
         }
+        let embedded_engine = if supervisor.withhold_engine_ack {
+            serde_json::Value::Null
+        } else {
+            body.get("embedded_engine").cloned().unwrap_or_default()
+        };
         Json(serde_json::json!({
+            "embedded_engine": embedded_engine,
             "sandbox_id": "018f0000-0000-7000-8000-000000000000",
             "state": if supervisor.stop.is_some() { "completing" } else { "running" },
             "stop": supervisor.stop.is_some(),
@@ -993,6 +1039,71 @@ mod tests {
         );
         state.lock().unwrap().stop = Some("test complete".into());
         run.await.unwrap().unwrap();
+    }
+
+    fn registration() -> EmbeddedEngineRegistration {
+        EmbeddedEngineRegistration {
+            engine_session_id: "018f0000-0000-7000-8000-000000000001".parse().unwrap(),
+            engine: tidebreak_core::HarnessKind::Codex,
+            engine_version: "0.147.0".to_owned(),
+        }
+    }
+
+    /// An admitted engine is registered on a poll that precedes the first
+    /// turn, and every later poll repeats it.
+    #[tokio::test]
+    async fn an_admitted_engine_registers_before_the_first_turn() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        engine.finish(TurnEnd::Completed { success: true });
+        let run = tokio::spawn(
+            driver(engine.clone(), &url, &inputs("turn", None))
+                .with_embedded_engine(registration())
+                .run(),
+        );
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        {
+            let supervisor = state.lock().unwrap();
+            assert_eq!(
+                supervisor.polls[0]["embedded_engine"],
+                serde_json::to_value(registration()).unwrap(),
+                "the first poll registers the engine"
+            );
+            assert!(supervisor
+                .polls
+                .iter()
+                .all(|poll| poll.get("embedded_engine").is_some()));
+        }
+        assert_eq!(engine.turns().len(), 1);
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    /// Without the exact echo the registration was not accepted, and the
+    /// run stops before the engine starts a turn it could not run.
+    #[tokio::test]
+    async fn an_unacknowledged_registration_stops_the_run_before_any_turn() {
+        let (state, url) = start_supervisor().await;
+        state.lock().unwrap().withhold_engine_ack = true;
+        let engine = MockEngine::new();
+        let error = driver(engine.clone(), &url, &inputs("turn", None))
+            .with_embedded_engine(registration())
+            .run()
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, EXIT_CONTROL_FATAL);
+        assert!(
+            error.message.contains("did not confirm"),
+            "{}",
+            error.message
+        );
+        assert!(engine.turns().is_empty());
     }
 
     #[tokio::test]

@@ -401,7 +401,7 @@ fn verified_managed_node_root(managed_node_root: Option<&Path>) -> Option<&Path>
 /// the first thing npm does is fail to create `/.npm/_logs`, so every install
 /// died before a byte was fetched. The cache lives beside the installs so it
 /// depends on nothing but the data directory.
-pub fn npm_cache_dir(data_dir: &Path) -> PathBuf {
+fn npm_cache_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("tools").join("npm-cache")
 }
 

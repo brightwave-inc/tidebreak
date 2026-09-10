@@ -813,6 +813,7 @@ pub async fn reschedule_trigger_fire_delivery_failure(
 }
 
 /// Fires already recorded for one workspace, newest first.
+#[cfg(any(test, feature = "test-util"))]
 pub async fn list_fires_for_workspace(
     store: &DbStore,
     owner: &OwnerId,

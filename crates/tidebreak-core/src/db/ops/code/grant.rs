@@ -350,7 +350,7 @@ pub async fn revoke_external_grant_all_owners(
 /// so a storage failure cannot leave a half-revoked workspace.
 pub async fn revoke_external_workspace_grants(
     store: &DbStore,
-    owner: &OwnerId,
+    _owner: &OwnerId,
     channel_kind: &str,
     workspace_identity: &str,
     reason: &str,
@@ -367,7 +367,6 @@ pub async fn revoke_external_workspace_grants(
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let live = entities::code_external_grant::Entity::find()
-        .filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_external_grant::Column::ChannelKind.eq(channel_kind))
         .filter(entities::code_external_grant::Column::WorkspaceIdentity.eq(workspace_identity))
         .filter(entities::code_external_grant::Column::RevokedAt.is_null())

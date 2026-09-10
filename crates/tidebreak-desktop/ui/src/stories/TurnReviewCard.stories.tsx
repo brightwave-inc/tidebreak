@@ -114,7 +114,7 @@ export const CodexRevokedRefreshToken: Story = {
 
 export const CodexRevokedRefreshTokenCompact: Story = {
   render: renderCodexRevokedTokenTranscript,
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 /**

@@ -27,17 +27,17 @@ symlinks rather than following them.
 
 ## Closed first-slice contract
 
-- Curated text formats — Markdown, plain text, CSV, JSON, HTML, and recognized
-  source-code or text-configuration filenames — publish as text outputs; any
-  other extension publishes as a binary artifact with a media type derived from
-  its extension, bounded at 16 MiB.
+- Curated text formats — Markdown, plain text, CSV, JSON, HTML, charts
+  (`*.chart.json`), and recognized source-code or text-configuration filenames
+  — publish as text outputs; any other extension publishes as a binary artifact
+  with a media type derived from its extension, bounded at 16 MiB.
 - Filenames are one portable ASCII component, at most 120 characters.
 - Content is valid UTF-8, non-empty, and at most 512 KiB.
 - The catalog returns the newest 100 valid output files.
 - Text previews return at most 100,000 Unicode characters. Export always uses
   the complete file.
 - Formats with an inline viewer — spreadsheets and CSV (Univer), Word documents
-  (docx-preview), PDFs, and images — load the revision's complete bytes and
+  (`@extend-ai/react-docx`), PDFs, and images — load the revision's complete bytes and
   reuse the same engines as source documents.
 - Markdown previews use the same safe renderer as assistant messages: raw HTML,
   local-file links, executable URL schemes, and remote image loads are not
@@ -92,9 +92,7 @@ identical content returns the original record, so an ambiguous store response
 can be retried without creating a second output or a second revision; reusing
 one with different content is rejected.
 
-This layer is what the exec `output/` scan writes into. Files created before
-the record existed under the legacy `artifacts/` directory predate the record
-and are not adopted into it.
+This layer is what the exec `output/` scan writes into.
 
 ## Accepting binary workspace artifacts
 
@@ -184,7 +182,7 @@ person can move back.
 ## Deliberate limits
 
 An export is a synchronous user action, so it is not automatically retried and
-does not yet have a durable export receipt. Writing directly into connected
-folders remains a later slice. That addition should preserve the same rule: the
-model names a logical output, while a person or narrowly scoped capability
-chooses where host data is written.
+does not yet have a durable export receipt. Publishing an existing output into
+an attached folder uses `write_output_to_connected_folder`: the model names the
+output by filename, and the trusted client writes only into a root the user
+already connected.

@@ -1225,7 +1225,7 @@ impl CodeRuntime {
             return;
         }
         let live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
-        let changed = match tidebreak_core::db::code::set_pull_request_live_state(
+        let (changed, stored) = match tidebreak_core::db::code::set_pull_request_live_state(
             &self.db,
             owner,
             &host,
@@ -1236,7 +1236,7 @@ impl CodeRuntime {
         )
         .await
         {
-            Ok(Some((_, changed))) => changed,
+            Ok(Some((_, changed, stored))) => (changed, stored),
             // No fact row yet: the detector or the reconcile sweep mints it,
             // and the next digest change lands on it.
             Ok(None) => return,
@@ -1248,6 +1248,18 @@ impl CodeRuntime {
         if !changed {
             return;
         }
+        // A read that did not load checks writes through the checks the row
+        // kept, not its own absence: the workspace column mirrors the tier.
+        let mut digest = digest.clone();
+        if digest.checks.is_none() {
+            digest.checks_summary = stored.checks_summary;
+            digest.check_counts = stored
+                .checks
+                .as_deref()
+                .map(tidebreak_core::PullRequestCheckCounts::from_checks);
+            digest.checks = stored.checks;
+        }
+        let digest = &digest;
         // One delivery nudge per real change (decision 66): the delivery
         // page and notification monitor re-read on receipt instead of on
         // their own timers.

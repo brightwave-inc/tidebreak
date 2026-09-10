@@ -128,10 +128,18 @@ pub async fn get_pull_request_fact(
 
 /// Write the live tier onto one observed pull request (decision 66).
 ///
-/// Returns the row id and whether any live field actually moved —
-/// `observed_at` alone never counts, so callers broadcast real change and
-/// nothing else. `Ok(None)` when no fact row exists for the identity: the
-/// live tier decorates decision-62 observations, it never mints them.
+/// Returns the row id, whether any live field actually moved, and the tier
+/// as stored after the write. `observed_at` alone never counts as change, so
+/// callers broadcast real change and nothing else. `Ok(None)` when no fact
+/// row exists for the identity: the live tier decorates decision-62
+/// observations, it never mints them.
+///
+/// A read that did not load checks carries `checks: None`, and that keeps
+/// the row's check list and summary: the reconcile sweep lists pull requests
+/// without their check rollup, and stamping that absence over a rollup the
+/// conditional fetcher wrote would blind the watch and the check triggers
+/// for the length of the sweep interval. A read that loaded checks and found
+/// none carries `Some(vec![])`, which clears them.
 pub async fn set_pull_request_live_state(
     store: &DbStore,
     owner: &OwnerId,
@@ -140,22 +148,26 @@ pub async fn set_pull_request_live_state(
     repo_name: &str,
     number: u64,
     live: &CodePullRequestLiveState,
-) -> Result<Option<(CodePullRequestId, bool)>> {
+) -> Result<Option<(CodePullRequestId, bool, CodePullRequestLiveState)>> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
     let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
         return Ok(None);
     };
-    let checks_json = match &live.checks {
-        Some(checks) => Some(serde_json::to_string(checks).map_err(|err| {
-            AgentError::Store(format!(
-                "pull request {} live checks are unwritable: {err}",
-                row.id
-            ))
-        })?),
-        None => None,
+    let (checks_summary, checks_json) = match &live.checks {
+        Some(checks) => (
+            live.checks_summary.clone(),
+            Some(serde_json::to_string(checks).map_err(|err| {
+                AgentError::Store(format!(
+                    "pull request {} live checks are unwritable: {err}",
+                    row.id
+                ))
+            })?),
+        ),
+        // The read did not load checks: keep what the row already knows.
+        None => (row.checks_summary.clone(), row.checks.clone()),
     };
-    let changed = row.checks_summary != live.checks_summary
+    let changed = row.checks_summary != checks_summary
         || row.checks != checks_json
         || row.review_decision != live.review_decision
         || row.mergeable != live.mergeable
@@ -163,8 +175,17 @@ pub async fn set_pull_request_live_state(
         || row.auto_merge_enabled != live.auto_merge_enabled
         || row.in_merge_queue != live.in_merge_queue;
     let id = CodePullRequestId(row.id);
+    let stored_checks = match checks_json.as_deref() {
+        Some(raw) => Some(serde_json::from_str(raw).map_err(|err| {
+            AgentError::Store(format!(
+                "pull request {} live checks are unreadable: {err}",
+                row.id
+            ))
+        })?),
+        None => None,
+    };
     let mut model: entities::code_pull_request::ActiveModel = row.into();
-    model.checks_summary = Set(live.checks_summary.clone());
+    model.checks_summary = Set(checks_summary.clone());
     model.checks = Set(checks_json);
     model.review_decision = Set(live.review_decision.clone());
     model.mergeable = Set(live.mergeable.clone());
@@ -173,7 +194,12 @@ pub async fn set_pull_request_live_state(
     model.in_merge_queue = Set(live.in_merge_queue);
     model.live_observed_at = Set(Some(live.observed_at));
     model.update(&store.conn).await.map_err(store_err)?;
-    Ok(Some((id, changed)))
+    let stored = CodePullRequestLiveState {
+        checks_summary,
+        checks: stored_checks,
+        ..live.clone()
+    };
+    Ok(Some((id, changed, stored)))
 }
 
 /// One observed pull request plus the transport hints the conditional
@@ -346,29 +372,6 @@ pub async fn list_pull_request_facts(
         .into_iter()
         .map(fact_from_row)
         .collect()
-}
-
-/// Every distinct repository identity holding at least one fact row.
-///
-/// The reconcile sweep reads this to keep cross-repo facts fresh: a
-/// repository discovered through a detected command keeps itself on the
-/// sweep's list without a local checkout.
-pub async fn list_fact_repo_identities(
-    store: &DbStore,
-    owner: &OwnerId,
-) -> Result<Vec<(String, String, String)>> {
-    let rows: Vec<(String, String, String)> = entities::code_pull_request::Entity::find()
-        .select_only()
-        .column(entities::code_pull_request::Column::Host)
-        .column(entities::code_pull_request::Column::RepoOwner)
-        .column(entities::code_pull_request::Column::RepoName)
-        .distinct()
-        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
-        .into_tuple()
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(rows)
 }
 
 /// Every distinct `(owner, host, repo_owner, repo_name)` holding at least

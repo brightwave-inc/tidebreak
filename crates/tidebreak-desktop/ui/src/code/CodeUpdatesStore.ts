@@ -17,7 +17,6 @@ import {
 } from "./CodeClientGeneration";
 import {
   INITIAL_RECONNECT_DELAY_MS,
-  MAX_RECONNECT_DELAY_MS,
   nextReconnectDelay,
 } from "../ChatSessionController";
 import { requestUserAttention } from "../host";
@@ -1022,5 +1021,3 @@ function reconcileTrackedClones(
     }
   }
 }
-
-export { MAX_RECONNECT_DELAY_MS };

@@ -154,3 +154,8 @@ demoting that harness a tier, not for weakening the rules.
   increments the surfaced counter and drops nothing else on the floor.
 - A plausible wrong implementation parses fixtures correctly but quietly
   discards unknown lines; the counting test above must fail it.
+
+
+## Amended 2026-09-10
+
+PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.

@@ -1,7 +1,7 @@
 //! Codex CLI adapter. Secondary tier.
 //!
-//! Process model for 0.147.0: one long-lived `codex app-server --stdio`
-//! JSON-RPC child per session. Chosen over `codex exec --json` because the
+//! Process model for the pinned Codex version: one long-lived
+//! `codex app-server --stdio` JSON-RPC child per session. Chosen over `codex exec --json` because the
 //! installed version's app-server handshake is stable and is the richer
 //! approval channel (`item/commandExecution/requestApproval`).
 
@@ -29,9 +29,9 @@ use crate::{
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Codex CLI adapter. Capabilities below are for the captured version
-/// 0.147.0: verified flags are `Supported`/`Unsupported`; anything not
-/// seen in a fixture is `Unknown`.
+/// Codex CLI adapter. Capabilities below are for the captured protocol line
+/// beginning at 0.147.0: verified flags are `Supported`/`Unsupported`; anything
+/// not seen in a fixture is `Unknown`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;
 
@@ -404,8 +404,8 @@ async fn observe_login(
 
 /// The first status-shaped line from either stream, stdout first.
 ///
-/// The pinned 0.147 writes the status line to stderr under the probe's spawn
-/// shape (null stdin, piped stdout), so neither stream alone is authoritative:
+/// The pinned Codex version writes the status line to stderr under the probe's
+/// spawn shape (null stdin, piped stdout), so neither stream alone is authoritative:
 /// a stdout-only read reported "not observed" on signed-in machines. A
 /// non-status first line on one stream does not hide a status line on the
 /// other.
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn login_status_reads_the_stream_the_cli_writes() {
-        // The pinned 0.147 writes `login status` to stderr when stdin is not
+        // The pinned Codex version writes `login status` to stderr when stdin is not
         // a terminal — the probe's spawn shape — so a stdout-only read
         // reported "not observed" on signed-in machines.
         assert_eq!(

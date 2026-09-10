@@ -4,7 +4,8 @@
 //! The fix-errors action used to hand an agent check names and URLs and let it
 //! find the logs itself: two or three `gh` calls before it saw an error line,
 //! and then a whole multi-megabyte job log in one read. This module does that
-//! fetch on the agent's behalf and bounds it.
+//! fetch on the agent's behalf. The fetch itself is unbounded; only the
+//! rendered output is capped.
 //!
 //! Files land under the workspace's private root, beside fork transcripts, so
 //! Git cannot index them and the session's `allowed_read_roots` already covers
@@ -29,6 +30,7 @@ const CI_LOGS_DIR: &str = "ci-logs";
 /// caller waits one request rather than one per job — which is what keeps the
 /// whole fetch inside the client's own timeout.
 const MAX_JOBS: usize = 6;
+const MAX_FAILURES: usize = MAX_JOBS;
 
 /// Largest log written per job, in bytes, header included.
 ///
@@ -70,6 +72,18 @@ pub struct CheckLogFailure {
 pub struct WrittenCheckLogs {
     pub logs: Vec<WrittenCheckLog>,
     pub failures: Vec<CheckLogFailure>,
+}
+
+fn push_failure(
+    failures: &mut Vec<CheckLogFailure>,
+    omitted: &mut usize,
+    failure: CheckLogFailure,
+) {
+    if failures.len() < MAX_FAILURES {
+        failures.push(failure);
+    } else {
+        *omitted += 1;
+    }
 }
 
 /// A GitHub Actions job, addressed the way its check URL spells it.
@@ -134,22 +148,31 @@ pub(crate) async fn write_failing_check_logs(
 ) -> std::io::Result<WrittenCheckLogs> {
     let mut targets = Vec::new();
     let mut failures = Vec::new();
+    let mut omitted_failures = 0;
     for check in checks
         .iter()
         .filter(|check| check.bucket == PullRequestCheckBucket::Fail)
     {
         let Some(url) = check.url.as_deref() else {
-            failures.push(CheckLogFailure {
-                check: check.name.clone(),
-                message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
-            });
+            push_failure(
+                &mut failures,
+                &mut omitted_failures,
+                CheckLogFailure {
+                    check: check.name.clone(),
+                    message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
+                },
+            );
             continue;
         };
         let Some(job) = job_ref_from_check_url(url) else {
-            failures.push(CheckLogFailure {
-                check: check.name.clone(),
-                message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
-            });
+            push_failure(
+                &mut failures,
+                &mut omitted_failures,
+                CheckLogFailure {
+                    check: check.name.clone(),
+                    message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
+                },
+            );
             continue;
         };
         if targets.len() < MAX_JOBS {
@@ -181,7 +204,11 @@ pub(crate) async fn write_failing_check_logs(
         let raw = match raw {
             Ok(raw) => raw,
             Err(message) => {
-                failures.push(CheckLogFailure { check, message });
+                push_failure(
+                    &mut failures,
+                    &mut omitted_failures,
+                    CheckLogFailure { check, message },
+                );
                 continue;
             }
         };
@@ -202,6 +229,19 @@ pub(crate) async fn write_failing_check_logs(
             url,
         });
         written_names.push(name);
+    }
+    if omitted_failures > 0 {
+        let replace_last = failures.len() == MAX_FAILURES;
+        omitted_failures += usize::from(replace_last);
+        let summary = CheckLogFailure {
+            check: "Additional failing checks".to_owned(),
+            message: format!("{omitted_failures} additional failing checks were omitted."),
+        };
+        if replace_last {
+            failures[MAX_FAILURES - 1] = summary;
+        } else {
+            failures.push(summary);
+        }
     }
     prune_stale_logs(&dir, &written_names)?;
     Ok(WrittenCheckLogs { logs, failures })
@@ -455,6 +495,37 @@ mod tests {
         assert_eq!(written.failures[0].check, "external CI");
         assert_eq!(written.failures[0].message, UNSUPPORTED_CHECK_LOG_MESSAGE);
         assert!(!root.path().join(CI_LOGS_DIR).join(old_name).exists());
+    }
+
+    #[tokio::test]
+    async fn unsupported_failure_reports_are_bounded() {
+        let directory = tempfile::tempdir().expect("temp root");
+        let root = super::super::scratch::ScratchRoot::open_for_test(directory.path())
+            .expect("scratch root");
+        let checks = (0..MAX_FAILURES + 4)
+            .map(|index| PullRequestCheck {
+                name: format!("external CI {index}"),
+                bucket: PullRequestCheckBucket::Fail,
+                detail: None,
+                url: None,
+            })
+            .collect::<Vec<_>>();
+
+        let written = write_failing_check_logs(
+            &root,
+            &directory.path().join("gh-must-not-run"),
+            &checks,
+            None,
+        )
+        .await
+        .expect("bounded failures");
+
+        assert_eq!(written.failures.len(), MAX_FAILURES);
+        assert_eq!(
+            written.failures.last().unwrap().check,
+            "Additional failing checks"
+        );
+        assert!(written.failures.last().unwrap().message.contains("omitted"));
     }
 
     #[tokio::test]

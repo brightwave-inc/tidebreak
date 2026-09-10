@@ -14,6 +14,7 @@
 //! explicit refusals. Host stacks ride the same generic GET the rest of
 //! Delivery uses.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::{stream, StreamExt as _};
@@ -31,6 +32,7 @@ const REST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap on one REST response body. PR and check payloads are kilobytes; the
 /// bound exists so a confused origin cannot grow the process.
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
+static REST_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
 /// Pinned mutation that arms auto-merge, or enqueues when the repository
 /// uses a merge queue. Not a general GraphQL runner.
@@ -141,12 +143,17 @@ async fn request(
     credential: &GitCredential,
     body: Option<&Value>,
 ) -> Result<(reqwest::StatusCode, Value), String> {
-    let client = reqwest::Client::builder()
-        .timeout(REST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("tidebreak/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| format!("the forge REST client could not be built: {error}"))?;
+    let client = REST_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(REST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("tidebreak/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|error| format!("the forge REST client could not be built: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
     let mut request = client
         .request(method, url)
         .bearer_auth(&credential.secret)
@@ -235,6 +242,23 @@ pub(crate) async fn api_get(
         return Err(forge_message(status, &value));
     }
     Ok(value)
+}
+
+fn pulls_for_head_url(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    head_branch: &str,
+    per_page: &str,
+) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("head", &format!("{}:{head_branch}", target.owner))
+        .append_pair("state", "all")
+        .append_pair("per_page", per_page)
+        .finish();
+    format!(
+        "{api_base}/repos/{}/{}/pulls?{query}",
+        target.owner, target.name
+    )
 }
 
 /// Read one pull request in the `gh pr view --json` vocabulary, checks
@@ -603,10 +627,7 @@ pub(crate) async fn list_pull_requests_for_head(
 ) -> Result<Vec<Value>, String> {
     let (status, value) = request(
         reqwest::Method::GET,
-        format!(
-            "{api_base}/repos/{}/{}/pulls?head={}:{}&state=all&per_page=5",
-            target.owner, target.name, target.owner, head_branch
-        ),
+        pulls_for_head_url(api_base, target, head_branch, "5"),
         credential,
         None,
     )
@@ -634,10 +655,7 @@ pub(crate) async fn pull_request_digest(
 ) -> Result<Option<PullRequestDigest>, String> {
     let (status, listed) = request(
         reqwest::Method::GET,
-        format!(
-            "{api_base}/repos/{}/{}/pulls?head={}:{}&state=all&per_page=10",
-            target.owner, target.name, target.owner, head_branch
-        ),
+        pulls_for_head_url(api_base, target, head_branch, "10"),
         credential,
         None,
     )
@@ -978,6 +996,19 @@ mod tests {
         assert_eq!(
             graphql_url("https://ghe.acme.test/api/v3"),
             "https://ghe.acme.test/api/graphql"
+        );
+    }
+
+    #[test]
+    fn branch_names_are_query_encoded() {
+        let target = CodeGitHubRepositoryTarget {
+            host: "github.com".to_owned(),
+            owner: "acme".to_owned(),
+            name: "demo".to_owned(),
+        };
+        assert_eq!(
+            pulls_for_head_url("https://api.github.com", &target, "fix/a&b#c%+d", "5"),
+            "https://api.github.com/repos/acme/demo/pulls?head=acme%3Afix%2Fa%26b%23c%25%2Bd&state=all&per_page=5"
         );
     }
 

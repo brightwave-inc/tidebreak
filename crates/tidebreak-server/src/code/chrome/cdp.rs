@@ -57,7 +57,6 @@ impl From<std::io::Error> for CdpError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CdpFrame {
     Text(String),
-    Binary(Vec<u8>),
     Close,
 }
 
@@ -104,24 +103,9 @@ impl CdpTransport for WebSocketTransport {
         loop {
             match self.stream.next().await {
                 Some(Ok(WsMessage::Text(text))) => {
-                    let bytes = text.len();
-                    if bytes > MAX_WS_MESSAGE_BYTES {
-                        return Err(CdpError(format!(
-                            "chrome message too large: {} bytes",
-                            bytes
-                        )));
-                    }
                     return Ok(Some(CdpFrame::Text(text.to_string())));
                 }
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    if bytes.len() > MAX_WS_MESSAGE_BYTES {
-                        return Err(CdpError(format!(
-                            "chrome message too large: {} bytes",
-                            bytes.len()
-                        )));
-                    }
-                    return Ok(Some(CdpFrame::Binary(bytes.to_vec())));
-                }
+                Some(Ok(WsMessage::Binary(_))) => continue,
                 Some(Ok(WsMessage::Close(_))) => return Ok(Some(CdpFrame::Close)),
                 Some(Ok(WsMessage::Ping(_)))
                 | Some(Ok(WsMessage::Pong(_)))
@@ -198,6 +182,21 @@ pub enum CdpEvent {
     },
 }
 
+impl CdpEvent {
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Console { session_id, .. }
+            | Self::Exception { session_id, .. }
+            | Self::RequestWillBeSent { session_id, .. }
+            | Self::ResponseReceived { session_id, .. }
+            | Self::LoadingFailed { session_id, .. }
+            | Self::ContextCreated { session_id, .. }
+            | Self::Lifecycle { session_id, .. } => session_id.as_deref(),
+            Self::TargetCreated { .. } | Self::TargetDestroyed { .. } => None,
+        }
+    }
+}
+
 fn truncated(value: &str, max: usize) -> String {
     if value.len() <= max {
         value.to_owned()
@@ -215,10 +214,14 @@ fn truncated(value: &str, max: usize) -> String {
 pub fn parse_event(frame: &Value, session_id: Option<String>) -> Option<CdpEvent> {
     let method = frame.get("method")?.as_str()?;
     let params = frame.get("params")?;
+    let timestamp_factor = match method {
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown" => 1.0,
+        _ => 1000.0,
+    };
     let timestamp_ms = params
         .get("timestamp")
         .and_then(Value::as_f64)
-        .map(|seconds| (seconds * 1000.0) as u64)
+        .map(|timestamp| (timestamp * timestamp_factor) as u64)
         .unwrap_or(0);
     match method {
         "Runtime.consoleAPICalled" => {
@@ -594,10 +597,16 @@ impl CdpSession {
             .map_err(|_| CdpError("chrome protocol session closed during command".to_owned()))?
     }
 
-    /// Bounded clone of recently observed protocol events (newest last).
-    pub fn recent_events(&self) -> Vec<CdpEvent> {
+    /// Bounded clone of recently observed protocol events for one session
+    /// (newest last). Unrelated session events remain in the ring without
+    /// being cloned into the caller.
+    pub fn recent_events_for_session(&self, session_id: &str) -> Vec<CdpEvent> {
         let events = self.events.lock().expect("cdp event history");
-        events.clone()
+        events
+            .iter()
+            .filter(|event| event.session_id() == Some(session_id))
+            .cloned()
+            .collect()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -703,7 +712,6 @@ async fn reader_loop(
                             }
                         }
                     }
-                    Ok(Some(CdpFrame::Binary(_))) => {}
                     Ok(Some(CdpFrame::Close)) | Ok(None) => {
                         for (_, pending_command) in pending.drain() {
                             let _ = pending_command.reply.send(Err(CdpError("chrome transport closed".to_owned())));
@@ -726,6 +734,41 @@ async fn reader_loop(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn runtime_timestamps_are_milliseconds_and_network_timestamps_are_seconds() {
+        let console = parse_event(
+            &json!({
+                "method":"Runtime.consoleAPICalled",
+                "params":{"type":"log","timestamp":1234.5,"args":[]}
+            }),
+            Some("page".into()),
+        )
+        .unwrap();
+        assert!(matches!(
+            console,
+            CdpEvent::Console {
+                timestamp_ms: 1234,
+                ..
+            }
+        ));
+
+        let request = parse_event(
+            &json!({
+                "method":"Network.requestWillBeSent",
+                "params":{"timestamp":1.25,"requestId":"1","request":{"method":"GET","url":"https://example.com"}}
+            }),
+            Some("page".into()),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            CdpEvent::RequestWillBeSent {
+                timestamp_ms: 1250,
+                ..
+            }
+        ));
+    }
 
     struct GatedSendTransport {
         entered: Option<oneshot::Sender<()>>,

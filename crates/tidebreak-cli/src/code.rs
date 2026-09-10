@@ -288,7 +288,6 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                     // report, and printing "no" there reads as broken.
                     HarnessAuthMode::GatewayManaged => "gw",
                     HarnessAuthMode::GatewayRelay => "relay",
-                    HarnessAuthMode::HostedUnavailable => "n/a",
                     HarnessAuthMode::LocalSignIn => match entry.authenticated {
                         Some(true) => "yes",
                         Some(false) => "no",

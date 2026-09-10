@@ -145,16 +145,6 @@ impl ScriptedProvider {
         }
     }
 
-    /// The same provider, but stalling `delay` before answering each completion,
-    /// so a drive spans several lease periods.
-    #[allow(dead_code)]
-    fn slow(completions: Vec<String>, delay: Duration) -> Self {
-        Self {
-            delay,
-            ..Self::new(completions)
-        }
-    }
-
     fn first_prompt(&self) -> String {
         self.prompts
             .lock()

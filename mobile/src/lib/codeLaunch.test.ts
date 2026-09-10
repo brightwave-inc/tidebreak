@@ -62,12 +62,6 @@ describe("mobile code launch choices", () => {
     expect(
       harnessUnavailableReason({
         ...harness,
-        auth_mode: "hosted_unavailable",
-      }),
-    ).toMatch(/hosted machines/);
-    expect(
-      harnessUnavailableReason({
-        ...harness,
         authenticated: false,
         remediation: "Run codex login.",
       }),

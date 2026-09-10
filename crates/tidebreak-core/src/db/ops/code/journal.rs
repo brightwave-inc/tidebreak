@@ -271,40 +271,6 @@ pub async fn list_events(
     Ok(EventPage { events, truncated })
 }
 
-/// The oldest events for one of the owner's sessions with `seq > after`, in
-/// order, at most `limit` of them.
-///
-/// The forward-reading companion to [`list_events`]: a follower that must
-/// not skip a row — the internal engine catching up after a lagged
-/// subscription — pages through the journal from its cursor with this,
-/// where the replay window would hand it the newest rows and drop the ones
-/// in between.
-pub async fn list_events_from(
-    store: &DbStore,
-    owner: &OwnerId,
-    session_id: SessionId,
-    after: i64,
-    limit: u64,
-) -> Result<Vec<SequencedEvent>> {
-    entities::event::Entity::find()
-        .filter(entities::event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::event::Column::SessionId.eq(session_id.0))
-        .filter(entities::event::Column::Seq.gt(after))
-        .order_by_asc(entities::event::Column::Seq)
-        .limit(limit)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .map(|model| {
-            Ok(SequencedEvent {
-                seq: model.seq,
-                event: serde_json::from_value(model.event)?,
-            })
-        })
-        .collect()
-}
-
 /// Complete reconstructable turn events through `through_turn`, newest first
 /// for budget decisions and ascending in the returned page.
 ///

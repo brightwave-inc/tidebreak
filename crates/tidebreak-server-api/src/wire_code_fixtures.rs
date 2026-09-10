@@ -460,7 +460,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         caps: caps(),
                         commands: Vec::new(),
                         authenticated: None,
-                        auth_mode: HarnessAuthMode::HostedUnavailable,
+                        auth_mode: HarnessAuthMode::GatewayRelay,
                         remediation: "Install grok-build and sign in.".to_owned(),
                         stderr: "grok: command not found".to_owned(),
                         unrecognized_event_count: 2,

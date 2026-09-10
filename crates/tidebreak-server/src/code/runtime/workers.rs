@@ -226,8 +226,7 @@ impl CodeRuntime {
             session.id,
             attached.spawn_epoch,
             session.harness_kind,
-            self.harness_llm.is_some()
-                && crate::code::harness_llm::relay_covered(session.harness_kind),
+            self.harness_llm.is_some(),
             None,
             attached.subagents.clone(),
             self.gh_search_path_owned(),

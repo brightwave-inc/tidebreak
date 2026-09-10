@@ -83,7 +83,7 @@ a normal result. Stop and disconnect also clear the emulation. If setup or clean
 fails, the operation refuses further input instead of bringing the tab forward.
 
 Input supports nested, scaled, and rotated frames. Perspective-transformed frames
-return an unsupported-geometry result before input. `chrome_activate_tab`
+refuse with an error before input. `chrome_activate_tab`
 refuses because it changes your selected tab. Disconnecting a managed browser
 closes it and removes its temporary profile. Disconnecting an existing browser leaves it open.
 

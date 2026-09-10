@@ -162,7 +162,6 @@ function CodeBrowserTabSession({
     documentEpoch: runtime?.documentEpoch,
   });
   const signalRefresh = useRefreshSignals((state) => state.signal);
-  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const nativeReady = useRef(false);
   const nativePresence = useRef<"unknown" | "missing" | "present">("unknown");
@@ -1090,13 +1089,14 @@ function CodeBrowserTabSession({
   }
 
   async function runHostCommand(type: "reload" | "stop" | "back" | "forward") {
-    await runHostAction({ type });
+    return runHostAction({ type });
   }
 
-  async function runHostAction(action: BrowserHostAction) {
-    if (!host.available() || !nativeReady.current) return;
+  async function runHostAction(action: BrowserHostAction): Promise<boolean> {
+    if (!host.available() || !nativeReady.current) return false;
     try {
       recordRuntime(await host.command(workspaceId, browserId, action));
+      return true;
     } catch (error) {
       updateSession((current) =>
         failBrowserSession(
@@ -1104,6 +1104,7 @@ function CodeBrowserTabSession({
           friendlyErrorMessage(error, "The browser command failed"),
         ),
       );
+      return false;
     }
   }
 
@@ -1191,7 +1192,8 @@ function CodeBrowserTabSession({
   }
 
   async function stop() {
-    await runHostCommand("stop");
+    const ok = await runHostCommand("stop");
+    if (!ok) return;
     updateSession((current) => ({
       ...current,
       loadState: current.url ? "ready" : "idle",
@@ -1343,7 +1345,7 @@ function CodeBrowserTabSession({
           onDismiss={() => setSlow(false)}
         />
       )}
-      <div ref={surfaceRef} className="relative min-h-0 flex-1 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         <ViewportSurface
           viewport={viewport}
           showNative={showNative}

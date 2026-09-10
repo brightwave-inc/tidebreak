@@ -722,7 +722,7 @@ pub struct PullRequestDigest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub auto_merge_enabled: Option<bool>,
-    // True when the host timeline says the PR is currently in its merge queue.
+    /// True when the host timeline says the PR is currently in its merge queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub in_merge_queue: Option<bool>,
@@ -1128,7 +1128,9 @@ pub struct CodePullRequestFact {
 pub struct CodePullRequestLiveState {
     /// One-line checks summary, as the digest carries it.
     pub checks_summary: Option<String>,
-    /// Individual checks, when the host reported any.
+    /// Individual checks. `Some` when the read loaded the check rollup
+    /// (empty when the host reported none); `None` when it did not load
+    /// checks at all, which a write treats as "keep what the row has".
     pub checks: Option<Vec<PullRequestCheck>>,
     /// Lowercased host review decision.
     pub review_decision: Option<String>,
@@ -2187,8 +2189,6 @@ pub enum IncarnationAdmission {
     },
 }
 
-/// Bounded image reference recorded on a code-mode user turn.
-///
 /// State of a persisted watch task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]

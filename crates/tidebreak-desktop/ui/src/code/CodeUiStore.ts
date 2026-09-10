@@ -275,8 +275,14 @@ function readStoredRailPrefs(): CodeRailPrefs {
   try {
     const raw = window.localStorage.getItem(RAIL_PREFS_KEY);
     if (!raw) {
-      return { ...DEFAULT_RAIL_PREFS, sortMode: readStoredWorkspaceSort() };
+      const seeded = {
+        ...DEFAULT_RAIL_PREFS,
+        sortMode: readStoredWorkspaceSort(),
+      };
+      window.localStorage.removeItem(WORKSPACE_SORT_KEY);
+      return seeded;
     }
+    window.localStorage.removeItem(WORKSPACE_SORT_KEY);
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return DEFAULT_RAIL_PREFS;
     const record = parsed as Record<string, unknown>;

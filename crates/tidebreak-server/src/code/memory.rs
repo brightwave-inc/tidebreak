@@ -30,7 +30,7 @@ pub(crate) async fn materialize_session_memory(
     owner: &OwnerId,
     repo_id: Option<RepoId>,
     private_root: &ScratchRoot,
-) -> io::Result<PathBuf> {
+) -> io::Result<Option<PathBuf>> {
     let dir = scratch::scratch_dir(private_root, MEMORY_DIR)?;
 
     let mut files: Vec<(String, String)> = Vec::new();
@@ -43,22 +43,22 @@ pub(crate) async fn materialize_session_memory(
         digest_parts.push(personal.markdown);
     }
     if let Some(repo_id) = repo_id {
-        match backend
+        let digest = backend
             .assemble_context(owner, MemoryScope::Repo { repo_id })
             .await
-        {
-            Ok(digest) if !digest.markdown.is_empty() => digest_parts.push(digest.markdown),
-            Ok(_) => {}
-            Err(_) => {}
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        if !digest.markdown.is_empty() {
+            digest_parts.push(digest.markdown);
         }
     }
-    files.push((MEMORY_INDEX.to_owned(), digest_parts.join("\n")));
-
     let mut records = list_active(backend, owner, MemoryScope::Personal).await?;
     if let Some(repo_id) = repo_id {
         records.extend(list_active(backend, owner, MemoryScope::Repo { repo_id }).await?);
     }
-    records.sort_by_key(|record| record.id.0);
+    if digest_parts.is_empty() && records.is_empty() {
+        return Ok(None);
+    }
+    files.push((MEMORY_INDEX.to_owned(), digest_parts.join("\n")));
     for record in records {
         files.push((
             record_file_name(&record),
@@ -74,7 +74,7 @@ pub(crate) async fn materialize_session_memory(
     for (name, body) in files {
         dir.publish(OsStr::new(&name), body.as_bytes()).await?;
     }
-    Ok(memory_dir_path(private_root))
+    Ok(Some(memory_dir_path(private_root)))
 }
 
 async fn list_active(
@@ -137,6 +137,7 @@ mod tests {
         records: Vec<MemoryRecord>,
         /// When set, every read fails, as a store outage would.
         failing: bool,
+        fail_repo_only: bool,
     }
 
     #[async_trait::async_trait]
@@ -186,7 +187,9 @@ mod tests {
             _owner: &OwnerId,
             filter: MemoryListFilter,
         ) -> tidebreak_core::MemoryResult<Vec<MemoryRecord>> {
-            if self.failing {
+            if self.failing
+                && (!self.fail_repo_only || matches!(filter.scope, Some(MemoryScope::Repo { .. })))
+            {
                 return Err(tidebreak_core::MemoryError::Unsupported(
                     tidebreak_core::MemoryCapability::ContextAssembly,
                 ));
@@ -313,16 +316,19 @@ mod tests {
         let backend = FixedBackend {
             records: vec![sample_record()],
             failing: false,
+            fail_repo_only: false,
         };
         let owner = OwnerId::new("user:alice").unwrap();
         let first = materialize_session_memory(&backend, &owner, None, &root)
             .await
+            .unwrap()
             .unwrap();
         let first_index = std::fs::read(first.join(MEMORY_INDEX)).unwrap();
         let first_record =
             std::fs::read(first.join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.md")).unwrap();
         let second = materialize_session_memory(&backend, &owner, None, &root)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             first_index,
@@ -342,9 +348,11 @@ mod tests {
         let healthy = FixedBackend {
             records: vec![sample_record()],
             failing: false,
+            fail_repo_only: false,
         };
         let dir = materialize_session_memory(&healthy, &owner, None, &root)
             .await
+            .unwrap()
             .unwrap();
         let index = std::fs::read(dir.join(MEMORY_INDEX)).unwrap();
         let record_file = dir.join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.md");
@@ -353,6 +361,7 @@ mod tests {
         let broken = FixedBackend {
             records: Vec::new(),
             failing: true,
+            fail_repo_only: false,
         };
         materialize_session_memory(&broken, &owner, None, &root)
             .await
@@ -363,6 +372,37 @@ mod tests {
             "the index the first turn named survives a store fault"
         );
         assert!(record_file.exists(), "the record files survive too");
+
+        let broken_repo = FixedBackend {
+            records: vec![sample_record()],
+            failing: true,
+            fail_repo_only: true,
+        };
+        materialize_session_memory(&broken_repo, &owner, Some(RepoId::new()), &root)
+            .await
+            .unwrap_err();
+        assert_eq!(std::fs::read(dir.join(MEMORY_INDEX)).unwrap(), index);
+        assert!(
+            record_file.exists(),
+            "a repo digest fault preserves the tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_memory_does_not_publish_an_index() {
+        let temp = TempDir::new().unwrap();
+        let root = ScratchRoot::open_for_test(temp.path()).unwrap();
+        let backend = FixedBackend {
+            records: Vec::new(),
+            failing: false,
+            fail_repo_only: false,
+        };
+        let owner = OwnerId::new("user:alice").unwrap();
+        assert!(materialize_session_memory(&backend, &owner, None, &root)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!memory_dir_path(&root).join(MEMORY_INDEX).exists());
     }
 
     #[tokio::test]
@@ -376,10 +416,12 @@ mod tests {
         let backend = FixedBackend {
             records: vec![sample_record()],
             failing: false,
+            fail_repo_only: false,
         };
         let owner = OwnerId::new("user:alice").unwrap();
         let written = materialize_session_memory(&backend, &owner, None, &root)
             .await
+            .unwrap()
             .unwrap();
         assert!(written.starts_with(&private));
         assert!(!written.starts_with(&worktree));

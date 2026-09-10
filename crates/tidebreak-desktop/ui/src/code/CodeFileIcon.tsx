@@ -100,7 +100,7 @@ export function CodeFileIcon({
   );
 }
 
-export function fileIconSpec(path: string): FileIconSpec {
+function fileIconSpec(path: string): FileIconSpec {
   const name = path.split("/").pop()?.toLowerCase() ?? path.toLowerCase();
   const extension = name.includes(".") ? (name.split(".").pop() ?? "") : "";
 
@@ -130,7 +130,7 @@ export function fileIconSpec(path: string): FileIconSpec {
       kind: "package",
     };
   }
-  if (name.endsWith(".lock") || name.includes("lock.")) {
+  if (name.endsWith(".lock") || /(^|[-.])lock\.[a-z0-9]+$/i.test(name)) {
     return {
       icon: LockKeyhole,
       tone: "text-muted-foreground",

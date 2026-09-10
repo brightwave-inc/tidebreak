@@ -84,6 +84,28 @@ describe("CodeSessionController", () => {
     controller.dispose();
   });
 
+  it("delivers a frame emitted synchronously while opening the socket", () => {
+    const batches: (readonly SequencedCodeEventFrame[])[] = [];
+    const frame: SequencedCodeEventFrame = {
+      seq: 1,
+      event: { type: "turn_started", turn_id: "turn-1" },
+    };
+    const controller = new CodeSessionController({
+      openSocket: (_after, onFrame) => {
+        onFrame(frame);
+        return new FakeSocket(onFrame) as unknown as WebSocket;
+      },
+      getAfter: () => 0,
+      onEvents: (events) => batches.push(events),
+      onConnectionState: () => undefined,
+    });
+
+    controller.start();
+
+    expect(batches).toEqual([[frame]]);
+    controller.dispose();
+  });
+
   it("reveals the durable snapshot while reconnecting after an initial failure", () => {
     const batches: Array<{
       events: readonly SequencedCodeEventFrame[];

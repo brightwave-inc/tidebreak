@@ -12,7 +12,8 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { toast } from "sonner";
 import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
@@ -80,8 +81,8 @@ function CodeHomeBody() {
       useCodeUpdatesStore
         .getState()
         .apply({ type: "harness_install", install: snapshot });
-    } catch {
-      // Create still reports why, with the reason the server gave.
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not start the download"));
     }
   }
 

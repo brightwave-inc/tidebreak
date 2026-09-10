@@ -50,6 +50,11 @@ pub(super) struct PullRequestObservation {
     /// Stored facts folded onto the page are not host observations: the
     /// persist pass must not treat them as a fresh confirm.
     pub(super) from_host: bool,
+    /// True when the read loaded the check rollup. A list read for every
+    /// state skips `statusCheckRollup`, so its empty check list means
+    /// "not asked", not "none": the live-tier write must not clear the
+    /// checks the conditional fetcher wrote.
+    pub(super) checks_loaded: bool,
 }
 
 impl PullRequestObservation {
@@ -991,6 +996,7 @@ pub(super) fn observation_from_fact(
         head_repository: None,
         host_stack: None,
         from_host: false,
+        checks_loaded,
     }
 }
 
@@ -1224,6 +1230,7 @@ pub(super) fn parse_pull_request(
         head_repository: parse_head_repository(repository, value),
         host_stack: None,
         from_host: true,
+        checks_loaded,
     })
 }
 
@@ -1525,24 +1532,28 @@ pub(super) fn workspace_links(
 /// the same shape a workspace read stores, so the live tier and its
 /// write-through take one path no matter who observed the pull request.
 pub fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> PullRequestDigest {
+    let checks: Vec<PullRequestCheck> = item
+        .checks
+        .iter()
+        .map(|check| PullRequestCheck {
+            name: check.name.clone(),
+            bucket: check.bucket,
+            detail: check.detail.clone(),
+            url: check.url.clone(),
+        })
+        .collect();
+    // The summary and counts are derived the same way the conditional
+    // fetcher derives them, so the two live-tier writers agree on every
+    // field and an unchanged rollup reads as unchanged.
+    let counts = PullRequestCheckCounts::from_checks(&checks);
     PullRequestDigest {
         number: item.number,
         url: Some(item.url.clone()),
         state: item.state.clone(),
         title: Some(item.title.clone()),
-        checks_summary: None,
-        check_counts: None,
-        checks: Some(
-            item.checks
-                .iter()
-                .map(|check| PullRequestCheck {
-                    name: check.name.clone(),
-                    bucket: check.bucket,
-                    detail: check.detail.clone(),
-                    url: check.url.clone(),
-                })
-                .collect(),
-        ),
+        checks_summary: Some(counts.summary_line()),
+        check_counts: Some(counts),
+        checks: Some(checks),
         draft: Some(item.draft),
         // `state` alone cannot separate merged from closed on every host
         // response, which is why the summary carries `merged_at`.
@@ -1643,6 +1654,7 @@ pub(super) async fn persist_and_augment_pull_request_facts(
             .collect();
         for &index in indices {
             let from_host = items[index].from_host;
+            let checks_loaded = items[index].checks_loaded;
             let item = &mut items[index].summary;
             if item.in_merge_queue.is_none() {
                 item.in_merge_queue = known_queue.get(&item.number).copied();
@@ -1682,8 +1694,15 @@ pub(super) async fn persist_and_augment_pull_request_facts(
             // row's live tier and fan real change out to every workspace
             // holding the pull request (decision 66). One list read per
             // repository is what keeps every surface fresh.
+            let mut digest = digest_from_summary(item);
+            if !checks_loaded {
+                // Not asked, so not known: `None` keeps the row's checks.
+                digest.checks_summary = None;
+                digest.check_counts = None;
+                digest.checks = None;
+            }
             runtime
-                .record_pull_request_live_state(owner, None, &digest_from_summary(item))
+                .record_pull_request_live_state(owner, None, &digest)
                 .await;
             // Keep this pass's fact set current for later durable reads.
             match repo_facts

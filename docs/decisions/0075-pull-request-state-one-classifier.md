@@ -114,3 +114,8 @@ changes.
   or the stacks REST surface gaining queue or per-layer merge-state
   information. Either would move queue detection off `mergeable_state` and
   into first-class fields.
+
+
+## Amended 2026-09-10
+
+PR #3101 removed `PrCard`; `CodeInspector`, `WorkspacePrList`, and `pullRequestPresentation.ts` now carry its pull-request presentation responsibilities.

@@ -1116,7 +1116,7 @@ impl CodeRuntime {
         .await
         .map_err(|error| match error {
             tidebreak_core::db::code::ExternalMessageIntakeError::Context { kind, message } => {
-                ServerError::bad_request_kind(kind, message)
+                ServerError::bad_request_kind(kind, &message)
             }
             tidebreak_core::db::code::ExternalMessageIntakeError::Store(error) => error.into(),
         })?;

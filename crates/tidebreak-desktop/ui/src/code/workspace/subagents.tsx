@@ -41,9 +41,6 @@ export function subagentSummaryFromTranscript(
 
 function toolDetailSubject(
   detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
-): string;
-function toolDetailSubject(
-  detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
 ): string {
   switch (detail.kind) {
     case "command":

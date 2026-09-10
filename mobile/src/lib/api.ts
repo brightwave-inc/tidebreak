@@ -125,7 +125,6 @@ function harnessAuthMode(value: unknown): value is HarnessAuthMode {
     "local_sign_in",
     "gateway_managed",
     "gateway_relay",
-    "hosted_unavailable",
   ].includes(String(value));
 }
 

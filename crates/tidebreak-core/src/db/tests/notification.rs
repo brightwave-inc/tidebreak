@@ -91,7 +91,7 @@ async fn a_code_turn_cannot_double_insert() {
     let workspace_id = crate::WorkspaceId::new();
     let turn_id = crate::TurnId::new();
 
-    let first = crate::db::code::record_code_turn_notification(
+    let first = crate::db::ops::notification::record_code_turn_notification(
         &store,
         &owner,
         session_id,
@@ -102,7 +102,7 @@ async fn a_code_turn_cannot_double_insert() {
     )
     .await
     .unwrap();
-    let second = crate::db::code::record_code_turn_notification(
+    let second = crate::db::ops::notification::record_code_turn_notification(
         &store,
         &owner,
         session_id,

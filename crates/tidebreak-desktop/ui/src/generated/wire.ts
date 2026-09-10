@@ -1527,13 +1527,6 @@ name: string,
 status: CodeSubagentStatus, };
 
 /**
- * Unsequenced activity notice published on the updates channel.
- *
- * Never journaled. A client that missed one just pulls from its last cursor.
- */
-export type CodeTerminalActivityNotice = { workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
-
-/**
  * Identifies one auxiliary terminal attached to a workspace.
  */
 export type CodeTerminalId = string;
@@ -1590,8 +1583,6 @@ export type CodeWatchId = string;
 export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: SessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
 
 /**
- * Bounded image reference recorded on a code-mode user turn.
- *
  * State of a persisted watch task.
  */
 export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopped" | "failed";
@@ -2651,7 +2642,7 @@ export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "sc
 /**
  * How a session of one engine authenticates on this machine.
  */
-export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_relay" | "hosted_unavailable";
+export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_relay";
 
 /**
  * Capability vector for one probed engine version.
@@ -2755,12 +2746,9 @@ standing_grants: CapLevel,
 /**
  * The engine can resume a turn that was interrupted mid-model-call.
  *
- * Boot recovery skips pid-less sessions that declare this, so a
- * restart does not close an in-flight internal turn as interrupted.
- * Update-quiesce uses the same flag: `Supported` aborts and hands the
- * lease back; `Unsupported` waits for a turn boundary (decision 0080).
- * External harnesses declare `Unsupported` — no engine can resume a
- * harness turn.
+ * Declared so the doctor surface can report it. Boot recovery and
+ * update-quiesce key on [`crate::HarnessKind::Internal`] today, not
+ * this flag. External harnesses declare `Unsupported`.
  */
 mid_turn_resume: CapLevel,
 /**
@@ -4356,7 +4344,11 @@ head_sha?: string,
 /**
  * True when auto-merge is enabled on the host.
  */
-auto_merge_enabled?: boolean, in_merge_queue?: boolean, };
+auto_merge_enabled?: boolean,
+/**
+ * True when the host timeline says the PR is currently in its merge queue.
+ */
+in_merge_queue?: boolean, };
 
 /**
  * The id is the client-generated turn id promotion will accept under, so an

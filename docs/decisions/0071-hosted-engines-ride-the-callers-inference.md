@@ -1,6 +1,6 @@
 # 71. Hosted engines ride the caller's inference
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Owners: server
 - Related: [`0051-on-behalf-of-inference-for-hosted-machines.md`](0051-on-behalf-of-inference-for-hosted-machines.md),
@@ -32,14 +32,16 @@ worthless anywhere else.
 
 ## Decision
 
-1. **The server relays engine inference through the caller's grant.** Two
-   routes on the main listener, `/code/llm/anthropic/v1/messages` and
-   `/code/llm/openai/v1/responses`, stream requests through to the Model
-   Gateway's compat endpoints. Per request, the relay exchanges the owning
-   caller's live machine-bound token for a fresh inference token (the same
-   single-flight cache decision 51 uses for chat) and sends that upstream
-   in place of what the child presented. The session outlives any single
-   token because the exchange runs on every request.
+1. **The server relays engine inference through the caller's grant.** Three
+   routes on the main listener, `/code/llm/anthropic/v1/messages`,
+   `/code/llm/openai/v1/responses`, and `/code/llm/openai/v1/models`,
+   stream requests through to the Model Gateway's compat endpoints. Per
+   request, the relay exchanges the owning caller's live machine-bound
+   token for a fresh inference token (the same single-flight cache
+   decision 51 uses for chat) and sends that upstream in place of what
+   the child presented. The session outlives any single token because the
+   exchange runs on every request. The same relay key also authorizes
+   `POST /code/git/credential`.
 
 2. **The child authenticates with a session-scoped relay key.** At spawn on
    a machine that has an on-behalf-of gateway, the runtime mints an opaque

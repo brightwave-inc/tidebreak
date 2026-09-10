@@ -17,7 +17,7 @@ The authenticated local API owns provider selection and timeout policy:
 | Route | Purpose |
 | --- | --- |
 | `GET /code-execution` | Return the selected provider, timeout, provider-enforcement disclosure, and host readiness |
-| `PUT /code-execution` | Select a fixed provider or disable execution and update the bounded timeout |
+| `PUT /code-execution` | Select a fixed provider or disable execution, and update the bounded timeout, egress policy, E2B template, or Daytona snapshot |
 | `GET /code-execution/credentials` | Read readiness for the fixed E2B and Daytona key slots |
 | `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
 | `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
@@ -29,13 +29,20 @@ The initial state is:
   "provider": "local",
   "timeout_ms": 60000,
   "available": true,
-  "has_credential": false
+  "has_credential": false,
+  "providers": [],
+  "egress": {
+    "policy": { "mode": "open" },
+    "enforcement": []
+  },
+  "detached_admission": []
 }
 ```
 
-`available` reports whether the selected native confinement primitive exists on
-the current host. The example above is the supported macOS state; it is false
-when execution is disabled or unsupported.
+`available` reports the selected provider's own availability test: local asks
+the adapter's platform probe, Docker asks whether a runtime answers, and the
+managed providers are available exactly when their credential slot is filled.
+It is false when execution is disabled or that test fails.
 Timeouts must be between 1 and 120 seconds; the default is 60 seconds, enough headroom for a cold package install that pulls compiled wheels. Sending `{"provider": null}`
 disables execution; sending `{"provider": "local"}` enables the local adapter.
 `e2b` and `daytona` select the managed adapters, which become available once
@@ -51,8 +58,9 @@ independently. Local execution needs no credential and has no slot to report.
 ### Per-chat network policy
 
 Every chat persists one provider-neutral code-execution policy. It defaults to
-`off`, is selected beside the composer, and is read again immediately before
-each command:
+`open`. A new chat seeds from the owner's last explicit choice at the same
+routes; a brand-new install with no sticky state keeps open. The policy is
+selected beside the composer and is read again immediately before each command:
 
 ```json
 { "mode": "off" }
@@ -68,8 +76,8 @@ each command:
 Custom hosts are exact DNS names: wildcard patterns and address literals are
 rejected, entries are lowercased and deduplicated before persistence, and the
 list is bounded. `package_managers` expands to a fixed, reviewable registry
-class (PyPI, npm, crates.io, Maven, Go, NuGet, RubyGems, and Packagist
-endpoints). The model cannot author or widen the policy.
+class (PyPI, npm, crates.io, Maven, Gradle Plugin Portal, Go, NuGet, RubyGems,
+and Packagist endpoints). The model cannot author or widen the policy.
 
 The local adapter starts an execution-scoped HTTP CONNECT broker on
 `127.0.0.1` for every non-`off` command. Seatbelt admits outbound TCP to that
@@ -256,9 +264,19 @@ On macOS, the configured server intersects the chat's product attachment IDs
 with the host broker's live read and write grants immediately before each
 `exec` invocation. The local adapter rejects missing roots and roots presented
 as symlinks, canonicalizes every path, and adds one narrow Seatbelt `subpath`
-read allowance per readable root. A write allowance is added only when the
-live grant is write-scoped. The profile's existing network denial and broad
-user-data read denials remain in place.
+read allowance per readable root.
+
+Writable grants do not write the user's real folder during the command. Each
+writable root is copied into a per-turn overlay under `.exec-overlays` in the
+chat scratch tree; the sandbox profile makes that copy the only writable
+location. The overlay *is* the tree the command sees, so every filesystem
+operation works as it would against the real folder. On APFS the copy is a
+`clonefile`. At the end of the turn, the overlay is compared against the
+digest manifest recorded when it was made. Untouched files are left alone;
+changed files are written back; files the overlay deleted are deleted from the
+folder too. Each write-back keeps an undo snapshot of the prior bytes when they
+fit the snapshot ceiling. A folder that cannot be staged is downgraded to
+read-only for that turn rather than restoring direct writes.
 
 Folder paths and access modes are listed in the foreground operating context so
 the model can address them without inventing paths. That list is bounded and is
@@ -297,11 +315,12 @@ tools. Local execution reports a
 concise command error when the host lacks Python or an underlying renderer; it
 does not download tooling or use an unconfined fallback.
 
-The local backend warms its verified wheel cache one exact requirement set at
-a time. A successful set, or one pip proves has no compatible distribution for
-the fixed interpreter, is remembered for the process lifetime so later execs
-do not repeat the same deterministic resolution and warning. Network, timeout,
-and process-launch failures remain retryable, and any changed exact pin set
+The host runs `pip download` (wheels only) into a hash-verified, host-owned
+cache and mounts that cache read-only as `$TIDEBREAK_PACKAGE_CACHE`. Population
+is host-side over host TLS; nothing a sandbox wrote is promoted. The resolved
+requirement set is persisted to `populated-pins.json` so later execs reuse the
+same deterministic resolution across process restarts. Network, timeout, and
+process-launch failures remain retryable, and any changed exact pin set
 receives one fresh attempt.
 
 Beyond the helpers, the sandbox image carries the runtimes a document run may
@@ -344,10 +363,13 @@ The initial adapter is deliberately fail-closed and macOS-first:
 
 - `/usr/bin/sandbox-exec` applies a generated Seatbelt profile;
 - network is denied;
-- writes are allowed only below the exact canonical private chat scratch;
+- writes are allowed only below the exact canonical private chat scratch, the
+  per-chat env home, write overlays, and `/dev/null`;
 - sensitive user, application, configuration, temporary, and volume paths are
   denied for reads, while system executables and runtime libraries remain
   usable;
+- when the chat policy is not `off`, Seatbelt also admits one loopback TCP
+  pinhole to the execution-scoped CONNECT broker;
 - the parent environment is cleared; only fixed `HOME`, `TMPDIR`, and `PATH`
   values are supplied, with `HOME` and `TMPDIR` pointing at a writable per-chat
   directory outside the model-visible scratch so interpreter caches never
@@ -363,8 +385,8 @@ The initial adapter is deliberately fail-closed and macOS-first:
 An absolute path beneath a host area that the local profile denies is reported
 as `sandbox_path_denied`, not as a missing workspace file. Direct path
 arguments are rejected before the process starts. When a shell or interpreter
-embeds the path in a script, a failed Seatbelt access is annotated in the
-bounded stderr result while preserving the original diagnostic. The message
+embeds the path in a script, a failed Seatbelt access replaces stdout and
+stderr wholesale with a sandbox-denial message. The message
 names the path, identifies the permitted model-visible roots (the private chat
 workspace plus any currently connected folders), and tells the caller to
 attach or copy the file into scratch or connect its containing folder before

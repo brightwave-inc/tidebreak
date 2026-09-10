@@ -75,30 +75,32 @@ describe("accepted turn after the socket already painted", () => {
     };
     store
       .getState()
-      .applyEvent(
-        { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+      .applyEvents(
+        [{ seq: 1, event: { type: "turn_started", turn_id: "turn-1" } }],
         deps,
       );
     store
       .getState()
-      .applyEvent(
-        { seq: 2, event: { type: "assistant_delta", text: "README.md" } },
+      .applyEvents(
+        [{ seq: 2, event: { type: "assistant_delta", text: "README.md" } }],
         deps,
       );
-    store.getState().applyEvent(
-      {
-        seq: 3,
-        event: {
-          type: "turn_completed",
-          usage: {
-            input_tokens: 1,
-            output_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            context_tokens: 0,
+    store.getState().applyEvents(
+      [
+        {
+          seq: 3,
+          event: {
+            type: "turn_completed",
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+              context_tokens: 0,
+            },
           },
         },
-      },
+      ],
       deps,
     );
     await submitAcceptedTurn(store.getState().update, async () => ({

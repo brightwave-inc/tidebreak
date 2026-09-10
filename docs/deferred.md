@@ -19,10 +19,8 @@ pick them up now:
 
 - Close the remaining multi-principal prompt-inbox ownership gap in the
   self-hosted profile.
-- Enforce the strict `network off` setting in Docker code execution, then use
-  the existing egress topology to make the other network policies enforceable.
-- Make deletion of a terminal chat erase its background-run workspaces without
-  waiting for the periodic reaper.
+- Build the egress topology that can enforce Docker policies other than the
+  current fail-closed `--network none` posture.
 
 These are important finishing work, but they do not change the product's basic
 shape. They should be delivered as normal, reviewable slices rather than held
@@ -36,10 +34,8 @@ static bearer token from the operator file. The packaged desktop app stays a
 local Desktop-profile product: it embeds its own server and does not point at
 a remote deployment.
 
-The first member client is now specified:
-[decision 47](decisions/0047-gateway-linked-hosting.md) is a desktop remote
-connection mode (URL, token, TLS except on loopback) with host authority
-degrading on a remote machine. The hosted web UI is unparked:
+The desktop app can attach to a remote machine and reports that attachment
+through `remote_machine_state`. The hosted web UI is unparked:
 [decision 82](decisions/0082-the-hosted-machine-serves-the-renderer.md) has
 the machine serve the desktop renderer to browsers, with a session that lasts
 its bearer. Refreshing a browser session without re-entering through the
@@ -216,7 +212,7 @@ purpose:
   approvals, resume, and durable history. Reconsider only if a harness's
   machine-readable surface proves genuinely unusable over time.
 - **A custom or system harness binary.** Every engine runs the bundled pin
-  ([record 41](decisions/0041-pinned-harness-binaries.md)). The pin shares
+  ([record 45](decisions/0045-run-code-mode-on-windows.md)). The pin shares
   HOME-scoped config and credentials with a system install, so vendor login,
   modelctl-managed gateway auth, and the hosted relay all work without
   pointing spawn at a different executable. Revisit when a machine has a
@@ -266,21 +262,10 @@ purpose:
   What no repo can do is name its own location; toolchains that misbehave
   outside the repo's ancestry are the known cost, and the override waits for
   real instances of that pain.
-- **Remote session execution.** The adapter contract deliberately never
-  assumes a session's engine is a local child process. A later execution
-  location can run the same harness in a managed sandbox — the session
-  ingesting a sequenced remote event stream into the same journal, the
-  workspace becoming a remote clone whose results arrive as pushed branches.
-  Channels that cannot carry interactive approvals restrict the session to
-  permission modes that need none, under the same visible-capability rules
-  as any other limitation.
-- **A supervision-first mobile client.** Recorded in
-  [decision 72](decisions/0072-mobile-client.md) and tracked as epic
-  [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644). The
-  in-repo Expo client at `mobile/` pairs with Model Gateway and attaches to
-  a hosted machine. What remains deferred is the supervision UI itself
-  (launch, approve, steer, review) and a local relay so a laptop can be
-  the machine the phone attaches to.
+- **A local relay for the mobile client.** The hosted mobile path shipped in
+  epic [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644). What
+  remains deferred is the local relay from #3199, so a phone can attach to a
+  laptop rather than a hosted machine.
 
 ## Memory that outlives a session
 
@@ -296,8 +281,8 @@ surfaces. The first slices are ordinary issues. What stays parked here:
   boundary, once a governed remote store exists to host it. Promotion is
   explicit and record-by-record; nothing is ever derived from observed
   traffic.
-- Episodic search: read-only lexical search across past sessions'
-  journals and recaps, as a recall tier beneath the curated records.
+- Cross-repository episodic search, recap retrieval, and integration with the
+  curated memory tier. Per-workspace transcript search already exists.
 - A continuous one-way mirror of memory records into a user-chosen
   folder, and a folder-backed storage backend for users who keep
   knowledge in versioned plain files. The mirror is derived output, never

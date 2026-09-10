@@ -318,7 +318,6 @@ const HARNESS_AUTH_MODES = new Set<HarnessAuthMode>([
   "local_sign_in",
   "gateway_managed",
   "gateway_relay",
-  "hosted_unavailable",
 ]);
 const HARNESS_UPDATE_CHANNELS = new Set<WireHarnessUpdateChannel>([
   "pinned",

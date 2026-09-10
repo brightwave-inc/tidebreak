@@ -98,8 +98,6 @@ export function nameTerminals(
   return unchanged ? (current as Record<string, string>) : kept;
 }
 
-/** Native child webviews must yield whenever a portaled app surface overlaps them. */
-
 function shortcutHint(id: ShellShortcutAction, command: boolean): string {
   const def = SHELL_SHORTCUTS.find((item) => item.id === id);
   return def ? shortcutKeycaps(def, command).join("") : "";

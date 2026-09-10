@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-20
 - Owners: code mode
-- Related: [`0031-code-mode-harness-adapters.md`](0031-code-mode-harness-adapters.md),
+- Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),
   [`0035-code-mode-wire-contract.md`](0035-code-mode-wire-contract.md),
   [`0050-watch-and-fix-is-a-durable-task.md`](0050-watch-and-fix-is-a-durable-task.md)
 

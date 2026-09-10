@@ -145,7 +145,7 @@ export function CodeCenterTabs({
   /** Offer "New agent" in the plus menu. */
   onNewConversation?: () => void;
   onCloseConversation?: (sessionId: string | null) => void;
-  /** Copy this agent's transcript into the worktree and open a new agent on it. */
+  /** Copy this agent's transcript into private scratch (outside every worktree) and open a new agent on it. */
   onForkConversation?: (sessionId: string) => void;
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;

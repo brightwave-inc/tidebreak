@@ -8,17 +8,28 @@ libraries.
 
 ```
       clients            tidebreak-desktop   tidebreak-cli
-                               │                 │
-                               └────── tidebreak-server
-                                            │
-      libraries          tidebreak-mcp
-                         tidebreak-router
-                         tidebreak-host-broker  tidebreak-code-execution
-                         tidebreak-egress       tidebreak-sandbox-protocol
+                         tidebreak-sandbox-agent
+                         tidebreak-supervised-agent
+                               │
+                         tidebreak-server (crate tidebreak-server-api)
+                               │
+                         tidebreak-server-core (crate tidebreak-server)
+                               │
+      libraries          tidebreak-mcp            tidebreak-harness
+                         tidebreak-router         tidebreak-code-remote
+                         tidebreak-host-broker    tidebreak-code-delivery
+                         tidebreak-code-execution tidebreak-sandbox-runtime
+                         tidebreak-egress         tidebreak-sandbox-protocol
+                         tidebreak-gateway-runtime
+                         tidebreak-worker-runtime
+                         tidebreak-managed-node
+                         tidebreak-shell-policy
                                             │
       the seam                         tidebreak-core
 
 ```
+
+`tidebreak-whisper` is its own Cargo workspace, excluded from the root one.
 
 **Status legend:** 🟢 built/in active development · 🟡 partial baseline · ⚪ stub.
 
@@ -40,7 +51,7 @@ Major surfaces present today:
 
 | Module | What it is |
 | --- | --- |
-| `id` | Typed identifiers (`ChatId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
+| `id` | Typed identifiers (`SessionId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
 | `error` | The crate-wide `AgentError` + `Result`. |
 | `model` | Persisted chats, projects, documents, jobs, tool executions, leases, and lifecycle state. |
 | `tool` | The tool contract (`Tool`, `ToolSpec`, `ToolOutput`, `ToolCtx`, `ApprovalClass`). |
@@ -149,6 +160,110 @@ See [Code execution](code-execution.md).
 
 **Depends on:** `tidebreak-core`, `tidebreak-egress`.
 
+## `tidebreak-code-remote` — remote sandbox control 🟢
+
+The client side of the confining environment's sandbox runtime API. Decision
+0079 split remote execution in two: the workload half is
+`tidebreak-supervised-agent`; this crate is Tidebreak asking that environment
+to provision, watch, steer, and stop the sandbox a remote session's engine
+runs in. Tidebreak never dials into the pod. The pinned contract is
+`/api/v1/runtime/...` on the gateway (spawn, status, sequenced events, inbox
+messages, cancel).
+
+**Depends on:** `tidebreak-core`.
+
+## `tidebreak-code-delivery` — GitHub delivery 🟢
+
+Install-wide GitHub delivery reads and guarded user actions. The database
+remains the source of truth for registered repositories, Tidebreak
+workspaces, and attributed pull-request facts. Workflow run summaries persist
+as `code_workflow_run` rows; deployments stay live GitHub observations in a
+short in-memory cache.
+
+**Depends on:** `tidebreak-core`.
+
+## `tidebreak-sandbox-agent` — in-container sandbox agent 🟡
+
+The sandbox-resident side of the sandbox-provider design: a container image
+running Tidebreak's agent loop with a closed, sandbox-resident tool registry,
+behind `tidebreak-sandbox-protocol`. The supervisor owns the transport
+listener; the agent loop drives model inference back to the host over reverse
+RPC so no model credential lives in the container; a separate egress proxy
+enforces the run's compiled network policy.
+
+**Depends on:** `tidebreak-sandbox-protocol`, `tidebreak-core`.
+
+## `tidebreak-sandbox-runtime` — sandboxed background-agent execution 🟢
+
+Owns in-process sandbox runs, container-hosted runs, Docker lifecycle,
+detached-admission checks, exact-attempt cancellation, and the durable
+reverse-operation log. The embedding server supplies model routing, live
+settings, event publication, and tool catalogs through narrow traits.
+
+**Depends on:** `tidebreak-core`, `tidebreak-sandbox-protocol`.
+
+## `tidebreak-worker-runtime` — durable worker pacing 🟢
+
+Shared pacing and retry contracts for durable workers (lanes and retry).
+
+**Depends on:** nothing in the workspace.
+
+## `tidebreak-supervised-agent` — externally supervised agent 🟡
+
+An externally supervised sandbox — a controlled execution environment that
+Tidebreak does not provision — starts this agent, owns the durable event
+stream, and exposes a control endpoint. The agent initiates outbound polls to
+that endpoint, drives an engine CLI through `tidebreak-harness`, and reports
+lifecycle events outward. It runs no listener, accepts no attach, and keeps
+no durable state of its own.
+
+**Depends on:** `tidebreak-harness`, `tidebreak-core`.
+
+## `tidebreak-managed-node` — managed Node runtime contract 🟢
+
+Shared verification contract for Tidebreak's managed Node runtime. The
+desktop owns downloading and unpacking Node. Consumers only trust the
+resulting directory when its marker names the exact artifact pinned for the
+current platform and both required entrypoints are present.
+
+**Depends on:** nothing in the workspace.
+
+## `tidebreak-gateway-runtime` — model-gateway session 🟢
+
+Model-gateway connection, session, catalog, and relay runtime. The embedding
+server supplies managed policy, model persistence, pairing, and MCP
+configuration through narrow traits. The runtime owns the network session,
+authority fence, sign-in lifecycle, catalog refresh, endpoint entitlements,
+and shared-app relay.
+
+**Depends on:** `tidebreak-core`, `tidebreak-router`.
+
+## `tidebreak-shell-policy` — shell command analysis 🟢
+
+Deterministic safety analysis for shell commands. Given a raw command and
+standing allow/deny rules, it decides whether the command may run without
+asking, must be put to a human, or is structurally unsafe. The crate is
+pure: no process is spawned and no filesystem is touched.
+
+**Depends on:** nothing Tidebreak-specific beyond the parser.
+
+## `tidebreak-harness` — external engine events 🟢
+
+Protocol translation from an external agent engine into one normalized event
+vocabulary. Nothing in this crate's traits assumes the engine is a coding
+agent. Orchestration, persistence, and UI consume only `tidebreak_core::Event`;
+this crate emits the unpersisted sibling `HarnessEvent`.
+
+**Depends on:** `tidebreak-core`.
+
+## `tidebreak-whisper` — on-demand transcription helper 🟢
+
+One-shot whisper.cpp transcription helper. The desktop spawns this binary per
+transcription instead of linking whisper.cpp. It is excluded from the root
+workspace and published separately.
+
+**Depends on:** whisper.cpp (its own workspace).
+
 ## `tidebreak-egress` — egress policy decisions 🟢
 
 The dependency-free decision layer from
@@ -202,12 +317,21 @@ local run instructions.
 
 **Depends on:** `tidebreak-core`, `tidebreak-host-broker`, `tidebreak-server` (+ Tauri).
 
-## `tidebreak-server` — local API and workers 🟢
+## `tidebreak-server-api` — HTTP and WebSocket routes 🟢
 
-The authenticated loopback HTTP/WebSocket surface shared by desktop and
-headless clients. It owns route orchestration and the durable document,
-retirement, and audit workers while core state transitions remain in
-`tidebreak-core`.
+Package name `tidebreak-server`. Tidebreak's in-process HTTP and WebSocket
+route surface. Desktop and CLI depend on this crate; it re-exports workers
+and tools from `tidebreak-server-core`.
+
+**Depends on:** `tidebreak-server-core`.
+
+## `tidebreak-server` — local API workers 🟢
+
+Directory `crates/tidebreak-server`, package name `tidebreak-server-core`.
+The authenticated loopback workers shared by desktop and headless clients.
+It owns the durable document, retirement, and audit workers while core state
+transitions remain in `tidebreak-core`. HTTP routes live in
+`tidebreak-server-api`, not here.
 
 Two former standalone crates now live here as modules, because the server
 was their only consumer:

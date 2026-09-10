@@ -96,6 +96,9 @@ export function WorkspaceWorkflowControl({
   onOpenWatchTask?: () => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [pushFailureDetail, setPushFailureDetail] = useState<string | null>(
+    null,
+  );
   // Downloading the failing job logs is a host read the reader waits on, so
   // the primary button spins through it rather than looking dead.
   const [attachingLogs, setAttachingLogs] = useState(false);
@@ -418,12 +421,15 @@ export function WorkspaceWorkflowControl({
             return true;
           });
           if (!pushed) return;
+          setPushFailureDetail(null);
           toast.success("Pushed");
         } catch (err) {
-          const message =
-            err instanceof HttpError && err.kind === "git_auth_failed"
-              ? err.message
-              : friendlyErrorMessage(err, "Could not push");
+          const message = friendlyErrorMessage(err, "Could not push");
+          setPushFailureDetail(
+            err instanceof HttpError && err.kind === "git_push_failed"
+              ? message
+              : null,
+          );
           resource.setMutationError(message);
           toast.error(message);
         }
@@ -570,6 +576,11 @@ export function WorkspaceWorkflowControl({
                 snapshot={resource.data}
                 error={resource.mutationError ?? resource.error}
               />
+              {pushFailureDetail && (
+                <pre className="bg-muted max-h-32 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap">
+                  {pushFailureDetail}
+                </pre>
+              )}
             </div>
             <div className="flex flex-wrap gap-1 border-t border-border-subtle p-1.5">
               {!model.remote && (

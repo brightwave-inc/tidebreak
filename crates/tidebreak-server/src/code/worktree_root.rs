@@ -103,24 +103,52 @@ async fn validate_worktree_root(root: &Path) -> Result<(), ServerError> {
         ));
     }
     match tokio::fs::metadata(root).await {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(ServerError::bad_request_kind(
-            "worktree_root_not_dir",
-            format!("worktree root {} is not a directory", root.display()),
-        )),
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(ServerError::bad_request_kind(
+                "worktree_root_not_dir",
+                format!("worktree root {} is not a directory", root.display()),
+            ));
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             tokio::fs::create_dir_all(root).await.map_err(|err| {
                 ServerError::bad_request_kind(
                     "worktree_root_unusable",
                     format!("could not create worktree root {}: {err}", root.display()),
                 )
-            })
+            })?;
         }
-        Err(err) => Err(ServerError::bad_request_kind(
-            "worktree_root_unusable",
-            format!("could not read worktree root {}: {err}", root.display()),
-        )),
+        Err(err) => {
+            return Err(ServerError::bad_request_kind(
+                "worktree_root_unusable",
+                format!("could not read worktree root {}: {err}", root.display()),
+            ));
+        }
     }
+    let probe = root.join(format!(".tidebreak-write-probe-{}", uuid::Uuid::new_v4()));
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .await
+        .map_err(|err| {
+            ServerError::bad_request_kind(
+                "worktree_root_unusable",
+                format!(
+                    "could not write under worktree root {}: {err}",
+                    root.display()
+                ),
+            )
+        })?;
+    tokio::fs::remove_file(&probe).await.map_err(|err| {
+        ServerError::bad_request_kind(
+            "worktree_root_unusable",
+            format!(
+                "could not remove write probe under {}: {err}",
+                root.display()
+            ),
+        )
+    })
 }
 
 async fn read_worktree_root(store: &dyn Store) -> Result<Option<String>, ServerError> {

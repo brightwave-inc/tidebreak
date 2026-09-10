@@ -1,12 +1,5 @@
 import { useState } from "react";
-import {
-  Brain,
-  FolderPlus,
-  LoaderCircle,
-  Package,
-  Paperclip,
-  Plus,
-} from "lucide-react";
+import { Brain, FolderPlus, Package, Paperclip, Plus } from "lucide-react";
 
 import type { NetworkPolicy, ReasoningEffort } from "./api";
 import { ReasoningEffortSubMenu } from "./ModelMenu";
@@ -16,6 +9,7 @@ import {
   networkPolicyLabel,
 } from "./NetworkPolicyDialog";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -139,7 +133,7 @@ export function ComposerToolsMenu({
               data-first-task-target="attach-files"
             >
               {attachFiles.attaching ? (
-                <LoaderCircle className="size-4 animate-spin" />
+                <Spinner className="size-4" />
               ) : (
                 <Paperclip className="size-4" />
               )}
@@ -153,7 +147,7 @@ export function ComposerToolsMenu({
               data-first-task-target="attach-folder"
             >
               {attachFolder.working ? (
-                <LoaderCircle className="size-4 animate-spin" />
+                <Spinner className="size-4" />
               ) : (
                 <FolderPlus className="size-4" />
               )}

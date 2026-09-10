@@ -1,7 +1,6 @@
-import { Loader2 } from "lucide-react";
-
 import type { SpecDiscoveryInfo } from "../api";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 
 /** A copyable OpenAPI 3 JSON document with one GET, a path parameter, and a
  * bearer header — enough to ingest when the vendor publishes nothing. */
@@ -100,7 +99,7 @@ export function DiscoveryResults({
   if (discovering) {
     return (
       <p className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Loader2 size={14} className="animate-spin" />
+        <Spinner className="size-3.5" />
         Searching well-known OpenAPI locations…
       </p>
     );

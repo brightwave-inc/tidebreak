@@ -530,7 +530,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         return park_watch(
             runtime.as_ref(),
             watch,
-            "the pull request digest is unavailable; is GitHub CLI signed in?",
+            "the pull request digest is unavailable; check that GitHub access is signed in",
         )
         .await;
     };

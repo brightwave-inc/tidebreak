@@ -15,7 +15,6 @@ use tokio::sync::Semaphore;
 
 use super::leg::{LegDriver, LegDriverConfig};
 use super::session::InternalSession;
-use crate::code::bus::CodeEventBus;
 use crate::state::AppState;
 
 /// The in-process engine, registered under [`HarnessKind::Internal`].
@@ -30,7 +29,6 @@ use crate::state::AppState;
 pub struct InternalAdapter {
     state: AppState,
     db: Arc<DbStore>,
-    bus: Arc<CodeEventBus>,
     /// Process-wide ceiling on concurrent internal-engine model calls.
     /// Sized from the same config as [`LegDriverConfig`].
     concurrency: Arc<Semaphore>,
@@ -41,7 +39,6 @@ impl InternalAdapter {
     pub fn new(
         state: AppState,
         db: Arc<DbStore>,
-        bus: Arc<CodeEventBus>,
         sandbox_spawn_execution_location: AgentRunExecutionLocation,
     ) -> Self {
         let driver = LegDriver::new(
@@ -70,7 +67,6 @@ impl InternalAdapter {
         Self {
             state,
             db,
-            bus,
             concurrency: Arc::new(Semaphore::new(LegDriverConfig::default().max_concurrency)),
             driver,
         }
@@ -138,7 +134,6 @@ impl HarnessAdapter for InternalAdapter {
         let session = InternalSession::launch(
             self.state.clone(),
             self.db.clone(),
-            self.bus.clone(),
             self.concurrency.clone(),
             self.driver.clone(),
             spec,

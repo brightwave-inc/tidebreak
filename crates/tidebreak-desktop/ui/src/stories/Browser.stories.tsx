@@ -46,7 +46,8 @@ type BrowserScenario =
   | "profile-reset-confirmation"
   | "profile-resetting"
   | "profile-reset-reconstructing"
-  | "profile-reset-failure";
+  | "profile-reset-failure"
+  | "address-error";
 
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   name: "wk_webview",
@@ -272,7 +273,11 @@ function BrowserStory({
         <BrowserToolbar
           session={session}
           address={address}
-          addressError={null}
+          addressError={
+            scenario === "address-error"
+              ? "Only HTTP and HTTPS addresses can open here"
+              : null
+          }
           canGoBack={session.historyIndex > 0}
           canGoForward={false}
           controller={controller}
@@ -780,6 +785,10 @@ export const SlowPage: Story = { args: { scenario: "slow" } };
 
 export const Failure: Story = {
   args: { scenario: "failure" },
+};
+
+export const AddressError: Story = {
+  args: { scenario: "address-error" },
 };
 
 export const PopupBlocked: Story = { args: { scenario: "popup" } };

@@ -119,14 +119,13 @@ pub(crate) use types::{
     CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody,
     CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage,
     CodeForkBody, CodeForkTranscript, CodeGrantSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
-    CodeTriggerSnapshot, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot,
-    CodeWorkspaceTree, CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList,
-    MergeCodePrBody, QueuedTurn, ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame,
-    SessionAccessSnapshot, SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody,
-    SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody, UpdateNotice,
-    WorkspaceTitleProposal,
+    CodeRepoSnapshot, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
+    CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
+    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
+    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedTurn,
+    ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame, SessionAccessSnapshot, SessionDigest,
+    SessionSnapshot, SetCodeWorktreeRootBody, SetSessionVisibilityBody, TurnSnapshot,
+    UpdateCodeTriggerBody, UpdateNotice, WorkspaceTitleProposal,
 };
 #[allow(unused_imports)] // Compatibility exports keep these route paths stable.
 pub(crate) use types::{

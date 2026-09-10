@@ -189,5 +189,5 @@ type Story = StoryObj<typeof meta>;
 export const FutureChatAccess: Story = {};
 
 export const FutureChatAccessCompact: Story = {
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

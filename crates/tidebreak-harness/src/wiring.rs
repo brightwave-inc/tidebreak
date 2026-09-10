@@ -43,8 +43,10 @@ pub struct InferenceWiring<'a> {
 /// those providers rides the caller's grant. Grok takes a custom models
 /// endpoint plus the relay key itself; its CLI reads credentials only from
 /// an auth file, so the grok adapter materializes the key as a
-/// session-scoped `GROK_AUTH_PATH` file. The wired key variable also stays
-/// available to shell tools that borrow credentials through the host.
+/// session-scoped `GROK_AUTH_PATH` file. Codex and Grok also retain the wired
+/// key variable for shell tools that borrow credentials through the host; Claude
+/// and opencode consume the key through their engine-specific authentication
+/// surfaces.
 #[must_use]
 pub fn spawn_wiring(
     kind: HarnessKind,

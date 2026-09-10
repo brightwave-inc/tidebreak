@@ -34,8 +34,8 @@ impl ClaudeCodeAdapter {
     }
 }
 
-/// The ladder `claude --effort` takes on the pinned 2.1.234, plus the rung the
-/// engine's own picker appends above it.
+/// The ladder `claude --effort` takes on the pinned Claude Code version, plus
+/// the rung the engine's own picker appends above it.
 ///
 /// `--effort` itself accepts `low, medium, high, xhigh, max`. `Ultra` is
 /// ultracode, which Claude Code presents as the top of the same slider even
@@ -218,13 +218,15 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             // Permission flags are documented on the 2.1 line. The product
-            // pins 2.1.234 and offers every mode that pin can honor.
+            // pins the current Claude Code version and offers every mode that
+            // pin can honor.
             structured_approvals: CapLevel::Supported,
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
             auto_mode: CapLevel::Supported,
             allow_mode: CapLevel::Supported,
-            // `--effort` is documented on the pinned 2.1.234 `--help`.
+            // `--effort` is documented on the pinned Claude Code version
+            // `--help`.
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
@@ -253,7 +255,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
-        // The ladder reads off the pinned 2.1.234 `--help`. When
+        // The ladder reads off the pinned Claude Code version `--help`. When
         // `capabilities` degrades `reasoning_levels` for an engine off that
         // line, session create refuses every level, so advertising the
         // pinned ladder would offer a control that only fails. The empty
@@ -841,7 +843,8 @@ mod tests {
         };
         let adapter = ClaudeCodeAdapter::new();
 
-        let pinned = probe("2.1.234 (Claude Code)");
+        let pinned_version = crate::pin_for(HarnessKind::ClaudeCode).unwrap().version;
+        let pinned = probe(&format!("{pinned_version} (Claude Code)"));
         assert_eq!(adapter.reasoning_efforts(&pinned), EFFORT_LADDER);
         let models = adapter.list_models(&pinned).await;
         assert!(!models.is_empty());
