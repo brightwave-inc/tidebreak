@@ -21,11 +21,11 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default number of paths the tree route returns.
 pub const DEFAULT_TREE_LIMIT: u32 = 50;
 /// Hard cap on the tree route. The explorer may request this many paths.
-pub const MAX_TREE_LIMIT: u32 = 5_000;
+const MAX_TREE_LIMIT: u32 = 5_000;
 /// Default number of matching lines returned by content search.
 pub const DEFAULT_SEARCH_LIMIT: u32 = 200;
 /// Hard cap for one content-search response.
-pub const MAX_SEARCH_LIMIT: u32 = 500;
+const MAX_SEARCH_LIMIT: u32 = 500;
 const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -1598,15 +1598,12 @@ pub async fn archive_blockers(
     let uncommitted = has_uncommitted_work(worktree_path).await?;
     let unpushed = has_unpushed_work(worktree_path, base_ref).await?;
     let ignored = has_non_disposable_ignored_content(worktree_path).await?;
-    Ok(if ignored {
-        Some(ArchiveBlock::IgnoredContent)
-    } else {
-        match (uncommitted, unpushed) {
-            (true, true) => Some(ArchiveBlock::UncommittedAndUnpushed),
-            (true, false) => Some(ArchiveBlock::Uncommitted),
-            (false, true) => Some(ArchiveBlock::Unpushed),
-            (false, false) => None,
-        }
+    Ok(match (uncommitted, unpushed) {
+        (true, true) => Some(ArchiveBlock::UncommittedAndUnpushed),
+        (true, false) => Some(ArchiveBlock::Uncommitted),
+        (false, true) => Some(ArchiveBlock::Unpushed),
+        (false, false) if ignored => Some(ArchiveBlock::IgnoredContent),
+        (false, false) => None,
     })
 }
 
@@ -2900,6 +2897,13 @@ mod tests {
             archive_blockers(&path, "main").await.unwrap(),
             Some(ArchiveBlock::IgnoredContent)
         );
+
+        std::fs::write(path.join("tracked-change.txt"), "not committed\n").unwrap();
+        assert_eq!(
+            archive_blockers(&path, "main").await.unwrap(),
+            Some(ArchiveBlock::Uncommitted)
+        );
+        std::fs::remove_file(path.join("tracked-change.txt")).unwrap();
 
         run(
             &path,

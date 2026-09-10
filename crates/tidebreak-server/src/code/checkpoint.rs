@@ -433,6 +433,13 @@ async fn write_snapshot_ref(
     parent_oid: Option<&str>,
     message: &str,
 ) -> Result<String, CheckpointError> {
+    let expected_old = git_text(
+        worktree,
+        &["rev-parse", "--verify", "--quiet", r#ref],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok();
     let tree = snapshot_tree(worktree).await?;
     let parent = match parent_oid {
         Some(oid) => oid.to_owned(),
@@ -447,14 +454,30 @@ async fn write_snapshot_ref(
     )
     .await
     .map_err(CheckpointError::internal)?;
+    move_snapshot_ref(worktree, r#ref, &commit, expected_old.as_deref()).await?;
+    Ok(commit)
+}
+
+async fn move_snapshot_ref(
+    worktree: &Path,
+    r#ref: &str,
+    commit: &str,
+    expected_old: Option<&str>,
+) -> Result<(), CheckpointError> {
     git_text(
         worktree,
-        &["update-ref", "--no-deref", r#ref, &commit],
+        &[
+            "update-ref",
+            "--no-deref",
+            r#ref,
+            commit,
+            expected_old.unwrap_or(""),
+        ],
         GIT_TIMEOUT,
     )
     .await
-    .map_err(CheckpointError::internal)?;
-    Ok(commit)
+    .map(|_| ())
+    .map_err(CheckpointError::internal)
 }
 
 /// Changed files between two trees or a tree and the live worktree snapshot.
@@ -2219,6 +2242,22 @@ mod tests {
         // first in the ref path.
         let removed = delete_workspace_refs(&repo, workspace).await.unwrap();
         assert_eq!(removed, 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_ref_writes_refuse_a_stale_expected_value() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "checkpoint-race");
+        let reference = checkpoint_ref(ws(), sess(), 1);
+
+        let first = write_snapshot_ref(&tree, &reference, None, "first writer")
+            .await
+            .unwrap();
+        let error = move_snapshot_ref(&tree, &reference, &first, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cannot lock ref"), "{error}");
     }
 
     #[tokio::test]
