@@ -104,7 +104,7 @@ is the wrong face for long-running follow.
 
 ## Validation
 
-`crates/tidebreak-cli/tests/agent_mcp.rs` speaks MCP over the real binary
+`crates/tidebreak-cli/src/agent_mcp/` speaks MCP over the real binary
 against `tidebreak serve` with the scripted provider: a turn completes with
 assistant text; an exec approval returns `needs_approval` and `chat_decide`
 settles it; `chat_events` returns frames after a cursor; a short timeout

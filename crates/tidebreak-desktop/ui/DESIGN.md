@@ -176,9 +176,9 @@ control sits below the label and spans the full width, because selects,
 text inputs, and editors read badly squeezed against the right edge.
 
 Save each field when its value changes. Do not add Save or Cancel buttons.
-Use a `Switch` for binary toggles and a `Select` for short lists. Use
-`ValidatedInput` (or an async validation pattern) for text that must be
-checked, such as a workspace URL.
+Use a `Switch` for binary toggles and a `Select` for short lists. Use an
+async validation pattern for text that must be checked, such as a workspace
+URL.
 
 ### Cards and rows
 

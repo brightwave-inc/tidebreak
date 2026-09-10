@@ -49,6 +49,10 @@ an accepted boundary.
   vocabulary, foreground and sandbox surfaces, and reliability rules.
 - [Code execution](code-execution.md) — the provider-neutral `exec` contract,
   network policy, workspaces, local backends, and managed backends.
+- [Computer use](computer-use.md) — screen capture, app control, and Chrome
+  debugger input for coding sessions.
+- [Code browser integration](code-browser-integration.md) — how coding sessions
+  share a browser channel with the host.
 - [Execution providers and sandbox-resident runs](sandbox-providers.md) — the
   parked design for detached runs, credential separation, admission, and the
   sandbox-agent protocol.
@@ -86,5 +90,10 @@ an accepted boundary.
 
 - [What comes after v1](deferred.md) — canonical home for intentionally parked
   product scope and the conditions that would bring it forward.
+
+## Spikes
+
+- [Reverse-RPC findings](spikes/reverse-rpc-findings.md) — superseded spike;
+  the shipping contract is `tidebreak-sandbox-protocol`.
 
 For API-level documentation, run `cargo doc --open`.
