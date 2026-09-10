@@ -2440,3 +2440,30 @@ pub mod code_session_context {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// Durable receipts for native tools requested by a sandbox incarnation.
+pub mod code_native_tool_receipt {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_native_tool_receipt")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub incarnation_id: Uuid,
+        pub grant_id: Uuid,
+        pub request_id: String,
+        pub call_id: Uuid,
+        pub tool: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result: Option<Json>,
+        pub status: String,
+        pub delivered: bool,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

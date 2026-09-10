@@ -7119,3 +7119,318 @@ async fn external_channel_snapshot_failure_rolls_back_session_and_binding() {
         Some(serde_json::json!("existing value"))
     );
 }
+
+async fn native_receipt_fixture(
+    store: &crate::DbStore,
+    label: &str,
+) -> (SessionId, crate::CodeIncarnationId) {
+    let owner = OwnerId::local();
+    let session = seed_external_session(store, &owner, label).await;
+    let incarnation = admitted(
+        crate::db::code::create_incarnation_intent(store, &owner, session, 1, 10)
+            .await
+            .unwrap(),
+    );
+    crate::db::code::activate_incarnation(store, &owner, incarnation.id, "native-tool-test")
+        .await
+        .unwrap();
+    (session, incarnation.id)
+}
+
+#[tokio::test]
+async fn native_tool_receipts_claim_once_and_replay_exact_results() {
+    let (_dir, store) = temp_store().await;
+    native_receipt_replay_contract(&store, "native-replay").await;
+}
+
+async fn native_receipt_replay_contract(store: &crate::DbStore, label: &str) {
+    use crate::db::code::*;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(store, label).await;
+    let args = serde_json::json!({"repo":"one", "task":"inspect"});
+    let row = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &args,
+    )
+    .await
+    .unwrap();
+    let replay = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &serde_json::json!({"task":"inspect", "repo":"one"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.call_id, replay.call_id);
+    assert_eq!(row.status, NativeToolStatus::Pending);
+    let binding = get_external_binding(store, &owner, "slack", label)
+        .await
+        .unwrap()
+        .unwrap();
+    attach_external_binding(
+        store,
+        &owner,
+        binding.grant_id,
+        "slack",
+        &format!("{label}-attached"),
+        session,
+    )
+    .await
+    .unwrap();
+
+    assert!(enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &serde_json::json!({"task":"mutate"})
+    )
+    .await
+    .is_err());
+    let (first, second) = tokio::join!(
+        claim_native_tool_request(store, &owner, &row),
+        claim_native_tool_request(store, &owner, &replay)
+    );
+    let outcomes = [first.unwrap(), second.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, NativeToolClaim::Claimed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, NativeToolClaim::Running(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &row)
+            .await
+            .unwrap(),
+        NativeToolClaim::Running(_)
+    ));
+    let result =
+        serde_json::json!({"request_id":"request-1", "output":{"ok":true}, "artifacts":[]});
+    let finished = complete_native_tool_request(store, &owner, &row, &result)
+        .await
+        .unwrap();
+    assert_eq!(finished.call_id, row.call_id);
+    assert_eq!(finished.result, Some(result.clone()));
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &row)
+            .await
+            .unwrap(),
+        NativeToolClaim::Completed(_)
+    ));
+    complete_native_tool_request(store, &owner, &row, &result)
+        .await
+        .unwrap();
+    assert!(complete_native_tool_request(
+        store,
+        &owner,
+        &row,
+        &serde_json::json!({"changed":true})
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        list_native_tool_requests(store, &owner, session, incarnation)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    mark_native_tool_request_delivered(store, &owner, &finished)
+        .await
+        .unwrap();
+    assert!(
+        list_native_tool_requests(store, &owner, session, incarnation)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replay = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert!(replay.delivered);
+    assert_eq!(replay.result, Some(result));
+}
+
+#[tokio::test]
+async fn native_tool_receipts_fence_authority_and_bound_payloads() {
+    use crate::db::code::*;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(&store, "native-authority").await;
+    let args = serde_json::json!({});
+    let row = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "one",
+        "code_repos",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert!(enqueue_native_tool_request(
+        &store,
+        &OwnerId::new("other").unwrap(),
+        session,
+        incarnation,
+        "one",
+        "code_repos",
+        &args
+    )
+    .await
+    .is_err());
+    assert!(enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        crate::CodeIncarnationId::new(),
+        "one",
+        "code_repos",
+        &args
+    )
+    .await
+    .is_err());
+    assert!(enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "large",
+        "code_repos",
+        &serde_json::json!("x".repeat(65_536))
+    )
+    .await
+    .is_err());
+    assert!(complete_native_tool_request(&store, &owner, &row, &args)
+        .await
+        .is_err());
+    assert!(mark_native_tool_request_delivered(&store, &owner, &row)
+        .await
+        .is_err());
+    claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap();
+    assert!(complete_native_tool_request(
+        &store,
+        &owner,
+        &row,
+        &serde_json::json!("x".repeat(3 * 1024 * 1024))
+    )
+    .await
+    .is_err());
+    let binding = get_external_binding(&store, &owner, "slack", "native-authority")
+        .await
+        .unwrap()
+        .unwrap();
+    revoke_external_grant(&store, &owner, binding.grant_id, "test")
+        .await
+        .unwrap();
+    assert!(claim_native_tool_request(&store, &owner, &row)
+        .await
+        .is_err());
+    assert!(complete_native_tool_request(&store, &owner, &row, &args)
+        .await
+        .is_err());
+    assert!(
+        list_native_tool_requests(&store, &owner, session, incarnation)
+            .await
+            .is_err()
+    );
+    let (session2, incarnation2) = native_receipt_fixture(&store, "native-stopped").await;
+    let row2 = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session2,
+        incarnation2,
+        "one",
+        "code_repos",
+        &args,
+    )
+    .await
+    .unwrap();
+    stop_incarnation(&store, &owner, incarnation2, Some("test"))
+        .await
+        .unwrap();
+    assert!(claim_native_tool_request(&store, &owner, &row2)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn native_tool_receipts_survive_restart_without_reexecuting_running_work() {
+    use crate::db::code::*;
+    let (dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(&store, "native-restart").await;
+    let row = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "restart",
+        "code_run_turn",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
+    let store = crate::DbStore::connect(&url).await.unwrap();
+    let outstanding = list_native_tool_requests(&store, &owner, session, incarnation)
+        .await
+        .unwrap();
+    assert_eq!(outstanding.len(), 1);
+    assert_eq!(outstanding[0].call_id, row.call_id);
+    assert!(matches!(
+        claim_native_tool_request(&store, &owner, &outstanding[0])
+            .await
+            .unwrap(),
+        NativeToolClaim::Running(_)
+    ));
+    let result =
+        serde_json::json!({"request_id":"restart", "output":{"uncertain":true}, "artifacts":[]});
+    complete_native_tool_request(&store, &owner, &outstanding[0], &result)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let store = crate::DbStore::connect(&url).await.unwrap();
+    let NativeToolClaim::Completed(restored) = claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap()
+    else {
+        panic!("result must survive restart")
+    };
+    assert_eq!(restored.result, Some(result));
+    assert_eq!(restored.call_id, row.call_id);
+}

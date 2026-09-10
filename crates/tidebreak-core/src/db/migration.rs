@@ -29,6 +29,7 @@ mod code_conversation_request;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
+mod native_tool_receipt;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
@@ -104,10 +105,10 @@ impl MigratorTrait for Migrator {
             Box::new(session_context::SessionContext),
             Box::new(code_conversation_request::CodeConversationRequests),
             Box::new(IncarnationToolBridge),
+            Box::new(native_tool_receipt::NativeToolReceipts),
         ]
     }
 }
-
 
 /// Keep typed native-tool requests and results flowing through a sandbox
 /// incarnation while preserving the ingest cursor and durability exactly as
