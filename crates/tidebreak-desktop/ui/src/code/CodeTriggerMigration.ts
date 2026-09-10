@@ -59,6 +59,7 @@ export function triggersForNotificationRules(
     if (!rule.enabled) {
       continue;
     }
+    // `tidebreakLinkedOnly` is redundant: triggers only bind linked repositories.
     const scoped =
       rule.repositoryKeys.length === 0
         ? repositories

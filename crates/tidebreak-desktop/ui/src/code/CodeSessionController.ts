@@ -77,6 +77,7 @@ export class CodeSessionController {
   private disposed = false;
   private hydrated = false;
   private socket: WebSocket | null = null;
+  private connection: object | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private turnRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -195,6 +196,7 @@ export class CodeSessionController {
   /** Close the socket and silence every callback and pending timer, forever. */
   dispose(): void {
     this.disposed = true;
+    this.connection = null;
     this.turnRefreshRequested = false;
     this.cancelReplayFlush();
     this.replayFrames = [];
@@ -317,9 +319,11 @@ export class CodeSessionController {
   private connect(): void {
     if (this.disposed) return;
     let socket: WebSocket;
+    const connection = {};
+    this.connection = connection;
     try {
       socket = this.options.openSocket(this.options.getAfter(), (frame) => {
-        if (this.disposed || this.socket !== socket) return;
+        if (this.disposed || this.connection !== connection) return;
         if (!isWellFormedFrame(frame)) {
           console.error("dropping malformed code event frame", frame);
           return;
@@ -332,13 +336,14 @@ export class CodeSessionController {
         this.options.onEvents([...replay, frame], this.settleInitialView());
       });
     } catch {
+      if (this.connection === connection) this.connection = null;
       this.scheduleReconnect();
       return;
     }
 
     this.socket = socket;
     socket.onopen = () => {
-      if (this.disposed || this.socket !== socket) return;
+      if (this.disposed || this.connection !== connection) return;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.options.onConnectionState("live");
       // The protocol has no explicit replay-complete frame. If this session
@@ -352,12 +357,13 @@ export class CodeSessionController {
       }
     };
     socket.onerror = () => {
-      if (this.disposed || this.socket !== socket) return;
+      if (this.disposed || this.connection !== connection) return;
       socket.close();
       this.scheduleReconnect();
     };
     socket.onclose = () => {
-      if (this.socket !== socket) return;
+      if (this.connection !== connection) return;
+      this.connection = null;
       this.socket = null;
       this.scheduleReconnect();
     };
