@@ -468,10 +468,8 @@ pub(crate) fn truncate_to_bytes(
     if content.len() <= max_bytes {
         return None;
     }
-    let mut end = max_bytes;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
+    let (mut bounded, _) = crate::truncate_utf8(content, max_bytes);
+    let shown_bytes = bounded.len();
     // Naming the call turns a dead end into a next step: the record kept the
     // whole result, so the model can read past this point instead of guessing
     // at what it missed.
@@ -481,13 +479,13 @@ pub(crate) fn truncate_to_bytes(
         }
         None => String::new(),
     };
-    Some(format!(
-        "{}\n\n[truncated: {} of {} bytes shown{}]",
-        &content[..end],
-        end,
+    bounded.push_str(&format!(
+        "\n\n[truncated: {} of {} bytes shown{}]",
+        shown_bytes,
         content.len(),
         recovery
-    ))
+    ));
+    Some(bounded)
 }
 
 /// Parse accumulated tool-call args for the durable record and the transcript,
@@ -516,11 +514,7 @@ pub(crate) fn parse_args(raw: &str) -> (Value, Option<String>) {
 /// Clamp a garbled argument fragment to the record's argument bound without
 /// splitting a multi-byte character.
 pub(crate) fn bound_raw_fragment(raw: &str) -> String {
-    let mut end = raw.len().min(ToolCallRecord::MAX_ARGUMENT_BYTES);
-    while end > 0 && !raw.is_char_boundary(end) {
-        end -= 1;
-    }
-    raw[..end].to_owned()
+    crate::truncate_utf8(raw, ToolCallRecord::MAX_ARGUMENT_BYTES).0
 }
 
 /// Parse tool-call args for dispatch. A call crosses into execution, so

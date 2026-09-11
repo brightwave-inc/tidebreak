@@ -1441,59 +1441,41 @@ mod tests {
     }
 
     #[test]
-    fn no_adapter_declares_image_input_without_an_image_fixture() {
+    fn no_adapter_declares_image_input_without_a_replayed_contract() {
         use tidebreak_core::CapLevel;
 
-        let probe = HarnessProbe {
-            found: true,
-            binary_path: None,
-            version: Some("test".into()),
-            authenticated: None,
-            stderr: String::new(),
-            env: Vec::new(),
-            commands: Vec::new(),
-        };
-        let cases: [(&str, Box<dyn HarnessAdapter>, &str); 4] = [
+        let cases: [(HarnessKind, Box<dyn HarnessAdapter>); 4] = [
             (
-                "claude_code",
+                HarnessKind::ClaudeCode,
                 Box::new(claude::ClaudeCodeAdapter::new()),
-                "claude-code/2.1.233",
             ),
+            (HarnessKind::Codex, Box::new(codex::CodexAdapter::new())),
             (
-                "codex",
-                Box::new(codex::CodexAdapter::new()),
-                "codex/0.147.0",
-            ),
-            (
-                "opencode",
+                HarnessKind::Opencode,
                 Box::new(opencode::OpencodeAdapter::new()),
-                "opencode/1.18.18",
             ),
-            ("grok", Box::new(grok::GrokAdapter::new()), "grok/1.0.4"),
+            (HarnessKind::Grok, Box::new(grok::GrokAdapter::new())),
         ];
-        for (kind, adapter, fixture_rel) in cases {
-            let caps = adapter.capabilities(&probe);
-            if caps.image_input != CapLevel::Supported {
+        for (kind, adapter) in cases {
+            let probe = HarnessProbe {
+                found: true,
+                binary_path: None,
+                version: Some(pin::pin_for(kind).unwrap().version.into()),
+                authenticated: None,
+                stderr: String::new(),
+                env: Vec::new(),
+                commands: Vec::new(),
+            };
+            if adapter.capabilities(&probe).image_input != CapLevel::Supported {
                 continue;
             }
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures")
-                .join(fixture_rel);
-            assert!(
-                fixture_dir_has_image_roundtrip(&dir),
-                "{kind} declares image_input Supported without a fixture directory containing an image round-trip capture"
-            );
+            match kind {
+                HarnessKind::ClaudeCode => claude::tests::assert_image_input_replay(),
+                _ => panic!(
+                    "{kind} declares image_input Supported without an input/output replay proof"
+                ),
+            }
         }
-    }
-
-    fn fixture_dir_has_image_roundtrip(dir: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-        entries.filter_map(Result::ok).any(|entry| {
-            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            name.contains("image") && (name.ends_with(".ndjson") || name.ends_with(".json"))
-        })
     }
 
     /// A supervising user reads a tool call while it runs, so every adapter

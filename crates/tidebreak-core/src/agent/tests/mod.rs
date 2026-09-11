@@ -37,6 +37,7 @@ mod approvals;
 mod cancellation;
 mod client_tools;
 mod compaction;
+mod date_context;
 mod output_writeback;
 mod provider_search;
 mod recovery;

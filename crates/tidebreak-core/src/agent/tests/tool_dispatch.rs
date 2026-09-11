@@ -81,6 +81,19 @@ fn a_large_result_is_kept_whole_in_the_record_and_cut_only_for_the_model() {
 }
 
 #[test]
+fn result_truncation_notice_counts_bytes_at_the_retained_boundary() {
+    assert_eq!(
+        truncate_to_bytes("a€z", 3, None).as_deref(),
+        Some("a\n\n[truncated: 1 of 5 bytes shown]")
+    );
+    assert_eq!(
+        truncate_to_bytes("é", 0, None).as_deref(),
+        Some("\n\n[truncated: 0 of 2 bytes shown]")
+    );
+    assert_eq!(truncate_to_bytes("é", 2, None), None);
+}
+
+#[test]
 fn exec_preview_blocks_follow_result_text_and_respect_model_capability() {
     let image = ImageRef {
         blob_id: uuid::Uuid::from_u128(7),

@@ -45,26 +45,32 @@ pub struct HarnessPin {
     pub bin: &'static str,
 }
 
-/// Current pins. Bump deliberately; these are not floating "latest" tags.
+/// Current install pins. They do not identify complete fixture captures.
+/// Replay baselines and later protocol-specific captures live in
+/// `fixtures/README.md`; keep that coverage table accurate when changing a pin.
 pub const PINS: &[HarnessPin] = &[
+    // Replay baseline: 2.1.233; 2.1.238/239 process observations are manifest notes.
     HarnessPin {
         kind: HarnessKind::ClaudeCode,
         version: "2.1.259",
         package: "@anthropic-ai/claude-code",
         bin: "claude",
     },
+    // Replay baseline: 0.147.0; MCP elicitation captures: 0.153.0.
     HarnessPin {
         kind: HarnessKind::Codex,
         version: "0.153.4",
         package: "@openai/codex",
         bin: "codex",
     },
+    // Replay baseline: 1.18.18; no complete 1.18.27 capture.
     HarnessPin {
         kind: HarnessKind::Opencode,
         version: "1.18.27",
         package: "opencode-ai",
         bin: "opencode",
     },
+    // Replay baselines: 1.0.4/5; 1.0.13 covers ACP and tool images only.
     HarnessPin {
         kind: HarnessKind::Grok,
         version: "1.0.13",

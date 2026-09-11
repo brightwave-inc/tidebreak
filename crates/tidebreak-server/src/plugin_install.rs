@@ -1005,11 +1005,8 @@ fn bounded_description(description: Option<&str>, name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let mut end = MAX_DESCRIPTION_BYTES.min(normalized.len());
-    while end > 0 && !normalized.is_char_boundary(end) {
-        end -= 1;
-    }
-    let bounded = normalized[..end].trim_end();
+    let (bounded, _) = tidebreak_core::truncate_utf8(&normalized, MAX_DESCRIPTION_BYTES);
+    let bounded = bounded.trim_end();
     if bounded.is_empty() {
         format!("Skills bundled by the {name} plugin.")
     } else {

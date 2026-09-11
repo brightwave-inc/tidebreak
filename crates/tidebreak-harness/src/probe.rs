@@ -1231,6 +1231,12 @@ fn parse_sentinel_output(
 ) -> Option<SentinelPayload> {
     let after_begin = stdout.split_once(begin)?.1;
     let (between, after_env) = after_begin.split_once(env_mark)?;
+    // The marker's line ending is framing, not part of the first env key.
+    // Remove only that ending; NUL-delimited values may contain newlines.
+    let after_env = after_env
+        .strip_prefix("\r\n")
+        .or_else(|| after_env.strip_prefix('\n'))
+        .unwrap_or(after_env);
     let env_block = after_env.split_once(end)?.0;
     let path = between
         .lines()
@@ -1298,6 +1304,50 @@ async fn run_interactive_login_shell(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nul_delimited_probe_preserves_first_key_and_value_newlines() {
+        for marker_ending in ["\n", "\r\n", ""] {
+            let output = format!(
+                "profile noise\nBEGIN\n/managed/claude\nENV{marker_ending}\
+                 PATH=/managed/bin:/usr/bin\0MULTILINE=\nfirst\nsecond\n\0\
+                 EMPTY=\0EQUALS=a=b\0\nEND\ntrailing noise"
+            );
+            let parsed = parse_sentinel_output(&output, "BEGIN", "ENV", "END").unwrap();
+            assert_eq!(parsed.path, "/managed/claude");
+            assert_eq!(
+                parsed.env,
+                vec![
+                    ("PATH".into(), "/managed/bin:/usr/bin".into()),
+                    ("MULTILINE".into(), "\nfirst\nsecond\n".into()),
+                    ("EMPTY".into(), "".into()),
+                    ("EQUALS".into(), "a=b".into()),
+                ]
+            );
+            assert_eq!(
+                env_value(&filter_child_env(parsed.env), std::ffi::OsStr::new("PATH")),
+                Some(&OsString::from("/managed/bin:/usr/bin"))
+            );
+        }
+    }
+
+    #[test]
+    fn line_delimited_probe_keeps_existing_marker_behavior() {
+        let output =
+            "noise\nBEGIN\n/managed/claude\nENV\nPATH=/managed/bin\nHOME=/home/test\n\nEND\nnoise";
+        let parsed = parse_sentinel_output(output, "BEGIN", "ENV", "END").unwrap();
+        assert_eq!(parsed.path, "/managed/claude");
+        assert_eq!(
+            parsed.env,
+            vec![
+                ("PATH".into(), "/managed/bin".into()),
+                ("HOME".into(), "/home/test".into()),
+            ]
+        );
+        assert!(parse_sentinel_output(output, "MISSING", "ENV", "END").is_none());
+        assert!(parse_sentinel_output(output, "BEGIN", "MISSING", "END").is_none());
+        assert!(parse_sentinel_output(output, "BEGIN", "ENV", "MISSING").is_none());
+    }
 
     fn write_exec(path: &Path, body: &str) {
         // Write a sibling inode, fsync, then rename over `path` so execve

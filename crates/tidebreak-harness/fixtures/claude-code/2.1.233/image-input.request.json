@@ -1,0 +1,22 @@
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "what is in this image"
+      },
+      {
+        "type": "image",
+        "source": {
+          "type": "base64",
+          "media_type": "image/png",
+          "data": "REDACTED"
+        }
+      }
+    ]
+  },
+  "session_id": "f89fe270-751c-4956-8113-2c940d84a79b",
+  "uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+}
