@@ -126,6 +126,47 @@ pub async fn get_pull_request_fact(
     Ok(Some(fact_from_row(row)?))
 }
 
+/// How a live-tier write treats `review_decision`.
+///
+/// REST does not load reviews, so it must not assign the column: omitting
+/// it keeps whatever an authoritative write stored, including a concurrent
+/// write between the caller's awaits. `None` on the live struct is
+/// authoritative empty and still needs [`Self::Replace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestReviewDecisionWrite {
+    /// Write `live.review_decision`, including `None` to clear the column.
+    Replace,
+    /// Leave the stored decision untouched. The update statement omits
+    /// `review_decision`.
+    Preserve,
+}
+
+/// Write the live tier onto one observed pull request (decision 66).
+///
+/// Authoritative callers replace `review_decision`. REST keep-the-row
+/// writes pass [`PullRequestReviewDecisionWrite::Preserve`].
+pub async fn set_pull_request_live_state(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+    live: &CodePullRequestLiveState,
+) -> Result<Option<(CodePullRequestId, bool, CodePullRequestLiveState)>> {
+    set_pull_request_live_state_with(
+        store,
+        owner,
+        host,
+        repo_owner,
+        repo_name,
+        number,
+        live,
+        PullRequestReviewDecisionWrite::Replace,
+    )
+    .await
+}
+
 /// Write the live tier onto one observed pull request (decision 66).
 ///
 /// Returns the row id, whether any live field actually moved, and the tier
@@ -140,7 +181,12 @@ pub async fn get_pull_request_fact(
 /// conditional fetcher wrote would blind the watch and the check triggers
 /// for the length of the sweep interval. A read that loaded checks and found
 /// none carries `Some(vec![])`, which clears them.
-pub async fn set_pull_request_live_state(
+///
+/// [`PullRequestReviewDecisionWrite::Preserve`] omits `review_decision` the
+/// same way: the update never assigns the column, so a concurrent
+/// authoritative write cannot be overwritten by a stale copy.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_pull_request_live_state_with(
     store: &DbStore,
     owner: &OwnerId,
     host: &str,
@@ -148,6 +194,7 @@ pub async fn set_pull_request_live_state(
     repo_name: &str,
     number: u64,
     live: &CodePullRequestLiveState,
+    review_decision_write: PullRequestReviewDecisionWrite,
 ) -> Result<Option<(CodePullRequestId, bool, CodePullRequestLiveState)>> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
@@ -167,9 +214,13 @@ pub async fn set_pull_request_live_state(
         // The read did not load checks: keep what the row already knows.
         None => (row.checks_summary.clone(), row.checks.clone()),
     };
+    let review_decision = match review_decision_write {
+        PullRequestReviewDecisionWrite::Replace => live.review_decision.clone(),
+        PullRequestReviewDecisionWrite::Preserve => row.review_decision.clone(),
+    };
     let changed = row.checks_summary != checks_summary
         || row.checks != checks_json
-        || row.review_decision != live.review_decision
+        || row.review_decision != review_decision
         || row.mergeable != live.mergeable
         || row.merge_state_status != live.merge_state_status
         || row.auto_merge_enabled != live.auto_merge_enabled
@@ -187,7 +238,9 @@ pub async fn set_pull_request_live_state(
     let mut model: entities::code_pull_request::ActiveModel = row.into();
     model.checks_summary = Set(checks_summary.clone());
     model.checks = Set(checks_json);
-    model.review_decision = Set(live.review_decision.clone());
+    if review_decision_write == PullRequestReviewDecisionWrite::Replace {
+        model.review_decision = Set(live.review_decision.clone());
+    }
     model.mergeable = Set(live.mergeable.clone());
     model.merge_state_status = Set(live.merge_state_status.clone());
     model.auto_merge_enabled = Set(live.auto_merge_enabled);
@@ -197,6 +250,7 @@ pub async fn set_pull_request_live_state(
     let stored = CodePullRequestLiveState {
         checks_summary,
         checks: stored_checks,
+        review_decision,
         ..live.clone()
     };
     Ok(Some((id, changed, stored)))

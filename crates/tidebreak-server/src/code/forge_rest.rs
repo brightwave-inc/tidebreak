@@ -52,6 +52,9 @@ const CHECK_RUN_CONCURRENCY: usize = 4;
 const TIMELINE_PAGE_SIZE: u32 = 100;
 const TIMELINE_PAGE_LIMIT: u32 = 20;
 
+/// Review list was not loaded; the live-tier writer keeps the row's value.
+pub(crate) const REVIEW_DECISION_UNKNOWN: &str = "unknown";
+
 /// Stable action classification kept beside the HTTP response that proves it.
 ///
 /// This module always sends `sha` to GitHub's pull-request merge endpoint,
@@ -733,9 +736,10 @@ pub(crate) async fn pull_request_digest(
         check_counts: Some(counts),
         checks: (!checks.is_empty()).then_some(checks),
         draft: detail.get("draft").and_then(Value::as_bool),
-        // REST has no review-decision projection; the field stays unstated
-        // rather than approximated from raw reviews.
-        review_decision: None,
+        // REST never derives a review decision. An open digest carries the
+        // internal keep-the-row sentinel; `None` is an authoritative empty
+        // decision (merged/closed, or a loaded review list with no objection).
+        review_decision: open.then(|| REVIEW_DECISION_UNKNOWN.to_owned()),
         mergeable: match detail.get("mergeable") {
             Some(Value::Bool(true)) => Some("mergeable".to_owned()),
             Some(Value::Bool(false)) => Some("conflicting".to_owned()),
@@ -894,10 +898,19 @@ pub(crate) fn queue_membership_from_timeline(value: &Value) -> Option<bool> {
     Some(last == Some("added_to_merge_queue"))
 }
 
+/// Whether a digest's review decision is the REST keep-the-row sentinel.
+/// `None` is an authoritative empty decision, not an unloaded marker.
+pub(crate) fn review_decision_is_unknown(value: Option<&str>) -> bool {
+    value == Some(REVIEW_DECISION_UNKNOWN)
+}
+
 /// One REST pull request restated in the `gh --json` fact shape
 /// ([`super::gh::PR_FACT_FIELDS`]), so the fact store parses one vocabulary
 /// however the host was asked. `state` stays REST's own `open`/`closed`;
 /// the parser already reads closed-with-merged-at as merged.
+///
+/// `reviewDecision` stays JSON null: REST does not derive it, and an
+/// internal keep-the-row marker must not land on the public summary.
 pub(crate) fn fact_value(pr: &Value) -> Value {
     let head_repository = pr.pointer("/head/repo").map_or(Value::Null, |repository| {
         serde_json::json!({
@@ -973,6 +986,14 @@ mod tests {
         assert_eq!(fact["author"]["login"], "mira-chen");
         assert_eq!(fact["headRefName"], "feature");
         assert_eq!(fact["headRefOid"], "abc123");
+        assert!(fact["reviewDecision"].is_null());
+    }
+
+    #[test]
+    fn only_the_unknown_sentinel_is_an_unloaded_review_decision() {
+        assert!(review_decision_is_unknown(Some(REVIEW_DECISION_UNKNOWN)));
+        assert!(!review_decision_is_unknown(None));
+        assert!(!review_decision_is_unknown(Some("changes_requested")));
     }
 
     /// github.com maps to the public API origin; any other forge host keeps

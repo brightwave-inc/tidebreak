@@ -353,7 +353,8 @@ pub async fn push_branch(
     })
 }
 
-/// Inspect the worktree and, when `gh` can, refresh the PR digest.
+/// Inspect local git and `gh` availability, carrying the persisted PR digest.
+/// The runtime's conditional fetcher owns remote pull-request refreshes.
 #[allow(clippy::too_many_arguments)]
 pub async fn workspace_git_status(
     worktree: &Path,
@@ -2625,6 +2626,32 @@ mod tests {
         assert_eq!(result.git.changed_files, 2);
         assert_eq!(result.git.unstaged_files, 1);
         assert_eq!(result.git.untracked_files, 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_status_carries_the_persisted_digest_unchanged() {
+        let (dir, work, _) = init_paired_repos();
+        let persisted: PullRequestDigest = serde_json::from_value(serde_json::json!({
+            "number": 17,
+            "url": "https://github.com/acme/tools/pull/17",
+            "state": "open",
+            "review_decision": "changes_requested",
+            "title": "Stored title"
+        }))
+        .unwrap();
+        let unavailable = dir.path().join("no-gh");
+        let status = workspace_git_status(
+            &work,
+            "Local title",
+            "main",
+            "main",
+            Some(persisted.clone()),
+            Some(unavailable.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.pr, Some(persisted));
+        assert!(!status.gh_found);
     }
 
     fn init_paired_repos() -> (TempDir, PathBuf, PathBuf) {

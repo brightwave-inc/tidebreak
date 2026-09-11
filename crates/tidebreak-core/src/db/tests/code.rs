@@ -4116,7 +4116,8 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
         list_fact_repo_identities_all_owners, promote_attribution_to_authored,
         save_pull_request_fact, set_pull_request_fetch_state, set_pull_request_live_state,
-        PullRequestFetchCondition,
+        set_pull_request_live_state_with, PullRequestFetchCondition,
+        PullRequestReviewDecisionWrite,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4304,6 +4305,56 @@ async fn pull_request_facts_upsert_claim_and_promote() {
             .unwrap()
             .is_none()
     );
+
+    // Preserve omits `review_decision` so a later REST write cannot stamp a
+    // stale pre-read (or `None` after a failed read) over an authoritative
+    // value. Replace with `None` still clears.
+    let mut rest_unknown = live.clone();
+    rest_unknown.review_decision = None;
+    let (_, preserve_changed, preserve_stored) = set_pull_request_live_state_with(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        &rest_unknown,
+        PullRequestReviewDecisionWrite::Preserve,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !preserve_changed,
+        "preserving review_decision is not a change"
+    );
+    assert_eq!(
+        preserve_stored.review_decision.as_deref(),
+        Some("review_required")
+    );
+    let mut cleared_review = live.clone();
+    cleared_review.review_decision = None;
+    let (_, cleared_review_changed, cleared_review_stored) = set_pull_request_live_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        &cleared_review,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        cleared_review_changed,
+        "authoritative None clears the column"
+    );
+    assert_eq!(cleared_review_stored.review_decision, None);
+    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+        .await
+        .unwrap()
+        .unwrap();
 
     // Claim once: the second claim reports the row already exists and the
     // stored relation is untouched.

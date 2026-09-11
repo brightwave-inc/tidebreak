@@ -827,7 +827,7 @@ fn checks_from_value(value: &Value) -> Vec<PullRequestCheck> {
 
 /// Each reviewer's newest standing review, tallied. `COMMENTED` never moves
 /// a reviewer's standing, and a dismissal clears it.
-fn tally_reviews(value: &Value) -> ReviewTally {
+pub(crate) fn tally_reviews(value: &Value) -> ReviewTally {
     let empty = Vec::new();
     let reviews = value.as_array().unwrap_or(&empty);
     let mut standing: HashMap<String, &str> = HashMap::new();
