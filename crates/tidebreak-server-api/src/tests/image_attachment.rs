@@ -1259,7 +1259,27 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     assert!(text.starts_with("# Important context\n\n<attachments>"));
     assert!(text.contains(&format!("image_1: id={png};")));
     assert!(text.contains(&format!("image_2: id={jpeg};")));
-    assert!(text.ends_with("</attachments>\n\n# User message\n\nDescribe these attachments."));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == tidebreak_core::Role::User)
+        .expect("the accepted user message is durable");
+    assert_eq!(user_message.content, "Describe these attachments.");
+    let stored_context = user_message
+        .llm_content
+        .as_deref()
+        .expect("the image attachment context is durable");
+    assert!(
+        stored_context.ends_with("</attachments>\n\n# User message\n\nDescribe these attachments.")
+    );
+    assert_eq!(
+        text,
+        format!(
+            "{stored_context}\n\n[Submission date: {} (UTC). Use this date for relative dates unless \
+             the user specifies otherwise. Local dates may differ.]",
+            user_message.created_at.date_naive(),
+        )
+    );
     for (part, media_type) in content[..2].iter().zip(["image/png", "image/jpeg"]) {
         assert_eq!(part["type"], "input_image");
         assert!(
