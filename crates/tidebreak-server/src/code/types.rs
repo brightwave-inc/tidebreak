@@ -229,6 +229,10 @@ pub struct CodeWorkspaceSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub bundle_bytes: Option<i64>,
+    /// Bounded setup-script failure output, when status is `setup_failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub setup_error: Option<String>,
 }
 
 impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
@@ -249,6 +253,7 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
             released_at: workspace.released_at,
             released_tip: workspace.released_tip,
             bundle_bytes: workspace.bundle_bytes,
+            setup_error: workspace.setup_error,
         }
     }
 }

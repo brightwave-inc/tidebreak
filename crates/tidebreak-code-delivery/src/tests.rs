@@ -202,6 +202,7 @@ fn workspace_index_marker(owner: &OwnerId, marker: &str) -> Vec<WorkspaceIndexEn
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
         repository_key: format!("github.com/brightwave-inc/{marker}"),
         head_sha: Some(marker.into()),

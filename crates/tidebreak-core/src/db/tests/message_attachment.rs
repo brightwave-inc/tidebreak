@@ -757,6 +757,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await

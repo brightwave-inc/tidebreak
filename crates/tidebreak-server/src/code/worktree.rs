@@ -165,6 +165,14 @@ pub enum WorktreeError {
     ArchiveUncertain(String),
     #[error("{message}")]
     Conflict { kind: &'static str, message: String },
+    /// Setup or archive hook exited non-zero. `message` is the one-line
+    /// summary; `stdout` and `stderr` are the captured streams.
+    #[error("{message}")]
+    HookFailed {
+        message: String,
+        stdout: String,
+        stderr: String,
+    },
 }
 
 impl WorktreeError {
@@ -1586,7 +1594,11 @@ async fn run_hook_script(
             message.push(' ');
             message.push_str(&notice);
         }
-        Err(WorktreeError::user(message))
+        Err(WorktreeError::HookFailed {
+            message,
+            stdout: run.stdout,
+            stderr: run.stderr,
+        })
     }
 }
 
@@ -2675,6 +2687,15 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("[output truncated]"), "{error}");
+        match &error {
+            WorktreeError::HookFailed { stdout, stderr, .. } => {
+                assert!(
+                    !stdout.is_empty() || !stderr.is_empty(),
+                    "hook failure must carry captured output"
+                );
+            }
+            other => panic!("expected HookFailed, got {other:?}"),
+        }
         assert!(path.join("README.md").is_file());
     }
 

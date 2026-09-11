@@ -355,6 +355,11 @@ async fn workspace_setup_failure_preserves_the_checkout() {
     assert_eq!(listed[0]["status"], "setup_failed");
     let path = listed[0]["worktree_path"].as_str().unwrap();
     assert!(std::path::Path::new(path).join("README.md").is_file());
+    let setup_error = listed[0]["setup_error"].as_str().unwrap();
+    assert!(
+        setup_error.contains("setup script failed") || setup_error.contains("exit"),
+        "{setup_error}"
+    );
 }
 
 /// Quick actions are only reachable if a client can write them. `create`
@@ -590,6 +595,7 @@ async fn retry_setup_revives_a_setup_failed_workspace_in_place() {
         .unwrap();
     let workspace_id = json_id(&listed[0]).to_owned();
     let worktree_path = listed[0]["worktree_path"].as_str().unwrap().to_owned();
+    assert!(listed[0]["setup_error"].as_str().is_some(), "{}", listed[0]);
 
     // Still broken: the retry fails the same way and the status holds.
     let again = client
@@ -625,6 +631,7 @@ async fn retry_setup_revives_a_setup_failed_workspace_in_place() {
     assert_eq!(revived.status(), reqwest::StatusCode::OK);
     let revived: serde_json::Value = revived.json().await.unwrap();
     assert_eq!(revived["status"], "active");
+    assert!(revived.get("setup_error").is_none(), "{revived}");
     // The same worktree, not a second one.
     assert_eq!(revived["worktree_path"], worktree_path);
     assert!(std::path::Path::new(&worktree_path)

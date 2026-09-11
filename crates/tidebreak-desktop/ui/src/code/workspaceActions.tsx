@@ -831,13 +831,17 @@ export function useWorkspaceCardCommands(): {
       });
     } catch (error) {
       toast.error(friendlyErrorMessage(error, "The setup script failed again"));
+      const refreshed = await client
+        .getCodeWorkspace(workspace.id)
+        .catch(() => null);
+      if (refreshed) upsertWorkspace(refreshed);
     }
   }
 
   function run(
     command: WorkspaceCommandId,
     context: WorkspaceCommandContext,
-  ): void {
+  ): void | Promise<void> {
     switch (command) {
       case "open":
       case "new-session":
@@ -981,8 +985,7 @@ export function useWorkspaceCardCommands(): {
         void runRestore(context.workspace);
         return;
       case "retry-setup":
-        void runRetrySetup(context.workspace);
-        return;
+        return runRetrySetup(context.workspace);
     }
   }
 

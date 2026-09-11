@@ -74,6 +74,7 @@ async fn seed_owner(
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
+            setup_error: None,
         },
     )
     .await

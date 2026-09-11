@@ -38,6 +38,7 @@ mod session_acts_as;
 mod session_context;
 mod session_owner_kind;
 mod turn_actor;
+mod workspace_setup_error;
 
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
@@ -107,6 +108,7 @@ impl MigratorTrait for Migrator {
             Box::new(IncarnationToolBridge),
             Box::new(native_tool_receipt::NativeToolReceipts),
             Box::new(native_tool_receipt::NativeToolClaimTime),
+            Box::new(workspace_setup_error::WorkspaceSetupError),
         ]
     }
 }

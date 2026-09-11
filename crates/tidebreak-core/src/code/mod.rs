@@ -922,6 +922,8 @@ pub struct CodeWorkspace {
     pub released_tip: Option<String>,
     /// Size of the stored bundle.
     pub bundle_bytes: Option<i64>,
+    /// Bounded setup-script failure output, when status is `setup_failed`.
+    pub setup_error: Option<String>,
 }
 
 impl CodeWorkspace {

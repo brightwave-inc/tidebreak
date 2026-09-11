@@ -77,6 +77,7 @@ import {
   TabPointerSensor,
 } from "./workspace/tabDrag";
 import {
+  SetupFailedBanner,
   StartSessionPrompt,
   WorkspaceSessionStartingState,
 } from "./StartSessionPrompt";
@@ -242,6 +243,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client, models, defaultModelKey } = useApp();
   const catalog = useCodeCatalogStore();
   const { run, dialogs } = useWorkspaceCardCommands();
+  const [retryingSetup, setRetryingSetup] = useState(false);
   const layout = useLayoutState();
   const { setLayout } = usePanelNav();
   const layoutRef = useRef(layout);
@@ -668,6 +670,22 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   </Button>
                 </div>
               )}
+              {workspace?.status === "setup_failed" && (
+                <SetupFailedBanner
+                  output={workspace.setup_error}
+                  retrying={retryingSetup}
+                  onRetry={() => {
+                    if (retryingSetup) return;
+                    setRetryingSetup(true);
+                    void Promise.resolve(
+                      run("retry-setup", {
+                        workspace,
+                        title: title ?? workspace.title,
+                      }),
+                    ).finally(() => setRetryingSetup(false));
+                  }}
+                />
+              )}
               {workspaceStartup &&
                 workspace?.status === "active" &&
                 !draftAgent && (
@@ -990,6 +1008,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               onCommand={(command) => {
                 if (command.id === "fork-agent") {
                   if (session) void forkConversation(session.id);
+                  return;
+                }
+                if (command.id === "retry-setup") {
+                  if (retryingSetup) return;
+                  setRetryingSetup(true);
+                  void Promise.resolve(
+                    run(command.id, {
+                      workspace,
+                      title: title ?? workspace.title,
+                      session: session ?? undefined,
+                      actionName: command.actionName,
+                    }),
+                  ).finally(() => setRetryingSetup(false));
                   return;
                 }
                 run(command.id, {

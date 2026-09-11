@@ -2,6 +2,56 @@
 
 use super::*;
 
+/// Last 8 KiB of setup-script output, cut on a UTF-8 character boundary.
+const SETUP_ERROR_MAX_BYTES: usize = 8 * 1024;
+const SETUP_ERROR_TRUNCATION_MARKER: &str = "[truncated]\n";
+
+fn persistable_setup_error(error: &WorktreeError) -> String {
+    let body = match error {
+        WorktreeError::HookFailed {
+            stdout,
+            stderr,
+            message,
+        } => {
+            let combined = combine_script_output(stdout, stderr);
+            if combined.is_empty() {
+                message.clone()
+            } else {
+                combined
+            }
+        }
+        other => other.to_string(),
+    };
+    tail_utf8(&body, SETUP_ERROR_MAX_BYTES)
+}
+
+fn combine_script_output(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+/// The last `max_bytes` of `value` on a character boundary. When the value
+/// is longer, prefix `[truncated]\n` and keep a tail that still fits.
+fn tail_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let marker = SETUP_ERROR_TRUNCATION_MARKER;
+    let keep = max_bytes.saturating_sub(marker.len());
+    let mut start = value.len().saturating_sub(keep);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut out = String::with_capacity(marker.len() + value.len() - start);
+    out.push_str(marker);
+    out.push_str(&value[start..]);
+    out
+}
+
 fn collision_resolved_slug(base: &str, index: u64) -> String {
     if index <= 1 {
         return base.to_owned();
@@ -175,6 +225,7 @@ impl CodeRuntime {
                 released_at: None,
                 released_tip: None,
                 bundle_bytes: None,
+                setup_error: None,
             };
             insert_workspace(&self.db, &workspace).await?;
             match create_worktree(repo_root, &path, &branch, &base).await {
@@ -230,6 +281,7 @@ impl CodeRuntime {
             }
             Err(err) => {
                 workspace.status = CodeWorkspaceStatus::SetupFailed;
+                workspace.setup_error = Some(persistable_setup_error(&err));
                 match self.save_workspace_final(&workspace).await {
                     Ok(true) => operation.complete().await,
                     Ok(false) => {
@@ -792,6 +844,7 @@ impl CodeRuntime {
         } else {
             CodeWorkspaceStatus::SetupFailed
         };
+        workspace.setup_error = setup.as_ref().err().map(persistable_setup_error);
         workspace.archived_at = None;
         if released {
             Self::clear_release(&mut workspace);
@@ -874,6 +927,7 @@ impl CodeRuntime {
         {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
+                workspace.setup_error = None;
                 if !self.save_workspace_final(&workspace).await? {
                     return Err(ServerError::not_found(format!(
                         "workspace {} not found",
@@ -883,10 +937,20 @@ impl CodeRuntime {
                 gh::run_auto_create_actions(&path, &repo.quick_actions).await;
                 Ok(workspace)
             }
-            Err(error) => Err(ServerError::unprocessable_kind(
-                "setup_failed",
-                error.to_string(),
-            )),
+            Err(error) => {
+                workspace.setup_error = Some(persistable_setup_error(&error));
+                if let Err(save_error) = self.save_workspace_final(&workspace).await {
+                    tracing::warn!(
+                        error = ?save_error,
+                        workspace_id = %workspace.id,
+                        "failed to persist setup error after retry"
+                    );
+                }
+                Err(ServerError::unprocessable_kind(
+                    "setup_failed",
+                    error.to_string(),
+                ))
+            }
         }
     }
 
@@ -1201,5 +1265,133 @@ impl CodeRuntime {
             .entry(workspace_id)
             .or_default()
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tidebreak_core::{CodeRepo, OwnerId};
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    async fn runtime_with_repo(setup_script: &str) -> (TempDir, CodeRuntime, OwnerId, RepoId) {
+        let dir = TempDir::new().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        git(&repo_path, &["init", "-b", "main"]);
+        git(&repo_path, &["config", "user.email", "tidebreak@localhost"]);
+        git(&repo_path, &["config", "user.name", "Tidebreak"]);
+        std::fs::write(repo_path.join("README.md"), "ok\n").unwrap();
+        git(&repo_path, &["add", "README.md"]);
+        git(&repo_path, &["commit", "-m", "initial"]);
+
+        let db = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let owner = OwnerId::local();
+        let repo_id = RepoId::new();
+        insert_repo(
+            &db,
+            &CodeRepo {
+                id: repo_id,
+                owner: owner.clone(),
+                root_path: repo_path.display().to_string(),
+                display_name: "example".into(),
+                default_base_ref: "main".into(),
+                branch_prefix: "tidebreak/".into(),
+                setup_script: Some(setup_script.into()),
+                archive_script: None,
+                quick_actions: Vec::new(),
+                created_at: Utc::now(),
+                removed_at: None,
+                cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = CodeRuntime::new(
+            db,
+            dir.path().to_path_buf(),
+            Some(dir.path().join("wt")),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        (dir, runtime, owner, repo_id)
+    }
+
+    #[tokio::test]
+    async fn workspaces_persist_bounded_setup_error_and_retry_clears_it() {
+        let noisy = "i=0; while [ \"$i\" -lt 2000 ]; do printf 'xxxxxxxxxxxxxxxx'; i=$((i+1)); done; exit 1";
+        let (_dir, runtime, owner, repo_id) = runtime_with_repo(noisy).await;
+        let created = runtime
+            .create_workspace(&owner, repo_id, Some("broken".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(created.kind(), "setup_failed");
+
+        let listed = runtime
+            .list_workspaces(&owner, Some(repo_id))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, CodeWorkspaceStatus::SetupFailed);
+        let first = "FIRST_LINE_MUST_GO";
+        let last = "LAST_LINE_MUST_STAY";
+        let oversized = WorktreeError::HookFailed {
+            message: "setup script failed (exit 1): noise".into(),
+            stdout: format!(
+                "{first}\n{}\n{last}",
+                "x".repeat(SETUP_ERROR_MAX_BYTES + 64)
+            ),
+            stderr: String::new(),
+        };
+        let stored = persistable_setup_error(&oversized);
+        assert!(stored.len() <= SETUP_ERROR_MAX_BYTES, "{}", stored.len());
+        assert!(
+            stored.starts_with(SETUP_ERROR_TRUNCATION_MARKER),
+            "{stored}"
+        );
+        assert!(stored.contains(last), "{stored}");
+        assert!(!stored.contains(first), "{stored}");
+
+        let listed_output = listed[0].setup_error.clone().expect("setup error stored");
+        assert!(!listed_output.is_empty(), "{listed_output}");
+
+        let mut repo = runtime.get_repo(&owner, repo_id).await.unwrap();
+        repo.setup_script = None;
+        runtime.save_repo(&repo).await.unwrap();
+
+        let revived = runtime
+            .retry_workspace_setup(&owner, listed[0].id)
+            .await
+            .unwrap();
+        assert_eq!(revived.status, CodeWorkspaceStatus::Active);
+        assert_eq!(revived.setup_error, None);
+
+        let reloaded = runtime.get_workspace(&owner, listed[0].id).await.unwrap();
+        assert_eq!(reloaded.setup_error, None);
     }
 }

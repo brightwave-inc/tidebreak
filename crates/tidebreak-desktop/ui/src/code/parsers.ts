@@ -2139,6 +2139,7 @@ export function parseCodeWorkspace(
       "released_at",
       "released_tip",
       "bundle_bytes",
+      "setup_error",
     ]) ||
     (value.read_only !== undefined && typeof value.read_only !== "boolean") ||
     (value.base_refresh_warning !== undefined &&
@@ -2154,7 +2155,8 @@ export function parseCodeWorkspace(
     !optionalTimestamp(value.archived_at) ||
     !optionalTimestamp(value.released_at) ||
     !optionalWireId(value.released_tip) ||
-    (value.bundle_bytes !== undefined && !isFiniteNumber(value.bundle_bytes))
+    (value.bundle_bytes !== undefined && !isFiniteNumber(value.bundle_bytes)) ||
+    (value.setup_error !== undefined && !blockText(value.setup_error))
   ) {
     return null;
   }
@@ -2182,6 +2184,9 @@ export function parseCodeWorkspace(
       : {}),
     ...(value.bundle_bytes !== undefined
       ? { bundle_bytes: value.bundle_bytes }
+      : {}),
+    ...(value.setup_error !== undefined
+      ? { setup_error: value.setup_error }
       : {}),
   };
   if (value.pr !== undefined) {
