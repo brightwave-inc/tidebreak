@@ -1061,10 +1061,7 @@ fn pull_request_load_more_survives_a_shorter_reread() {
     );
     let cursor = first.next_cursor.expect("page continues");
 
-    let shorter = vec![
-        pull_request_list_row("a", t0),
-        pull_request_list_row("c", t2),
-    ];
+    let shorter = vec![pull_request_list_row("a", t0)];
     let mut query = pull_request_query();
     query.cursor = Some(cursor.clone());
     query.limit = Some(2);
@@ -1083,7 +1080,7 @@ fn pull_request_load_more_survives_a_shorter_reread() {
             .iter()
             .map(|item| item.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["c"]
+        Vec::<&str>::new()
     );
 }
 

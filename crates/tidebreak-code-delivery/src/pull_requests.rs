@@ -385,7 +385,7 @@ fn pull_request_sorts_after(
         == std::cmp::Ordering::Less
 }
 
-pub(super) fn paginate_pull_requests(
+fn paginate_pull_requests(
     items: Vec<CodeDeliveryPullRequestSummary>,
     cursor: Option<&str>,
     limit: Option<u16>,
