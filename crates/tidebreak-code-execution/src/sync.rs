@@ -42,6 +42,11 @@ pub const PULLED_DIRS: &[&str] = &["output", "preview"];
 /// anything past the limit with an already-shown reason becomes a count.
 pub const MAX_SYNC_NOTES: usize = 32;
 
+/// Ceiling on the directories one pull walks. A backend's listing is data,
+/// not a tree: it may name a directory twice, name its own parent, or keep
+/// inventing children, and none of that may keep the walk alive.
+pub const MAX_PULLED_DIRS: usize = 4_096;
+
 /// Directory names never staged or pulled: version control and dependency
 /// trees that are large, regenerable, and meaningless to copy between the host
 /// and a sandbox.
@@ -354,7 +359,20 @@ pub async fn pull_result_dirs(
         .filter_map(|root| WorkspaceFilePath::parse(*root).ok())
         .collect();
     let mut files: Vec<WorkspaceFilePath> = Vec::new();
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     while let Some(dir) = stack.pop() {
+        if !visited.insert(dir.as_str().to_owned()) {
+            continue;
+        }
+        if visited.len() > MAX_PULLED_DIRS {
+            report.skip(
+                "beyond the directory sync limit",
+                format!(
+                    "not fully pulled: more than {MAX_PULLED_DIRS} directories under output/ and preview/"
+                ),
+            );
+            break;
+        }
         let listing = match lifecycle.list_workspace_files(workspace, Some(&dir)).await {
             Ok(listing) => listing,
             // A workspace with no output/ or preview/ yet has nothing to pull;
@@ -404,7 +422,7 @@ pub async fn pull_result_dirs(
                         "dependency or VCS tree",
                         format!("not pulled: {}/ (dependency or VCS tree)", path.as_str()),
                     );
-                } else {
+                } else if !visited.contains(path.as_str()) {
                     stack.push(path);
                 }
                 continue;
@@ -594,6 +612,9 @@ mod tests {
         /// Extra rows returned verbatim from the `output/` listing, for
         /// hostile-backend cases.
         planted: Mutex<Vec<WorkspaceFileEntry>>,
+        /// When set, every listing also names the listed directory itself
+        /// as a child, the shape of a backend that echoes its argument.
+        lists_itself: bool,
     }
 
     impl FakeWorkspace {
@@ -684,6 +705,19 @@ mod tests {
             }
             if path.map(WorkspaceFilePath::as_str) == Some("output") {
                 entries.extend(self.planted.lock().unwrap().drain(..));
+            }
+            // A root named without a trailing component fails the scope
+            // check before it can loop; a nested directory naming itself is
+            // the shape that walked forever.
+            if let (true, Some(dir)) = (
+                self.lists_itself,
+                path.filter(|dir| dir.as_str().contains('/')),
+            ) {
+                entries.push(WorkspaceFileEntry {
+                    path: dir.as_str().to_owned(),
+                    directory: true,
+                    size_bytes: None,
+                });
             }
             Ok(WorkspaceListing {
                 entries,
@@ -1083,5 +1117,36 @@ mod tests {
             pulled.notes.last().unwrap(),
             &format!("not pulled: 9 more note(s) beyond the {MAX_SYNC_NOTES}-note sync limit")
         );
+    }
+
+    /// A listing that names its own directory must not walk forever: the
+    /// pull visits each directory once and still pulls the files it found.
+    #[tokio::test]
+    async fn pull_terminates_when_a_listing_names_its_own_directory() {
+        let fake = FakeWorkspace {
+            lists_itself: true,
+            ..FakeWorkspace::default()
+        };
+        fake.insert("output/report.txt", b"done");
+        fake.insert("output/nested/more.txt", b"more");
+        let host = tempfile::tempdir().unwrap();
+
+        let pulled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pull_result_dirs(&fake, &workspace_id(), host.path()),
+        )
+        .await
+        .expect("the walk terminates")
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(host.path().join("output/report.txt")).unwrap(),
+            "done"
+        );
+        assert_eq!(
+            std::fs::read_to_string(host.path().join("output/nested/more.txt")).unwrap(),
+            "more"
+        );
+        assert_eq!(pulled.notes, Vec::<String>::new());
     }
 }
