@@ -123,45 +123,41 @@ it("updates workspace-less recovery from the digest without reloading its snapsh
     "true",
   );
   act(() =>
-    useCodeUpdatesStore
-      .getState()
-      .apply({
-        type: "digest",
-        digest: {
-          workspace: null,
-          session: session.id,
-          kind: "interactive",
-          lifecycle: "fenced",
-          fence_reason: { type: "probe_ambiguous", detail: "Recovery stopped" },
-          attention: {
-            state: {
-              type: "needs_you",
-              prompt: "Inspect the previous process.",
-              source: "lifecycle",
-            },
+    useCodeUpdatesStore.getState().apply({
+      type: "digest",
+      digest: {
+        workspace: null,
+        session: session.id,
+        kind: "interactive",
+        lifecycle: "fenced",
+        fence_reason: { type: "probe_ambiguous", detail: "Recovery stopped" },
+        attention: {
+          state: {
+            type: "needs_you",
+            prompt: "Inspect the previous process.",
             source: "lifecycle",
           },
-          title: "Conversation",
-          turn_count: 1,
+          source: "lifecycle",
         },
-      }),
+        title: "Conversation",
+        turn_count: 1,
+      },
+    }),
   );
   expect(screen.getByText("Inspect the previous process.")).toBeInTheDocument();
   act(() =>
-    useCodeUpdatesStore
-      .getState()
-      .apply({
-        type: "digest",
-        digest: {
-          workspace: null,
-          session: session.id,
-          kind: "interactive",
-          lifecycle: "idle",
-          attention: { state: { type: "idle" }, source: "lifecycle" },
-          title: "Conversation",
-          turn_count: 1,
-        },
-      }),
+    useCodeUpdatesStore.getState().apply({
+      type: "digest",
+      digest: {
+        workspace: null,
+        session: session.id,
+        kind: "interactive",
+        lifecycle: "idle",
+        attention: { state: { type: "idle" }, source: "lifecycle" },
+        title: "Conversation",
+        turn_count: 1,
+      },
+    }),
   );
   expect(screen.getByTestId("session-pane")).toHaveAttribute(
     "data-disabled",
