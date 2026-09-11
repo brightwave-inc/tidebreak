@@ -395,7 +395,12 @@ impl CodeRuntime {
         attribution: crate::obo_gateway::GitForgeAttributionRequest,
         lender: Option<std::sync::Arc<dyn crate::obo_gateway::GitCredentialLender>>,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
-        let parent = self.clone_parent(request.parent_dir.as_deref()).await?;
+        let requested_parent = request
+            .parent_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let parent = self.clone_parent(requested_parent).await?;
         validate_parent_dir(&parent).await?;
         let source = resolve_clone_source(
             &request,
@@ -438,7 +443,12 @@ impl CodeRuntime {
                 format!("destination {} already exists", legacy_target.display()),
             ));
         }
-        write_clone_parent_dir(&*self.db, &parent).await?;
+        // The parent-dir setting is process-wide. Persist it only when this
+        // caller named a destination; a default-parent clone must not re-point
+        // everyone else's remembered path.
+        if requested_parent.is_some() {
+            write_clone_parent_dir(&*self.db, &parent).await?;
+        }
         tokio::fs::create_dir_all(target.parent().expect("clone target has a parent"))
             .await
             .map_err(|error| {
@@ -1326,6 +1336,86 @@ mod tests {
             external_origin: None,
             finished_at,
         }
+    }
+
+    async fn test_runtime(dir: &tempfile::TempDir) -> std::sync::Arc<CodeRuntime> {
+        let db = std::sync::Arc::new(
+            tidebreak_core::DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        std::sync::Arc::new(
+            CodeRuntime::new(db, dir.path().into(), None, None, None, None, None, None)
+                .with_clone_parent_default(dir.path().join("default-parent")),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_default_parent_clone_does_not_repoint_another_users_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let runtime = test_runtime(&dir).await;
+        let alice = OwnerId::local();
+        let bob = OwnerId::new("user:bob").unwrap();
+        let alice_parent = dir.path().join("alice-repos");
+        std::fs::create_dir_all(&alice_parent).unwrap();
+        std::fs::create_dir_all(dir.path().join("default-parent")).unwrap();
+
+        assert_eq!(runtime.clone_defaults().await.unwrap().parent_dir, None);
+        runtime
+            .start_clone(
+                &bob,
+                CloneRequest {
+                    url: Some("https://github.com/acme/demo.git".into()),
+                    github: None,
+                    parent_dir: None,
+                    name: Some("bob-default".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.clone_defaults().await.unwrap().parent_dir,
+            None,
+            "a clone that used the machine default must not persist it as everyone's parent"
+        );
+
+        runtime
+            .start_clone(
+                &alice,
+                CloneRequest {
+                    url: Some("https://github.com/acme/demo.git".into()),
+                    github: None,
+                    parent_dir: Some(alice_parent.display().to_string()),
+                    name: Some("alice-copy".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let alice_default = runtime.clone_defaults().await.unwrap().parent_dir;
+        assert_eq!(
+            alice_default.as_deref(),
+            Some(alice_parent.display().to_string().as_str())
+        );
+
+        runtime
+            .start_clone(
+                &bob,
+                CloneRequest {
+                    url: Some("https://github.com/acme/demo.git".into()),
+                    github: None,
+                    parent_dir: None,
+                    name: Some("bob-copy".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.clone_defaults().await.unwrap().parent_dir,
+            alice_default
+        );
     }
 
     #[test]

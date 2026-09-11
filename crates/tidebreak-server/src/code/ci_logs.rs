@@ -4,8 +4,8 @@
 //! The fix-errors action used to hand an agent check names and URLs and let it
 //! find the logs itself: two or three `gh` calls before it saw an error line,
 //! and then a whole multi-megabyte job log in one read. This module does that
-//! fetch on the agent's behalf. The fetch itself is unbounded; only the
-//! rendered output is capped.
+//! fetch on the agent's behalf. The fetch is byte-capped; rendered output is
+//! capped again so the file keeps the failure tail.
 //!
 //! Files land under the workspace's private root, beside fork transcripts, so
 //! Git cannot index them and the session's `allowed_read_roots` already covers
@@ -19,6 +19,7 @@ use futures::{stream, StreamExt};
 use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
 
 use super::gh;
+use tidebreak_harness::OutputBudget;
 
 /// Directory holding downloaded job logs below the workspace's private root.
 const CI_LOGS_DIR: &str = "ci-logs";
@@ -212,7 +213,8 @@ pub(crate) async fn write_failing_check_logs(
                 continue;
             }
         };
-        let rendered = render_job_log(&check, &url, head_sha, &raw);
+        let rendered = render_job_log(&check, &url, head_sha, &raw.text);
+        let truncated = rendered.truncated || raw.truncated;
         let name = log_file_name(&check, job.job_id);
         dir.publish(std::ffi::OsStr::new(&name), rendered.text.as_bytes())
             .await?;
@@ -225,7 +227,7 @@ pub(crate) async fn write_failing_check_logs(
                 .display()
                 .to_string(),
             byte_len: rendered.text.len() as u64,
-            truncated: rendered.truncated,
+            truncated,
             url,
         });
         written_names.push(name);
@@ -247,7 +249,12 @@ pub(crate) async fn write_failing_check_logs(
     Ok(WrittenCheckLogs { logs, failures })
 }
 
-async fn fetch_job_log(binary: &Path, job: &JobRef) -> Result<String, String> {
+struct FetchedLog {
+    text: String,
+    truncated: bool,
+}
+
+async fn fetch_job_log(binary: &Path, job: &JobRef) -> Result<FetchedLog, String> {
     let endpoint = job.endpoint();
     let mut args = vec!["api".to_owned(), endpoint];
     if job.host != "github.com" {
@@ -255,8 +262,31 @@ async fn fetch_job_log(binary: &Path, job: &JobRef) -> Result<String, String> {
     }
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     // `cwd` is unused by an absolute REST read, and this runs for a workspace
-    // whose worktree may be mid-rebase.
-    gh::run_gh(Path::new("."), binary, &borrowed, GH_LOG_TIMEOUT).await
+    // whose worktree may be mid-rebase. The fetch itself is capped: a job log
+    // can be many megabytes, and only the tail is worth keeping.
+    let output = gh::run_gh_capped(
+        Path::new("."),
+        binary,
+        &borrowed,
+        GH_LOG_TIMEOUT,
+        OutputBudget::tail(MAX_JOB_LOG_BYTES, usize::MAX),
+        OutputBudget::tail(64 * 1024, 2_048),
+    )
+    .await?;
+    let truncated = output.stdout.truncated;
+    let text =
+        if output.status.success() || (output.terminated_for_output && output.stdout.truncated) {
+            output.stdout.into_marked_text()
+        } else {
+            let stderr = output.stderr.into_marked_text();
+            let stdout = output.stdout.into_marked_text();
+            return Err(if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            });
+        };
+    Ok(FetchedLog { text, truncated })
 }
 
 struct RenderedLog {
@@ -557,5 +587,33 @@ mod tests {
         assert!(written.logs.is_empty());
         assert!(written.failures.is_empty());
         assert!(!root.path().join(CI_LOGS_DIR).join(old_name).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn job_log_fetch_truncates_unbounded_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temp root");
+        let gh = directory.path().join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nhead -c 800000 /dev/zero | tr '\\0' 'x'\n").unwrap();
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
+
+        let fetched = fetch_job_log(
+            &gh,
+            &JobRef {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                repo: "tools".into(),
+                job_id: 1,
+            },
+        )
+        .await
+        .expect("capped fetch");
+        assert!(fetched.truncated);
+        assert!(fetched.text.contains("[output truncated]"));
+        assert!(fetched.text.len() <= MAX_JOB_LOG_BYTES + 32);
     }
 }

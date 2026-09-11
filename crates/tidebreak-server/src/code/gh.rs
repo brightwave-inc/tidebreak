@@ -16,7 +16,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
-use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, OutputBudget};
+use tidebreak_harness::{
+    filter_child_env, probe_shell, spawn_process_tree, BoundedProcessOutput, HostEnv, OutputBudget,
+};
 
 use super::setup_script::{missing_image_toolchain_notice, spawn_workspace_script};
 use crate::code::types::CodeGitHubRepositoryTarget;
@@ -30,6 +32,10 @@ const MAX_OUTPUT_CHARS: usize = 4_096;
 const MAX_UNTRACKED_DIFFSTAT_BYTES: u64 = 1024 * 1024;
 const MAX_ACTION_OUTPUT_BYTES: usize = 4_096;
 const MAX_ACTION_OUTPUT_LINES: usize = 256;
+const GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const GIT_OUTPUT_LINES: usize = 200_000;
+const GIT_ERROR_BYTES: usize = 64 * 1024;
+const GIT_ERROR_LINES: usize = 2_048;
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 pub const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
 pub const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
@@ -1735,6 +1741,41 @@ fn classify_gh(
     GhError::user(format!("gh failed: {err}"))
 }
 
+pub(crate) async fn wait_command_bounded(
+    command: &mut Command,
+    limit: Duration,
+    stdout_budget: OutputBudget,
+    stderr_budget: OutputBudget,
+    description: &str,
+) -> Result<BoundedProcessOutput, String> {
+    let child = spawn_process_tree(command)
+        .map_err(|err| format!("failed to spawn {description}: {err}"))?;
+    timeout(
+        limit,
+        child.wait_with_bounded_output(stdout_budget, stderr_budget, true),
+    )
+    .await
+    .map_err(|_| format!("{description} timed out"))?
+    .map_err(|err| format!("{description} failed: {err}"))
+}
+
+fn finish_bounded_command(
+    output: BoundedProcessOutput,
+    accept_truncated_stdout: bool,
+) -> Result<String, String> {
+    let stdout_truncated = output.stdout.truncated;
+    let stderr_empty = output.stderr.bytes.is_empty();
+    let stdout = output.stdout.into_marked_text().trim().to_owned();
+    let stderr = output.stderr.into_marked_text().trim().to_owned();
+    if output.status.success() && !output.terminated_for_output {
+        return Ok(stdout);
+    }
+    if output.terminated_for_output && accept_truncated_stdout && stdout_truncated && stderr_empty {
+        return Ok(stdout);
+    }
+    Err(if stderr.is_empty() { stdout } else { stderr })
+}
+
 async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
     git_with_credential(cwd, args, limit, None).await
 }
@@ -1762,20 +1803,15 @@ async fn git_with_credential(
             .env(GIT_CREDENTIAL_SECRET_ENV, &credential.secret)
             .env(GIT_CREDENTIAL_HOST_ENV, GIT_CREDENTIAL_FORGE_HOST);
     }
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn git: {err}"))?;
-    let output = timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(if stderr.is_empty() { stdout } else { stderr })
-    }
+    let output = wait_command_bounded(
+        &mut command,
+        limit,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+        OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
+        &format!("git {}", args.join(" ")),
+    )
+    .await?;
+    finish_bounded_command(output, true)
 }
 
 /// General `gh` runner for creation, status, and comment reads — every
@@ -2290,6 +2326,50 @@ async fn spawn_gh_output(
         .map_err(|err| format!("gh {} failed: {err}", args.join(" ")))
 }
 
+/// `gh` with bounded stdout/stderr. Job-log fetches use this so a huge log
+/// cannot grow without a cap.
+pub(crate) async fn run_gh_capped(
+    cwd: &Path,
+    binary: &Path,
+    args: &[&str],
+    limit: Duration,
+    stdout_budget: OutputBudget,
+    stderr_budget: OutputBudget,
+) -> Result<BoundedProcessOutput, String> {
+    if refuse_gh_args(args) {
+        return Err("refusing to run a merge or GraphQL gh command".into());
+    }
+    let login_env = GH_LAUNCH
+        .get()
+        .filter(|launch| launch.binary == binary)
+        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
+    let mut command = Command::new(binary);
+    if let Some(login_env) = login_env {
+        command.env_clear();
+        for (key, value) in filter_child_env(login_env.iter().cloned()) {
+            command.env(key, value);
+        }
+    }
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GH_NO_UPDATE_NOTIFIER", "1");
+    wait_command_bounded(
+        &mut command,
+        limit,
+        stdout_budget,
+        stderr_budget,
+        &format!("gh {}", args.join(" ")),
+    )
+    .await
+}
+
 /// One `gh api --include` answer: the status line, the caching and pacing
 /// headers the fetcher acts on, and the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2592,6 +2672,31 @@ mod tests {
             generate_commit_message("first change", &stat),
             generate_commit_message("first change", &stat)
         );
+    }
+
+    #[tokio::test]
+    async fn git_output_beyond_the_cap_is_truncated() {
+        let mut command = Command::new("head");
+        command
+            .args(["-c", "4096", "/dev/zero"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = wait_command_bounded(
+            &mut command,
+            Duration::from_secs(5),
+            OutputBudget::head(64, 8),
+            OutputBudget::tail(64, 8),
+            "python3",
+        )
+        .await
+        .unwrap();
+        assert!(output.stdout.truncated);
+        assert!(output.stdout.bytes.len() <= 64);
+        let marked = output.stdout.clone().into_marked_text();
+        assert!(marked.contains("[output truncated]"));
+        let finished = finish_bounded_command(output, true).unwrap();
+        assert!(finished.contains("[output truncated]"));
     }
 
     #[test]
