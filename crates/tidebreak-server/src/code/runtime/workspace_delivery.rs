@@ -490,7 +490,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        let mut workspace = self.get_workspace(owner, id).await?;
+        let workspace = self.get_workspace(owner, id).await?;
         // Being asked is the attention signal (decision 66): the request
         // path reads local git plus the stored row, and the hot refresher
         // this mark feeds is what keeps the row current while anyone reads.
@@ -531,16 +531,6 @@ impl CodeRuntime {
                         }
                     }
                 }
-            }
-        }
-        if status.pr != workspace.pr {
-            workspace.pr = status.pr.clone();
-            self.save_workspace(&workspace).await?;
-            // A digest that moved is a fresh host observation: write it onto
-            // the fact row's live tier and fan the change out (decision 66).
-            if let Some(digest) = &status.pr {
-                self.record_pull_request_live_state(owner, Some(workspace.id), digest)
-                    .await;
             }
         }
         Ok(status)
@@ -1659,8 +1649,8 @@ impl CodeRuntime {
         };
         self.delivery_cache.invalidate();
         let created_number = digest.number;
-        workspace.pr = Some(digest);
-        self.save_workspace(&workspace).await?;
+        self.save_created_workspace_pr(&mut workspace, digest)
+            .await?;
         // Best-effort authored fact (decision 77). The digest just came from
         // the host; the REST path already holds the full row, and the `gh`
         // path re-reads it repository-qualified for full identity and
@@ -1709,6 +1699,19 @@ impl CodeRuntime {
         // fetched digest — checks pending on the fresh pull request — not
         // the light creation stub.
         self.refresh_workspace_pr(owner, id).await
+    }
+
+    /// Persist the creation result before refresh, without internal read markers.
+    async fn save_created_workspace_pr(
+        &self,
+        workspace: &mut CodeWorkspace,
+        mut digest: PullRequestDigest,
+    ) -> Result<(), ServerError> {
+        if crate::code::forge_rest::review_decision_is_unknown(digest.review_decision.as_deref()) {
+            digest.review_decision = None;
+        }
+        workspace.pr = Some(digest);
+        self.save_workspace(workspace).await
     }
 
     pub async fn run_workspace_action(
@@ -2344,6 +2347,49 @@ mod remote_pr_tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.live.unwrap().review_decision, None);
+    }
+
+    #[tokio::test]
+    async fn a_created_rest_digest_stays_public_when_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, mut workspace) =
+            fixture_with_host(dir.path(), Some("unsupported.example")).await;
+        let mut created = workspace.pr.clone().unwrap();
+        created.review_decision = Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN.into());
+        runtime
+            .save_created_workspace_pr(&mut workspace, created)
+            .await
+            .unwrap();
+        assert!(runtime
+            .refresh_workspace_pr(&owner, workspace.id)
+            .await
+            .is_err());
+
+        let stored = runtime.get_workspace(&owner, workspace.id).await.unwrap();
+        assert_eq!(stored.pr.as_ref().unwrap().review_decision, None);
+        let status = runtime.workspace_pr(&owner, workspace.id).await.unwrap();
+        assert_eq!(status.pr.as_ref().unwrap().review_decision, None);
+        let wire = serde_json::to_value(status.pr.unwrap()).unwrap();
+        assert!(wire
+            .get("review_decision")
+            .is_none_or(serde_json::Value::is_null));
+    }
+
+    #[tokio::test]
+    async fn a_created_digest_keeps_an_authoritative_review_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, mut workspace) = fixture(dir.path()).await;
+        let mut created = workspace.pr.clone().unwrap();
+        created.review_decision = Some("approved".into());
+        runtime
+            .save_created_workspace_pr(&mut workspace, created)
+            .await
+            .unwrap();
+        let stored = runtime.get_workspace(&owner, workspace.id).await.unwrap();
+        assert_eq!(
+            stored.pr.unwrap().review_decision.as_deref(),
+            Some("approved")
+        );
     }
 
     #[tokio::test]

@@ -185,6 +185,7 @@ pub async fn set_pull_request_live_state(
 /// [`PullRequestReviewDecisionWrite::Preserve`] omits `review_decision` the
 /// same way: the update never assigns the column, so a concurrent
 /// authoritative write cannot be overwritten by a stale copy.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_pull_request_live_state_with(
     store: &DbStore,
     owner: &OwnerId,
