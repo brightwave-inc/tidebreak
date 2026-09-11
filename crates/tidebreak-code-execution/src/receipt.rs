@@ -203,8 +203,6 @@ fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), ExecErr
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::{ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId};
 
