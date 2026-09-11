@@ -5913,7 +5913,14 @@ async fn a_replayed_external_message_records_once() {
     .unwrap();
     assert_eq!(
         replay,
-        crate::code::ExternalMessageRecord::Replay { turn_id: row.id }
+        crate::code::ExternalMessageRecord::Replay {
+            turn_id: row.id,
+            steer_requested: None,
+            expected_turn_id: None,
+            correlation_uuid: None,
+            admission: None,
+            queued_reason: None,
+        }
     );
     let queued = crate::db::code::list_queued_turns(&store, &owner, session_id)
         .await
@@ -5934,6 +5941,163 @@ async fn a_replayed_external_message_records_once() {
     assert!(matches!(
         second,
         crate::code::ExternalMessageRecord::Recorded(_)
+    ));
+}
+
+/// A steering queue resolution is durable and replays reproduce the exact
+/// reason, so a retried delivery cannot invent a different outcome.
+#[tokio::test]
+async fn a_settled_steer_admission_replays_with_its_reason() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+    use crate::db::code::{
+        record_external_message_with_steer, settle_external_steer_admission,
+        ExternalSteerAdmissionInput,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "steer-replay").await;
+    let expected = TurnId::new();
+    let correlation = uuid::Uuid::new_v4();
+    let first = record_external_message_with_steer(
+        &store,
+        &owner,
+        session_id,
+        "EvSteer",
+        "1700000001.000100",
+        "redirect",
+        &crate::code::TurnActor::default(),
+        None,
+        ExternalSteerAdmissionInput {
+            request_steer: true,
+            expected_turn_id: Some(expected),
+            correlation_uuid: Some(correlation),
+        },
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalMessageRecord::Recorded(row) = first else {
+        panic!("first delivery must record");
+    };
+    assert!(settle_external_steer_admission(
+        &store,
+        &owner,
+        session_id,
+        "EvSteer",
+        expected,
+        ExternalSteerAdmission::Queued,
+        Some(ExternalSteerQueuedReason::SteerUnsupported),
+    )
+    .await
+    .unwrap());
+    let replay = record_external_message_with_steer(
+        &store,
+        &owner,
+        session_id,
+        "EvSteer",
+        "1700000001.000100",
+        "redirect",
+        &crate::code::TurnActor::default(),
+        None,
+        ExternalSteerAdmissionInput::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        replay,
+        crate::code::ExternalMessageRecord::Replay {
+            turn_id: row.id,
+            steer_requested: Some(true),
+            expected_turn_id: Some(expected),
+            correlation_uuid: Some(correlation),
+            admission: Some(ExternalSteerAdmission::Queued),
+            queued_reason: Some(ExternalSteerQueuedReason::SteerUnsupported),
+        }
+    );
+}
+
+/// A zero-row CAS under a concurrent settle must return true exactly when
+/// the winner wrote the identical resolution, reason included.
+#[tokio::test]
+async fn a_settle_race_validates_the_winner_instead_of_failing_ambiguously() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+    use crate::db::code::{
+        record_external_message_with_steer, settle_external_steer_admission,
+        ExternalSteerAdmissionInput,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "steer-race").await;
+    let expected = TurnId::new();
+    let correlation = uuid::Uuid::new_v4();
+    record_external_message_with_steer(
+        &store,
+        &owner,
+        session_id,
+        "EvRace",
+        "1700000001.000100",
+        "redirect",
+        &crate::code::TurnActor::default(),
+        None,
+        ExternalSteerAdmissionInput {
+            request_steer: true,
+            expected_turn_id: Some(expected),
+            correlation_uuid: Some(correlation),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(settle_external_steer_admission(
+        &store,
+        &owner,
+        session_id,
+        "EvRace",
+        expected,
+        ExternalSteerAdmission::Queued,
+        Some(ExternalSteerQueuedReason::StaleTurn),
+    )
+    .await
+    .unwrap());
+    // Winning row already holds the identical resolution, so the loser's
+    // zero-row CAS is a successful idempotent retry.
+    assert!(settle_external_steer_admission(
+        &store,
+        &owner,
+        session_id,
+        "EvRace",
+        expected,
+        ExternalSteerAdmission::Queued,
+        Some(ExternalSteerQueuedReason::StaleTurn),
+    )
+    .await
+    .unwrap());
+    // A different reason is not the same admission and must not be claimed.
+    assert!(!settle_external_steer_admission(
+        &store,
+        &owner,
+        session_id,
+        "EvRace",
+        expected,
+        ExternalSteerAdmission::Queued,
+        Some(ExternalSteerQueuedReason::Unacknowledged),
+    )
+    .await
+    .unwrap());
+    let replay = crate::db::code::external_steer_admission(
+        &store,
+        &owner,
+        session_id,
+        "EvRace",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        replay,
+        crate::code::ExternalMessageRecord::Replay {
+            admission: Some(ExternalSteerAdmission::Queued),
+            queued_reason: Some(ExternalSteerQueuedReason::StaleTurn),
+            ..
+        }
     ));
 }
 
@@ -6540,7 +6704,14 @@ async fn external_context_is_first_message_only_and_bound_to_its_grant() {
     .unwrap();
     assert_eq!(
         replay,
-        crate::code::ExternalMessageRecord::Replay { turn_id: row.id }
+        crate::code::ExternalMessageRecord::Replay {
+            turn_id: row.id,
+            steer_requested: None,
+            expected_turn_id: None,
+            correlation_uuid: None,
+            admission: None,
+            queued_reason: None,
+        }
     );
     let later = record_external_message_with_context(
         &store,

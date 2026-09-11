@@ -601,10 +601,11 @@ impl CodeRuntime {
         expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
-        self.steer_inner(owner, id, expected_turn_id, message, None)
+        self.steer_inner(owner, id, expected_turn_id, message, None, None)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn steer_inner(
         &self,
         owner: &OwnerId,
@@ -612,6 +613,7 @@ impl CodeRuntime {
         expected_turn_id: TurnId,
         message: String,
         trigger_delivery: Option<TriggerDeliveryClaim>,
+        admission: Option<SteerAdmission>,
     ) -> Result<(), ServerError> {
         if let Some(claim) = trigger_delivery {
             if tidebreak_core::db::code::trigger_delivery_accepted(
@@ -685,6 +687,7 @@ impl CodeRuntime {
                 .send(WorkerCommand::Steer {
                     expected_turn_id,
                     message,
+                    admission,
                     reply,
                 })
                 .await
@@ -732,6 +735,7 @@ impl CodeRuntime {
                 delivery_id,
                 lease_token,
             }),
+            None,
         )
         .await
     }
@@ -787,5 +791,127 @@ impl CodeRuntime {
                 other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
             })?;
         self.attach_and_spawn_worker(session).await
+    }
+}
+
+/// Steer one durable external admission into the active local native turn.
+///
+/// The external delivery is already durably parked under its event row.
+/// Admission resolves only when the engine acknowledges the instruction:
+/// `steered` on native ack, `queued` with a bounded reason otherwise, and
+/// the queue row stays put in both cases so a replay and the later sweep
+/// preserve the original input. The caller receives the settlement through
+/// `SteerAdmissionSettlement`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn steer_external(
+    &self,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: String,
+    text: String,
+    expected_turn_id: TurnId,
+    turn_id: TurnId,
+    correlation_uuid: Option<uuid::Uuid>,
+) -> Result<SteerAdmissionSettlement, ServerError> {
+    use tidebreak_core::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+
+    let session = self.get_session(owner, session_id).await?;
+    let adapter = self.adapter(session.harness_kind)?;
+    let probe = self.probe(adapter.as_ref()).await;
+    let level = adapter.capabilities(&probe).mid_turn_steering;
+    let settle_queued = |reason: ExternalSteerQueuedReason| async move {
+        let _ = tidebreak_core::db::code::settle_external_steer_admission(
+            &self.db,
+            owner,
+            session_id,
+            &event_id,
+            expected_turn_id,
+            ExternalSteerAdmission::Queued,
+            Some(reason),
+        )
+        .await;
+        Ok(SteerAdmissionSettlement {
+            expected_turn_id,
+            turn_id,
+            correlation_uuid,
+            reason: Some(reason.as_str().to_owned()),
+        })
+    };
+    if level != CapLevel::Supported {
+        return settle_queued(ExternalSteerQueuedReason::SteerUnsupported).await;
+    }
+    let Some(active) = get_open_turn(&self.db, owner, session_id).await? else {
+        return settle_queued(ExternalSteerQueuedReason::StaleTurn).await;
+    };
+    if active.id != expected_turn_id {
+        return settle_queued(ExternalSteerQueuedReason::StaleTurn).await;
+    }
+    let handle = self.require_worker(session_id)?;
+    if handle.spawn_epoch != session.spawn_epoch {
+        return settle_queued(ExternalSteerQueuedReason::StaleTurn).await;
+    }
+    let (reply, rx) = oneshot::channel();
+    let result = handle
+        .commands
+        .send(WorkerCommand::Steer {
+            expected_turn_id,
+            message: text,
+            admission: Some(SteerAdmission {
+                owner: owner.clone(),
+                session_id,
+                event_id: event_id.clone(),
+                expected_turn_id,
+                turn_id,
+                correlation_uuid,
+            }),
+            reply,
+        })
+        .await
+        .map_err(|_| ServerError::internal("session worker is gone"))?;
+    let result = rx
+        .await
+        .map_err(|_| ServerError::internal("session worker dropped the steer"))?;
+    match result {
+        Ok(()) => {
+            let settled = tidebreak_core::db::code::settle_external_steer_admission(
+                &self.db,
+                owner,
+                session_id,
+                &event_id,
+                expected_turn_id,
+                ExternalSteerAdmission::Steered,
+                None,
+            )
+            .await;
+            if !settled.unwrap_or(false) {
+                return Ok(SteerAdmissionSettlement {
+                    expected_turn_id,
+                    turn_id,
+                    correlation_uuid,
+                    reason: Some(
+                        ExternalSteerQueuedReason::Unacknowledged.as_str().to_owned(),
+                    ),
+                });
+            }
+            Ok(SteerAdmissionSettlement {
+                expected_turn_id,
+                turn_id,
+                correlation_uuid,
+                reason: None,
+            })
+        }
+        Err(WorkerError::SteeringUnavailable(_) | WorkerError::SteeringRejected(_))
+        | Err(WorkerError::NoActiveTurn(_) | WorkerError::StaleTurn(_)) => {
+            let reason = if matches!(
+                result.as_ref().unwrap_err(),
+                WorkerError::StaleTurn(_) | WorkerError::NoActiveTurn(_)
+            ) {
+                ExternalSteerQueuedReason::StaleTurn
+            } else {
+                ExternalSteerQueuedReason::SteerUnsupported
+            };
+            settle_queued(reason).await
+        }
+        Err(_) => settle_queued(ExternalSteerQueuedReason::Unacknowledged).await,
     }
 }

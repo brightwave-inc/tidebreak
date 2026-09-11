@@ -81,7 +81,23 @@ pub trait TurnHandle: Send {
     /// Completion must win when it races delivery. Returning
     /// [`SteerOutcome::Ended`] keeps the message unacknowledged so the next
     /// turn receives it.
-    async fn steer(&mut self, body: String) -> SteerOutcome;
+    async fn steer(&mut self, body: String) -> SteerOutcome {
+        self.steer_with_correlation(body, None).await
+    }
+
+    /// Delivers a message with the caller's admission correlation id.
+    ///
+    /// The default forwards to [`Self::steer`]. Adapters that can report the
+    /// correlation (Codex's `clientUserMessageId`, Claude's replayed user
+    /// UUID) should return `Delivered` only when the engine acknowledged it.
+    async fn steer_with_correlation(
+        &mut self,
+        body: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> SteerOutcome {
+        let _ = correlation_uuid;
+        self.steer(body).await
+    }
 
     /// Stops the turn. The next [`TurnHandle::wait`] reports how it ended —
     /// usually [`TurnEnd::Interrupted`], but a turn that finished first keeps

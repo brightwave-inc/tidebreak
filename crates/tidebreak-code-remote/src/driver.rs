@@ -438,6 +438,80 @@ async fn settle_turn_rows(
     Ok(false)
 }
 
+/// Settle durable steering admissions from supervised sandbox lifecycle
+/// events. The agent emits `steer_ack` only when the native engine
+/// acknowledged the instruction; `steer_refused` keeps the queue row intact
+/// and records the explicit fallback.
+async fn settle_sandbox_steer_admissions(
+    db: &Arc<DbStore>,
+    owner: &OwnerId,
+    session_id: SessionId,
+    events: &[super::wire::SandboxEvent],
+) -> Result<(), tidebreak_core::AgentError> {
+    use tidebreak_core::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+    for event in events {
+        let admission = match event.kind.as_str() {
+            "steer_ack" | "steer_refused" => event,
+            _ => continue,
+        };
+        let Some(correlation) = admission
+            .payload
+            .get("correlation_uuid")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(record) = tidebreak_core::db::code::external_event_by_correlation_str(
+            db,
+            owner,
+            session_id,
+            &correlation,
+        )
+        .await?
+        else {
+            continue;
+        };
+        let tidebreak_core::ExternalMessageRecord::Replay {
+            expected_turn_id: Some(expected),
+            ..
+        } = record
+        else {
+            continue;
+        };
+        let (outcome, reason) = if admission.kind == "steer_ack" {
+            (ExternalSteerAdmission::Steered, None)
+        } else {
+            (
+                ExternalSteerAdmission::Queued,
+                Some(ExternalSteerQueuedReason::Unacknowledged),
+            )
+        };
+        let Some(event_id) =
+            tidebreak_core::db::code::external_event_key_by_correlation_str(
+                db,
+                owner,
+                session_id,
+                &correlation,
+            )
+            .await?
+        else {
+            continue;
+        };
+        let _ = tidebreak_core::db::code::settle_external_steer_admission(
+            db,
+            owner,
+            session_id,
+            &event_id,
+            expected,
+            outcome,
+            reason,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 impl RemoteDriver<'_> {
     /// Submit one user turn to a remote session.
     ///
@@ -843,6 +917,54 @@ impl RemoteDriver<'_> {
         }
     }
 
+    /// Send one durable steering frame into the live sandbox's inbox.
+    ///
+    /// This is transport-only: no turn row is created, and the caller owns
+    /// the durable admission row. The supervised agent acknowledges only
+    /// after the native engine accepts the instruction.
+    pub async fn send_steer_frame(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        body: String,
+    ) -> Result<(), tidebreak_core::AgentError> {
+        let Some(row) = latest_incarnation(self.db, owner, session_id).await? else {
+            return Err(tidebreak_core::AgentError::Store(
+                "cannot steer a sandbox with no incarnation".into(),
+            ));
+        };
+        if row.state != IncarnationState::Active {
+            return Err(tidebreak_core::AgentError::Store(
+                "the sandbox is not active; steering is unavailable".into(),
+            ));
+        }
+        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+            return Err(tidebreak_core::AgentError::Store(
+                "active incarnation has no sandbox id".into(),
+            ));
+        };
+        let message = SandboxMessage {
+            body: SupervisorMessageBody::Input(body),
+            interrupt: false,
+        };
+        message
+            .validate()
+            .map_err(tidebreak_core::AgentError::Store)?;
+        match self
+            .provisioner
+            .send(owner, session_id, sandbox_id, &message)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(RemoteSandboxError::SignInRequired(detail)) => {
+                Err(tidebreak_core::AgentError::Store(format!(
+                    "sandbox steering needs a sign-in: {detail}"
+                )))
+            }
+            Err(error) => Err(tidebreak_core::AgentError::Store(error.to_string())),
+        }
+    }
+
     /// Read and apply everything new from the session's live sandbox.
     ///
     /// Idle when no incarnation is active. The caller schedules pumps; this
@@ -1039,6 +1161,7 @@ impl RemoteDriver<'_> {
             }
         }
 
+        settle_sandbox_steer_admissions(db, &owner, session.id, &read.events).await?;
         let turn_settled =
             settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
 

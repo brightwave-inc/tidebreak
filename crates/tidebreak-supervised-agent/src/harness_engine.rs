@@ -549,6 +549,14 @@ impl TurnHandle for HarnessTurn {
     }
 
     async fn steer(&mut self, body: String) -> SteerOutcome {
+        self.steer_with_correlation(body, None).await
+    }
+
+    async fn steer_with_correlation(
+        &mut self,
+        body: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> SteerOutcome {
         if let Some(ended) = &self.ended {
             return SteerOutcome::Ended(ended.clone());
         }
@@ -556,7 +564,7 @@ impl TurnHandle for HarnessTurn {
         let joined = tokio::select! {
             biased;
             joined = &mut self.run => joined,
-            result = session.steer(body) => {
+            result = session.steer_with_correlation(body, correlation_uuid) => {
                 // Any refusal — an engine with no mid-turn channel, or one
                 // that rejected this steer — keeps the message queued for the
                 // next turn.

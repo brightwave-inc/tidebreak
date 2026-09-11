@@ -586,6 +586,9 @@ async fn send(
                     channel_ts: chrono::Utc::now().timestamp_micros().to_string(),
                     actor,
                     context: None,
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await?;

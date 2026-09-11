@@ -201,6 +201,9 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
         "task_output" => {
             out.task_output = payload_str(payload, "body").map(str::to_owned);
         }
+        // Durable steering admissions are protocol state, not journal rows.
+        // The driver settles them from the correlation/expected-turn payload.
+        "steer_ack" | "steer_refused" => {}
         "supervisor_stopped" => {
             let reason = payload_str(payload, "reason").unwrap_or("stopped");
             out.journal.push(notice(

@@ -128,6 +128,7 @@ enum PendingWriteState {
 struct PendingSteer {
     expected_turn_id: String,
     text: String,
+    correlation_uuid: Option<uuid::Uuid>,
     reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
     deadline: Option<Instant>,
     write_state: PendingWriteState,
@@ -401,7 +402,13 @@ impl CodexSession {
     /// write removes a queued request, while cancellation after that point
     /// leaves the stream reader responsible for the acknowledgement and
     /// `UserSteered` event.
-    async fn request_steer(&self, thread_id: String, text: String) -> Result<(), HarnessError> {
+    #[allow(clippy::too_many_arguments)]
+    async fn request_steer(
+        &self,
+        thread_id: String,
+        text: String,
+        correlation: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
         let Some(stdin) = self.stdin.lock().expect("codex stdin").clone() else {
             return Err(HarnessError::SteeringRejected(
                 "the engine child has no stdin".into(),
@@ -416,7 +423,10 @@ impl CodexSession {
                     ControlTurn::Active(turn_id) => {
                         let expected_turn_id = turn_id.clone();
                         let rpc_id = self.next_rpc_id();
-                        let client_message_id = format!("tidebreak-steer-{rpc_id}");
+                        let correlation_uuid = correlation;
+                        let client_message_id = correlation_uuid
+                            .map(|uuid| format!("tidebreak-steer-{uuid}"))
+                            .unwrap_or_else(|| format!("tidebreak-steer-{rpc_id}"));
                         let message = steer_request(
                             rpc_id,
                             &thread_id,
@@ -434,6 +444,7 @@ impl CodexSession {
                             PendingSteer {
                                 expected_turn_id,
                                 text: text.clone(),
+                                correlation_uuid,
                                 reply: Some(tx),
                                 deadline: None,
                                 write_state: PendingWriteState::Queued,
@@ -1236,7 +1247,10 @@ impl CodexSession {
                         if pending.accept_response && result.is_ok() {
                             self.spec
                                 .sink
-                                .emit(HarnessEvent::UserSteered { text: pending.text })
+                                .emit(HarnessEvent::UserSteered {
+                                    text: pending.text,
+                                    correlation_uuid: pending.correlation_uuid,
+                                })
                                 .await;
                         }
                         if let Some(reply) = pending.reply.take() {
@@ -1404,12 +1418,20 @@ impl HarnessSession for CodexSession {
     }
 
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
+        self.steer_with_correlation(text, None).await
+    }
+
+    async fn steer_with_correlation(
+        &self,
+        text: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
         let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
             return Err(HarnessError::SteeringRejected(
                 "the engine session has no thread id".into(),
             ));
         };
-        self.request_steer(thread_id, text).await
+        self.request_steer(thread_id, text, correlation_uuid).await
     }
 
     async fn decide(

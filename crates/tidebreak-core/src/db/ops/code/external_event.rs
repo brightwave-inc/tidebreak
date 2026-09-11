@@ -16,11 +16,11 @@
 //! "B steered by A".
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{ExternalMessageRecord, QueuedTurn, SessionId, TurnId};
+use crate::code::{ExternalMessageRecord, ExternalSteerAdmission, ExternalSteerQueuedReason, QueuedTurn, SessionId, TurnId};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -135,6 +135,18 @@ pub async fn record_external_message(
     })
 }
 
+/// Admission metadata an external message may carry when it asks to steer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExternalSteerAdmissionInput {
+    /// Whether the delivery asked to steer into the active native turn.
+    pub request_steer: bool,
+    /// The native turn the instruction targets. Required when steering.
+    pub expected_turn_id: Option<TurnId>,
+    /// Caller correlation id; echoed in the admission response and carried
+    /// through the supervised sandbox so an engine UUID maps back here.
+    pub correlation_uuid: Option<uuid::Uuid>,
+}
+
 /// A context refusal is client input; persistence failures remain server faults.
 #[derive(Debug, thiserror::Error)]
 pub enum ExternalMessageIntakeError {
@@ -163,6 +175,33 @@ pub async fn record_external_message_with_context(
     actor: &crate::code::TurnActor,
     context: Option<&crate::code::ExternalThreadContext>,
 ) -> std::result::Result<ExternalMessageRecord, ExternalMessageIntakeError> {
+    record_external_message_with_steer(
+        store,
+        owner,
+        session_id,
+        event_id,
+        channel_ts,
+        message,
+        actor,
+        context,
+        ExternalSteerAdmissionInput::default(),
+    )
+    .await
+}
+
+/// Record one external delivery with its steering admission metadata.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_external_message_with_steer(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+    channel_ts: &str,
+    message: &str,
+    actor: &crate::code::TurnActor,
+    context: Option<&crate::code::ExternalThreadContext>,
+    steering: ExternalSteerAdmissionInput,
+) -> std::result::Result<ExternalMessageRecord, ExternalMessageIntakeError> {
     if event_id.trim().is_empty() || channel_ts.trim().is_empty() {
         return Err(AgentError::Store(
             "an external message needs an event id and an ordering token".into(),
@@ -177,10 +216,9 @@ pub async fn record_external_message_with_context(
         return Err(AgentError::Store(format!("code session {session_id} not found")).into());
     }
     if let Some(event) = find_event_on(&transaction, owner, session_id, event_id).await? {
+        let record = replay_from_event(event);
         transaction.commit().await.map_err(store_err)?;
-        return Ok(ExternalMessageRecord::Replay {
-            turn_id: TurnId(event.turn_id),
-        });
+        return Ok(record);
     }
     let existing = entities::code_queued_turn::Entity::find()
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
@@ -282,6 +320,12 @@ pub async fn record_external_message_with_context(
         channel_ts: Set(channel_ts.to_owned()),
         turn_id: Set(queued_id.0),
         created_at: Set(now),
+        steer_requested: Set(steering.request_steer),
+        expected_turn_id: Set(steering.expected_turn_id.map(|id| id.0)),
+        correlation_uuid: Set(steering.correlation_uuid),
+        outcome: Set(None),
+        outcome_reason: Set(None),
+        outcome_at: Set(None),
     }
     .insert(&transaction)
     .await;
@@ -293,9 +337,7 @@ pub async fn record_external_message_with_context(
         let Some(event) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
             return Err(store_err(error).into());
         };
-        return Ok(ExternalMessageRecord::Replay {
-            turn_id: TurnId(event.turn_id),
-        });
+        return Ok(replay_from_event(event));
     }
     order_queued_by_channel_ts(&transaction, owner, session_id).await?;
     let row = entities::code_queued_turn::Entity::find_by_id(queued_id.0)
@@ -306,4 +348,175 @@ pub async fn record_external_message_with_context(
     let row = queued_turn_from_model(row)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(ExternalMessageRecord::Recorded(Box::new(row)))
+}
+
+fn replay_from_event(event: entities::code_external_event::Model) -> ExternalMessageRecord {
+    let admission = event
+        .outcome
+        .as_deref()
+        .and_then(ExternalSteerAdmission::from_str);
+    ExternalMessageRecord::Replay {
+        turn_id: TurnId(event.turn_id),
+        steer_requested: event.steer_requested.then_some(true),
+        expected_turn_id: event.expected_turn_id.map(TurnId),
+        correlation_uuid: event.correlation_uuid,
+        admission,
+        // The queued reason is part of the durable admission; a replay must
+        // reproduce it so the adapter renders the same honest substitute.
+        queued_reason: event
+            .outcome_reason
+            .as_deref()
+            .and_then(ExternalSteerQueuedReason::from_str),
+    }
+}
+
+/// Read the durable admission state of one external event.
+pub async fn external_steer_admission(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+) -> Result<Option<ExternalMessageRecord>> {
+    let Some(event) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(replay_from_event(event)))
+}
+
+/// Settle one steering admission durably.
+///
+/// Idempotent for the exact resolution and expected turn. `false` means the
+/// event is missing or its steering metadata cannot be reconciled with the
+/// caller's expected turn, so no outcome is invented.
+pub async fn settle_external_steer_admission(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+    expected_turn_id: TurnId,
+    admission: ExternalSteerAdmission,
+    reason: Option<ExternalSteerQueuedReason>,
+) -> Result<bool> {
+    let Some(event) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
+        return Ok(false);
+    };
+    if event.expected_turn_id != Some(expected_turn_id.0) {
+        return Ok(false);
+    }
+    let requested_reason = reason.map(|reason| reason.as_str().to_owned());
+    let now = database_now(&store.conn).await?;
+    let (outcome, outcome_reason, outcome_at) = match event.outcome.as_deref() {
+        // An already settled admission is the same outcome, reason included.
+        // A queued admission carries a reason; a steered one carries none.
+        Some(existing)
+            if existing == admission.as_str()
+                && event.outcome_reason.as_deref() == requested_reason.as_deref() =>
+        {
+            return Ok(true);
+        }
+        Some(_) => return Ok(false),
+        None => (
+            admission.as_str().to_owned(),
+            requested_reason.clone(),
+            Some(now),
+        ),
+    };
+    let updated = entities::code_external_event::Entity::update_many()
+        .col_expr(
+            entities::code_external_event::Column::Outcome,
+            sea_orm::sea_query::Expr::value(Some(outcome)),
+        )
+        .col_expr(
+            entities::code_external_event::Column::OutcomeReason,
+            sea_orm::sea_query::Expr::value(outcome_reason),
+        )
+        .col_expr(
+            entities::code_external_event::Column::OutcomeAt,
+            sea_orm::sea_query::Expr::value(outcome_at),
+        )
+        .filter(entities::code_external_event::Column::Id.eq(event.id))
+        .filter(entities::code_external_event::Column::Outcome.is_null())
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected == 1 {
+        return Ok(true);
+    }
+    // A concurrent settler may have won the write between our read and this
+    // CAS. That is the same admission only when every field matches, reason
+    // included; otherwise nobody can claim this resolution.
+    let Some(settled) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
+        return Ok(false);
+    };
+    Ok(settled.expected_turn_id == Some(expected_turn_id.0)
+        && settled.outcome.as_deref() == Some(admission.as_str())
+        && settled.outcome_reason.as_deref()
+            == reason.map(|reason| reason.as_str().to_owned()).as_deref())
+}
+
+/// Find one external event by its admission correlation id, scoped to a
+/// session. Correlation ids are minted per delivery by the adapter, so a
+/// match is the durable handle a supervised sandbox ack carries back.
+pub async fn external_event_by_correlation(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    correlation_uuid: uuid::Uuid,
+) -> Result<Option<ExternalMessageRecord>> {
+    let Some(event) = entities::code_external_event::Entity::find()
+        .filter(entities::code_external_event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_event::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_external_event::Column::CorrelationUuid.eq(correlation_uuid))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(replay_from_event(event)))
+}
+
+/// The channel event id behind one admission correlation id.
+pub async fn external_event_key_by_correlation(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    correlation_uuid: uuid::Uuid,
+) -> Result<Option<String>> {
+    let row = entities::code_external_event::Entity::find()
+        .select_only()
+        .column(entities::code_external_event::Column::EventId)
+        .filter(entities::code_external_event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_event::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_external_event::Column::CorrelationUuid.eq(correlation_uuid))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(row.map(|row| row.event_id))
+}
+
+/// Correlation lookup by its wire string form; invalid strings match nothing.
+pub async fn external_event_key_by_correlation_str(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    correlation_uuid: &str,
+) -> Result<Option<String>> {
+    let Ok(correlation_uuid) = uuid::Uuid::parse_str(correlation_uuid) else {
+        return Ok(None);
+    };
+    external_event_key_by_correlation(store, owner, session_id, correlation_uuid).await
+}
+
+/// Correlation record lookup by wire string; invalid strings match nothing.
+pub async fn external_event_by_correlation_str(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    correlation_uuid: &str,
+) -> Result<Option<ExternalMessageRecord>> {
+    let Ok(correlation_uuid) = uuid::Uuid::parse_str(correlation_uuid) else {
+        return Ok(None);
+    };
+    external_event_by_correlation(store, owner, session_id, correlation_uuid).await
 }

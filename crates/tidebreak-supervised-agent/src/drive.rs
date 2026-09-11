@@ -25,6 +25,7 @@ use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, Turn
 use crate::inputs::{Inputs, RunMode, POLL_INTERVAL};
 use crate::tool_bridge::LocalToolBridge;
 use crate::wip::{self, CheckpointPoint, WipContext};
+use tidebreak_core::code::supervisor_tools::{decode_steer_frame, is_steer_frame};
 use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 use tidebreak_core::code::supervisor_tools::is_result_frame;
@@ -98,6 +99,15 @@ pub struct Driver<E> {
     /// The installed engine to register on every poll, when the environment
     /// admitted an identity for this run.
     embedded_engine: Option<EmbeddedEngineRegistration>,
+    /// Sandbox identifier the environment assigned this incarnation; a
+    /// steering frame from any other sandbox is stale and never applied.
+    sandbox_id: Option<String>,
+}
+
+enum SteerFrameStep {
+    Continue,
+    Wait,
+    End(TurnEnd),
 }
 
 impl<E: Engine> Driver<E> {
@@ -131,6 +141,7 @@ impl<E: Engine> Driver<E> {
             push_denied: inputs.forge_push_denied,
             wip: None,
             embedded_engine: None,
+            sandbox_id: inputs.sandbox_id.clone(),
         }
     }
 
@@ -254,7 +265,7 @@ impl<E: Engine> Driver<E> {
             .inbox
             .iter()
             .filter(|message| !self.processed_frames.contains(&message.seq))
-            .map(|message| message.body.as_str())
+            .map(|message| message.body.clone())
             .collect::<Vec<_>>();
         if !input.is_empty() {
             return NextAction::Run(TurnRequest {
@@ -414,6 +425,15 @@ impl<E: Engine> Driver<E> {
                 handle.interrupt().await;
                 return None;
             }
+            if is_steer_frame(&message.body) {
+                let message = message.clone();
+                match self.steer_frame(handle, &message).await {
+                    SteerFrameStep::Continue => {}
+                    SteerFrameStep::Wait => return None,
+                    SteerFrameStep::End(end) => return Some(end),
+                }
+                continue;
+            }
             match handle.steer(message.body.clone()).await {
                 SteerOutcome::Delivered => {
                     let message = self.inbox.pop_front().expect("front was just observed");
@@ -425,6 +445,105 @@ impl<E: Engine> Driver<E> {
             }
         }
         None
+    }
+
+    /// Delivers exactly one framed steering admission.
+    async fn steer_frame(
+        &mut self,
+        handle: &mut dyn TurnHandle,
+        message: &SupervisorMessage,
+    ) -> SteerFrameStep {
+        let Some(frame) = decode_steer_frame(&message.body) else {
+            // A malformed reserved frame must not become engine text: dropping
+            // it is safer than letting an unvalidated payload steer the agent.
+            let message = self.inbox.pop_front().expect("front was just observed");
+            self.delivered_through = Some(message.seq);
+            self.advance_acknowledged_frames();
+            self.outbox.push(
+                "steer_refused",
+                serde_json::json!({
+                    "seq": message.seq,
+                    "reason": "malformed_steer_frame",
+                }),
+            );
+            return SteerFrameStep::Continue;
+        };
+        let correlation_uuid = frame
+            .correlation_uuid
+            .as_ref()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        let stale = self.sandbox_id.as_deref() != Some(frame.sandbox_id.as_str())
+            || frame.native_turn != self.turn;
+        if stale {
+            // A stale frame cannot steer this native turn. Consume it at the
+            // transport level (never run it as text) and let the server keep
+            // the durable queue row for the correct promotion.
+            let message = self.inbox.pop_front().expect("front was just observed");
+            self.delivered_through = Some(message.seq);
+            self.advance_acknowledged_frames();
+            self.outbox.push(
+                "steer_refused",
+                serde_json::json!({
+                    "seq": message.seq,
+                    "expected_turn_id": frame.expected_turn_id,
+                    "correlation_uuid": frame.correlation_uuid,
+                    "reason": "stale_turn",
+                }),
+            );
+            return SteerFrameStep::Continue;
+        }
+        match handle
+            .steer_with_correlation(frame.body.clone(), correlation_uuid)
+            .await
+        {
+            SteerOutcome::Delivered => {
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_ack",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                        "correlation_uuid": frame.correlation_uuid,
+                    }),
+                );
+                SteerFrameStep::Continue
+            }
+            SteerOutcome::Refused => {
+                // The engine refused; consume the frame so it can never run as
+                // an ordinary text turn beside the server's durable row. The
+                // server owns queue fallback through the original queue id.
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_refused",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                        "correlation_uuid": frame.correlation_uuid,
+                        "reason": "engine_refused",
+                    }),
+                );
+                SteerFrameStep::Continue
+            }
+            SteerOutcome::Ended(end) => {
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_refused",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                        "correlation_uuid": frame.correlation_uuid,
+                        "reason": "turn_ended",
+                    }),
+                );
+                SteerFrameStep::End(end)
+            }
+        }
     }
 
     /// Posts one poll, classifies the outcome, and absorbs instructions.

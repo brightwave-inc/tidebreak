@@ -250,6 +250,10 @@ pub enum HarnessEvent {
     UserSteered {
         /// The steered text.
         text: String,
+        /// Optional caller correlation id, echoed from the admission so the
+        /// server can reconcile the durable queue row without resending text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correlation_uuid: Option<uuid::Uuid>,
     },
     /// The turn finished successfully.
     TurnCompleted {
@@ -1069,6 +1073,23 @@ pub trait HarnessSession: Send + Sync {
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
         let _ = text;
         Err(HarnessError::SteeringUnsupported)
+    }
+
+    /// Inject a mid-turn user message with an optional correlation id.
+    ///
+    /// The default forwards to [`Self::steer`], so adapters that only need
+    /// content keep one implementation. An adapter that can carry the
+    /// correlation (Codex's `clientUserMessageId`, Claude's replayed user
+    /// UUID) uses this to report which admission the engine acknowledged.
+    async fn steer_with_correlation(
+        &self,
+        text: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
+        if let Some(correlation) = correlation_uuid {
+            let _ = correlation;
+        }
+        self.steer(text).await
     }
 
     /// Engine-native resume token, when the stream has reported one.

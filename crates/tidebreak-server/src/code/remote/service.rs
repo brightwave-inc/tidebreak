@@ -1798,6 +1798,9 @@ mod tests {
             channel_ts: "1700000001.000100".into(),
             actor: tidebreak_core::TurnActor::default(),
             context: None,
+            steer: false,
+            expected_turn_id: None,
+            correlation_uuid: None,
         };
         let first = runtime
             .external_submit_message(&owner, grant.id, binding.session_id, message())
@@ -1886,6 +1889,9 @@ mod tests {
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
                 context: None,
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
             };
             let first = runtime
                 .external_submit_message(&owner, grant, binding.session_id, message("Ev1"))
@@ -2047,6 +2053,9 @@ mod tests {
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
                 context: None,
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
             };
             let lock = remote.promotion_lock(binding.session_id);
             let guard = lock.lock().await;
@@ -2177,6 +2186,9 @@ mod tests {
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2204,6 +2216,9 @@ mod tests {
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2227,6 +2242,9 @@ mod tests {
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2245,6 +2263,9 @@ mod tests {
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2268,6 +2289,9 @@ mod tests {
                     event_id: "Ev3".to_owned(),
                     channel_ts: "1700000003.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await;
@@ -2290,6 +2314,9 @@ mod tests {
                     event_id: "Ev4".to_owned(),
                     channel_ts: "1700000004.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await;
@@ -2340,6 +2367,9 @@ mod tests {
                     event_id: "Ev0".to_owned(),
                     channel_ts: "1700000000.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2355,6 +2385,9 @@ mod tests {
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2382,6 +2415,9 @@ mod tests {
                     event_id: "EvA".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2457,6 +2493,9 @@ mod tests {
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await

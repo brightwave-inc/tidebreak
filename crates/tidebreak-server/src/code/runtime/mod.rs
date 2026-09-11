@@ -151,6 +151,14 @@ pub struct ExternalMessage {
     pub actor: TurnActor,
     /// Bounded prior thread messages; accepted only with channel opt-in.
     pub context: Option<tidebreak_core::code::ExternalThreadContext>,
+    /// Whether this delivery asked to steer into the active native turn.
+    /// Old clients omit it and keep the queue-default contract.
+    pub steer: bool,
+    /// The native turn the instruction targets; required when `steer` is true.
+    pub expected_turn_id: Option<TurnId>,
+    /// Caller correlation id; echoed in the admission response and carried
+    /// into the supervised sandbox so an engine UUID maps back here.
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 /// Result of one external message delivery (`docs/slack-sessions.md`,
@@ -162,6 +170,19 @@ pub enum ExternalMessageOutcome {
     NewTurn(Box<Turn>),
     /// The session was busy; the message sits as a durable queue row.
     Queued(Box<QueuedTurn>),
+    /// The engine acknowledged the instruction into the expected active
+    /// Tidebreak turn. The message row itself remains parked until that
+    /// turn settles and is then consumed without resending its text.
+    Steered {
+        /// The durable receipt/message id the admission owns; stable for
+        /// replay and distinct from the target turn.
+        turn_id: TurnId,
+        /// The active Tidebreak turn the engine acknowledged, matching the
+        /// caller's `expected_turn_id` exactly.
+        expected_turn_id: TurnId,
+        /// Caller correlation id, echoed verbatim.
+        correlation_uuid: Option<uuid::Uuid>,
+    },
     /// The row the first delivery caused was retracted before it could
     /// run; the replay has nothing to point at.
     Dropped,

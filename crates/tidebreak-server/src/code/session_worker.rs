@@ -79,9 +79,42 @@ pub(crate) enum WorkerCommand {
     Steer {
         expected_turn_id: TurnId,
         message: String,
+        /// Durable external admission to settle, when this steer came from
+        /// the Slack messages endpoint.
+        admission: Option<SteerAdmission>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Shutdown,
+}
+
+/// Result of settling one durable external steering admission.
+#[derive(Debug, Clone)]
+pub(crate) struct SteerAdmissionSettlement {
+    /// The active Tidebreak turn that was targeted.
+    pub expected_turn_id: TurnId,
+    /// Durable receipt/message id of the admission.
+    pub turn_id: TurnId,
+    /// Caller correlation id.
+    pub correlation_uuid: Option<uuid::Uuid>,
+    /// Bounded queued reason, present exactly when the outcome is queued.
+    pub reason: Option<String>,
+}
+
+/// One durable external steering admission the worker owes a settlement for.
+#[derive(Debug, Clone)]
+pub(crate) struct SteerAdmission {
+    /// Owner of the external event row.
+    pub owner: OwnerId,
+    /// Session the event row belongs to.
+    pub session_id: SessionId,
+    /// Channel event id, the idempotency key of the admission.
+    pub event_id: String,
+    /// The active Tidebreak turn the instruction targets.
+    pub expected_turn_id: TurnId,
+    /// The durable receipt/message id (queue row id) from the first delivery.
+    pub turn_id: TurnId,
+    /// Caller correlation id.
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 /// The durable outcome that releases a worker after native mode acceptance.
@@ -134,6 +167,10 @@ pub(crate) enum WorkerError {
     QueuedTurnStopped,
     #[error("{0}")]
     Failed(String),
+    /// The engine did not acknowledge steering into the expected native
+    /// turn; the durable admission is settled `queued` and the route answers
+    /// honestly instead of inventing success.
+    SteerAdmissionSettled(SteerAdmissionSettlement),
     #[error("trigger delivery was already accepted")]
     TriggerDeliveryAccepted,
     /// A sibling session holds the workspace's turn lock.
@@ -1792,8 +1829,10 @@ async fn apply_control(
         WorkerCommand::Steer {
             expected_turn_id,
             message,
+            admission,
             reply,
         } => {
+            let admission = admission.as_ref();
             let result = match active_turn_id {
                 None => Err(WorkerError::NoActiveTurn(
                     "there is no active turn to steer; the message was not queued".into(),
@@ -1805,7 +1844,7 @@ async fn apply_control(
                 )),
                 Some(_) => match tokio::time::timeout(
                     STEER_CONTROL_TIMEOUT,
-                    engine.steer(message),
+                    engine.steer_with_correlation(message, admission.and_then(|a| a.correlation_uuid)),
                 )
                 .await
                 {
@@ -4148,7 +4187,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
             decision: decision.into(),
             actor: None,
         },
-        HarnessEvent::UserSteered { text } => Event::UserSteered {
+        HarnessEvent::UserSteered { text, .. } => Event::UserSteered {
             text,
             message_id: None,
         },

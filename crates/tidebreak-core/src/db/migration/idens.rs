@@ -1172,6 +1172,12 @@ pub(crate) enum CodeExternalEvent {
     ChannelTs,
     TurnId,
     CreatedAt,
+    SteerRequested,
+    ExpectedTurnId,
+    CorrelationUuid,
+    Outcome,
+    OutcomeReason,
+    OutcomeAt,
 }
 
 #[derive(DeriveIden)]

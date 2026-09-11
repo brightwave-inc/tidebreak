@@ -385,3 +385,49 @@ mod tests {
             .is_err());
     }
 }
+
+/// Prefix for durable steering instructions sent over the ordinary string
+/// message transport. The environment stores and delivers it as plain text,
+/// so an older supervisor that cannot decode it sees harmless text; the
+/// Tidebreak supervisor recognizes it and never feeds it to the engine as a
+/// normal user turn.
+pub const STEER_PREFIX: &str = "tidebreak-steer-v1\n";
+
+/// One durable steering admission framed for the supervised sandbox.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorSteerFrame {
+    /// Active Tidebreak turn the instruction targets.
+    pub expected_turn_id: String,
+    /// The sandbox incarnation that owns the target native turn. A stale
+    /// frame from an older incarnation must never steer a newer one; the
+    /// supervisor compares this against the sandbox id it was spawned with.
+    pub sandbox_id: String,
+    /// The agent's current native turn counter; the supervisor only steers
+    /// when this matches its running turn.
+    pub native_turn: u32,
+    /// Caller correlation id, echoed back in `steer_ack`. Required for
+    /// sandbox steering so admission settlement is never ambiguous.
+    pub correlation_uuid: String,
+    /// User text to inject into the running native turn.
+    pub body: String,
+}
+
+/// Encode a steering admission as an ordinary string message.
+pub fn encode_steer_frame(frame: &SupervisorSteerFrame) -> String {
+    format!(
+        "{STEER_PREFIX}{}",
+        serde_json::to_string(frame).expect("a bounded steer frame serializes")
+    )
+}
+
+/// Whether a message is a steering admission frame.
+pub fn is_steer_frame(message: &str) -> bool {
+    message.starts_with(STEER_PREFIX)
+}
+
+/// Decode a steering admission frame. `None` for malformed frames.
+pub fn decode_steer_frame(message: &str) -> Option<SupervisorSteerFrame> {
+    let payload = message.strip_prefix(STEER_PREFIX)?;
+    serde_json::from_str(payload).ok()
+}

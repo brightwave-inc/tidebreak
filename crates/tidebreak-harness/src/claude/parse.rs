@@ -344,6 +344,7 @@ impl ClaudeStreamParser {
                     if parent.is_none() && !text.is_empty() {
                         events.push(HarnessEvent::UserSteered {
                             text: bound(text, MAX_EVENT_TEXT_CHARS),
+                            correlation_uuid: None,
                         });
                     }
                 }

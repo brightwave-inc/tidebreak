@@ -357,6 +357,9 @@ async fn sandbox_admission_requires_durable_external_consent_before_accepting_wo
                 event_id: "Ev1".into(),
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
                 context: None,
             },
         )
@@ -457,6 +460,9 @@ async fn sandbox_admission_requires_durable_external_consent_before_accepting_wo
                 event_id: "EvBeforeRevocation".into(),
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
                 context: None,
             },
         )

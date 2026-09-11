@@ -26,6 +26,7 @@
 mod baseline;
 mod channel_repository_confirm;
 mod code_conversation_request;
+mod external_steer_admission;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
@@ -109,6 +110,7 @@ impl MigratorTrait for Migrator {
             Box::new(native_tool_receipt::NativeToolReceipts),
             Box::new(native_tool_receipt::NativeToolClaimTime),
             Box::new(workspace_setup_error::WorkspaceSetupError),
+            Box::new(external_steer_admission::ExternalSteerAdmission),
         ]
     }
 }
