@@ -482,6 +482,14 @@ export type CodeUiStore = {
   requestArchiveWorkspace: () => void;
   takeArchiveWorkspace: () => boolean;
   /**
+   * The same chord while the rail holds a selection, taken by the sidebar
+   * that owns the selected cards. The shell routes here first so Cmd+Shift+A
+   * over three selected workspaces archives three, not the one on screen.
+   */
+  archiveSelectionPending: boolean;
+  requestArchiveSelection: () => void;
+  takeArchiveSelection: () => boolean;
+  /**
    * What the workspace header says the next step is, republished for the
    * command palette.
    *
@@ -607,6 +615,13 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   takeArchiveWorkspace: () => {
     if (!get().archivePending) return false;
     set({ archivePending: false });
+    return true;
+  },
+  archiveSelectionPending: false,
+  requestArchiveSelection: () => set({ archiveSelectionPending: true }),
+  takeArchiveSelection: () => {
+    if (!get().archiveSelectionPending) return false;
+    set({ archiveSelectionPending: false });
     return true;
   },
   workflowSuggestion: null,
@@ -770,6 +785,7 @@ export function resetCodeUiHostState(): void {
     filesSearchPending: false,
     workflowShortcutPending: null,
     archivePending: false,
+    archiveSelectionPending: false,
     workflowSuggestion: null,
     openFilePending: null,
     selectedWorkspaceIds: [],

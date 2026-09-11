@@ -297,6 +297,18 @@ export function WorkspaceCard({
                   HOVER_TINT,
                   creating && "cursor-wait",
                 )}
+                onMouseDown={(event) => {
+                  // Shift-click would otherwise extend the page's text
+                  // selection from wherever the caret last sat, and with
+                  // text selected macOS hands the next Cmd+Shift+A to its
+                  // man-page text service instead of to the app.
+                  if (
+                    onSelectPointer &&
+                    pointerSelectIntent(event) !== "open"
+                  ) {
+                    event.preventDefault();
+                  }
+                }}
                 onClick={(event) => {
                   if (creating) return;
                   if (

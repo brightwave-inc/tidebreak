@@ -216,6 +216,31 @@ export function CodeSidebar() {
     }
   }
 
+  const archiveSelectionPending = useCodeUiStore(
+    (state) => state.archiveSelectionPending,
+  );
+  useEffect(() => {
+    if (!archiveSelectionPending) return;
+    if (!useCodeUiStore.getState().takeArchiveSelection()) return;
+    if (selectedWorkspaces.length === 0) return;
+    // One selected card takes the single-workspace path so the dialog and
+    // the dirty-worktree escalation read the same as the context menu's.
+    if (selectedWorkspaces.length === 1) {
+      const workspace = selectedWorkspaces[0];
+      const digest = digests[workspace.id];
+      run("archive", {
+        workspace,
+        title: digest?.title ?? workspace.title,
+        pr: digest?.pr_state ?? workspace.pr,
+        session: sessions[workspace.id],
+      });
+      return;
+    }
+    runBulk("archive", selectedWorkspaces);
+    // The chord is the trigger; the rest is state read when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveSelectionPending]);
+
   useEffect(() => {
     function onPointerDown(event: PointerEvent) {
       if (useCodeUiStore.getState().selectedWorkspaceIds.length === 0) return;
@@ -280,8 +305,13 @@ export function CodeSidebar() {
             clearWorkspaceSelection();
             return;
           }
+          // Plain Cmd+A only. Cmd+Shift+A is the archive chord, and
+          // selecting everything a beat before it fires would archive the
+          // whole rail.
           if (
             (event.metaKey || event.ctrlKey) &&
+            !event.shiftKey &&
+            !event.altKey &&
             event.key.toLowerCase() === "a"
           ) {
             event.preventDefault();
