@@ -141,7 +141,19 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       ? deliveryWorkspaces.filter(
           (workspace) => workspace.status !== "released",
         )
-      : deliveryWorkspaces;
+      : scenario === "archive"
+        ? [
+            {
+              ...deliveryWorkspaces.find(
+                (workspace) => workspace.status === "released",
+              )!,
+              id: "ws-shared-archive",
+              title: "Shared Slack investigation",
+              read_only: true,
+            },
+            ...deliveryWorkspaces,
+          ]
+        : deliveryWorkspaces;
   const refreshedMergedPullRequest = {
     ...deliveryPullRequests[0]!,
     state: "merged" as const,

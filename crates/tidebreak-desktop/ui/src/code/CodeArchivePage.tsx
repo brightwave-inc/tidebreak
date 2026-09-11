@@ -102,7 +102,7 @@ function CodeArchiveBody() {
   const historyAnchors = useMemo(() => {
     const seenRepos = new Set<string>();
     return archiveCandidates.filter((workspace) => {
-      if (seenRepos.has(workspace.repo_id)) return false;
+      if (workspace.read_only || seenRepos.has(workspace.repo_id)) return false;
       seenRepos.add(workspace.repo_id);
       return true;
     });
@@ -230,7 +230,11 @@ function CodeArchiveBody() {
   }, [archiveCandidates, historyMatchesByWorkspace, repos, trimmedSearch]);
 
   const restore = async (workspaceId: string) => {
-    if (restoring) return;
+    if (
+      restoring ||
+      workspaces.find((workspace) => workspace.id === workspaceId)?.read_only
+    )
+      return;
     setRestoring(workspaceId);
     try {
       const restored = await client.restoreCodeWorkspace(workspaceId);
@@ -475,15 +479,21 @@ function CodeArchiveBody() {
                         PR
                       </Button>
                     )}
-                    <Button
-                      type="button"
-                      size="xs"
-                      disabled={Boolean(restoring)}
-                      onClick={() => void restore(workspace.id)}
-                    >
-                      {restoring === workspace.id ? <Spinner /> : <RotateCcw />}
-                      Restore
-                    </Button>
+                    {!workspace.read_only && (
+                      <Button
+                        type="button"
+                        size="xs"
+                        disabled={Boolean(restoring)}
+                        onClick={() => void restore(workspace.id)}
+                      >
+                        {restoring === workspace.id ? (
+                          <Spinner />
+                        ) : (
+                          <RotateCcw />
+                        )}
+                        Restore
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       size="icon-xs"
