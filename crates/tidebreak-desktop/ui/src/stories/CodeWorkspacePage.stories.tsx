@@ -603,7 +603,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
             status: "setup_failed" as const,
             pr: undefined,
             setup_error:
-              "setup script failed (exit 1):\nerror: pnpm: command not found",
+              "[truncated]\nerror: pnpm: command not found\n    at install",
           }
         : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)

@@ -4,9 +4,52 @@ use super::*;
 
 /// Last 8 KiB of setup-script output, cut on a UTF-8 character boundary.
 const SETUP_ERROR_MAX_BYTES: usize = 8 * 1024;
+const SETUP_ERROR_TRUNCATION_MARKER: &str = "[truncated]\n";
 
-fn persistable_setup_error(message: &str) -> String {
-    tidebreak_core::truncate_utf8(message, SETUP_ERROR_MAX_BYTES).0
+fn persistable_setup_error(error: &WorktreeError) -> String {
+    let body = match error {
+        WorktreeError::HookFailed {
+            stdout,
+            stderr,
+            message,
+        } => {
+            let combined = combine_script_output(stdout, stderr);
+            if combined.is_empty() {
+                message.clone()
+            } else {
+                combined
+            }
+        }
+        other => other.to_string(),
+    };
+    tail_utf8(&body, SETUP_ERROR_MAX_BYTES)
+}
+
+fn combine_script_output(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+/// The last `max_bytes` of `value` on a character boundary. When the value
+/// is longer, prefix `[truncated]\n` and keep a tail that still fits.
+fn tail_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let marker = SETUP_ERROR_TRUNCATION_MARKER;
+    let keep = max_bytes.saturating_sub(marker.len());
+    let mut start = value.len().saturating_sub(keep);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut out = String::with_capacity(marker.len() + value.len() - start);
+    out.push_str(marker);
+    out.push_str(&value[start..]);
+    out
 }
 
 fn collision_resolved_slug(base: &str, index: u64) -> String {
@@ -238,7 +281,7 @@ impl CodeRuntime {
             }
             Err(err) => {
                 workspace.status = CodeWorkspaceStatus::SetupFailed;
-                workspace.setup_error = Some(persistable_setup_error(&err.to_string()));
+                workspace.setup_error = Some(persistable_setup_error(&err));
                 match self.save_workspace_final(&workspace).await {
                     Ok(true) => operation.complete().await,
                     Ok(false) => {
@@ -788,10 +831,7 @@ impl CodeRuntime {
         } else {
             CodeWorkspaceStatus::SetupFailed
         };
-        workspace.setup_error = setup
-            .as_ref()
-            .err()
-            .map(|error| persistable_setup_error(&error.to_string()));
+        workspace.setup_error = setup.as_ref().err().map(persistable_setup_error);
         workspace.archived_at = None;
         if released {
             Self::clear_release(&mut workspace);
@@ -864,13 +904,6 @@ impl CodeRuntime {
         }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
-        workspace.setup_error = None;
-        if !self.save_workspace_final(&workspace).await? {
-            return Err(ServerError::not_found(format!(
-                "workspace {} not found",
-                workspace.id
-            )));
-        }
         match run_setup_script(
             &path,
             std::path::Path::new(&repo.root_path),
@@ -892,8 +925,14 @@ impl CodeRuntime {
                 Ok(workspace)
             }
             Err(error) => {
-                workspace.setup_error = Some(persistable_setup_error(&error.to_string()));
-                let _ = self.save_workspace_final(&workspace).await;
+                workspace.setup_error = Some(persistable_setup_error(&error));
+                if let Err(save_error) = self.save_workspace_final(&workspace).await {
+                    tracing::warn!(
+                        error = ?save_error,
+                        workspace_id = %workspace.id,
+                        "failed to persist setup error after retry"
+                    );
+                }
                 Err(ServerError::unprocessable_kind(
                     "setup_failed",
                     error.to_string(),
@@ -1306,9 +1345,27 @@ mod tests {
             .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].status, CodeWorkspaceStatus::SetupFailed);
-        let stored = listed[0].setup_error.clone().expect("setup error stored");
+        let first = "FIRST_LINE_MUST_GO";
+        let last = "LAST_LINE_MUST_STAY";
+        let oversized = WorktreeError::HookFailed {
+            message: "setup script failed (exit 1): noise".into(),
+            stdout: format!(
+                "{first}\n{}\n{last}",
+                "x".repeat(SETUP_ERROR_MAX_BYTES + 64)
+            ),
+            stderr: String::new(),
+        };
+        let stored = persistable_setup_error(&oversized);
         assert!(stored.len() <= SETUP_ERROR_MAX_BYTES, "{}", stored.len());
-        assert!(stored.contains('x'), "{stored}");
+        assert!(
+            stored.starts_with(SETUP_ERROR_TRUNCATION_MARKER),
+            "{stored}"
+        );
+        assert!(stored.contains(last), "{stored}");
+        assert!(!stored.contains(first), "{stored}");
+
+        let listed_output = listed[0].setup_error.clone().expect("setup error stored");
+        assert!(!listed_output.is_empty(), "{listed_output}");
 
         let mut repo = runtime.get_repo(&owner, repo_id).await.unwrap();
         repo.setup_script = None;

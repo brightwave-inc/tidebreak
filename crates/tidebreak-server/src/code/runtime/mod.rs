@@ -982,7 +982,7 @@ fn map_gh(err: GhError) -> ServerError {
 
 fn map_worktree(err: WorktreeError) -> ServerError {
     match err {
-        WorktreeError::User(message) => {
+        WorktreeError::User(message) | WorktreeError::HookFailed { message, .. } => {
             if message.contains("already exists") {
                 ServerError::conflict_kind("branch_collision", message)
             } else if message.contains("bare") {

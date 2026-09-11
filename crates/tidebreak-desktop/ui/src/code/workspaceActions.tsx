@@ -841,7 +841,7 @@ export function useWorkspaceCardCommands(): {
   function run(
     command: WorkspaceCommandId,
     context: WorkspaceCommandContext,
-  ): void {
+  ): void | Promise<void> {
     switch (command) {
       case "open":
       case "new-session":
@@ -985,8 +985,7 @@ export function useWorkspaceCardCommands(): {
         void runRestore(context.workspace);
         return;
       case "retry-setup":
-        void runRetrySetup(context.workspace);
-        return;
+        return runRetrySetup(context.workspace);
     }
   }
 
