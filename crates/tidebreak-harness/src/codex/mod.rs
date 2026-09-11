@@ -4,6 +4,11 @@
 //! `codex app-server --stdio` JSON-RPC child per session. Chosen over `codex exec --json` because the
 //! installed version's app-server handshake is stable and is the richer
 //! approval channel (`item/commandExecution/requestApproval`).
+//!
+//! `SessionSpec.allowed_read_roots` are required to be absolute and then left
+//! ungranted. Codex's sandbox does not restrict reads, so the engine can read
+//! those paths without a protocol field; they are never sent as
+//! `writableRoots`, which would grant write access the contract does not allow.
 
 pub mod parse;
 pub mod session;
