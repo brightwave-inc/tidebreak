@@ -4347,6 +4347,20 @@ function parseSubagents(value: unknown): CodeSubagentSummary[] | null {
   return subagents;
 }
 
+function parseDigestOrigin(value: unknown): CodeSessionExternalOrigin | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<CodeSessionExternalOrigin>(value, [
+      "channel_kind",
+      "external_key",
+    ]) ||
+    !nonEmptyLine(value.channel_kind) ||
+    !wireId(value.external_key)
+  )
+    return null;
+  return { channel_kind: value.channel_kind, external_key: value.external_key };
+}
+
 export function parseCodeSessionDigest(
   value: unknown,
 ): CodeSessionDigest | null {
@@ -4364,6 +4378,7 @@ export function parseCodeSessionDigest(
       "title",
       "turn_count",
       "trigger_target_at",
+      "external_origin",
       "activity",
       "activity_detail",
       "pr_state",
@@ -4386,6 +4401,8 @@ export function parseCodeSessionDigest(
     !lineText(value.title) ||
     !isFiniteNumber(value.turn_count) ||
     !optionalTimestamp(value.trigger_target_at) ||
+    (value.external_origin !== undefined &&
+      !parseDigestOrigin(value.external_origin)) ||
     (value.activity !== undefined &&
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
     !optionalLine(value.activity_detail) ||
@@ -4427,6 +4444,9 @@ export function parseCodeSessionDigest(
     attention,
     ...(fence_reason ? { fence_reason } : {}),
     title: value.title,
+    ...(value.external_origin !== undefined
+      ? { external_origin: parseDigestOrigin(value.external_origin)! }
+      : {}),
     turn_count: value.turn_count,
     ...(value.trigger_target_at !== undefined
       ? { trigger_target_at: value.trigger_target_at }
@@ -4489,6 +4509,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "title",
           "turn_count",
           "trigger_target_at",
+          "external_origin",
           "activity",
           "activity_detail",
           "pr_state",
@@ -4509,6 +4530,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !lineText(value.title) ||
         !isFiniteNumber(value.turn_count) ||
         !optionalTimestamp(value.trigger_target_at) ||
+        (value.external_origin !== undefined &&
+          !parseDigestOrigin(value.external_origin)) ||
         (value.activity !== undefined &&
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
         !optionalLine(value.activity_detail) ||
@@ -4551,6 +4574,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         attention,
         ...(fence_reason ? { fence_reason } : {}),
         title: value.title,
+        ...(value.external_origin !== undefined
+          ? { external_origin: parseDigestOrigin(value.external_origin)! }
+          : {}),
         turn_count: value.turn_count,
         ...(value.trigger_target_at !== undefined
           ? { trigger_target_at: value.trigger_target_at }

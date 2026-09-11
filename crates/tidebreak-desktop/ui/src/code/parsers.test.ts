@@ -2204,3 +2204,27 @@ describe("code frames against real server output", () => {
     expect(outcomes).toEqual(new Set(["ran", "queued"]));
   });
 });
+
+it("preserves Slack provenance in snapshots and live digests", () => {
+  const digest = {
+    workspace: null,
+    session: "scratch",
+    kind: "interactive",
+    lifecycle: "idle",
+    attention: { state: { type: "idle" }, source: "lifecycle" },
+    title: "Inspect both repositories",
+    turn_count: 1,
+    external_origin: { channel_kind: "slack", external_key: "T/C/123" },
+  };
+  expect(parseCodeSessionDigest(digest)).toEqual(digest);
+  expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({
+    type: "digest",
+    ...digest,
+  });
+  expect(
+    parseCodeSessionDigest({
+      ...digest,
+      external_origin: { channel_kind: "slack", external_key: "" },
+    }),
+  ).toBeNull();
+});

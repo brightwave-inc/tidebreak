@@ -4821,7 +4821,11 @@ harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention,
 /**
  * Recovery cause, independent of a manual attention pin.
  */
-fence_reason?: FenceReason, title: string, turn_count: number,
+fence_reason?: FenceReason, title: string,
+/**
+ * Source of this conversation, including sessions without a repository.
+ */
+external_origin?: SessionExternalOrigin, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions: the newest
  * turn start, or session creation before the first turn. Optional so a
@@ -5704,7 +5708,7 @@ sessions: Array<SessionDigest>, } | { "type": "digest", workspace: WorkspaceId |
 /**
  * Engine identity for the session represented by this digest.
  */
-harness_kind?: HarnessKind, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, title: string, external_origin?: SessionExternalOrigin, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions.
  */

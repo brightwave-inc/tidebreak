@@ -241,6 +241,7 @@ fn queued_turn() -> QueuedTurn {
 
 fn digest() -> SessionDigest {
     SessionDigest {
+        external_origin: None,
         can_open_chat: None,
         workspace: Some(workspace_id()),
         session: session_id(),
@@ -296,8 +297,9 @@ fn digest_notice(d: SessionDigest) -> UpdateNotice {
         harness_kind: d.harness_kind,
         lifecycle: d.lifecycle,
         fence_reason: d.fence_reason.map(Box::new),
-        attention: d.attention,
+        attention: Box::new(d.attention),
         title: d.title,
+        external_origin: d.external_origin.map(Box::new),
         turn_count: d.turn_count,
         trigger_target_at: d.trigger_target_at,
         activity: d.activity,

@@ -61,6 +61,7 @@ pub struct SessionDigest {
     /// Recovery cause, independent of a manual attention pin.
     pub fence_reason: Option<tidebreak_core::FenceReason>,
     pub title: String,
+    pub external_origin: Option<super::types::SessionExternalOrigin>,
     pub turn_count: i64,
     /// Timestamp trigger delivery uses to rank candidate sessions: the newest
     /// turn start, or session creation before the first turn.

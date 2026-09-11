@@ -109,3 +109,28 @@ export const NarrowLongNames: Story = { args: { scenario: "long-names" } };
 export const Empty: Story = { args: { scenario: "empty" } };
 export const Loading: Story = { args: { scenario: "loading" } };
 export const LoadFailure: Story = { args: { scenario: "error" } };
+
+export const SlackWithoutRepository: Story = {
+  args: { scenario: "scratch" },
+  play: async ({ canvasElement }) => {
+    await checkWorkspaceActions(canvasElement);
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", {
+        name: /Fix the deployment across both repositories, Slack channel/,
+      }),
+    ).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Slack conversations, 2 workspaces" }),
+    );
+    await expect(
+      canvas.queryByRole("button", {
+        name: /Fix the deployment across both repositories/,
+      }),
+    ).not.toBeInTheDocument();
+    canvasElement.dataset.railReady = "true";
+  },
+};
+export const SlackWithoutRepositoryByStatus: Story = {
+  args: { scenario: "scratch-status" },
+};

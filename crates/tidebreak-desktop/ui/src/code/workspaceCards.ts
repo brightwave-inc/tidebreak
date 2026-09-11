@@ -297,6 +297,7 @@ export type ArrangedWorkspaceGroup = {
   /** Set when the group is one repo, so the rail can link its header. */
   repoId?: string;
   workspaces: CodeWorkspaceSnapshot[];
+  conversations?: CodeSessionDigest[];
 };
 
 export type WorkspaceSourceSection = {
@@ -316,21 +317,93 @@ export function arrangeWorkspaceSections(
   workspaces: readonly CodeWorkspaceSnapshot[],
   digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
   sessions: Readonly<Record<string, CodeSessionSnapshot | undefined>> = {},
+  conversations: readonly CodeSessionDigest[] = [],
 ): WorkspaceSourceSection[] {
   const buckets = new Map<string, CodeWorkspaceSnapshot[]>();
   for (const workspace of workspaces) {
     if (isPutAway(workspace)) continue;
     const key =
-      sessions[workspace.id]?.external_origin?.channel_kind ?? "local";
+      sessions[workspace.id]?.external_origin?.channel_kind ??
+      digests[workspace.id]?.external_origin?.channel_kind ??
+      "local";
     const listed = buckets.get(key);
     if (listed) listed.push(workspace);
     else buckets.set(key, [workspace]);
   }
-  return orderedSourceKeys(buckets.keys()).map((key) => ({
-    key,
-    label: sourceLabel(key),
-    groups: arrangeLiveWorkspaces(mode, repos, buckets.get(key) ?? [], digests),
-  }));
+  for (const conversation of conversations) {
+    const key = conversation.external_origin?.channel_kind ?? "local";
+    if (!buckets.has(key)) buckets.set(key, []);
+  }
+  return orderedSourceKeys(buckets.keys()).map((key) => {
+    const groups = arrangeLiveWorkspaces(
+      mode,
+      repos,
+      buckets.get(key) ?? [],
+      digests,
+    );
+    const listed = conversations
+      .filter(
+        (conversation) =>
+          (conversation.external_origin?.channel_kind ?? "local") === key,
+      )
+      .sort(
+        (a, b) =>
+          (b.trigger_target_at ?? "").localeCompare(
+            a.trigger_target_at ?? "",
+          ) || a.session.localeCompare(b.session),
+      );
+    for (const conversation of listed) {
+      const rank = sessionStatusRank(conversation);
+      const groupKey =
+        mode === "by-status"
+          ? rank
+          : mode === "by-created"
+            ? "created"
+            : "conversations";
+      let group = groups.find((group) => group.key === groupKey);
+      if (!group) {
+        group = {
+          key: groupKey,
+          label:
+            mode === "by-status"
+              ? WORKSPACE_STATUS_RANK_LABELS[rank]
+              : mode === "by-created"
+                ? null
+                : key === "slack"
+                  ? "Slack conversations"
+                  : "Conversations",
+          workspaces: [],
+        };
+        groups.push(group);
+      }
+      (group.conversations ??= []).push(conversation);
+    }
+    if (mode === "by-status")
+      groups.sort(
+        (a, b) =>
+          WORKSPACE_STATUS_RANK_ORDER.indexOf(a.key as WorkspaceStatusRank) -
+          WORKSPACE_STATUS_RANK_ORDER.indexOf(b.key as WorkspaceStatusRank),
+      );
+    return { key, label: sourceLabel(key), groups };
+  });
+}
+
+export function sessionStatusRank(
+  digest: CodeSessionDigest,
+): WorkspaceStatusRank {
+  digest = recoveryDigest(digest);
+  const attention = digest.attention.state.type;
+  if (attention === "needs_you" || attention === "stalled") return "needs_you";
+  if (digest.lifecycle === "running" || attention === "fenced")
+    return "running";
+  if (
+    digest.pr_state &&
+    ["open", "draft"].includes(pullRequestLifecycle(digest.pr_state))
+  )
+    return "pr_open";
+  if (attention === "done_unreviewed" || digest.turn_count > 0)
+    return "done_unreviewed";
+  return "idle";
 }
 
 /** Flatten sources in display order while preserving their group metadata. */

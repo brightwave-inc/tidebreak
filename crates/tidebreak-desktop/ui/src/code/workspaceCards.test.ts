@@ -1212,3 +1212,61 @@ describe("workspaceStackParent", () => {
     ).toBeNull();
   });
 });
+
+describe("repository-free Slack cards", () => {
+  const origin = { channel_kind: "slack", external_key: "T/C/123" };
+  it("keeps Slack conversations in the same source as Slack workspaces", () => {
+    const conversation = digest("scratch", {
+      workspace: null,
+      external_origin: origin,
+    });
+    const sections = arrangeWorkspaceSections(
+      "by-repo",
+      [repo("app")],
+      [workspace("local", "app"), workspace("slack", "app")],
+      { slack: digest("slack", { external_origin: origin }) },
+      {},
+      [conversation],
+    );
+    expect(sections.map((section) => section.key)).toEqual(["local", "slack"]);
+    expect(sections[1].groups.map((group) => group.key)).toEqual([
+      "app",
+      "conversations",
+    ]);
+    expect(sections[1].groups[1].conversations).toEqual([conversation]);
+    expect(
+      visibleWorkspaceGroups(sections, "by-repo", ["source:slack"]).flatMap(
+        (group) => group.conversations ?? [],
+      ),
+    ).toEqual([]);
+  });
+  it("groups repository-free conversations by status and keeps collapse controls", () => {
+    const running = digest("running", {
+      workspace: null,
+      external_origin: origin,
+      lifecycle: "running",
+    });
+    const done = digest("done", {
+      workspace: null,
+      external_origin: origin,
+      turn_count: 1,
+    });
+    const sections = arrangeWorkspaceSections("by-status", [], [], {}, {}, [
+      done,
+      running,
+    ]);
+    expect(sections[0].groups.map((group) => group.key)).toEqual([
+      "running",
+      "done_unreviewed",
+    ]);
+    expect(workspaceCollapseKeys(sections, "by-status")).toEqual([
+      "slack:by-status:running",
+      "slack:by-status:done_unreviewed",
+    ]);
+    expect(
+      visibleWorkspaceGroups(sections, "by-status", [
+        "slack:by-status:running",
+      ])[0].conversations,
+    ).toEqual([done]);
+  });
+});

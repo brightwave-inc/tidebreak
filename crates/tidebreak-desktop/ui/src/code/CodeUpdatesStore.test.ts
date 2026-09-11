@@ -766,3 +766,21 @@ describe("conversations without a workspace", () => {
     ).toEqual(EMPTY_STATE);
   });
 });
+
+it("keeps Slack provenance when a live digest replaces a snapshot", () => {
+  const origin = { channel_kind: "slack", external_key: "T/C/123" };
+  const action = noticeToAction({
+    type: "digest",
+    workspace: null,
+    session: "scratch",
+    kind: "interactive",
+    lifecycle: "idle",
+    attention: { state: { type: "idle" }, source: "lifecycle" },
+    title: "Inspect both repositories",
+    turn_count: 1,
+    external_origin: origin,
+  });
+  expect(action?.type === "digest" && action.digest.external_origin).toEqual(
+    origin,
+  );
+});

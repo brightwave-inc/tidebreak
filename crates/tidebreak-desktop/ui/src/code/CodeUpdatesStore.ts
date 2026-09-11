@@ -439,6 +439,9 @@ export function noticeToAction(
         attention: notice.attention,
         ...(notice.fence_reason ? { fence_reason: notice.fence_reason } : {}),
         title: notice.title,
+        ...(notice.external_origin
+          ? { external_origin: notice.external_origin }
+          : {}),
         turn_count: notice.turn_count,
         ...(notice.trigger_target_at !== undefined
           ? { trigger_target_at: notice.trigger_target_at }

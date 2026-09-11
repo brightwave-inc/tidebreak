@@ -147,6 +147,7 @@ export function CodeSidebar() {
     workspaces,
     digests,
     sessions,
+    chatConversations,
   );
   const groups = visibleWorkspaceGroups(
     sections,
@@ -323,30 +324,25 @@ export function CodeSidebar() {
           }
         }}
       >
-        {chatConversations.length > 0 && (
-          <section aria-label="Conversations" className="flex flex-col gap-1">
-            <div className="px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground">
-              Conversations
-            </div>
-            {chatConversations.map((digest) => (
-              <WorkspaceLessSessionRow
-                key={digest.session}
-                digest={digest}
-                onOpen={(sessionId) =>
-                  void navigate({
-                    to: "/code/s/$sessionId",
-                    params: { sessionId },
-                  })
-                }
-              />
-            ))}
-          </section>
-        )}
         <WorkspaceRailGroups
           sections={sections}
           mode={prefs.sortMode}
           collapsedKeys={collapsedKeys}
           onToggle={toggleGroup}
+          renderConversation={(digest) => (
+            <WorkspaceLessSessionRow
+              key={digest.session}
+              digest={digest}
+              active={pathname === `/code/s/${digest.session}`}
+              density={prefs.density}
+              onOpen={(sessionId) =>
+                void navigate({
+                  to: "/code/s/$sessionId",
+                  params: { sessionId },
+                })
+              }
+            />
+          )}
           renderWorkspace={(workspace) => {
             const digest = digests[workspace.id];
             const pr = digest?.pr_state ?? workspace.pr;
