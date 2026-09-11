@@ -197,6 +197,76 @@ async fn tab_activation_is_rejected_without_any_protocol_command() {
 }
 
 #[tokio::test]
+async fn non_http_schemes_and_foreign_sessions_are_refused() {
+    let (service, scope, mut requests, replies) = connection();
+    for url in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "chrome://settings",
+    ] {
+        let result = service
+            .dispatch(&scope, &call(CHROME_NEW_TAB_TOOL, json!({"url": url})))
+            .await
+            .result;
+        assert_eq!(result.outcome, ComputerUseOutcome::Rejected, "{url}");
+    }
+    assert!(
+        requests.try_recv().is_err(),
+        "scheme refusal issued a protocol command"
+    );
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    respond(requests, replies, log.clone(), |request| {
+        if request["method"] == "Target.getTargetInfo" {
+            return Scripted::Result(json!({
+                "targetInfo":{"type":"page","url":"file:///tmp/secret.html","title":"Local"}
+            }));
+        }
+        page_reply(request)
+    });
+    let attach = service.attach_existing_tab(&scope, "test", "T-file").await;
+    assert!(
+        attach.is_err(),
+        "file URL tab must stay outside the approved connection"
+    );
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .all(|request| request["method"] != "Target.attachToTarget"),
+        "attach proceeded past scheme validation"
+    );
+
+    let (service, scope, requests, replies) = connection();
+    respond(
+        requests,
+        replies,
+        Arc::new(Mutex::new(Vec::new())),
+        page_reply,
+    );
+    let owned = service
+        .attach_existing_tab(&scope, "test", "T1")
+        .await
+        .unwrap();
+    let other = ChromeScope {
+        session: SessionId::new(),
+        ..scope.clone()
+    };
+    assert!(service
+        .attach_existing_tab(&other, "test", "T1")
+        .await
+        .is_err());
+    let snapshot = service
+        .dispatch(
+            &other,
+            &call(CHROME_SNAPSHOT_TOOL, json!({"targetRef": owned.target_ref})),
+        )
+        .await
+        .result;
+    assert_eq!(snapshot.outcome, ComputerUseOutcome::Rejected);
+}
+
+#[tokio::test]
 async fn wrong_owner_and_workspace_never_reach_chrome() {
     let (service, scope, mut requests, _replies) = connection();
     for other in [
