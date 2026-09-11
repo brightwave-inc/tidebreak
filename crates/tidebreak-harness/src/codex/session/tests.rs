@@ -56,15 +56,28 @@ fn permission_mode_mapping_matches_0033() {
 }
 
 #[test]
-fn turn_policy_carries_allowed_read_roots_as_writable_roots() {
-    let root = PathBuf::from("/tmp/tidebreak-private");
+fn turn_policy_does_not_put_allowed_read_roots_in_writable_roots() {
+    let root = std::env::temp_dir().join("tidebreak-private");
     let (sandbox, _) =
         turn_start_policy(PermissionMode::Auto, std::slice::from_ref(&root)).unwrap();
     assert_eq!(sandbox["type"], "workspaceWrite");
-    assert_eq!(
-        sandbox["writableRoots"],
-        serde_json::json!([root.to_string_lossy()])
-    );
+    match sandbox.get("writableRoots") {
+        None => {}
+        Some(roots) => {
+            let roots = roots.as_array().expect("writableRoots is an array");
+            let root_str = root.to_string_lossy();
+            assert!(
+                !roots
+                    .iter()
+                    .any(|value| value.as_str() == Some(root_str.as_ref())),
+                "allowed_read_roots must not appear in writableRoots: {roots:?}"
+            );
+            assert!(
+                roots.is_empty(),
+                "workspace-write must not gain extra writable roots; got {roots:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -920,9 +933,16 @@ async fn allowed_read_roots_reach_turn_start_sandbox_policy() {
     assert_eq!(requests.len(), 2);
     for request in requests {
         assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
-        assert_eq!(
-            request["params"]["sandboxPolicy"]["writableRoots"],
-            json!([private.to_string_lossy()])
+        let writable = request["params"]["sandboxPolicy"].get("writableRoots");
+        let private_str = private.to_string_lossy();
+        assert!(
+            writable.is_none()
+                || !writable
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.as_str() == Some(private_str.as_ref())),
+            "allowed_read_roots must not appear in writableRoots: {writable:?}"
         );
     }
 }

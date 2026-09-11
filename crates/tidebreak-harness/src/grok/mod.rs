@@ -4,6 +4,11 @@
 //! 1.0.13 ACP channel carries native approvals, cancellation, and session
 //! loading over stdin/stdout. Other versions retain the print fallback
 //! without claiming a verified Auto posture.
+//!
+//! Grok print/ACP protocols have no extra-read-root flag. `allowed_read_roots`
+//! are still required to be absolute so a relative private path cannot slip
+//! through; the engine then runs without additional read scoping rather than
+//! dropping the field silently.
 
 pub mod parse;
 pub mod session;

@@ -866,12 +866,12 @@ pub struct SessionSpec {
     pub worktree: PathBuf,
     /// Absolute directory roots that engine tools may read outside the worktree.
     ///
-    /// Claude honors these as `--add-dir`. Codex maps them onto sandbox
-    /// `writableRoots` — the app-server protocol has no read-only extra-roots
-    /// field, so those paths are writable as well as readable. OpenCode and
-    /// Grok have no equivalent scoping: adapters still require every root to
-    /// be absolute and then launch without extra read restriction, rather
-    /// than dropping the field silently.
+    /// Claude honors these as `--add-dir`. Codex does not receive a grant for
+    /// them: its sandbox restricts writes and network, not reads, so the engine
+    /// can already read those paths, and they are never passed as
+    /// `writableRoots` (no write access). OpenCode and Grok have no extra-read
+    /// flag: adapters still require every root to be absolute and then launch
+    /// without extra read restriction, rather than dropping the field silently.
     pub allowed_read_roots: Vec<PathBuf>,
     /// Permission mode. Adapters refuse a mode they cannot honor.
     pub permission_mode: PermissionMode,

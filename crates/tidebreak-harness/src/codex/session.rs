@@ -873,26 +873,25 @@ pub(crate) fn thread_start_policy(mode: PermissionMode) -> (&'static str, &'stat
 /// takes: `sandboxPolicy` is a tagged object there, not the plain mode string
 /// `thread/start` accepts. Both fields apply to this turn and every later one,
 /// which is what lets a mode switch land without a new child.
+///
+/// `allowed_read_roots` are validated as absolute and then ignored as a Codex
+/// grant. Codex's sandbox (Seatbelt on macOS, Landlock/seccomp on Linux,
+/// `workspace-write` mode) restricts writes and network, not reads: files
+/// outside the writable roots are already readable. Passing those paths as
+/// `writableRoots` would grant write access the `SessionSpec` contract does
+/// not allow, so they are never sent. `workspace-write` keeps the workspace
+/// cwd as the only writable root.
 pub(crate) fn turn_start_policy(
     mode: PermissionMode,
     allowed_read_roots: &[PathBuf],
 ) -> Result<(Value, &'static str), HarnessError> {
     crate::require_absolute_read_roots(allowed_read_roots)?;
     let (sandbox, approval) = thread_start_policy(mode);
-    let mut sandbox = match sandbox {
+    let sandbox = match sandbox {
         "read-only" => json!({ "type": "readOnly" }),
         "danger-full-access" => json!({ "type": "dangerFullAccess" }),
         _ => json!({ "type": "workspaceWrite" }),
     };
-    if !allowed_read_roots.is_empty() {
-        // Codex app-server `sandboxPolicy` has no read-roots field. `writableRoots`
-        // is the closest equivalent (0.147.0): extra paths are writable as well
-        // as readable.
-        sandbox["writableRoots"] = json!(allowed_read_roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect::<Vec<_>>());
-    }
     Ok((sandbox, approval))
 }
 
