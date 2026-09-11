@@ -66,6 +66,48 @@ pub const GATEWAY_URL_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_GATEWAY_URL";
 /// The credential-free loopback listener Gateway permits the workload to reach.
 pub const PROXY_ENDPOINT_VARIABLE: &str = "SANDBOX_PROXY_ENDPOINT";
 
+/// The sandbox sidecar's connected-app MCP endpoint.
+pub const APPS_ENDPOINT_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_APPS_ENDPOINT";
+
+/// Reads the optional apps endpoint. Older gateway deployments omit it.
+pub fn gateway_apps_from_env() -> Result<Option<tidebreak_harness::AppsChannelSpec>, String> {
+    resolve_gateway_apps(read_trimmed(APPS_ENDPOINT_VARIABLE))
+}
+
+fn resolve_gateway_apps(
+    value: Option<String>,
+) -> Result<Option<tidebreak_harness::AppsChannelSpec>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(&value)
+        .map_err(|_| format!("{APPS_ENDPOINT_VARIABLE} is not a URL"))?;
+    let loopback = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| ip.is_loopback());
+    if !loopback
+        || url.scheme() != "http"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.path() != "/mcp/connected-apps"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{APPS_ENDPOINT_VARIABLE} must name the loopback HTTP connected-app endpoint"
+        ));
+    }
+    Ok(Some(tidebreak_harness::AppsChannelSpec {
+        mcp_endpoint_url: value,
+        token: SANDBOX_PLACEHOLDER_TOKEN.to_owned(),
+    }))
+}
+
 /// Environment variable name the wiring carries the credential under, for
 /// engines whose clients read it from the environment.
 pub const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
@@ -143,6 +185,8 @@ fn read_trimmed(name: &str) -> Option<String> {
 
 /// Everything [`HarnessEngine`] needs, resolved before the loop starts.
 pub struct HarnessEngineSpec {
+    /// Connected apps served by the sandbox sidecar, when the gateway provides them.
+    pub apps: Option<tidebreak_harness::AppsChannelSpec>,
     /// Persistent Tidebreak session identity, or one local identity for standalone runs.
     pub session_id: tidebreak_core::SessionId,
     /// The adapter for the selected engine.
@@ -281,7 +325,7 @@ impl HarnessEngine {
                 sink: self.sink.clone(),
                 browser: None,
                 native: None,
-                apps: None,
+                apps: self.spec.apps.clone(),
             })
             .await
             .map_err(|error| EngineError {
@@ -617,6 +661,7 @@ mod tests {
     /// The launch fields the tests assert on.
     #[derive(Default)]
     struct CapturedSpec {
+        apps: Option<tidebreak_harness::AppsChannelSpec>,
         session_id: Option<tidebreak_core::SessionId>,
         permission_mode: Option<PermissionMode>,
         worktree: Option<PathBuf>,
@@ -683,6 +728,7 @@ mod tests {
                 return Err(error);
             }
             *self.captured.lock().unwrap() = CapturedSpec {
+                apps: spec.apps,
                 session_id: Some(spec.session_id),
                 permission_mode: Some(spec.permission_mode),
                 worktree: Some(spec.worktree),
@@ -720,6 +766,7 @@ mod tests {
 
     fn engine_over(adapter: Arc<FakeAdapter>, spec_probe: HarnessProbe) -> HarnessEngine {
         HarnessEngine::new(HarnessEngineSpec {
+            apps: None,
             session_id: tidebreak_core::SessionId::new(),
             adapter,
             probe: spec_probe,
@@ -747,6 +794,44 @@ mod tests {
         HarnessEvent::TurnCompleted {
             usage: TurnUsage::default(),
         }
+    }
+
+    #[test]
+    fn sandbox_apps_endpoint_is_optional_and_loopback_only() {
+        assert!(super::resolve_gateway_apps(None).unwrap().is_none());
+        let endpoint = "http://127.0.0.1:18080/mcp/connected-apps";
+        let spec = super::resolve_gateway_apps(Some(endpoint.into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.mcp_endpoint_url, endpoint);
+        assert_eq!(spec.token, "mg-sandbox-placeholder");
+        for endpoint in [
+            "https://example.test/mcp/connected-apps",
+            "http://secret@127.0.0.1/mcp/connected-apps",
+            "http://127.0.0.1/other",
+        ] {
+            assert!(super::resolve_gateway_apps(Some(endpoint.into())).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn supervised_engine_passes_sandbox_apps_to_the_harness() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![completed_event()],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter.clone(), probe(true));
+        let apps =
+            super::resolve_gateway_apps(Some("http://127.0.0.1:18080/mcp/connected-apps".into()))
+                .unwrap();
+        engine.spec.apps = apps.clone();
+        let mut turn = engine
+            .start_turn(request("review app usage"))
+            .await
+            .unwrap();
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+        assert_eq!(adapter.captured.lock().unwrap().apps, apps);
     }
 
     #[tokio::test]
@@ -1153,6 +1238,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
             ("GITHUB_TOKEN".into(), "fixture-secret".into()),
         ]);
         let mut engine = HarnessEngine::new(HarnessEngineSpec {
+            apps: None,
             session_id: tidebreak_core::SessionId::new(),
             adapter: tidebreak_harness::builtin_registry()
                 .get(HarnessKind::ClaudeCode)
