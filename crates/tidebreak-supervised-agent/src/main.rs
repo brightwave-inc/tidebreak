@@ -149,7 +149,7 @@ async fn run_inputs(
         vec![workspace]
     };
 
-    let mut trust_env: Vec<(OsString, OsString)> = bootstrap
+    let trust_env: Vec<(OsString, OsString)> = bootstrap
         .trust
         .environment()
         .iter()
@@ -158,21 +158,7 @@ async fn run_inputs(
 
     let tool_bridge = if inputs.embedded_engine.is_some() {
         match tidebreak_supervised_agent::tool_bridge::LocalToolBridge::start(&workdir) {
-            Ok(bridge) => {
-                let helper = match std::env::current_exe() {
-                    Ok(path) => path,
-                    Err(error) => {
-                        eprintln!("could not locate native tool helper: {error}");
-                        return EXIT_CONTROL_FATAL;
-                    }
-                };
-                trust_env.push((
-                    "TIDEBREAK_TOOL_SOCKET".into(),
-                    bridge.socket_path().into_os_string(),
-                ));
-                trust_env.push(("TIDEBREAK_TOOL_HELPER".into(), helper.into_os_string()));
-                Some(bridge)
-            }
+            Ok(bridge) => Some(bridge),
             Err(error) => {
                 eprintln!("could not start native tool bridge: {error}");
                 return EXIT_CONTROL_FATAL;
@@ -189,6 +175,19 @@ async fn run_inputs(
             return EXIT_MISSING_INPUT;
         }
     };
+    let tool_bridge_spec = match &tool_bridge {
+        Some(bridge) => match std::env::current_exe() {
+            Ok(helper) => Some(tidebreak_harness::ToolBridgeSpec {
+                helper,
+                socket: bridge.socket_path(),
+            }),
+            Err(error) => {
+                eprintln!("could not locate native tool helper: {error}");
+                return EXIT_CONTROL_FATAL;
+            }
+        },
+        None => None,
+    };
     let engine = HarnessEngine::new(HarnessEngineSpec {
         apps,
         session_id,
@@ -199,6 +198,7 @@ async fn run_inputs(
         worktree: workdir.clone(),
         allowed_read_roots,
         trust_env,
+        tool_bridge: tool_bridge_spec,
         gateway_inference,
     });
 

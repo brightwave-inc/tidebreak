@@ -16,6 +16,7 @@ use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
+#[cfg(test)]
 use crate::browser_channel::apply_child_env_tokio;
 use crate::child::{turn_outcome, ChildPid};
 use crate::grok::parse::GrokStreamParser;
@@ -699,14 +700,8 @@ impl GrokSession {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_child_env_tokio(
-            &mut command,
-            tidebreak_core::HarnessKind::Grok,
-            self.spec.env.iter().cloned(),
-            &plan.env,
-            self.spec.browser.as_ref(),
-            self.spec.native.as_ref(),
-        );
+        self.spec
+            .apply_child_env(&mut command, tidebreak_core::HarnessKind::Grok, &plan.env);
         let mut child = spawn_process_tree(&mut command)?;
         // The engine writes its session directory as it starts, so from here
         // on the id is something to resume rather than something to create.
@@ -896,6 +891,7 @@ mod tests {
                 sink: std::sync::Arc::new(Discard),
                 browser: None,
                 native: None,
+                tool_bridge: None,
                 apps: None,
             },
             "1.0.5".into(),
@@ -1552,6 +1548,7 @@ exit 0
                     sink,
                     browser: None,
                     native: None,
+                    tool_bridge: None,
                     apps: None,
                 },
                 "1.0.5".into(),

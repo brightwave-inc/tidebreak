@@ -1288,6 +1288,7 @@ mod tests {
             sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         })
         .await
@@ -1658,6 +1659,7 @@ mod tests {
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
                 native: None,
+                tool_bridge: None,
                 apps: None,
             })
             .await

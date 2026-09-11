@@ -412,6 +412,7 @@ impl CodeRuntime {
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
             native,
+            tool_bridge: None,
             apps,
         };
         let mut attached = attached;

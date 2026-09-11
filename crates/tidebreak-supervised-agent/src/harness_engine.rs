@@ -204,6 +204,8 @@ pub struct HarnessEngineSpec {
     pub allowed_read_roots: Vec<PathBuf>,
     /// Outbound-trust variables every engine child carries.
     pub trust_env: Vec<(OsString, OsString)>,
+    /// Runtime-owned native tool dispatcher, independent of ambient variables.
+    pub tool_bridge: Option<tidebreak_harness::ToolBridgeSpec>,
     /// The environment's inference contract, when the pod has one.
     pub gateway_inference: Option<GatewayInference>,
 }
@@ -325,6 +327,7 @@ impl HarnessEngine {
                 sink: self.sink.clone(),
                 browser: None,
                 native: None,
+                tool_bridge: self.spec.tool_bridge.clone(),
                 apps: self.spec.apps.clone(),
             })
             .await
@@ -702,6 +705,7 @@ mod tests {
     #[derive(Default)]
     struct CapturedSpec {
         apps: Option<tidebreak_harness::AppsChannelSpec>,
+        tool_bridge: Option<tidebreak_harness::ToolBridgeSpec>,
         session_id: Option<tidebreak_core::SessionId>,
         permission_mode: Option<PermissionMode>,
         worktree: Option<PathBuf>,
@@ -768,6 +772,7 @@ mod tests {
                 return Err(error);
             }
             *self.captured.lock().unwrap() = CapturedSpec {
+                tool_bridge: spec.tool_bridge.clone(),
                 apps: spec.apps,
                 session_id: Some(spec.session_id),
                 permission_mode: Some(spec.permission_mode),
@@ -814,6 +819,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             worktree: PathBuf::from("/workspace/repo"),
             allowed_read_roots: vec![PathBuf::from("/workspace")],
+            tool_bridge: None,
             trust_env: vec![(
                 OsString::from("SSL_CERT_FILE"),
                 OsString::from("/tmp/bundle.pem"),
@@ -1159,6 +1165,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_tool_bridge_survives_child_environment_filtering() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![completed_event()],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let captured = adapter.captured.clone();
+        let mut engine = engine_over(adapter, probe(true));
+        let bridge = tidebreak_harness::ToolBridgeSpec {
+            helper: PathBuf::from("/usr/local/bin/tidebreak-supervised-agent"),
+            socket: PathBuf::from("/workspace/.tidebreak/tool.sock"),
+        };
+        engine.spec.tool_bridge = Some(bridge.clone());
+        engine
+            .start_turn(request("use native tools"))
+            .await
+            .unwrap();
+        assert_eq!(captured.lock().unwrap().tool_bridge, Some(bridge));
+    }
+
+    #[tokio::test]
     async fn a_placeholder_credential_wires_the_engine_at_the_gateway() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
             events: vec![completed_event()],
@@ -1352,6 +1379,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
             reasoning_effort: None,
             worktree: dir.path().to_owned(),
             allowed_read_roots: Vec::new(),
+            tool_bridge: None,
             trust_env: Vec::new(),
             gateway_inference: Some(GatewayInference {
                 placeholder_credential: SANDBOX_PLACEHOLDER_TOKEN.into(),

@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tracing::warn;
 
+#[cfg(test)]
 use crate::browser_channel::apply_child_env_tokio;
 use crate::child::ChildPid;
 use crate::launch::{validate_launch_plan, LaunchPlan};
@@ -573,13 +574,10 @@ impl OpencodeSession {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_child_env_tokio(
+        self.spec.apply_child_env(
             &mut command,
             tidebreak_core::HarnessKind::Opencode,
-            self.spec.env.iter().cloned(),
             &plan.env,
-            self.spec.browser.as_ref(),
-            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdout = child
@@ -1146,6 +1144,7 @@ mod tests {
             sink: std::sync::Arc::new(Discard),
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         })
     }

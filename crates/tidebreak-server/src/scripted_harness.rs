@@ -1030,6 +1030,7 @@ mod tests {
             sink,
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         }
     }

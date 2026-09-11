@@ -318,6 +318,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         sink,
         browser: None,
         native: None,
+        tool_bridge: None,
         apps: None,
     })
 }
@@ -629,6 +630,7 @@ fn spec_for(
         sink: Arc::new(SilentSink),
         browser: None,
         native: None,
+        tool_bridge: None,
         apps: None,
     }
 }
