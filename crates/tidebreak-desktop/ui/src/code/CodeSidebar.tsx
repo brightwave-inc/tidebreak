@@ -94,9 +94,11 @@ export function CodeSidebar() {
   const childrenByWorkspace = useCodeUpdatesStore(
     (state) => state.childrenByWorkspace,
   );
-  const chatConversations = Object.values(conversationsWithoutWorkspace).filter(
-    (digest) => digest.can_open_chat === true,
-  );
+  // Every accessible workspace-less session is listed. The row opens the
+  // authorized session route, which serves sandbox-engine and shared
+  // sessions as well as machine-side chats, so `can_open_chat` does not
+  // decide whether a conversation appears here.
+  const chatConversations = Object.values(conversationsWithoutWorkspace);
   const newWorkspaceOpen = useCodeUiStore((state) => state.newWorkspaceOpen);
   const newWorkspaceRepoId = useCodeUiStore(
     (state) => state.newWorkspaceRepoId,
