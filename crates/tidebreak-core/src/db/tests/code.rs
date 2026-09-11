@@ -8848,7 +8848,7 @@ async fn steer_recovery_delete_failure_rolls_back_without_poisoning_receipt() {
     assert_eq!(
         rows.len(),
         1,
-        "the replacement insert rolls back with the failed delete"
+        "a failed delete leaves only the original row"
     );
     assert_eq!(rows[0].id, original.id);
     assert!(

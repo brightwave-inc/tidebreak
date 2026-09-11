@@ -951,7 +951,7 @@ pub async fn recover_external_steer(
         return Err(ExternalSteerRecoveryError::AdmissionResolved);
     }
     let now = database_now(&transaction).await?;
-    let retry_turn_id = if action == ExternalSteerRecoveryAction::Retry {
+    let original = if action == ExternalSteerRecoveryAction::Retry {
         let session = entities::session::Entity::find_by_id(session_id.0)
             .one(&transaction)
             .await
@@ -967,6 +967,18 @@ pub async fn recover_external_steer(
             .await
             .map_err(store_err)?
             .ok_or(ExternalSteerRecoveryError::OriginalMissing)?;
+        Some(original)
+    } else {
+        None
+    };
+    entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::Id.eq(event.turn_id))
+        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let retry_turn_id = if let Some(original) = original {
         let tail = entities::code_queued_turn::Entity::find()
             .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
             .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
@@ -1000,13 +1012,6 @@ pub async fn recover_external_steer(
     } else {
         None
     };
-    entities::code_queued_turn::Entity::delete_many()
-        .filter(entities::code_queued_turn::Column::Id.eq(event.turn_id))
-        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     entities::code_external_event::ActiveModel {
         id: Set(event.id),
         recovery_action: Set(Some(action.as_str().into())),
