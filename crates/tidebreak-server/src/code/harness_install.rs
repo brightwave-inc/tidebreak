@@ -56,6 +56,12 @@ struct HarnessInstallJob {
     generation: u64,
 }
 
+#[derive(Debug)]
+enum HarnessInstallClaim {
+    Started(HarnessInstallJob),
+    Running(HarnessInstallJob),
+}
+
 impl HarnessInstallJobs {
     fn key(job: &HarnessInstallJob) -> (HarnessKind, HarnessUpdateChannel) {
         (job.kind, job.channel)
@@ -70,13 +76,17 @@ impl HarnessInstallJobs {
             .cloned()
     }
 
-    fn insert(&self, job: HarnessInstallJob) {
+    /// An installed binary does not complete a different install in progress.
+    fn observe_ready(&self, job: HarnessInstallJob) -> HarnessInstallJob {
         let key = Self::key(&job);
-        self.inner
-            .lock()
-            .expect("harness install jobs")
-            .jobs
-            .insert(key, job);
+        let mut inner = self.inner.lock().expect("harness install jobs");
+        match inner.jobs.get(&key) {
+            Some(running) if !running.done => running.clone(),
+            _ => {
+                inner.jobs.insert(key, job.clone());
+                job
+            }
+        }
     }
 
     /// Two callers of the same engine and channel share one install. A cold
@@ -84,20 +94,20 @@ impl HarnessInstallJobs {
     /// knows the version. A request whose target is known and different from
     /// the running job is a distinct job and takes the slot.
     ///
-    /// One lock covers the check and the claim, so two requests that arrive
-    /// together produce one install.
-    fn claim(&self, mut job: HarnessInstallJob) -> Option<HarnessInstallJob> {
+    /// Return the claimed generation while holding the lock. A later request
+    /// may replace the slot before the caller starts its worker.
+    fn claim(&self, mut job: HarnessInstallJob) -> HarnessInstallClaim {
         let mut inner = self.inner.lock().expect("harness install jobs");
         let key = Self::key(&job);
         match inner.jobs.get(&key) {
             Some(running) if !running.done && Self::same_running_job(running, &job) => {
-                Some(running.clone())
+                HarnessInstallClaim::Running(running.clone())
             }
             _ => {
                 job.generation = inner.next_generation;
                 inner.next_generation += 1;
-                inner.jobs.insert(key, job);
-                None
+                inner.jobs.insert(key, job.clone());
+                HarnessInstallClaim::Started(job)
             }
         }
     }
@@ -173,9 +183,9 @@ impl CodeRuntime {
     ///
     /// Answers immediately in every case: the release is already installed,
     /// an install this process started is still running, or a fresh one is
-    /// now detached. Two callers never produce two installs for the same
-    /// engine and channel: a cold `latest` install (`version` unset) joins
-    /// a later click that already knows the version.
+    /// now detached. Callers for the same engine, channel, and target share
+    /// one install. A cold `latest` request with no known version also joins
+    /// a running install for that engine and channel.
     ///
     /// `deliberate` separates the two callers. A picker warms the engine
     /// because a surface opened, so a failed managed-Node install stays
@@ -220,8 +230,7 @@ impl CodeRuntime {
                 error: None,
                 generation: 0,
             };
-            self.harness_installs.insert(job.clone());
-            return Ok(job.to_snapshot());
+            return Ok(self.harness_installs.observe_ready(job).to_snapshot());
         }
         let job = HarnessInstallJob {
             kind,
@@ -232,13 +241,10 @@ impl CodeRuntime {
             error: None,
             generation: 0,
         };
-        if let Some(running) = self.harness_installs.claim(job.clone()) {
-            return Ok(running.to_snapshot());
-        }
-        let claimed = self
-            .harness_installs
-            .get(kind, channel)
-            .expect("just claimed");
+        let claimed = match self.harness_installs.claim(job) {
+            HarnessInstallClaim::Running(running) => return Ok(running.to_snapshot()),
+            HarnessInstallClaim::Started(claimed) => claimed,
+        };
         self.publish_harness_install(owner, &claimed);
 
         let runtime = Arc::clone(self);
@@ -405,92 +411,100 @@ mod claim_tests {
         }
     }
 
+    fn started(claim: HarnessInstallClaim) -> HarnessInstallJob {
+        match claim {
+            HarnessInstallClaim::Started(job) => job,
+            HarnessInstallClaim::Running(_) => panic!("expected a distinct install"),
+        }
+    }
+
     #[test]
     fn cold_latest_none_then_resolved_version_joins_the_running_install() {
         let jobs = HarnessInstallJobs::default();
-        assert!(
-            jobs.claim(installing(HarnessUpdateChannel::Latest, None))
-                .is_none(),
-            "first claim starts the install"
-        );
-        let running = jobs
-            .claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
-            .expect("second claim reports the running install");
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Latest, None)));
+        let HarnessInstallClaim::Running(running) =
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
+        else {
+            panic!("second claim must join the running install");
+        };
         assert!(!running.done);
         assert_eq!(running.version, None);
         assert_eq!(running.channel, HarnessUpdateChannel::Latest);
-        assert!(
-            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
-                .is_some(),
-            "exactly one install owns the latest slot"
-        );
+        assert_eq!(running.generation, first.generation);
+        assert!(matches!(
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))),
+            HarnessInstallClaim::Running(_)
+        ));
     }
 
     #[test]
     fn latest_warmup_for_installed_does_not_join_deliberate_newer_target() {
         let jobs = HarnessInstallJobs::default();
-        assert!(
-            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259")))
-                .is_none(),
-            "non-deliberate warm-up starts an install of the installed version"
-        );
-        assert!(
-            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
-                .is_none(),
-            "a deliberate latest whose resolved target differs starts its own install"
-        );
-        let running = jobs
-            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Latest)
-            .expect("slot occupied");
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259"))));
+        let running =
+            started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
         assert!(!running.done);
         assert_eq!(running.version.as_deref(), Some("2.1.300"));
         assert_eq!(running.phase, PHASE_INSTALLING);
+        assert_ne!(running.generation, first.generation);
     }
 
     #[test]
     fn pinned_jobs_for_different_versions_are_distinct() {
         let jobs = HarnessInstallJobs::default();
-        assert!(jobs
-            .claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.259")))
-            .is_none());
-        assert!(
-            jobs.claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.300")))
-                .is_none(),
-            "a different pin takes the slot as its own job"
-        );
-        let running = jobs
-            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Pinned)
-            .expect("slot occupied");
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.259"))));
+        let running =
+            started(jobs.claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.300"))));
         assert_eq!(running.version.as_deref(), Some("2.1.300"));
+        assert_ne!(running.generation, first.generation);
     }
 
     #[test]
-    fn finish_only_completes_the_job_that_owns_the_slot() {
+    fn a_started_claim_keeps_its_generation_after_another_request_replaces_the_slot() {
         let jobs = HarnessInstallJobs::default();
-        assert!(jobs
-            .claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.259")))
-            .is_none());
-        let first = jobs
-            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Pinned)
-            .expect("first job");
-        assert!(jobs
-            .claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.300")))
-            .is_none());
-        let second = jobs
-            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Pinned)
-            .expect("second job");
+        let first_claim = jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259")));
+        // Another request replaces the slot before the first caller starts
+        // its worker. The first claim must still carry its own generation.
+        let second = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
+        let first = started(first_claim);
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(first.version.as_deref(), Some("2.1.259"));
         let finished = HarnessInstallJob {
             done: true,
             phase: PHASE_READY,
-            version: Some("2.1.259".into()),
             ..first.clone()
         };
         assert!(!jobs.finish(first.kind, first.channel, first.generation, finished));
         let still = jobs
-            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Pinned)
+            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Latest)
             .expect("second still owns the slot");
         assert_eq!(still.generation, second.generation);
         assert!(!still.done);
         assert_eq!(still.version.as_deref(), Some("2.1.300"));
+    }
+
+    #[test]
+    fn observing_an_installed_version_keeps_a_newer_install_running() {
+        let jobs = HarnessInstallJobs::default();
+        let old = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259"))));
+        let update = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
+        let observed = jobs.observe_ready(HarnessInstallJob {
+            done: true,
+            phase: PHASE_READY,
+            generation: 0,
+            ..old
+        });
+        assert_eq!(observed.generation, update.generation);
+        assert_eq!(observed.version, update.version);
+        assert!(!observed.done);
+        let finished = HarnessInstallJob {
+            done: true,
+            phase: PHASE_READY,
+            ..update.clone()
+        };
+        assert!(jobs.finish(update.kind, update.channel, update.generation, finished));
+        let stored = jobs.get(update.kind, update.channel).unwrap();
+        assert!(stored.done);
+        assert_eq!(stored.version.as_deref(), Some("2.1.300"));
     }
 }
