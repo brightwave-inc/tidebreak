@@ -40,6 +40,8 @@ const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_CHARS: usize = 4_096;
 const MAX_PROGRESS_LINE_BYTES: usize = 4_096;
 const COMPLETED_JOB_RETENTION: Duration = Duration::from_secs(30 * 60);
+/// After a failed external clone is reported, wait this long before retrying.
+const EXTERNAL_CLONE_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_COMPLETED_JOBS: usize = 256;
 pub const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
 const HOSTED_CLONE_SCHEMES: [&str; 4] = ["git", "http", "https", "ssh"];
@@ -63,6 +65,7 @@ struct CloneJob {
     repo_id: Option<RepoId>,
     external_origin: Option<String>,
     finished_at: Option<Instant>,
+    error_surfaced: bool,
 }
 
 struct CloneJobGuard {
@@ -485,6 +488,7 @@ impl CodeRuntime {
             repo_id: None,
             external_origin,
             finished_at: None,
+            error_surfaced: false,
         };
         self.clone_jobs.insert(job.clone());
         self.publish_clone(&job);
@@ -589,6 +593,7 @@ impl CodeRuntime {
             job.phase = "failed".into();
             job.done = true;
             job.error = Some(error);
+            job.finished_at = Some(Instant::now());
         });
     }
 
@@ -1335,6 +1340,7 @@ mod tests {
             repo_id: None,
             external_origin: None,
             finished_at,
+            error_surfaced: false,
         }
     }
 
@@ -1353,9 +1359,45 @@ mod tests {
         )
     }
 
+    fn local_file_origin(dir: &tempfile::TempDir) -> String {
+        let repo = dir.path().join("origin.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::process::Command::new("git")
+            .args(["config", "user.email", "dev@example.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Dev"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        let committed = std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(committed.success());
+        format!("file://{}", repo.display())
+    }
+
     #[tokio::test]
     async fn a_default_parent_clone_does_not_repoint_another_users_parent() {
         let dir = tempfile::TempDir::new().unwrap();
+        let origin = local_file_origin(&dir);
         let runtime = test_runtime(&dir).await;
         let alice = OwnerId::local();
         let bob = OwnerId::new("user:bob").unwrap();
@@ -1364,11 +1406,14 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("default-parent")).unwrap();
 
         assert_eq!(runtime.clone_defaults().await.unwrap().parent_dir, None);
+        // Named members cannot use file://; a closed local port fails immediately
+        // instead of leaving a `git clone` of GitHub running after TempDir drops.
+        let hosted_origin = "git://127.0.0.1:1/demo.git".to_string();
         runtime
             .start_clone(
                 &bob,
                 CloneRequest {
-                    url: Some("https://github.com/acme/demo.git".into()),
+                    url: Some(hosted_origin.clone()),
                     github: None,
                     parent_dir: None,
                     name: Some("bob-default".into()),
@@ -1386,7 +1431,7 @@ mod tests {
             .start_clone(
                 &alice,
                 CloneRequest {
-                    url: Some("https://github.com/acme/demo.git".into()),
+                    url: Some(origin.clone()),
                     github: None,
                     parent_dir: Some(alice_parent.display().to_string()),
                     name: Some("alice-copy".into()),
@@ -1404,7 +1449,7 @@ mod tests {
             .start_clone(
                 &bob,
                 CloneRequest {
-                    url: Some("https://github.com/acme/demo.git".into()),
+                    url: Some(hosted_origin),
                     github: None,
                     parent_dir: None,
                     name: Some("bob-copy".into()),

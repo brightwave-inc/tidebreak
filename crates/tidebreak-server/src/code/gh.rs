@@ -1762,16 +1762,34 @@ pub(crate) async fn wait_command_bounded(
 fn finish_bounded_command(
     output: BoundedProcessOutput,
     accept_truncated_stdout: bool,
-) -> Result<String, String> {
+) -> Result<(Vec<u8>, bool), String> {
     let stdout_truncated = output.stdout.truncated;
+    let stderr_truncated = output.stderr.truncated;
     let stderr_empty = output.stderr.bytes.is_empty();
+    if output.status.success() && !output.terminated_for_output {
+        return if stdout_truncated && !accept_truncated_stdout {
+            Err("git output exceeded its limit".into())
+        } else {
+            Ok((output.stdout.bytes, stdout_truncated))
+        };
+    }
+    if output.terminated_for_output
+        && stdout_truncated
+        && !stderr_truncated
+        && stderr_empty
+        && accept_truncated_stdout
+    {
+        return Ok((output.stdout.bytes, true));
+    }
     let stdout = output.stdout.into_marked_text().trim().to_owned();
     let stderr = output.stderr.into_marked_text().trim().to_owned();
-    if output.status.success() && !output.terminated_for_output {
-        return Ok(stdout);
-    }
-    if output.terminated_for_output && accept_truncated_stdout && stdout_truncated && stderr_empty {
-        return Ok(stdout);
+    if output.terminated_for_output {
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(if detail.is_empty() {
+            "git output exceeded its limit".into()
+        } else {
+            detail
+        });
     }
     Err(if stderr.is_empty() { stdout } else { stderr })
 }
@@ -1811,7 +1829,8 @@ async fn git_with_credential(
         &format!("git {}", args.join(" ")),
     )
     .await?;
-    finish_bounded_command(output, true)
+    let (bytes, _) = finish_bounded_command(output, false)?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
 /// General `gh` runner for creation, status, and comment reads — every
@@ -2284,13 +2303,18 @@ async fn spawn_gh_with_login_env(
     args: &[&str],
     limit: Duration,
 ) -> Result<String, String> {
-    let output = spawn_gh_output(cwd, binary, login_env, args, limit).await?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if output.status.success() {
-        return Ok(stdout);
-    }
-    Err(if stderr.is_empty() { stdout } else { stderr })
+    let output = spawn_gh_output(
+        cwd,
+        binary,
+        login_env,
+        args,
+        limit,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+        OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
+    )
+    .await?;
+    let (bytes, _) = finish_bounded_command(output, false)?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
 async fn spawn_gh_output(
@@ -2299,50 +2323,9 @@ async fn spawn_gh_output(
     login_env: Option<&[(OsString, OsString)]>,
     args: &[&str],
     limit: Duration,
-) -> Result<std::process::Output, String> {
-    let mut command = Command::new(binary);
-    if let Some(login_env) = login_env {
-        command.env_clear();
-        for (key, value) in filter_child_env(login_env.iter().cloned()) {
-            command.env(key, value);
-        }
-    }
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GH_NO_UPDATE_NOTIFIER", "1");
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn gh: {err}"))?;
-    timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| format!("gh {} timed out", args.join(" ")))?
-        .map_err(|err| format!("gh {} failed: {err}", args.join(" ")))
-}
-
-/// `gh` with bounded stdout/stderr. Job-log fetches use this so a huge log
-/// cannot grow without a cap.
-pub(crate) async fn run_gh_capped(
-    cwd: &Path,
-    binary: &Path,
-    args: &[&str],
-    limit: Duration,
     stdout_budget: OutputBudget,
     stderr_budget: OutputBudget,
 ) -> Result<BoundedProcessOutput, String> {
-    if refuse_gh_args(args) {
-        return Err("refusing to run a merge or GraphQL gh command".into());
-    }
-    let login_env = GH_LAUNCH
-        .get()
-        .filter(|launch| launch.binary == binary)
-        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
     let mut command = Command::new(binary);
     if let Some(login_env) = login_env {
         command.env_clear();
@@ -2366,6 +2349,35 @@ pub(crate) async fn run_gh_capped(
         stdout_budget,
         stderr_budget,
         &format!("gh {}", args.join(" ")),
+    )
+    .await
+}
+
+/// `gh` with bounded stdout/stderr. Job-log fetches use this so a huge log
+/// cannot grow without a cap.
+pub(crate) async fn run_gh_capped(
+    cwd: &Path,
+    binary: &Path,
+    args: &[&str],
+    limit: Duration,
+    stdout_budget: OutputBudget,
+    stderr_budget: OutputBudget,
+) -> Result<BoundedProcessOutput, String> {
+    if refuse_gh_args(args) {
+        return Err("refusing to run a merge or GraphQL gh command".into());
+    }
+    let login_env = GH_LAUNCH
+        .get()
+        .filter(|launch| launch.binary == binary)
+        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
+    spawn_gh_output(
+        cwd,
+        binary,
+        login_env,
+        args,
+        limit,
+        stdout_budget,
+        stderr_budget,
     )
     .await
 }
@@ -2401,12 +2413,23 @@ pub async fn run_gh_http(
         .get()
         .filter(|launch| launch.binary == binary)
         .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
-    let output = spawn_gh_output(cwd, binary, login_env, args, limit).await?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let output = spawn_gh_output(
+        cwd,
+        binary,
+        login_env,
+        args,
+        limit,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+        OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
     match parse_raw_http(&stdout) {
         Some(response) => Ok(response),
         None => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes)
+                .trim()
+                .to_owned();
             Err(if stderr.is_empty() {
                 format!("gh {} answered no HTTP status", args.join(" "))
             } else {
@@ -2674,29 +2697,43 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn git_output_beyond_the_cap_is_truncated() {
+    async fn oversized_head_output() -> BoundedProcessOutput {
         let mut command = Command::new("head");
         command
             .args(["-c", "4096", "/dev/zero"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = wait_command_bounded(
+        wait_command_bounded(
             &mut command,
             Duration::from_secs(5),
             OutputBudget::head(64, 8),
             OutputBudget::tail(64, 8),
-            "python3",
+            "head",
         )
         .await
-        .unwrap();
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn git_output_beyond_the_cap_is_truncated() {
+        let output = oversized_head_output().await;
         assert!(output.stdout.truncated);
         assert!(output.stdout.bytes.len() <= 64);
-        let marked = output.stdout.clone().into_marked_text();
+        let marked = output.stdout.into_marked_text();
         assert!(marked.contains("[output truncated]"));
-        let finished = finish_bounded_command(output, true).unwrap();
-        assert!(finished.contains("[output truncated]"));
+        let accepted = oversized_head_output().await;
+        let (finished, truncated) = finish_bounded_command(accepted, true).unwrap();
+        assert!(truncated);
+        assert!(
+            !String::from_utf8_lossy(&finished).contains("[output truncated]"),
+            "callers parse raw bytes; the marker must not be spliced in"
+        );
+        let refused = finish_bounded_command(oversized_head_output().await, false).unwrap_err();
+        assert!(
+            refused.contains("exceeded its limit") || refused.contains("[output truncated]"),
+            "{refused}"
+        );
     }
 
     #[test]
