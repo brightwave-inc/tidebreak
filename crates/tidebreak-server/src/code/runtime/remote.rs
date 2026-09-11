@@ -8,16 +8,6 @@ use tidebreak_core::ExecutionLocation;
 const MACHINE_PROMOTION_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const MACHINE_PROMOTION_POLLS: usize = 40;
 
-fn external_delegation_error(error: tidebreak_core::AgentError) -> ServerError {
-    match error {
-        tidebreak_core::AgentError::SignInRequired(_) | tidebreak_core::AgentError::InvalidTarget(_) => ServerError::conflict_kind(
-            "external_reconnect_required",
-            "Your Slack connection needs approval again. Send `reconnect` to Tidebreak, then approve the connection.",
-        ),
-        error => ServerError::from(error),
-    }
-}
-
 /// What get-or-create decided the session acts as, for the adapter to render.
 /// `acting_login`, `app_name`, and `connect_url` are known at create when the
 /// forge answered; an existing session reports `acts_as` from the row and
@@ -31,6 +21,79 @@ pub struct ExternalActsAsView {
 }
 
 impl CodeRuntime {
+    /// Resolve the original Slack consent before creating or queueing work.
+    async fn validated_external_delegation(
+        &self,
+        owner: &OwnerId,
+        grant_id: tidebreak_core::CodeGrantId,
+    ) -> Result<Option<Arc<crate::obo_gateway::OboGateway>>, ServerError> {
+        let Some(external) = self
+            .harness_llm
+            .as_ref()
+            .and_then(|relay| relay.external_delegations())
+        else {
+            return Ok(None);
+        };
+        match external.for_grant(owner, grant_id).await {
+            Ok(delegated) => Ok(Some(delegated)),
+            Err(
+                tidebreak_core::AgentError::SignInRequired(_)
+                | tidebreak_core::AgentError::InvalidTarget(_),
+            ) => {
+                let workspace =
+                    tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+                        .await?
+                        .is_some_and(|grant| grant.kind.is_workspace());
+                Err(ServerError::conflict_kind(
+                    "external_reconnect_required",
+                    if workspace {
+                        "Your Slack workspace connection needs administrator approval again. Ask an administrator to restore the Tidebreak connection for this Slack workspace."
+                    } else {
+                        "Your Slack connection needs approval again. Send `reconnect` to Tidebreak, then approve the connection."
+                    },
+                ))
+            }
+            Err(error) => Err(ServerError::from(error)),
+        }
+    }
+
+    /// Publish a fixed public failure summary, without transport error details.
+    async fn note_remote_startup_failure(
+        &self,
+        session: &Session,
+        attention: Attention,
+        message: String,
+    ) -> Result<(), ServerError> {
+        if session.attention == attention {
+            return Ok(());
+        }
+        let event = tidebreak_core::Event::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Warning,
+            message,
+        };
+        let seq = tidebreak_core::db::code::append_event(
+            &self.db,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            &event,
+        )
+        .await
+        .map_err(|error| tidebreak_core::AgentError::Store(error.to_string()))?;
+        self.bus
+            .publish(session.id, tidebreak_core::SequencedEvent { seq, event });
+        crate::code::attention::apply_attention(
+            &self.db,
+            &self.bus,
+            &session.owner,
+            session.id,
+            attention,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Create a workspace whose checkout lives in a sandbox, not on this
     /// machine. A per-workspace `remote:<id>` worktree marker records that
     /// state ([`CodeWorkspace::is_remote`]); nothing here touches the
@@ -263,23 +326,7 @@ impl CodeRuntime {
         } else {
             self.external_execution_location()
         };
-        let delegated = if location == ExecutionLocation::Machine {
-            match self
-                .harness_llm
-                .as_ref()
-                .and_then(|relay| relay.external_delegations())
-            {
-                Some(external) => Some(
-                    external
-                        .for_grant(owner, grant_id)
-                        .await
-                        .map_err(external_delegation_error)?,
-                ),
-                None => None,
-            }
-        } else {
-            None
-        };
+        let delegated = self.validated_external_delegation(owner, grant_id).await?;
         // The fast path costs one read and builds nothing.
         if let Some(binding) = tidebreak_core::db::code::get_external_binding(
             &self.db,
@@ -1029,7 +1076,15 @@ impl CodeRuntime {
             // notice and attention do not repeat every sweep tick. The
             // hold expiring retries on its own once the slot may be
             // free or the owner has signed in.
-            Ok(Outcome::CapExhausted { .. }) | Ok(Outcome::SignInRequired) => {
+            Ok(Outcome::SignInRequired) => {
+                remote.hold_promotion(session.id);
+                self.note_remote_startup_failure(
+                    &session,
+                    Attention::needs_you("sign in to the sandbox environment", AttentionSource::Structured),
+                    "Tidebreak cannot access the sandbox environment (sandbox_sign_in_required). Your message stays queued. Renew the connection in Tidebreak or ask your administrator for help, then send another message to retry.".into(),
+                ).await?;
+            }
+            Ok(Outcome::CapExhausted { .. }) => {
                 remote.hold_promotion(session.id);
             }
             // Busy shapes: the row stays queued for the next idle.
@@ -1041,6 +1096,11 @@ impl CodeRuntime {
                     "promoting a queued remote message failed; the row stays queued"
                 );
                 remote.hold_promotion(session.id);
+                self.note_remote_startup_failure(
+                    &session,
+                    Attention::needs_you(format!("Sandbox startup failed ({})", error.kind()), AttentionSource::Structured),
+                    format!("Tidebreak could not start the sandbox (sandbox_start_failed:{}). Your message stays queued. Tidebreak retries automatically; send another message to retry now.", error.kind()),
+                ).await?;
             }
         }
         Ok(())
@@ -1077,18 +1137,7 @@ impl CodeRuntime {
             ));
         }
         let session = self.get_session(owner, session_id).await?;
-        if session.execution_location == ExecutionLocation::Machine {
-            if let Some(external) = self
-                .harness_llm
-                .as_ref()
-                .and_then(|relay| relay.external_delegations())
-            {
-                external
-                    .for_grant(owner, grant_id)
-                    .await
-                    .map_err(external_delegation_error)?;
-            }
-        }
+        self.validated_external_delegation(owner, grant_id).await?;
         match session.lifecycle {
             SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(
@@ -1128,6 +1177,13 @@ impl CodeRuntime {
         if fresh {
             // Best effort: a refusal leaves the row queued for the sweep.
             let session = self.get_session(owner, session_id).await?;
+            if matches!(&session.attention.state, tidebreak_core::AttentionState::NeedsYou { prompt, .. }
+                if prompt.starts_with("Sandbox startup failed (") || prompt == "sign in to the sandbox environment")
+            {
+                if let Some(remote) = self.remote_sessions() {
+                    remote.clear_promotion_hold(session_id);
+                }
+            }
             if let Err(error) = self.promote_external_head(session, turn_id).await {
                 tracing::warn!(
                     session = %session_id,

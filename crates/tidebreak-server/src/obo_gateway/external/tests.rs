@@ -272,6 +272,207 @@ async fn browser_credentials_cannot_mask_missing_or_unconfirmed_delegation() {
 }
 
 #[tokio::test]
+async fn sandbox_admission_requires_durable_external_consent_before_accepting_work() {
+    use crate::code::remote::{
+        driver::RemoteSpawnSettings, gateway::GatewayProvisioner, service::RemoteSessions,
+    };
+    use crate::code::runtime::{ExternalMessage, NewSessionSettings};
+    use tidebreak_core::{ExecutionLocation, HarnessKind, PermissionMode, SessionLifecycle};
+
+    let (_dir, db, runtime, browser, base, state, owner) = setup().await;
+    let tokens = browser
+        .runtime_tokens("tidebreak")
+        .with_external_delegations(db.clone());
+    let provisioner = GatewayProvisioner::new(&base, "tidebreak", tokens).unwrap();
+    let runtime = runtime.with_remote_sessions(RemoteSessions::new(
+        Arc::new(provisioner),
+        RemoteSpawnSettings {
+            profile: "tidebreak".into(),
+            engine: Some(HarnessKind::ClaudeCode),
+            engines: None,
+            embedded_engine_registration: false,
+            incarnation_cap: 2,
+            spend_ceiling_microusd: None,
+            session_spend_ceiling_microusd: None,
+        },
+    ));
+    let (grant, _) = runtime
+        .mint_adapter_grant(&owner, "slack", "U2", "T1")
+        .await
+        .unwrap();
+    let error = runtime
+        .external_get_or_create(
+            &owner,
+            None,
+            grant.id,
+            "slack",
+            "T1/C1/unconfirmed",
+            None,
+            None,
+            HarnessKind::ClaudeCode,
+            NewSessionSettings::default(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a live adapter grant alone does not carry runtime consent");
+    assert_eq!(error.kind(), "external_reconnect_required");
+    assert!(tidebreak_core::db::code::get_external_binding(
+        &db,
+        &owner,
+        "slack",
+        "T1/C1/unconfirmed"
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    // A session persisted before this check must refuse the message before queueing it.
+    let mut session = crate::code::remote::fixtures::session_value();
+    session.owner = owner.clone();
+    session.workspace_id = None;
+    session.execution_location = ExecutionLocation::Sandbox;
+    session.lifecycle = SessionLifecycle::Idle;
+    session.permission_mode = PermissionMode::Allow;
+    tidebreak_core::db::code::insert_session(&db, &session)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::bind_external_session(
+        &db,
+        &owner,
+        grant.id,
+        "slack",
+        "T1/C1/legacy",
+        session.id,
+    )
+    .await
+    .unwrap();
+    let error = runtime
+        .external_submit_message(
+            &owner,
+            grant.id,
+            session.id,
+            ExternalMessage {
+                text: "hello".into(),
+                event_id: "Ev1".into(),
+                channel_ts: "1.0".into(),
+                actor: tidebreak_core::TurnActor::default(),
+                context: None,
+            },
+        )
+        .await
+        .expect_err("missing consent must not become a silently held queue row");
+    assert_eq!(error.kind(), "external_reconnect_required");
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&db, &owner, session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(state.mints.load(Ordering::SeqCst), 0);
+
+    let workspace_grant = tidebreak_core::db::code::mint_external_grant(
+        &db,
+        &owner,
+        tidebreak_core::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "workspace:T1",
+            workspace_identity: "T1",
+            kind: tidebreak_core::CodeGrantKind::Workspace,
+        },
+        &"a".repeat(64),
+        &"b".repeat(64),
+    )
+    .await
+    .unwrap();
+    let error = runtime
+        .external_get_or_create(
+            &owner,
+            None,
+            workspace_grant.id,
+            "slack",
+            "T1/C1/workspace",
+            None,
+            None,
+            HarnessKind::ClaudeCode,
+            NewSessionSettings::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "external_reconnect_required");
+    assert!(error.message().contains("administrator"));
+    assert!(error.message().contains("this Slack workspace"));
+    assert!(
+        !error.message().contains("`reconnect`"),
+        "personal reconnect cannot repair workspace consent"
+    );
+    assert_eq!(state.mints.load(Ordering::SeqCst), 0);
+
+    let confirmed = connect(&runtime, &owner).await;
+    let (created, _) = runtime
+        .external_get_or_create(
+            &owner,
+            None,
+            confirmed.id,
+            "slack",
+            "T1/C1/confirmed",
+            None,
+            None,
+            HarnessKind::ClaudeCode,
+            NewSessionSettings::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let tidebreak_core::ExternalSessionResolution::Created(binding) = created else {
+        panic!("completed consent must admit the session");
+    };
+    assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+    tidebreak_core::db::code::record_external_message_with_context(
+        &db,
+        &owner,
+        binding.session_id,
+        "EvBeforeRevocation",
+        "1.0",
+        "accepted before revocation",
+        &tidebreak_core::TurnActor::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    runtime
+        .revoke_adapter_grant(&owner, confirmed.id, "disconnect")
+        .await
+        .unwrap();
+    let error = runtime
+        .external_submit_message(
+            &owner,
+            confirmed.id,
+            binding.session_id,
+            ExternalMessage {
+                text: "accepted before revocation".into(),
+                event_id: "EvBeforeRevocation".into(),
+                channel_ts: "1.0".into(),
+                actor: tidebreak_core::TurnActor::default(),
+                context: None,
+            },
+        )
+        .await
+        .expect_err("a delivery replay cannot bypass revoked consent");
+    assert_eq!(error.kind(), "external_reconnect_required");
+    assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+    assert!(
+        tidebreak_core::db::code::latest_turn(&db, &owner, binding.session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn revocation_denies_cached_authority_and_retries_after_restart() {
     let (_dir, db, runtime, browser, base, state, owner) = setup().await;
     let grant = connect(&runtime, &owner).await;

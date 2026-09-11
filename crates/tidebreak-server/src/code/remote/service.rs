@@ -410,6 +410,7 @@ mod tests {
     #[derive(Default)]
     struct FakeProvisioner {
         spawns: StdMutex<Vec<SpawnArguments>>,
+        spawn_errors: StdMutex<VecDeque<RemoteSandboxError>>,
         sends: StdMutex<Vec<String>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
         /// Every events read issued, scripted or not.
@@ -426,6 +427,9 @@ mod tests {
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
             self.spawns.lock().unwrap().push(arguments.clone());
+            if let Some(error) = self.spawn_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
             Ok(SandboxLease {
                 sandbox_id: "sb-1".to_owned(),
                 state: SandboxState::Pending,
@@ -1681,6 +1685,250 @@ mod tests {
                 session_id: binding.session_id
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_repositoryless_managed_slack_message_spawns_with_native_tools_and_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spawn_settings = settings();
+        spawn_settings.engine = Some(HarnessKind::ClaudeCode);
+        spawn_settings.engines = Some(vec![HarnessKind::ClaudeCode, HarnessKind::Codex]);
+        spawn_settings.embedded_engine_registration = true;
+        let (runtime, fake, owner, _) =
+            runtime_with_remote_settings(dir.path(), spawn_settings).await;
+        let session_tools = Arc::new(crate::code::session_tools::SessionTools::default());
+        let conversation_tools =
+            Arc::new(crate::code::conversation_tools::ConversationTools::default());
+        let mut tools = tidebreak_core::ToolRegistry::new();
+        session_tools.register(&mut tools);
+        conversation_tools.register(&mut tools);
+        let runtime = Arc::new(
+            Arc::try_unwrap(runtime)
+                .unwrap_or_else(|_| panic!("fixture runtime must have one owner"))
+                .with_tool_registry(Arc::new(tools)),
+        );
+        session_tools.attach(&runtime);
+        conversation_tools.attach(&runtime);
+        runtime.remote_sessions().unwrap().with_host_tool(Arc::new(
+            crate::code::sandbox_tools::SandboxToolExecutor::new(Arc::downgrade(&runtime)),
+        ));
+        let (grant, _) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        let (resolved, _) = runtime
+            .external_get_or_create_with_channel_context(
+                &owner,
+                None,
+                grant.id,
+                "slack",
+                "T1/C1/first",
+                None,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+                None,
+                None,
+                Some(tidebreak_core::db::code::ExternalSessionChannelContext {
+                    channel_id: Some("C1"),
+                    instructions: "Keep answers concise.",
+                }),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolved else {
+            panic!("expected a create");
+        };
+        assert!(fake.spawns.lock().unwrap().is_empty());
+        let message = || crate::code::runtime::ExternalMessage {
+            text: "Read this thread and say hello.".into(),
+            event_id: "EvFirst".into(),
+            channel_ts: "1700000001.000100".into(),
+            actor: tidebreak_core::TurnActor::default(),
+            context: None,
+        };
+        let first = runtime
+            .external_submit_message(&owner, grant.id, binding.session_id, message())
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::NewTurn(turn) = first else {
+            panic!("the managed first message must spawn, got {first:?}");
+        };
+        {
+            let spawns = fake.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert!(spawns[0].repository.is_none());
+            assert!(spawns[0].model.is_none(), "an unset harness model is valid");
+            assert!(spawns[0].task.contains("Keep answers concise."));
+            for name in tidebreak_core::code::supervisor_tools::TOOLS {
+                assert!(
+                    spawns[0].task.contains(name),
+                    "missing bootstrap schema {name}"
+                );
+            }
+            assert!(spawns[0].task.contains("Read this thread and say hello."));
+            assert!(spawns[0].embedded_engine.is_some());
+        }
+        let replay = runtime
+            .external_submit_message(&owner, grant.id, binding.session_id, message())
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::NewTurn(replayed) = replay else {
+            panic!("the duplicate must resolve the first turn, got {replay:?}");
+        };
+        assert_eq!(turn.id, replayed.id);
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_failures_are_visible_safe_deduplicated_and_retryable_from_slack() {
+        for sign_in in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
+            let remote = runtime.remote_sessions().unwrap();
+            let grant = tidebreak_core::CodeGrantId::new();
+            let (resolution, _) = runtime
+                .external_get_or_create(
+                    &owner,
+                    None,
+                    grant,
+                    "slack",
+                    "T1/C1/startup",
+                    None,
+                    None,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+                panic!("expected creation");
+            };
+            for _ in 0..2 {
+                fake.spawn_errors.lock().unwrap().push_back(if sign_in {
+                    RemoteSandboxError::SignInRequired("private-token-and-upstream-body".into())
+                } else {
+                    RemoteSandboxError::Unavailable {
+                        operation: "spawn",
+                        detail: "private-token-and-upstream-body".into(),
+                    }
+                });
+            }
+            let message = |event: &str| crate::code::runtime::ExternalMessage {
+                text: "start work".into(),
+                event_id: event.into(),
+                channel_ts: "1.0".into(),
+                actor: tidebreak_core::TurnActor::default(),
+                context: None,
+            };
+            let first = runtime
+                .external_submit_message(&owner, grant, binding.session_id, message("Ev1"))
+                .await
+                .unwrap();
+            let ExternalMessageOutcome::Queued(first) = first else {
+                panic!("failed startup stays queued");
+            };
+            assert!(remote.promotion_held(binding.session_id));
+            assert!(latest_turn(&runtime.db, &owner, binding.session_id)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(!tidebreak_core::db::code::queue_paused(
+                &runtime.db,
+                &owner,
+                binding.session_id
+            )
+            .await
+            .unwrap());
+            runtime.promote_remote_queue_heads().await.unwrap();
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                1,
+                "held sweep must not retry"
+            );
+            remote.clear_promotion_hold(binding.session_id);
+            runtime.promote_remote_queue_heads().await.unwrap();
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                2,
+                "automatic retry is allowed after hold"
+            );
+            let events = tidebreak_core::db::code::list_events(
+                &runtime.db,
+                &owner,
+                binding.session_id,
+                0,
+                50,
+            )
+            .await
+            .unwrap()
+            .events;
+            let notices: Vec<_> = events
+                .iter()
+                .filter_map(|row| match &row.event {
+                    tidebreak_core::Event::HarnessNotice {
+                        level: tidebreak_core::HarnessNoticeLevel::Warning,
+                        message,
+                    } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                notices.len(),
+                1,
+                "identical failures must not repeat a notice"
+            );
+            assert!(notices[0].contains(if sign_in {
+                "sandbox_sign_in_required"
+            } else {
+                "sandbox_start_failed:store"
+            }));
+            assert!(!serde_json::to_string(&events)
+                .unwrap()
+                .contains("private-token-and-upstream-body"));
+            let replay = runtime
+                .external_submit_message(&owner, grant, binding.session_id, message("Ev1"))
+                .await
+                .unwrap();
+            assert!(matches!(replay, ExternalMessageOutcome::Queued(_)));
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                2,
+                "a transport replay cannot retry startup"
+            );
+            runtime
+                .external_submit_message(&owner, grant, binding.session_id, message("Ev2"))
+                .await
+                .unwrap();
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                3,
+                "a fresh message retries immediately"
+            );
+            let started = latest_turn(&runtime.db, &owner, binding.session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                started.id, first.id,
+                "retry promotes the original queue head"
+            );
+            assert!(!remote.promotion_held(binding.session_id));
+            let queue = tidebreak_core::db::code::list_queued_turns(
+                &runtime.db,
+                &owner,
+                binding.session_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                queue.len(),
+                1,
+                "the retry message follows the original turn"
+            );
+        }
     }
 
     /// External messages are idempotent on the event id: an idle session
