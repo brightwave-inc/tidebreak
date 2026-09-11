@@ -1838,10 +1838,12 @@ mod tests {
     #[tokio::test]
     async fn external_steering_rejects_missing_target_and_replays_original_receipt() {
         use tidebreak_core::code::ExternalSteerQueuedReason;
-        for (harness, compatible) in [
-            (HarnessKind::ClaudeCode, false),
-            (HarnessKind::Codex, false),
-            (HarnessKind::Codex, true),
+        for (harness, compatible, stale, oversized_frame) in [
+            (HarnessKind::ClaudeCode, false, false, false),
+            (HarnessKind::Codex, false, false, false),
+            (HarnessKind::Codex, true, false, false),
+            (HarnessKind::Codex, true, true, false),
+            (HarnessKind::Codex, true, false, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut spawn_settings = settings();
@@ -1875,7 +1877,12 @@ mod tests {
             };
             let make_message =
                 |event: &str, steer, target, correlation| crate::code::runtime::ExternalMessage {
-                    text: "Read the thread.".into(),
+                    // Escaping exceeds the frame limit while the original text still fits.
+                    text: if oversized_frame && event == "steer" {
+                        "\"".repeat(20 * 1024)
+                    } else {
+                        "Read the thread.".into()
+                    },
                     event_id: event.into(),
                     channel_ts: "1.0".into(),
                     actor: tidebreak_core::TurnActor::default(),
@@ -1931,16 +1938,23 @@ mod tests {
                     .unwrap();
             }
             let correlation = uuid::Uuid::new_v4();
+            let expected_turn = if stale {
+                tidebreak_core::TurnId::new()
+            } else {
+                active.id
+            };
             let first_steer = runtime
                 .external_submit_message(
                     &owner,
                     grant.id,
                     binding.session_id,
-                    make_message("steer", true, Some(active.id), Some(correlation)),
+                    make_message("steer", true, Some(expected_turn), Some(correlation)),
                 )
                 .await
                 .unwrap();
-            let expected_reason = if compatible {
+            let expected_reason = if stale || oversized_frame {
+                ExternalSteerQueuedReason::StaleTurn
+            } else if compatible {
                 ExternalSteerQueuedReason::Unacknowledged
             } else {
                 ExternalSteerQueuedReason::SteerUnsupported
@@ -1950,7 +1964,29 @@ mod tests {
             };
             assert_eq!(reason, expected_reason);
             let sends = fake.sends.lock().unwrap().len();
-            assert_eq!(sends, usize::from(compatible));
+            assert_eq!(sends, usize::from(compatible && !stale && !oversized_frame));
+            let tail = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message("later", false, None, None),
+                )
+                .await
+                .unwrap();
+            let ExternalMessageOutcome::Queued(tail) = tail else {
+                panic!("expected later message to queue: {tail:?}");
+            };
+            let rows = tidebreak_core::db::code::list_queued_turns(
+                &runtime.db,
+                &owner,
+                binding.session_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].id, turn_id);
+            assert_eq!(rows[1].id, tail.id);
             let replay = runtime
                 .external_submit_message(
                     &owner,
@@ -1973,7 +2009,7 @@ mod tests {
                 sends,
                 "a replay must not dispatch again"
             );
-            if compatible {
+            if compatible && !stale && !oversized_frame {
                 let target = tidebreak_core::db::code::external_steer_target_by_correlation(
                     &runtime.db,
                     &owner,
@@ -1996,15 +2032,28 @@ mod tests {
                     "unknown delivery holds the queue"
                 );
             } else {
+                assert_eq!(
+                    tidebreak_core::db::code::queued_turn_head(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    turn_id,
+                    "proven fallback releases the original head before the later message"
+                );
                 // Once fallback promotes, its original admission receipt still replays.
                 fake.event_reads.lock().unwrap().push_back(SandboxEvents {
                     sandbox_id: "sb-1".into(),
                     state: SandboxState::Running,
-                    latest_event_seq: 2,
+                    latest_event_seq: 3,
                     events: vec![
-                        event(1, "turn_started", serde_json::json!({"turn":1})),
+                        event(2, "turn_started", serde_json::json!({"turn":1})),
                         event(
-                            2,
+                            3,
                             "turn_completed",
                             serde_json::json!({"turn":1,"exit_code":0}),
                         ),
@@ -2021,14 +2070,27 @@ mod tests {
                     .await
                     .unwrap();
                 runtime.promote_remote_queue_heads().await.unwrap();
-                assert!(tidebreak_core::db::code::list_queued_turns(
+                assert_eq!(
+                    tidebreak_core::db::code::get_open_turn(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    turn_id
+                );
+                let remaining = tidebreak_core::db::code::list_queued_turns(
                     &runtime.db,
                     &owner,
-                    binding.session_id
+                    binding.session_id,
                 )
                 .await
-                .unwrap()
-                .is_empty());
+                .unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].id, tail.id);
                 let replay = runtime
                     .external_submit_message(
                         &owner,
@@ -2039,7 +2101,42 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(
-                    matches!(replay, ExternalMessageOutcome::SteerQueued { turn_id: replayed, reason: ExternalSteerQueuedReason::SteerUnsupported } if replayed == turn_id)
+                    matches!(replay, ExternalMessageOutcome::SteerQueued { turn_id: replayed, reason } if replayed == turn_id && reason == expected_reason)
+                );
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(),
+                    state: SandboxState::Running,
+                    latest_event_seq: 5,
+                    events: vec![
+                        event(4, "turn_started", serde_json::json!({"turn":2})),
+                        event(
+                            5,
+                            "turn_completed",
+                            serde_json::json!({"turn":2,"exit_code":0}),
+                        ),
+                    ],
+                });
+                session = runtime
+                    .get_session(&owner, binding.session_id)
+                    .await
+                    .unwrap();
+                remote
+                    .driver(&runtime.db, runtime.bus.as_ref())
+                    .pump(&mut session, 0)
+                    .await
+                    .unwrap();
+                runtime.promote_remote_queue_heads().await.unwrap();
+                assert_eq!(
+                    tidebreak_core::db::code::get_open_turn(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    tail.id
                 );
             }
         }

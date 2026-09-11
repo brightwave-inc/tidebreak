@@ -43,6 +43,15 @@ use super::{
 /// does not hold a concurrency slot for an afternoon.
 const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 
+/// Whether a steering failure proves that transport never received the frame.
+#[derive(Debug)]
+pub enum SteerDispatchError {
+    /// The caller may release its first-claim receipt to the ordinary queue.
+    NotSent(tidebreak_core::AgentError),
+    /// Transport began; only native evidence may settle the receipt.
+    Unconfirmed(tidebreak_core::AgentError),
+}
+
 /// Spawn-time settings for one remote session's sandboxes.
 #[derive(Clone, Debug)]
 pub struct RemoteSpawnSettings {
@@ -970,56 +979,65 @@ impl RemoteDriver<'_> {
         owner: &OwnerId,
         session_id: SessionId,
         body: String,
-    ) -> Result<(), tidebreak_core::AgentError> {
-        let Some(row) = latest_incarnation(self.db, owner, session_id).await? else {
-            return Err(tidebreak_core::AgentError::Store(
-                "cannot steer a sandbox with no incarnation".into(),
-            ));
-        };
-        if row.state != IncarnationState::Active {
-            return Err(tidebreak_core::AgentError::Store(
-                "the sandbox is not active; steering is unavailable".into(),
-            ));
+    ) -> Result<(), SteerDispatchError> {
+        let prepared: Result<_, tidebreak_core::AgentError> = async {
+            let Some(row) = latest_incarnation(self.db, owner, session_id).await? else {
+                return Err(tidebreak_core::AgentError::Store(
+                    "cannot steer a sandbox with no incarnation".into(),
+                ));
+            };
+            if row.state != IncarnationState::Active {
+                return Err(tidebreak_core::AgentError::Store(
+                    "the sandbox is not active; steering is unavailable".into(),
+                ));
+            }
+            let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+                return Err(tidebreak_core::AgentError::Store(
+                    "active incarnation has no sandbox id".into(),
+                ));
+            };
+            let frame = tidebreak_core::code::supervisor_tools::decode_steer_frame(&body)
+                .ok_or_else(|| {
+                    tidebreak_core::AgentError::Store("invalid steering frame".into())
+                })?;
+            let frame_runtime = uuid::Uuid::parse_str(&frame.runtime_id).ok();
+            if frame_runtime.is_none()
+                || frame_runtime != self.steering_runtime(owner, session_id).await?
+            {
+                return Err(tidebreak_core::AgentError::Store(
+                    "the target runtime changed before steering dispatch".into(),
+                ));
+            }
+            if frame.sandbox_id != sandbox_id {
+                return Err(tidebreak_core::AgentError::Store(
+                    "the target sandbox changed before steering dispatch".into(),
+                ));
+            }
+            let message = SandboxMessage {
+                body: SupervisorMessageBody::Input(body),
+                interrupt: false,
+            };
+            message
+                .validate()
+                .map_err(tidebreak_core::AgentError::Store)?;
+            Ok((sandbox_id.to_owned(), message))
         }
-        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
-            return Err(tidebreak_core::AgentError::Store(
-                "active incarnation has no sandbox id".into(),
-            ));
-        };
-        let frame = tidebreak_core::code::supervisor_tools::decode_steer_frame(&body)
-            .ok_or_else(|| tidebreak_core::AgentError::Store("invalid steering frame".into()))?;
-        let frame_runtime = uuid::Uuid::parse_str(&frame.runtime_id).ok();
-        if frame_runtime.is_none()
-            || frame_runtime != self.steering_runtime(owner, session_id).await?
-        {
-            return Err(tidebreak_core::AgentError::Store(
-                "the target runtime changed before steering dispatch".into(),
-            ));
-        }
-        if frame.sandbox_id != sandbox_id {
-            return Err(tidebreak_core::AgentError::Store(
-                "the target sandbox changed before steering dispatch".into(),
-            ));
-        }
-        let message = SandboxMessage {
-            body: SupervisorMessageBody::Input(body),
-            interrupt: false,
-        };
-        message
-            .validate()
-            .map_err(tidebreak_core::AgentError::Store)?;
+        .await;
+        let (sandbox_id, message) = prepared.map_err(SteerDispatchError::NotSent)?;
         match self
             .provisioner
-            .send(owner, session_id, sandbox_id, &message)
+            .send(owner, session_id, &sandbox_id, &message)
             .await
         {
             Ok(_) => Ok(()),
-            Err(RemoteSandboxError::SignInRequired(detail)) => {
-                Err(tidebreak_core::AgentError::Store(format!(
+            Err(RemoteSandboxError::SignInRequired(detail)) => Err(
+                SteerDispatchError::Unconfirmed(tidebreak_core::AgentError::Store(format!(
                     "sandbox steering needs a sign-in: {detail}"
-                )))
-            }
-            Err(error) => Err(tidebreak_core::AgentError::Store(error.to_string())),
+                ))),
+            ),
+            Err(error) => Err(SteerDispatchError::Unconfirmed(
+                tidebreak_core::AgentError::Store(error.to_string()),
+            )),
         }
     }
 
@@ -1879,10 +1897,12 @@ mod tests {
             correlation_uuid: uuid::Uuid::new_v4().to_string(),
             body: "guidance".into(),
         };
-        assert!(driver
-            .send_steer_frame(&session.owner, session.id, encode_steer_frame(&frame))
-            .await
-            .is_err());
+        assert!(matches!(
+            driver
+                .send_steer_frame(&session.owner, session.id, encode_steer_frame(&frame))
+                .await,
+            Err(SteerDispatchError::NotSent(_))
+        ));
         assert!(fake.sends.lock().unwrap().is_empty());
         frame.runtime_id = second_runtime.to_string();
         driver
@@ -1890,6 +1910,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
+        fake.send_results
+            .lock()
+            .unwrap()
+            .push_back(Err(RemoteSandboxError::Unavailable {
+                operation: "send",
+                detail: "response lost after admission".into(),
+            }));
+        assert!(matches!(
+            driver
+                .send_steer_frame(&session.owner, session.id, encode_steer_frame(&frame))
+                .await,
+            Err(SteerDispatchError::Unconfirmed(_))
+        ));
+        assert_eq!(fake.sends.lock().unwrap().len(), 2);
 
         // Every unsupported startup clears the old process capability.
         for (offset, payload) in [

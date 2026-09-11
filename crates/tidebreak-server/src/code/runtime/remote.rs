@@ -1410,7 +1410,7 @@ impl CodeRuntime {
         if claimed {
             // A network error cannot prove that the inbox rejected this instruction.
             // Preserve the receipt until durable native admission evidence arrives.
-            let _ = remote
+            let dispatch = remote
                 .driver(&self.db, self.bus.as_ref())
                 .send_steer_frame(
                     owner,
@@ -1425,6 +1425,20 @@ impl CodeRuntime {
                     }),
                 )
                 .await;
+            if matches!(
+                dispatch,
+                Err(crate::code::remote::driver::SteerDispatchError::NotSent(_))
+            ) {
+                self.settle_external_queued(
+                    owner,
+                    session.id,
+                    event_id,
+                    expected_turn_id,
+                    ExternalSteerQueuedReason::StaleTurn,
+                )
+                .await?;
+                return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
+            }
         }
         Ok(queued(ExternalSteerQueuedReason::Unacknowledged))
     }
