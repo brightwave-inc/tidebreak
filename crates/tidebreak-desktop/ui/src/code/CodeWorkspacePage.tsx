@@ -68,6 +68,8 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { RouteFrame } from "@/RouteFrame";
+import { sessionRecoveryState } from "./sessionRecovery";
+import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -95,7 +97,6 @@ import { canOpenInExternalEditor } from "./codeWorktreeHost";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { codeClientGeneration } from "./CodeClientGeneration";
 import { findEditorPanel, offersSplitDrop } from "./editorDrag";
-import { fenceReasonText } from "./labels";
 import { forkTranscriptFile } from "./fork";
 import { isPutAway, sessionActivityLabel } from "./workspaceCards";
 import { toast } from "sonner";
@@ -130,7 +131,7 @@ const TerminalPane = lazy(async () => {
 });
 
 /**
- * One workspace: header, transcript, composer, and the fence/reap path.
+ * One workspace: header, transcript, composer, and automatic recovery.
  *
  * The session store lives in the registry so two views of the same session
  * share one socket. This page is the only mounted session view in the
@@ -316,7 +317,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     error,
     retry,
     startSession,
-    reap,
+    retryRecovery,
+    retryingRecovery,
     selectConversation,
     newConversation,
     forkConversation,
@@ -398,8 +400,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     splitFocused,
   } = useEditorTabs({ layout, setLayout: setWorkspaceLayout });
 
-  const fenced =
-    session?.lifecycle === "fenced" || session?.fence_reason !== undefined;
+  const { lifecycle, attention, reason, blocksTurn } = sessionRecoveryState(
+    session,
+    digest,
+  );
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
   const title = digest?.title ?? workspace?.title;
   const repoName = repo?.display_name;
@@ -657,19 +661,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             // so `.message-view` can grow and the composer stays at the bottom,
             // including on an empty transcript.
             <div className="chat-pane" hidden={!visible || !showingChat}>
-              {fenced && session?.fence_reason && (
-                <div className="notice-surface notice-warning mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-                  <p>{fenceReasonText(session.fence_reason)}</p>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="self-start"
-                    onClick={() => void reap()}
-                  >
-                    Reap
-                  </Button>
-                </div>
-              )}
+              <SessionRecoveryNotice
+                showProgress={false}
+                allowRetry={session?.access !== "view"}
+                lifecycle={lifecycle}
+                attention={attention}
+                reason={reason}
+                retrying={retryingRecovery}
+                onRetry={() => void retryRecovery()}
+              />
               {workspace?.status === "setup_failed" && (
                 <SetupFailedBanner
                   output={workspace.setup_error}
@@ -740,7 +740,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   client={client}
                   catalogModels={models}
                   defaultModelKey={defaultModelKey}
-                  disabled={fenced || workspace?.status !== "active"}
+                  disabled={blocksTurn || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
                   onForkFromTurn={
                     session.kind === "interactive"
@@ -963,13 +963,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           session && !workspaceStartup ? (
             <>
               <SessionAttentionBadge
-                sessionId={session.id}
-                client={client}
-                fallback={digest?.attention ?? session.attention}
+                attention={digest?.attention ?? session.attention}
               />
               <PendingApprovalBadge sessionId={session.id} client={client} />
               <SessionLifecycleIndicator
                 lifecycle={digest?.lifecycle ?? session.lifecycle}
+                attention={attention}
                 harness={session.harness_kind}
                 version={session.harness_version}
                 unrecognizedEventCount={session.unrecognized_event_count}

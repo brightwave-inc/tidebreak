@@ -114,7 +114,12 @@ function HeaderState({
         loading ? undefined : (
           <>
             {attention?.state.type !== "working" && (
-              <AttentionBadge attention={attention} compact />
+              <AttentionBadge
+                attention={
+                  attention?.state.type === "fenced" ? undefined : attention
+                }
+                compact
+              />
             )}
             {pendingApprovals > 0 && (
               <Badge variant="warning" size="sm">
@@ -124,6 +129,7 @@ function HeaderState({
             )}
             <SessionLifecycleIndicator
               lifecycle={lifecycle}
+              attention={attention}
               harness="codex"
               version="0.84.0"
               unrecognizedEventCount={unrecognizedEventCount}
@@ -224,7 +230,7 @@ export const Stalled: Story = {
   },
 };
 
-export const Fenced: Story = {
+export const Reconnecting: Story = {
   args: {
     snapshot: openPrGit,
     attention: attentionFenced,

@@ -35,7 +35,7 @@ than hypothetical. What exists twice today:
    creation and refused per declared harness capability (decisions 38, 39).
 2. Two journals implementing the same snapshot-replay-live contract: the
    `event` table with `/chats/{id}/events`, and `code_event` with
-   `/code/sessions/{id}/events` plus the unsequenced `/code/updates` channel
+   `/sessions/{id}/events` plus the unsequenced `/updates` channel
    (decision 35).
 3. Two approval models: chat's grant ladders and approval judge; code's
    verbatim-payload rows with deny-with-feedback and deliberately no

@@ -122,16 +122,6 @@
     "remediation": "Reconnect this session from Slack."
   },
   {
-    "type": "attention_changed",
-    "state": {
-      "type": "fenced",
-      "reason": {
-        "type": "orphan_alive"
-      }
-    },
-    "source": "lifecycle"
-  },
-  {
     "type": "turn_refused",
     "usage": {
       "input_tokens": 12,

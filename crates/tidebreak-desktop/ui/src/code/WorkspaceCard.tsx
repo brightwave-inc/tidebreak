@@ -1,7 +1,8 @@
+import { recoveryDigest } from "./sessionRecovery";
+import { useRecoveryDelay } from "./useRecoveryDelay";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
-  Ban,
   Bot,
   CheckCircle2,
   ChevronDown,
@@ -827,6 +828,9 @@ function WorkspaceActivityLine({
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
 }) {
+  digest = digest ? recoveryDigest(digest) : undefined;
+  const recovering = digest?.attention.state.type === "fenced";
+  const showRecovery = useRecoveryDelay(recovering);
   // The checkout survived, so the workspace is usable — but the setup script
   // never finished, and nothing else on the card would say so.
   if (workspace.status === "setup_failed") {
@@ -845,7 +849,7 @@ function WorkspaceActivityLine({
     );
   }
   const railDigest = digest && isSessionRowWorthy(digest) ? digest : undefined;
-  if (!railDigest) return null;
+  if (!railDigest || (recovering && !showRecovery)) return null;
 
   const activity = workspaceActivitySummary(
     railDigest,
@@ -902,7 +906,7 @@ function WorkspaceActivityLine({
  *
  * The same shapes the compact attention mark draws, so the row and the badge
  * never disagree: a comet is work in motion, a circle-alert wants the
- * reader, a clock went quiet, a ban is fenced, a check is finished and
+ * reader, a clock went quiet, a comet reconnects, a check is finished and
  * unread, a pin was set by hand. Two shapes are the row's own, for a turn
  * that is alive but parked on something else: a bot for subagents and a
  * radar for a monitor, both in the live tone with the live pulse.
@@ -914,6 +918,10 @@ export function SessionStateGlyph({
   digest: CodeSessionDigest;
   pr?: PullRequestDigest;
 }) {
+  digest = recoveryDigest(digest);
+  const recovering = digest.attention.state.type === "fenced";
+  const showRecovery = useRecoveryDelay(recovering);
+  if (recovering && !showRecovery) return null;
   const className = "size-3 shrink-0";
   const attention = digest.attention.state.type;
   const mergeNotice = readyToMergeNotice(
@@ -988,10 +996,11 @@ export function SessionStateGlyph({
       );
     case "fenced":
       return (
-        <Ban
-          className={cn(className, STATUS_MARK.warning)}
-          data-state-glyph="fenced"
-          aria-hidden
+        <Loader
+          variant="comet"
+          size={12}
+          className="text-muted-foreground"
+          decorative
         />
       );
     case "manual":

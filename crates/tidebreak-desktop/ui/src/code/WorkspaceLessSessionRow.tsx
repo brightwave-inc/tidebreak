@@ -1,3 +1,5 @@
+import { recoveryDigest } from "./sessionRecovery";
+import { useRecoveryDelay } from "./useRecoveryDelay";
 import type { CodeSessionDigest } from "../api/types";
 import { cn } from "../lib/utils";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
@@ -12,8 +14,11 @@ export function WorkspaceLessSessionRow({
   digest: CodeSessionDigest;
   onOpen: (sessionId: string) => void;
 }) {
+  digest = recoveryDigest(digest);
   const title = digest.title?.trim() || "Untitled conversation";
-  const status = sessionRowLabel(digest);
+  const recovering = digest.attention.state.type === "fenced";
+  const showRecovery = useRecoveryDelay(recovering);
+  const status = recovering && !showRecovery ? "" : sessionRowLabel(digest);
   return (
     <button
       type="button"

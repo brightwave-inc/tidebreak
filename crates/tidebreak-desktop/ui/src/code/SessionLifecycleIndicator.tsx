@@ -1,10 +1,11 @@
+import { useRecoveryDelay } from "./useRecoveryDelay";
 import { CircleAlert } from "lucide-react";
 
 import { Loader } from "@/components/motion/loader";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-import type { CodeSessionSnapshot } from "../api/types";
+import type { Attention, CodeSessionSnapshot } from "../api/types";
 import { FOCUS_RING } from "./interactive";
 import { LIFECYCLE_LABELS, sessionLifecycleTooltip } from "./labels";
 import { STATUS_MARK } from "./statusTone";
@@ -23,13 +24,18 @@ export function SessionLifecycleIndicator({
   version,
   unrecognizedEventCount,
   runningLabel,
+  attention,
 }: {
   lifecycle: CodeSessionSnapshot["lifecycle"];
   harness: CodeSessionSnapshot["harness_kind"];
   version?: string;
   unrecognizedEventCount: number;
   runningLabel?: string;
+  attention?: Attention;
 }) {
+  const recovering =
+    lifecycle === "fenced" && attention?.state.type === "fenced";
+  const showRecovery = useRecoveryDelay(recovering);
   const tooltip = sessionLifecycleTooltip({
     lifecycle,
     harness,
@@ -38,13 +44,22 @@ export function SessionLifecycleIndicator({
     runningLabel,
   });
   const label =
-    lifecycle === "running" && runningLabel
-      ? runningLabel
-      : LIFECYCLE_LABELS[lifecycle];
+    lifecycle === "fenced" && attention?.state.type === "needs_you"
+      ? "Needs you"
+      : lifecycle === "running" && runningLabel
+        ? runningLabel
+        : LIFECYCLE_LABELS[lifecycle];
   const unrecognizedLabel = `${unrecognizedEventCount} unrecognized engine ${unrecognizedEventCount === 1 ? "event" : "events"} recorded in this session`;
 
+  if (recovering && !showRecovery) return null;
   return (
-    <WithTooltip label={tooltip}>
+    <WithTooltip
+      label={
+        attention?.state.type === "needs_you" && lifecycle === "fenced"
+          ? attention.state.prompt
+          : tooltip
+      }
+    >
       {/*
        * The tooltip carries the engine version and the dropped-event warning,
        * and neither is anywhere else on the page. A span cannot be tabbed to,
@@ -57,7 +72,7 @@ export function SessionLifecycleIndicator({
           FOCUS_RING,
         )}
       >
-        {lifecycle === "running" && (
+        {(lifecycle === "running" || recovering) && (
           <Loader variant="comet" size={12} className="text-live" decorative />
         )}
         <span>{label}</span>

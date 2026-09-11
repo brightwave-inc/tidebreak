@@ -70,7 +70,7 @@ async fn a_managed_ceiling_refuses_over_ceiling_code_session_modes() {
 
     // The mode route carries the same ceiling.
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "auto" }))
         .send()
@@ -82,7 +82,7 @@ async fn a_managed_ceiling_refuses_over_ceiling_code_session_modes() {
 
     // A ceiling names a maximum, so dialing down stays open.
     let allowed = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "plan" }))
         .send()

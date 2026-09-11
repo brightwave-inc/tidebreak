@@ -91,6 +91,7 @@ use crate::managed_policy::ManagedPolicy;
 
 mod adapters;
 mod approvals;
+mod auto_recovery;
 mod recover;
 mod remote;
 pub use remote::ExternalActsAsView;
@@ -243,6 +244,10 @@ pub struct CodeRuntime {
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<SessionId, WorkerHandle>>,
+    recovery_locks: Mutex<HashMap<SessionId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    recovery_attempts: Mutex<HashMap<SessionId, auto_recovery::RecoveryAttempt>>,
+    recovery_sweep: Mutex<Option<auto_recovery::RecoverySweepGuard>>,
+    recovery_started: AtomicBool,
     /// Sessions whose worker must move to the selected engine binary once
     /// their turn in flight ends. See `resync_workers_to_selected_binaries`.
     deferred_resyncs: Mutex<HashSet<SessionId>>,
@@ -519,6 +524,10 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            recovery_locks: Mutex::new(HashMap::new()),
+            recovery_attempts: Mutex::new(HashMap::new()),
+            recovery_sweep: Mutex::new(None),
+            recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
@@ -629,6 +638,7 @@ impl CodeRuntime {
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so
             // active watches resume with no extra state.
+            runtime.ensure_recovery_sweep();
             runtime.ensure_watch_sweep();
             runtime.ensure_trigger_sweep();
             runtime.ensure_reconcile_sweep();
@@ -692,6 +702,10 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            recovery_locks: Mutex::new(HashMap::new()),
+            recovery_attempts: Mutex::new(HashMap::new()),
+            recovery_sweep: Mutex::new(None),
+            recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),

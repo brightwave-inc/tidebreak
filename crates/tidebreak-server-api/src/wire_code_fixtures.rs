@@ -248,6 +248,7 @@ fn digest() -> SessionDigest {
         harness_kind: Some(HarnessKind::ClaudeCode),
         lifecycle: SessionLifecycle::Running,
         attention: attention(),
+        fence_reason: None,
         title: "Bound the code parser".to_owned(),
         turn_count: 3,
         trigger_target_at: Some(at(1_756_700_100)),
@@ -294,6 +295,7 @@ fn digest_notice(d: SessionDigest) -> UpdateNotice {
         kind: d.kind,
         harness_kind: d.harness_kind,
         lifecycle: d.lifecycle,
+        fence_reason: d.fence_reason.map(Box::new),
         attention: d.attention,
         title: d.title,
         turn_count: d.turn_count,
@@ -631,6 +633,20 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         ),
         fixture("session digest", "session_digest", &digest()),
         fixture(
+            "recovery digest with manual attention",
+            "session_digest",
+            &SessionDigest {
+                lifecycle: SessionLifecycle::Fenced,
+                attention: Attention::manual("Review these edits"),
+                fence_reason: Some(FenceReason::ProbeAmbiguous {
+                    detail: "The previous engine process could not be identified".to_owned(),
+                }),
+                activity: None,
+                activity_detail: None,
+                ..digest()
+            },
+        ),
+        fixture(
             "watch digest",
             "session_digest",
             &SessionDigest {
@@ -928,19 +944,6 @@ fn event_frames() -> Vec<Fixture> {
                 Event::HarnessNotice {
                     level: HarnessNoticeLevel::Warning,
                     message: "context is 80% full".to_owned(),
-                },
-            ),
-        ),
-        (
-            "event: attention_changed",
-            frame(
-                55,
-                Event::AttentionChanged {
-                    state: AttentionState::NeedsYou {
-                        prompt: "Approve the write to /etc/hosts?".to_owned(),
-                        source: AttentionSource::Structured,
-                    },
-                    source: AttentionSource::Structured,
                 },
             ),
         ),

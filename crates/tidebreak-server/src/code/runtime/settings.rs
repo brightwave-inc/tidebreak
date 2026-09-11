@@ -159,6 +159,7 @@ impl CodeRuntime {
         id: SessionId,
         mode: PermissionMode,
     ) -> Result<Session, ServerError> {
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         if session.permission_mode == mode {
             return Ok(session);
@@ -266,7 +267,7 @@ impl CodeRuntime {
                     if fenced.is_some() {
                         Err(ServerError::conflict_kind(
                             "permission_mode_unconfirmed",
-                            "the engine accepted the permission mode, but the durable session changed before confirmation; reap the fenced session before another turn",
+                            "the engine accepted the permission mode, but the durable session changed before confirmation; resolve the connection problem before another turn",
                         ))
                     } else {
                         Err(ServerError::conflict_kind(
@@ -343,7 +344,7 @@ impl CodeRuntime {
                 }
                 return Err(ServerError::conflict_kind(
                     "permission_mode_unconfirmed",
-                    "the session worker did not stop while changing permission mode; reap the fenced session before another turn",
+                    "the session worker did not stop while changing permission mode; resolve the connection problem before another turn",
                 ));
             }
         }
@@ -363,7 +364,7 @@ impl CodeRuntime {
                 crate::code::attention::emit_digest(&self.db, &self.bus, &fenced).await;
                 return Err(ServerError::conflict_kind(
                     "permission_mode_unconfirmed",
-                    "the session changed while its worker stopped for the permission mode update; reap the fenced session before another turn",
+                    "the session changed while its worker stopped for the permission mode update; resolve the connection problem before another turn",
                 ));
             }
             let _ = discard_permission_mode_change(&self.db, owner, &intent).await?;
@@ -590,6 +591,7 @@ impl CodeRuntime {
         id: SessionId,
         effort: Option<ReasoningEffort>,
     ) -> Result<Session, ServerError> {
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
             let mut next = SessionExecutionSettings::from(&session);
@@ -655,6 +657,7 @@ impl CodeRuntime {
         id: SessionId,
         fast_mode: bool,
     ) -> Result<Session, ServerError> {
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
             let mut requested = session.clone();

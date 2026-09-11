@@ -999,7 +999,7 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
     let session = owned_session(&client, addr, &token, &repo).await;
 
     let snapshot = client
-        .get(format!("http://{addr}/code/sessions/{session}"))
+        .get(format!("http://{addr}/sessions/{session}"))
         .bearer_auth(&*token)
         .send()
         .await
@@ -1013,7 +1013,7 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
     );
 
     let listed = client
-        .get(format!("http://{addr}/code/sessions/{session}/access"))
+        .get(format!("http://{addr}/sessions/{session}/access"))
         .bearer_auth(&*token)
         .send()
         .await
@@ -1032,7 +1032,7 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
             &client,
             addr,
             &token,
-            &format!("/code/sessions/{session}/access"),
+            &format!("/sessions/{session}/access"),
             serde_json::json!({ "subject": "whoever", "level": "view" }),
         )
         .await,
@@ -1044,7 +1044,7 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
             &client,
             addr,
             &token,
-            &format!("/code/sessions/{session}/access"),
+            &format!("/sessions/{session}/access"),
             serde_json::json!({ "subject": "principal:someone-else", "level": "view" }),
         )
         .await,
@@ -1053,17 +1053,11 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
 
     // The owner's own reads and writes are untouched by any of it.
     assert_eq!(
-        get_status(
-            &client,
-            addr,
-            &token,
-            &format!("/code/sessions/{session}/turns")
-        )
-        .await,
+        get_status(&client, addr, &token, &format!("/sessions/{session}/turns")).await,
         reqwest::StatusCode::OK,
     );
     let submitted = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .post(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&*token)
         .json(&serde_json::json!({ "message": "still mine to send" }))
         .send()

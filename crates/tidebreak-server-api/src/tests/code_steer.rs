@@ -41,7 +41,7 @@ async fn unsupported_explicit_steer_is_refused_without_queueing() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -51,7 +51,7 @@ async fn unsupported_explicit_steer_is_refused_without_queueing() {
     });
     let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id,
@@ -106,7 +106,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -126,7 +126,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -144,7 +144,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     .expect("pending approval never appeared");
 
     let first_steer = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id,
@@ -152,7 +152,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         }))
         .send();
     let second_steer = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id,
@@ -168,7 +168,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
 
     let decided = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -245,7 +245,7 @@ async fn supported_steer_requires_an_active_turn() {
 
     let refused = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/steer",
+            "http://{addr}/sessions/{}/steer",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -294,7 +294,7 @@ async fn steer_rejects_blank_nul_and_oversized_guidance() {
     ] {
         let refused = client
             .post(format!(
-                "http://{addr}/code/sessions/{}/steer",
+                "http://{addr}/sessions/{}/steer",
                 json_id(&session)
             ))
             .bearer_auth(&token)
@@ -345,7 +345,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -362,7 +362,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
     };
 
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": stale_turn_id,
@@ -424,7 +424,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -436,7 +436,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -455,7 +455,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
 
     let started = tokio::time::Instant::now();
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id,
@@ -474,7 +474,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
 
     let decided = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -530,7 +530,7 @@ async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted()
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -552,7 +552,7 @@ async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted()
     .expect("turn never completed");
 
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id.expect("turn id"),
@@ -604,7 +604,7 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -623,7 +623,7 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
     .expect("turn never started");
 
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": active_turn_id,

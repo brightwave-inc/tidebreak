@@ -816,7 +816,7 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
     assert_eq!(fake.spawns.lock().unwrap().len(), 1);
 
     let queued = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "continue from the browser" }))
         .send()
@@ -888,9 +888,7 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
     .await
     .expect("the queued turn drains after the send lands");
     let interrupted = client
-        .post(format!(
-            "http://{addr}/code/sessions/{session_id}/interrupt"
-        ))
+        .post(format!("http://{addr}/sessions/{session_id}/interrupt"))
         .bearer_auth(&token)
         .send()
         .await
@@ -934,7 +932,7 @@ async fn a_runtime_places_only_external_sessions_in_the_sandbox() {
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session_id = bound_session_id(&runtime, &owner, "T1/C-place/1.1").await;
     let snapshot = client
-        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .get(format!("http://{addr}/sessions/{session_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -4182,7 +4180,7 @@ async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targe
     assert_eq!(bindings[0]["external_key"], "T1/C1/1.1");
     assert_eq!(bindings[1]["session_id"], created["session_id"]);
     let snapshot: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{id}"))
+        .get(format!("http://{addr}/sessions/{id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -4291,7 +4289,7 @@ async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targe
             "/code/workspaces/{}/sessions",
             snapshot["workspace_id"].as_str().unwrap()
         ),
-        format!("/code/sessions/{id}/debug"),
+        format!("/sessions/{id}/debug"),
     ] {
         let response: serde_json::Value = client
             .get(format!("http://{addr}{path}"))

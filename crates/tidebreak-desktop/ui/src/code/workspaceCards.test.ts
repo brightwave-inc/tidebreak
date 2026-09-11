@@ -679,7 +679,7 @@ describe("workspaceStatusRank", () => {
     ).toBe("running");
   });
 
-  it("ranks a stale stall and a fenced session with needs-you", () => {
+  it("ranks a stale stall as needs-you and automatic recovery as running", () => {
     expect(
       workspaceStatusRank(
         workspace("ws-a", "app"),
@@ -695,13 +695,15 @@ describe("workspaceStatusRank", () => {
       workspaceStatusRank(
         workspace("ws-a", "app"),
         digest("ws-a", {
+          lifecycle: "fenced",
+          fence_reason: { type: "orphan_alive" },
           attention: {
             state: { type: "fenced", reason: { type: "orphan_alive" } },
             source: "structured",
           },
         }),
       ),
-    ).toBe("needs_you");
+    ).toBe("running");
   });
 
   it("ranks an idle session with turns as done, and an empty one as idle", () => {

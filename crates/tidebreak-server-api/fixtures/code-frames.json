@@ -566,6 +566,63 @@
   },
   {
     "kind": "session_digest",
+    "name": "recovery digest with manual attention",
+    "value": {
+      "attention": {
+        "source": "user",
+        "state": {
+          "note": "Review these edits",
+          "type": "manual"
+        }
+      },
+      "fence_reason": {
+        "detail": "The previous engine process could not be identified",
+        "type": "probe_ambiguous"
+      },
+      "harness_kind": "claude_code",
+      "kind": "interactive",
+      "lifecycle": "fenced",
+      "pr_count": 1,
+      "pr_state": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "recap": "The parser bounds every field; the tests are next.",
+      "session": "00000000-0000-0000-0000-000000000003",
+      "subagents": [
+        {
+          "call_id": "call-explore",
+          "name": "Explore",
+          "status": "running"
+        }
+      ],
+      "title": "Bound the code parser",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 3,
+      "workspace": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "session_digest",
     "name": "watch digest",
     "value": {
       "attention": {
@@ -1094,22 +1151,6 @@
         "type": "harness_notice"
       },
       "seq": 54
-    }
-  },
-  {
-    "kind": "event_frame",
-    "name": "event: attention_changed",
-    "value": {
-      "event": {
-        "source": "structured",
-        "state": {
-          "prompt": "Approve the write to /etc/hosts?",
-          "source": "structured",
-          "type": "needs_you"
-        },
-        "type": "attention_changed"
-      },
-      "seq": 55
     }
   },
   {

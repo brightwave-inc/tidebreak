@@ -469,7 +469,7 @@ elapses. `code_wait` re-follows an in-flight or queued turn. `code_decide`
 applies the decision and follows to the next settle point. `code_approvals`
 lists what is parked.
 
-`status` is the chat set plus **`queued`**. `POST /code/sessions/{id}/turns`
+`status` is the chat set plus **`queued`**. `POST /sessions/{id}/turns`
 waits for the worker to finish or to park the message on the durable session
 queue. A queued receipt returns immediately with the queue position and the
 turn id the promoted turn will run under — it is not a failure. Re-check with

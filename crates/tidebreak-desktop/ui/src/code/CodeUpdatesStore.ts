@@ -437,6 +437,7 @@ export function noticeToAction(
           : {}),
         lifecycle: notice.lifecycle,
         attention: notice.attention,
+        ...(notice.fence_reason ? { fence_reason: notice.fence_reason } : {}),
         title: notice.title,
         turn_count: notice.turn_count,
         ...(notice.trigger_target_at !== undefined

@@ -339,7 +339,7 @@ async fn start_turn(
         tidebreak_core::SessionId(uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap());
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(token)
         .json(&serde_json::json!({
             "message": "Fix the flaky retry test in the auth crate"

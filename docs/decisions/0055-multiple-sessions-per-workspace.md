@@ -133,3 +133,22 @@ the watch guard still refuses a second watch. Three tests cover the races the
 lock exists for — two idle siblings sending at once get one turn and one queue
 rather than two turns and a held request, an interrupt reaches a queued turn
 before it starts, and a fenced sibling refuses turns until it is reaped.
+
+## Amendment: automatic session recovery (2026-09-11)
+
+The workspace exclusion above remains in force while an unaccounted local
+process may still write to the checkout. Resolving that exclusion does not
+normally require a user action. Tidebreak can automatically stop an exact,
+identity-verified leftover process and recover the session before attaching a
+replacement worker. It can also replace a rejected engine resume reference.
+
+Recovery does not replay interrupted input. It keeps queued work paused and
+preserves the existing journal. Attempts are bounded and serialized with
+manual recovery. Unknown process ownership, repeated failures, and missing
+remote terminal output remain blocked with a concrete explanation. Remote
+recovery requires confirmed termination and recorded terminal events; it
+cannot silently accept lost output.
+
+The internal `Fenced` state is not a user-facing status. Brief recovery is
+quiet. Longer recovery shows “Reconnecting…”. A notice appears when recovery
+fails or needs user input, with the cause and a specific next action.

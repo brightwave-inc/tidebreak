@@ -109,8 +109,9 @@ export function attentionStatusTone(attention: Attention): StatusTone {
     case "needs_you":
       return "critical";
     case "stalled":
-    case "fenced":
       return "warning";
+    case "fenced":
+      return "pending";
     case "manual":
       return "pending";
     case "done_unreviewed":

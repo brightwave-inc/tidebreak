@@ -566,6 +566,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         session_id: SessionId,
     ) -> Result<(), ServerError> {
+        let _guard = self.session_recovery_lock(session_id).lock_owned().await;
         let Some(mut session) = get_session(&self.db, owner, session_id).await? else {
             return Ok(());
         };

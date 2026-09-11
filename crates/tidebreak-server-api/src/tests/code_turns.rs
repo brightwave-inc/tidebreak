@@ -102,7 +102,7 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
 
     let turn_req = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -119,7 +119,7 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
         }
         client
             .post(format!(
-                "http://{addr}/code/sessions/{}/interrupt",
+                "http://{addr}/sessions/{}/interrupt",
                 json_id(&session)
             ))
             .bearer_auth(&token)
@@ -197,7 +197,7 @@ async fn reap_replaces_browser_authority_without_tombstoning_the_session() {
         .unwrap();
 
     let reaped = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/reap"))
+        .post(format!("http://{addr}/sessions/{session_id}/reap"))
         .bearer_auth(&token)
         .send()
         .await
@@ -292,7 +292,7 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
 
     let turn_req = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -309,7 +309,7 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         }
         client
             .post(format!(
-                "http://{addr}/code/sessions/{}/interrupt",
+                "http://{addr}/sessions/{}/interrupt",
                 json_id(&session)
             ))
             .bearer_auth(&token)
@@ -334,10 +334,7 @@ async fn turn_statuses(
     session: &serde_json::Value,
 ) -> Vec<String> {
     let listed: Vec<serde_json::Value> = client
-        .get(format!(
-            "http://{addr}/code/sessions/{}/turns",
-            json_id(session)
-        ))
+        .get(format!("http://{addr}/sessions/{}/turns", json_id(session)))
         .bearer_auth(token)
         .send()
         .await
@@ -399,7 +396,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -428,7 +425,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     .expect("first turn never reached Running");
 
     let follow = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "follow-up" }))
         .send()
@@ -454,7 +451,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     // Depth is no longer one (decision 69): a second mid-turn send parks
     // behind the first instead of refusing with queue_full.
     let second = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "second follow-up" }))
         .send()
@@ -468,7 +465,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     // The queue is durable and addressable while the live turn runs: list,
     // edit, and retract are real routes, exactly as on a chat.
     let listed: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/queued"))
+        .get(format!("http://{addr}/sessions/{session_id}/queued"))
         .bearer_auth(&token)
         .send()
         .await
@@ -483,7 +480,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 
     let edited: serde_json::Value = client
         .patch(format!(
-            "http://{addr}/code/sessions/{session_id}/queued/{second_id}"
+            "http://{addr}/sessions/{session_id}/queued/{second_id}"
         ))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "second follow-up, edited" }))
@@ -497,7 +494,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 
     let removed = client
         .delete(format!(
-            "http://{addr}/code/sessions/{session_id}/queued/{second_id}"
+            "http://{addr}/sessions/{session_id}/queued/{second_id}"
         ))
         .bearer_auth(&token)
         .send()
@@ -590,7 +587,7 @@ async fn a_session_whose_turns_keep_failing_is_fenced_rather_than_left_idle() {
         let token = token.clone();
         async move {
             let body: serde_json::Value = client
-                .get(format!("http://{addr}/code/sessions/{session}/debug"))
+                .get(format!("http://{addr}/sessions/{session}/debug"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -604,7 +601,7 @@ async fn a_session_whose_turns_keep_failing_is_fenced_rather_than_left_idle() {
 
     for attempt in 1..=3 {
         let response = client
-            .post(format!("http://{addr}/code/sessions/{session}/turns"))
+            .post(format!("http://{addr}/sessions/{session}/turns"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "message": format!("attempt {attempt}") }))
             .send()
@@ -668,7 +665,7 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
         .unwrap();
 
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .post(format!("http://{addr}/sessions/{}/turns", ids[1]))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "while a sibling is fenced" }))
         .send()
@@ -680,7 +677,7 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
 
     // Reaping the fenced session reopens the workspace.
     let reaped = client
-        .post(format!("http://{addr}/code/sessions/{}/reap", ids[0]))
+        .post(format!("http://{addr}/sessions/{}/reap", ids[0]))
         .bearer_auth(&token)
         .send()
         .await
@@ -689,7 +686,7 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
     let body = reaped.text().await.unwrap();
     assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
     let accepted = client
-        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .post(format!("http://{addr}/sessions/{}/turns", ids[1]))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "after the reap" }))
         .send()
@@ -738,7 +735,7 @@ async fn a_sibling_fenced_for_repeated_failures_does_not_close_the_workspace() {
         .unwrap();
 
     let accepted = client
-        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .post(format!("http://{addr}/sessions/{}/turns", ids[1]))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "while a sibling is fenced" }))
         .send()
@@ -833,7 +830,7 @@ async fn a_recovered_session_accepts_a_turn() {
     let addr2 = serve(app(state)).await;
 
     let turn = reqwest::Client::new()
-        .post(format!("http://{addr2}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr2}/sessions/{session_id}/turns"))
         .bearer_auth(&token2)
         .json(&serde_json::json!({ "message": "after restart" }))
         .send()
@@ -886,7 +883,7 @@ async fn a_recovered_session_accepts_a_turn() {
     let client3 = reqwest::Client::new();
 
     let after_orphan_exit = client3
-        .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr3}/sessions/{session_id}/turns"))
         .bearer_auth(&token3)
         .json(&serde_json::json!({ "message": "after orphan exit" }))
         .send()
@@ -937,7 +934,7 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
 
     let turn = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)

@@ -583,6 +583,59 @@ jobs:
           -p tidebreak-desktop
           --locked
 
+  macos-sandbox:
+    name: macOS sandbox tests
+    needs: changes
+    # The execution crate depends on other workspace crates and the Cargo
+    # runner script, so every workspace change can affect native confinement.
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTC_WRAPPER: sccache
+      # CI tests need no keychain identity or interactive signing setup.
+      TIDEBREAK_DEV_SIGNING_IDENTITY: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: ./.github/actions/setup-sccache-s3
+        with:
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: macos-sandbox-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Set up self-contained Python for offline package tests
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12.10"
+      - name: Verify native sandbox prerequisites
+        run: |
+          test -x /usr/bin/sandbox-exec
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
+          /usr/bin/python3 -c 'import sys; print(sys.version)'
+          python3 -I -c 'import pathlib, pip, sys; assert pathlib.Path(pip.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()); print(sys.version, pip.__file__)'
+      - name: Seatbelt local sandbox tests
+        run: cargo test -p tidebreak-code-execution --locked --lib local::tests
+      - name: Egress broker tests
+        run: cargo test -p tidebreak-code-execution --locked --lib network::tests
+      - name: Seatbelt profile escaping tests
+        run: cargo test -p tidebreak-code-execution --locked --lib sbpl::tests
+
   windows-native:
     name: Windows native tests
     needs: changes

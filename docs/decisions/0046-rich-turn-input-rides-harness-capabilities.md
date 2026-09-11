@@ -8,7 +8,7 @@
 
 ## Context
 
-Code-mode turns today are plain text: `POST /code/sessions/{id}/turns`
+Code-mode turns today are plain text: `POST /sessions/{id}/turns`
 accepts `{message, model}`, and the composer offers nothing the wire cannot
 carry. Three requested inputs go beyond that:
 

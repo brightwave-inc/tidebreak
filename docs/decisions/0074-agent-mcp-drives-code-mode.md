@@ -33,7 +33,7 @@ auto-approve the driven session's harness approvals.
 **2. The chat return contract extends with `queued`.**
 `code_run_turn`, `code_wait`, and `code_decide` return the chat shape
 `{status, assistant_text, pending?, events_cursor}` with one added status:
-`queued`. `POST /code/sessions/{id}/turns` waits for the worker to finish or
+`queued`. `POST /sessions/{id}/turns` waits for the worker to finish or
 to park the message (decision 69). A `SubmitTurnResponse::Queued` receipt
 returns immediately with the queue position and the turn id the promoted turn
 will run under. The caller re-checks with `code_wait`. `running` still means

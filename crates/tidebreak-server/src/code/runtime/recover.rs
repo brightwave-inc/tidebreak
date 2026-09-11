@@ -210,6 +210,20 @@ impl CodeRuntime {
                 );
             }
         }
+        let fenced = list_sessions_all_owners(&self.db)
+            .await?
+            .into_iter()
+            .filter(|session| {
+                session.execution_location == tidebreak_core::ExecutionLocation::Machine
+                    && session.lifecycle == SessionLifecycle::Fenced
+                    && matches!(
+                        session.fence_reason,
+                        Some(FenceReason::OrphanAlive | FenceReason::ResumeLost { .. })
+                    )
+            })
+            .collect::<Vec<_>>();
+        self.prepare_recovered_harnesses(&fenced).await;
+        self.recover_fenced_sessions().await?;
         let recovered_sessions = list_sessions_all_owners(&self.db).await?;
         for session in &recovered_sessions {
             if session.lifecycle == SessionLifecycle::Ended {

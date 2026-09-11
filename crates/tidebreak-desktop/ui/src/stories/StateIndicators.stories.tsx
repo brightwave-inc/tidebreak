@@ -35,8 +35,8 @@ const attentionStates: Array<{
     attention: attentionStalled,
   },
   {
-    label: "Fenced",
-    description: "The session cannot continue safely.",
+    label: "Reconnecting",
+    description: "The connection recovers automatically.",
     attention: attentionFenced,
   },
   {
@@ -79,8 +79,8 @@ const headerStates: Array<{
     attention: attentionStalled,
   },
   {
-    label: "Fenced",
-    description: "The blocked mark stays distinct from a temporary stall.",
+    label: "Reconnecting",
+    description: "Brief disconnects stay quiet before progress appears.",
     lifecycle: "fenced",
     attention: attentionFenced,
   },
@@ -108,7 +108,7 @@ function StatusRow({
   description: string;
 }) {
   return (
-    <div className="grid grid-cols-[5rem_minmax(0,1fr)] items-center gap-4 border-t border-border-subtle px-4 py-3 first:border-t-0">
+    <div className="grid grid-cols-[9rem_minmax(0,1fr)] items-center gap-4 border-t border-border-subtle px-4 py-3 first:border-t-0">
       <div className="flex min-h-7 items-center gap-2">{mark}</div>
       <div className="min-w-0">
         <p className="text-sm font-medium">{label}</p>
@@ -170,11 +170,13 @@ function StateIndicators() {
                 key={state.label}
                 mark={
                   <>
-                    {state.attention && (
-                      <AttentionBadge attention={state.attention} compact />
-                    )}
+                    {state.attention &&
+                      state.attention.state.type !== "fenced" && (
+                        <AttentionBadge attention={state.attention} compact />
+                      )}
                     <SessionLifecycleIndicator
                       lifecycle={state.lifecycle}
+                      attention={state.attention}
                       harness="codex"
                       version="0.84.0"
                       unrecognizedEventCount={state.unrecognizedEventCount ?? 0}

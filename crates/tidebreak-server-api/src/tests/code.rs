@@ -504,7 +504,7 @@ async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
 
     let turn = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -518,7 +518,7 @@ async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
 
     let busy = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)

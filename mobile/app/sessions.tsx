@@ -1,5 +1,6 @@
+import type { SessionDigest as CodeSessionDigest } from "../src/generated/wire";
 import { useRouter } from "expo-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -14,6 +15,7 @@ import {
   attentionBadgeLabel,
   harnessLabel,
   lifecycleLabel,
+  sessionRecoveryPresentation,
 } from "../src/lib/updates";
 import { useMachineClient } from "../src/session/useMachineClient";
 import { useHasSnapshot, useListedSessions } from "../src/session/updatesStore";
@@ -103,40 +105,9 @@ export default function SessionsScreen() {
             </Text>
           </View>
         ) : null}
-        {rows.map((row) => {
-          const badge = attentionBadgeLabel(row.attention);
-          return (
-            <Pressable
-              key={row.session}
-              className="rounded-xl border border-border bg-background p-4 gap-1"
-              onPress={() =>
-                router.push({
-                  pathname: "/session/[id]",
-                  params: {
-                    id: row.session,
-                    title: row.title,
-                    workspace: row.workspace,
-                  },
-                })
-              }
-            >
-              <View className="flex-row items-start justify-between gap-2">
-                <Text className="flex-1 text-base font-medium text-foreground">
-                  {row.title || "Untitled session"}
-                </Text>
-                {badge ? (
-                  <View className="rounded-full bg-warning px-2 py-0.5">
-                    <Text className="text-xs text-warning-foreground">{badge}</Text>
-                  </View>
-                ) : null}
-              </View>
-              <Text className="text-sm text-muted-foreground">{row.workspace}</Text>
-              <Text className="text-sm text-muted-foreground">
-                {harnessLabel(row.harness_kind)} · {lifecycleLabel(row.lifecycle)}
-              </Text>
-            </Pressable>
-          );
-        })}
+        {rows.map((row) => (
+          <SessionRow key={row.session} row={row} />
+        ))}
         <Pressable
           className="mt-2 rounded-lg border border-border bg-background px-4 py-3"
           onPress={() => router.push("/approvals")}
@@ -151,5 +122,43 @@ export default function SessionsScreen() {
         </Pressable>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function SessionRow({ row }: { row: CodeSessionDigest }) {
+  const router = useRouter();
+  const { recovering, prompt } = sessionRecoveryPresentation(row);
+  const [showRecovery, setShowRecovery] = useState(false);
+  useEffect(() => {
+    setShowRecovery(false);
+    if (!recovering) return;
+    const timer = setTimeout(() => setShowRecovery(true), 1500);
+    return () => clearTimeout(timer);
+  }, [recovering]);
+  const badge = prompt ?? attentionBadgeLabel(row.attention);
+  const status = recovering
+    ? showRecovery ? "Reconnecting…" : null
+    : row.lifecycle === "fenced" ? "Needs you" : lifecycleLabel(row.lifecycle);
+  return (
+    <Pressable
+      className="rounded-xl border border-border bg-background p-4 gap-1"
+      onPress={() => router.push({
+        pathname: "/session/[id]",
+        params: { id: row.session, title: row.title, workspace: row.workspace },
+      })}
+    >
+      <View className="flex-row items-start justify-between gap-2">
+        <Text className="flex-1 text-base font-medium text-foreground">{row.title || "Untitled session"}</Text>
+        {badge ? (
+          <View className="rounded-full bg-warning px-2 py-0.5">
+            <Text className="text-xs text-warning-foreground">{badge}</Text>
+          </View>
+        ) : null}
+      </View>
+      <Text className="text-sm text-muted-foreground">{row.workspace}</Text>
+      <Text className="text-sm text-muted-foreground">
+        {harnessLabel(row.harness_kind)}{status ? ` · ${status}` : ""}
+      </Text>
+    </Pressable>
   );
 }

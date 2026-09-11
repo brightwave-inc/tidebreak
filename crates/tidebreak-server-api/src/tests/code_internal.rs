@@ -5,7 +5,7 @@
 //! approval rows. This module is the tripwire for that: chat's plan
 //! proposals, user questions, tool approvals with grant ladders, and
 //! mid-turn steering all have to be reachable over the shared session routes.
-//! The `/chats/*` and `/code/sessions/*` families stay as compatibility aliases.
+//! The `/chats/*` and `/sessions/*` families stay as compatibility aliases.
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -536,7 +536,7 @@ async fn canonical_and_compatibility_routes_share_session_rows() {
         .await
         .unwrap();
     let code_alias: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .get(format!("http://{addr}/sessions/{session_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -567,9 +567,7 @@ async fn canonical_and_compatibility_routes_share_session_rows() {
         .await
         .unwrap();
     let code_approvals: serde_json::Value = client
-        .get(format!(
-            "http://{addr}/code/approvals?session_id={session_id}"
-        ))
+        .get(format!("http://{addr}/approvals?session_id={session_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -958,7 +956,7 @@ async fn canonical_and_compatibility_routes_share_conversation_rows() {
         .await
         .unwrap();
     let code_session: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .get(format!("http://{addr}/sessions/{session_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -996,7 +994,7 @@ async fn canonical_and_compatibility_routes_share_conversation_rows() {
 
     let code_approvals: Vec<serde_json::Value> = client
         .get(format!(
-            "http://{addr}/code/approvals?session_id={session_id}&state=pending"
+            "http://{addr}/approvals?session_id={session_id}&state=pending"
         ))
         .bearer_auth(&token)
         .send()
@@ -1029,7 +1027,7 @@ async fn canonical_and_compatibility_routes_share_conversation_rows() {
         .await
         .unwrap();
     let code_turns: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .get(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1063,7 +1061,7 @@ async fn canonical_and_compatibility_routes_share_conversation_rows() {
         .await
         .unwrap();
     let code_queue: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/queued"))
+        .get(format!("http://{addr}/sessions/{session_id}/queued"))
         .bearer_auth(&token)
         .send()
         .await

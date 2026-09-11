@@ -1,3 +1,7 @@
+import { toast } from "sonner";
+import { useSessionDigest } from "./CodeUpdatesStore";
+import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
+import { sessionRecoveryState } from "./sessionRecovery";
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useApp } from "@/AppContext";
@@ -68,6 +72,7 @@ function CodeSessionRouteBody({ sessionId }: { sessionId: string }) {
         models={models}
         defaultModelKey={defaultModelKey}
         onRetry={() => setAttempt((value) => value + 1)}
+        onRecovered={setSession}
       />
     </RouteFrame>
   );
@@ -82,6 +87,7 @@ export function CodeSessionContent({
   models,
   defaultModelKey,
   onRetry,
+  onRecovered,
 }: {
   title?: string;
   session: CodeSessionSnapshot | null;
@@ -90,14 +96,31 @@ export function CodeSessionContent({
   models: ModelInfo[];
   defaultModelKey: string | null;
   onRetry: () => void;
+  onRecovered?: (session: CodeSessionSnapshot) => void;
 }) {
+  const digest = useSessionDigest(undefined, session?.id ?? null);
+  const recovery = sessionRecoveryState(session, digest);
+  const [retrying, setRetrying] = useState(false);
+  async function retryRecovery() {
+    if (!session || retrying) return;
+    setRetrying(true);
+    try {
+      const recovered = await client.reapCodeSession(session.id);
+      onRecovered?.(recovered);
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "Could not recover the session"));
+    } finally {
+      setRetrying(false);
+    }
+  }
   return (
     <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
         {session && (
           <SessionLifecycleIndicator
-            lifecycle={session.lifecycle}
+            lifecycle={recovery.lifecycle ?? session.lifecycle}
+            attention={recovery.attention}
             harness={session.harness_kind}
             unrecognizedEventCount={session.unrecognized_event_count}
           />
@@ -116,14 +139,25 @@ export function CodeSessionContent({
           </Button>
         </div>
       ) : session ? (
-        <CodeSessionPane
-          key={session.id}
-          session={session}
-          client={client}
-          catalogModels={models}
-          defaultModelKey={defaultModelKey}
-          disabled={false}
-        />
+        <>
+          <SessionRecoveryNotice
+            showProgress={false}
+            lifecycle={recovery.lifecycle}
+            attention={recovery.attention}
+            reason={recovery.reason}
+            retrying={retrying}
+            allowRetry={session.access !== "view"}
+            onRetry={() => void retryRecovery()}
+          />
+          <CodeSessionPane
+            key={session.id}
+            session={session}
+            client={client}
+            catalogModels={models}
+            defaultModelKey={defaultModelKey}
+            disabled={recovery.blocksTurn}
+          />
+        </>
       ) : (
         <div
           role="status"

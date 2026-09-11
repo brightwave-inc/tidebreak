@@ -460,8 +460,24 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
+    struct ProvisionGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    async fn wait_for_provision_gate(gate: &StdMutex<Option<Arc<ProvisionGate>>>) {
+        let gate = gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    #[derive(Default)]
     struct FakeProvisioner {
         spawns: StdMutex<Vec<SpawnArguments>>,
+        spawn_gate: StdMutex<Option<Arc<ProvisionGate>>>,
+        send_gate: StdMutex<Option<Arc<ProvisionGate>>>,
         spawn_errors: StdMutex<VecDeque<RemoteSandboxError>>,
         sends: StdMutex<Vec<String>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
@@ -478,6 +494,7 @@ mod tests {
             _session: tidebreak_core::SessionId,
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
+            wait_for_provision_gate(&self.spawn_gate).await;
             self.spawns.lock().unwrap().push(arguments.clone());
             if let Some(error) = self.spawn_errors.lock().unwrap().pop_front() {
                 return Err(error);
@@ -536,6 +553,7 @@ mod tests {
             _sandbox_id: &str,
             message: &SandboxMessage,
         ) -> Result<MessageReceipt, RemoteSandboxError> {
+            wait_for_provision_gate(&self.send_gate).await;
             let super::super::wire::SupervisorMessageBody::Input(body) = &message.body;
             self.sends.lock().unwrap().push(body.clone());
             Ok(MessageReceipt {
@@ -925,6 +943,117 @@ mod tests {
             fake.sends.lock().unwrap().as_slice(),
             &["and then".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_waits_for_remote_spawn_and_queued_send_admission() {
+        for queued in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+            let workspace = runtime
+                .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+                .await
+                .unwrap();
+            let session = runtime
+                .create_remote_session(
+                    &owner,
+                    None,
+                    workspace.id,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                )
+                .await
+                .unwrap();
+            if queued {
+                runtime
+                    .submit_turn(&owner, session.id, "first".into(), None, None, vec![], None)
+                    .await
+                    .unwrap();
+                runtime
+                    .submit_turn(&owner, session.id, "next".into(), None, None, vec![], None)
+                    .await
+                    .unwrap();
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(),
+                    state: SandboxState::Running,
+                    latest_event_seq: 2,
+                    events: vec![
+                        event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                        event(
+                            2,
+                            "turn_completed",
+                            serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                        ),
+                    ],
+                });
+                let mut live = runtime.get_session(&owner, session.id).await.unwrap();
+                runtime
+                    .remote_sessions()
+                    .unwrap()
+                    .driver(&runtime.db, runtime.bus.as_ref())
+                    .pump(&mut live, 0)
+                    .await
+                    .unwrap();
+            }
+            let gate = Arc::new(ProvisionGate::default());
+            if queued {
+                *fake.send_gate.lock().unwrap() = Some(gate.clone());
+            } else {
+                *fake.spawn_gate.lock().unwrap() = Some(gate.clone());
+            }
+            let admission = tokio::spawn({
+                let runtime = runtime.clone();
+                let owner = owner.clone();
+                async move {
+                    if queued {
+                        runtime.promote_remote_queue_heads().await
+                    } else {
+                        runtime
+                            .submit_turn(
+                                &owner,
+                                session.id,
+                                "first".into(),
+                                None,
+                                None,
+                                vec![],
+                                None,
+                            )
+                            .await
+                            .map(|_| ())
+                    }
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+                .await
+                .expect("remote admission reaches the provisioner");
+            let recovery = runtime.reap(&owner, session.id);
+            tokio::pin!(recovery);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut recovery)
+                    .await
+                    .is_err(),
+                "recovery must wait until remote admission commits, queued={queued}"
+            );
+            gate.release.notify_one();
+            admission.await.unwrap().unwrap();
+            assert_eq!(recovery.await.unwrap_err().kind(), "not_fenced");
+            let current = runtime.get_session(&owner, session.id).await.unwrap();
+            assert_eq!(current.lifecycle, SessionLifecycle::Running);
+            assert_eq!(current.spawn_epoch, session.spawn_epoch);
+            let turn = latest_turn(&runtime.db, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(turn.status, TurnStatus::Running);
+            assert_eq!(turn.ordinal, if queued { 2 } else { 1 });
+            assert!(runtime
+                .list_queued_turns(&owner, session.id)
+                .await
+                .unwrap()
+                .0
+                .is_empty());
+            assert!(fake.cancels.lock().unwrap().is_empty());
+        }
     }
 
     /// Remote session creation must serialize with workspace lifecycle

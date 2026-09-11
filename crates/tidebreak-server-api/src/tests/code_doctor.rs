@@ -622,10 +622,7 @@ async fn hosted_claude_efforts_follow_the_gateway_catalog() {
                 assert_eq!(status, reqwest::StatusCode::CREATED, "{effort}: {body}");
                 assert_eq!(body["reasoning_effort"], effort, "{body}");
                 let stored: serde_json::Value = client
-                    .get(format!(
-                        "http://{addr}/code/sessions/{}/debug",
-                        json_id(&body)
-                    ))
+                    .get(format!("http://{addr}/sessions/{}/debug", json_id(&body)))
                     .bearer_auth(token.as_ref())
                     .send()
                     .await
@@ -907,7 +904,7 @@ async fn unread_engine_events_accumulate_on_the_session_row_and_reach_the_doctor
     for message in ["hello", "again"] {
         let turn = client
             .post(format!(
-                "http://{addr}/code/sessions/{}/turns",
+                "http://{addr}/sessions/{}/turns",
                 json_id(&session)
             ))
             .bearer_auth(&token)
@@ -991,7 +988,7 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
         .unwrap());
 
     let failed = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "carry on" }))
         .send()
@@ -1027,7 +1024,7 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
     // Fenced, so the next turn is refused with the reap the UI offers rather
     // than another identical failure.
     let refused = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "again" }))
         .send()

@@ -159,7 +159,7 @@ Four more things are shared through it:
   not read this file: its REST validators are exercised against
   `generated/fixtures.ts` and the generated types.
 - **Code-mode fixtures.** The repo, workspace, session, turn, approval, and
-  delivery snapshots, the sequenced event frame, and the `/code/updates`
+  delivery snapshots, the sequenced event frame, and the `/updates`
   notices are re-exported from `tidebreak_server::wire` too, reject unknown
   keys, and are written to `crates/tidebreak-server-api/fixtures/code-frames.json`
   by `wire_code_fixtures` (a `CodeEvent` or `CodeUpdateNotice` variant without

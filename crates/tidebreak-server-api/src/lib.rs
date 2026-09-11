@@ -135,11 +135,6 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
         )
         .route(
-            "/code/sessions/{id}/attachments/images",
-            post(routes::code::publish_session_image)
-                .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
-        )
-        .route(
             "/sessions/{id}/attachments/images",
             post(routes::code::publish_session_image)
                 .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
@@ -1141,83 +1136,6 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::create_session).get(routes::code::list_workspace_sessions),
         )
         .route(
-            "/code/sessions",
-            post(routes::code::create_internal_session).get(routes::code::list_internal_sessions),
-        )
-        .route("/code/sessions/{id}", get(routes::code::get_session))
-        .route(
-            "/code/sessions/{id}/turns",
-            post(routes::code::submit_turn).get(routes::code::list_session_turns),
-        )
-        .route(
-            "/code/sessions/{id}/queued",
-            get(routes::code::list_queued_turns),
-        )
-        .route(
-            "/code/sessions/{id}/queued/{queued_id}",
-            axum::routing::patch(routes::code::patch_queued_turn)
-                .delete(routes::code::delete_queued_turn),
-        )
-        .route(
-            "/code/sessions/{id}/queue-paused",
-            axum::routing::put(routes::code::put_queue_paused),
-        )
-        .route(
-            "/code/sessions/{id}/queued/send-now",
-            post(routes::code::post_queue_send_now),
-        )
-        .route(
-            "/code/sessions/{id}/attachments/images/{blob_id}",
-            get(routes::code::get_session_image),
-        )
-        .route(
-            "/code/sessions/{id}/steer",
-            post(routes::code::steer_session),
-        )
-        .route(
-            "/code/sessions/{id}/interrupt",
-            post(routes::code::interrupt_session),
-        )
-        .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
-        .route(
-            "/code/sessions/{id}/mode",
-            post(routes::code::set_session_permission_mode),
-        )
-        .route(
-            "/code/sessions/{id}/effort",
-            post(routes::code::set_session_reasoning_effort),
-        )
-        .route(
-            "/code/sessions/{id}/fast-mode",
-            post(routes::code::set_session_fast_mode),
-        )
-        .route("/code/sessions/{id}/fork", post(routes::code::fork_session))
-        .route(
-            "/code/sessions/{id}/debug",
-            get(routes::code::get_session_debug),
-        )
-        .route(
-            "/code/sessions/{id}/attention",
-            post(routes::code::set_attention),
-        )
-        .route(
-            "/code/sessions/{id}/events",
-            get(routes::code::session_events),
-        )
-        .route(
-            "/code/sessions/{id}/access",
-            get(routes::code::list_session_access).post(routes::code::add_session_access),
-        )
-        .route(
-            "/code/sessions/{id}/access/{subject}",
-            delete(routes::code::revoke_session_access),
-        )
-        .route(
-            "/code/sessions/{id}/visibility",
-            post(routes::code::set_session_visibility),
-        )
-        .route("/code/updates", get(routes::code::code_updates))
-        .route(
             "/code/workspaces/{id}/terminals",
             post(routes::code::create_terminal)
                 .get(routes::code::list_terminals)
@@ -1238,11 +1156,6 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/workspaces/{id}/terminals/{tid}/resize",
             post(routes::code::resize_terminal),
-        )
-        .route("/code/approvals", get(routes::code::list_approvals))
-        .route(
-            "/code/approvals/{id}/decision",
-            post(routes::code::decide_approval),
         )
         .merge(client_executor_api)
         // Merged before the bearer layer, so `require_token` wraps outside

@@ -85,7 +85,7 @@ async fn listing_session_turns_returns_user_input_and_usage() {
     let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
     let missing = client
         .get(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             uuid::Uuid::new_v4()
         ))
         .bearer_auth(&token)
@@ -112,7 +112,7 @@ async fn listing_session_turns_returns_user_input_and_usage() {
         .unwrap();
     let empty = client
         .get(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -125,7 +125,7 @@ async fn listing_session_turns_returns_user_input_and_usage() {
 
     let first = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -138,7 +138,7 @@ async fn listing_session_turns_returns_user_input_and_usage() {
         .unwrap();
     let second = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -151,7 +151,7 @@ async fn listing_session_turns_returns_user_input_and_usage() {
         .unwrap();
     let listed = client
         .get(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -941,7 +941,7 @@ async fn first_turn_starts_when_the_repository_has_no_main_ref() {
 
     let turn = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -1037,4 +1037,63 @@ async fn workspace_create_does_not_fall_through_an_explicit_missing_ref() {
         !message.contains("trunk"),
         "an explicit miss must not walk sibling defaults: {message}"
     );
+}
+
+/// Retired aliases must reach the router's empty 404 fallback, including the
+/// separately mounted image-publication route.
+#[tokio::test]
+async fn code_prefixed_session_routes_are_not_registered() {
+    let (router, token, _runtime, _dir) = code_app(plain_text_script()).await;
+    let id = uuid::Uuid::new_v4();
+    let paths = [
+        ("GET", "/code/sessions"),
+        ("POST", "/code/sessions"),
+        ("GET", "/code/sessions/{id}"),
+        ("GET", "/code/sessions/{id}/turns"),
+        ("POST", "/code/sessions/{id}/turns"),
+        ("GET", "/code/sessions/{id}/queued"),
+        ("PATCH", "/code/sessions/{id}/queued/{id}"),
+        ("DELETE", "/code/sessions/{id}/queued/{id}"),
+        ("PUT", "/code/sessions/{id}/queue-paused"),
+        ("POST", "/code/sessions/{id}/queued/send-now"),
+        ("POST", "/code/sessions/{id}/attachments/images"),
+        ("GET", "/code/sessions/{id}/attachments/images/{id}"),
+        ("POST", "/code/sessions/{id}/steer"),
+        ("POST", "/code/sessions/{id}/interrupt"),
+        ("POST", "/code/sessions/{id}/reap"),
+        ("POST", "/code/sessions/{id}/mode"),
+        ("POST", "/code/sessions/{id}/effort"),
+        ("POST", "/code/sessions/{id}/fast-mode"),
+        ("POST", "/code/sessions/{id}/fork"),
+        ("GET", "/code/sessions/{id}/debug"),
+        ("POST", "/code/sessions/{id}/attention"),
+        ("GET", "/code/sessions/{id}/events"),
+        ("GET", "/code/sessions/{id}/access"),
+        ("POST", "/code/sessions/{id}/access"),
+        ("DELETE", "/code/sessions/{id}/access/{id}"),
+        ("POST", "/code/sessions/{id}/visibility"),
+        ("GET", "/code/updates"),
+        ("GET", "/code/approvals"),
+        ("POST", "/code/approvals/{id}/decision"),
+    ];
+
+    for (method, path) in paths {
+        let path = path.replace("{id}", &id.to_string());
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty(), "{method} {path}: {body:?}");
+    }
 }

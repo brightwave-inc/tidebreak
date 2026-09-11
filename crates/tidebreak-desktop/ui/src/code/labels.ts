@@ -40,7 +40,7 @@ export const LIFECYCLE_LABELS: Record<CodeSessionLifecycle, string> = {
   created: "Created",
   idle: "Idle",
   running: "Running",
-  fenced: "Fenced",
+  fenced: "Reconnecting…",
   ended: "Ended",
 };
 
@@ -144,20 +144,21 @@ export type ModeCaps = Pick<
 >;
 
 export function fenceReasonText(reason: FenceReason): string {
-  if (reason.type === "orphan_alive") {
-    return "An engine process is still running from a previous session. Reap it before starting another turn.";
+  switch (reason.type) {
+    case "orphan_alive":
+      return "Reconnecting to the session. Your transcript is kept.";
+    case "resume_lost":
+      return `The engine cannot restore this session. ${reason.detail} Your transcript is kept.`;
+    case "probe_ambiguous":
+      return `The session's process could not be identified safely. ${reason.detail}`;
+    case "repeated_turn_failures":
+      return `The session stopped after ${reason.count} failed turns. ${reason.detail}`;
+    case "terminal_flush_missing":
+      return `The remote session ended without its final output. ${reason.detail}`;
+    case "incarnation_unresolved":
+    case "sandbox_lost":
+      return `The remote session could not be restored. ${reason.detail} Your transcript is kept.`;
   }
-  if (reason.type === "resume_lost") {
-    return `The engine no longer has this session, so it cannot continue (${reason.detail}). Reap it to start a fresh engine session in this workspace; the transcript above is kept.`;
-  }
-  if (
-    reason.type === "incarnation_unresolved" ||
-    reason.type === "sandbox_lost" ||
-    reason.type === "terminal_flush_missing"
-  ) {
-    return `${reason.detail} Reap the session to close out the remote sandbox and start fresh; the journal above is kept.`;
-  }
-  return reason.detail;
 }
 
 /**
@@ -552,7 +553,7 @@ export function attentionLabel(attention: Attention): string {
     case "idle":
       return "Idle";
     case "fenced":
-      return "Fenced";
+      return "Reconnecting…";
     case "manual":
       return attention.state.note || "Pinned";
   }
@@ -568,6 +569,8 @@ export function attentionTooltip(attention: Attention): string {
       return `Stalled · idle ${attention.state.idle_secs}s`;
     case "needs_you":
       return `${attentionLabel(attention)} · ${attention.state.source}`;
+    case "fenced":
+      return "Reconnecting automatically. Your transcript is kept; the interrupted turn will not run again.";
     case "manual":
       return attention.state.note
         ? `Pinned · ${attention.state.note}`

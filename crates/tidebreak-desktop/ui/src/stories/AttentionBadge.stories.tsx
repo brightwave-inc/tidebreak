@@ -47,7 +47,7 @@ export const DoneUnreviewed: Story = {
   args: { attention: attentionDoneUnreviewed },
 };
 
-export const Fenced: Story = {
+export const Reconnecting: Story = {
   args: { attention: attentionFenced },
 };
 

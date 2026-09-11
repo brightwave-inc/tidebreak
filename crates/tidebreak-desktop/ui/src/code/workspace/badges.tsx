@@ -8,20 +8,14 @@ import { followScrollBehavior } from "@/ChatScroll";
 import { useRegisteredCodeSession } from "./CodeSessionPane";
 
 export function SessionAttentionBadge({
-  sessionId,
-  client,
-  fallback,
+  attention,
 }: {
-  sessionId: string;
-  client: ApiClient;
-  fallback: Attention | undefined;
+  attention: Attention | undefined;
 }) {
-  const store = useRegisteredCodeSession(sessionId, client);
-  const live = store((state) => state.attention);
-  const attention = live ?? fallback;
   // The lifecycle indicator owns live motion in this header. Keep the
   // attention mark for states that carry separate information.
-  if (attention?.state.type === "working") return null;
+  if (attention?.state.type === "working" || attention?.state.type === "fenced")
+    return null;
   return <AttentionBadge compact attention={attention} />;
 }
 

@@ -1804,6 +1804,10 @@ pub struct SessionDigest {
     pub harness_kind: Option<HarnessKind>,
     pub lifecycle: SessionLifecycle,
     pub attention: Attention,
+    /// Recovery cause, independent of a manual attention pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fence_reason: Option<FenceReason>,
     pub title: String,
     pub turn_count: i64,
     /// Timestamp trigger delivery uses to rank candidate sessions: the newest
@@ -1867,6 +1871,7 @@ impl From<crate::code::bus::SessionDigest> for SessionDigest {
             harness_kind: Some(digest.harness_kind),
             lifecycle: digest.lifecycle,
             attention: digest.attention,
+            fence_reason: digest.fence_reason,
             title: digest.title,
             turn_count: digest.turn_count,
             trigger_target_at: Some(digest.trigger_target_at),
@@ -1905,6 +1910,9 @@ pub enum UpdateNotice {
         #[ts(optional)]
         harness_kind: Option<HarnessKind>,
         lifecycle: SessionLifecycle,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        fence_reason: Option<Box<tidebreak_core::FenceReason>>,
         attention: Attention,
         title: String,
         turn_count: i64,
@@ -2043,6 +2051,7 @@ impl UpdateNotice {
             kind: wire.kind,
             harness_kind: wire.harness_kind,
             lifecycle: wire.lifecycle,
+            fence_reason: wire.fence_reason.map(Box::new),
             attention: wire.attention,
             title: wire.title,
             turn_count: wire.turn_count,

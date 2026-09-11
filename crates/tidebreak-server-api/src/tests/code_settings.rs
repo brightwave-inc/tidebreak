@@ -43,7 +43,7 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
         let session = session.clone();
         async move {
             let response = client
-                .post(format!("http://{addr}/code/sessions/{session}/mode"))
+                .post(format!("http://{addr}/sessions/{session}/mode"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "permission_mode": mode }))
                 .send()
@@ -65,7 +65,7 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
     // It stuck, and the engine came back up under it rather than being left
     // stopped by the relaunch.
     let reread: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .get(format!("http://{addr}/sessions/{session}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -93,7 +93,7 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
         "an unhonored mode must be refused: {body}"
     );
     let still: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .get(format!("http://{addr}/sessions/{session}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -129,7 +129,7 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
 
     // A turn is what gives the engine a session to resume into.
     let accepted = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .post(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "one" }))
         .send()
@@ -138,7 +138,7 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "auto" }))
         .send()
@@ -156,7 +156,7 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
     );
 
     let still: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .get(format!("http://{addr}/sessions/{session}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -222,7 +222,7 @@ async fn opencode_reasoning_is_never_reported_as_active() {
         ("effort", serde_json::json!({ "reasoning_effort": "high" })),
     ] {
         let refused = client
-            .post(format!("http://{addr}/code/sessions/{session_id}/{path}"))
+            .post(format!("http://{addr}/sessions/{session_id}/{path}"))
             .bearer_auth(&token)
             .json(&body)
             .send()
@@ -234,7 +234,7 @@ async fn opencode_reasoning_is_never_reported_as_active() {
     }
 
     let debug: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/debug"))
+        .get(format!("http://{addr}/sessions/{session_id}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -393,7 +393,7 @@ async fn unsupported_fast_mode_is_refused_on_create_and_live_update() {
     let session: serde_json::Value = created.json().await.unwrap();
     let refused = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/fast-mode",
+            "http://{addr}/sessions/{}/fast-mode",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -443,7 +443,7 @@ async fn a_model_switch_deactivates_incompatible_execution_settings() {
     let session_id = json_id(&session);
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "switch", "model": "steady" }))
         .send()
@@ -459,7 +459,7 @@ async fn a_model_switch_deactivates_incompatible_execution_settings() {
     assert!(!inputs[0].fast_mode);
 
     let debug: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/debug"))
+        .get(format!("http://{addr}/sessions/{session_id}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -515,7 +515,7 @@ async fn a_queued_turn_receives_the_validated_effective_settings() {
         let session_id = session_id.clone();
         tokio::spawn(async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "first" }))
                 .send()
@@ -525,7 +525,7 @@ async fn a_queued_turn_receives_the_validated_effective_settings() {
     };
     let _ = wait_for_open_turn(&runtime, parsed).await;
     let queued = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "second", "model": "steady" }))
         .send()
@@ -602,7 +602,7 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
     .await;
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/effort"))
+        .post(format!("http://{addr}/sessions/{session_id}/effort"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "reasoning_effort": "low" }))
         .send()
@@ -613,7 +613,7 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
     assert_eq!(body["kind"], "session_settings_changed", "{body}");
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "still default" }))
         .send()
@@ -638,7 +638,7 @@ async fn an_engine_without_an_effort_ladder_refuses_the_route() {
         .remove(0);
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/effort"))
+        .post(format!("http://{addr}/sessions/{session}/effort"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "reasoning_effort": "high" }))
         .send()
@@ -667,7 +667,7 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
         .remove(0);
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "auto" }))
         .send()
@@ -687,7 +687,7 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
     // the old mode back: the worker holds its own copy of the row, and every
     // turn persists the whole thing.
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .post(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "after the switch" }))
         .send()
@@ -696,7 +696,7 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
     assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
 
     let reread: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .get(format!("http://{addr}/sessions/{session}/debug"))
         .bearer_auth(&token)
         .send()
         .await
@@ -739,7 +739,7 @@ async fn a_permission_mode_intent_persistence_failure_never_reaches_the_engine()
     .await;
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "auto" }))
         .send()
@@ -791,7 +791,7 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
     .await;
 
     let response = client
-        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .post(format!("http://{addr}/sessions/{session}/mode"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "auto" }))
         .send()
@@ -820,7 +820,7 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
     ));
 
     let blocked = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .post(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "must not run" }))
         .send()

@@ -267,7 +267,7 @@ async fn complete_one_turn(
     let session_id = session["id"].as_str().unwrap().to_owned();
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(token)
         .json(&serde_json::json!({
             "message": "Fix the flaky retry test in the auth crate"

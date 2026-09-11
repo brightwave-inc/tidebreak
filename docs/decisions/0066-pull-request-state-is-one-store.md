@@ -15,7 +15,7 @@ its own cache, and its own clock:
 | Representation | Fetcher | Freshness | Read by |
 |---|---|---|---|
 | `PullRequestDigest` | `gh pr view` ×2 + `gh pr checks` + timeline | 20 s `PrDigestCache` (`gh.rs`) | workspace header, Review tab |
-| `code_workspace.pr` column | side effect of a digest read | as old as the last read | workspace cards, `/code/updates` digests |
+| `code_workspace.pr` column | side effect of a digest read | as old as the last read | workspace cards, `/updates` digests |
 | `code_pull_request` facts | detector, sweeps, delivery reads | ≤ 61 s, no check state | attributed lists, stacks, triggers |
 | Delivery summaries | `gh pr list` / `gh pr view` + REST | 30 s aggregate cache | delivery center, detail sheet, notifications |
 
@@ -94,7 +94,7 @@ it all day must never notice it in their rate limit.
    idle workspace, but no longer skips the state read.
 4. **A change broadcasts once.** The store diffs on write; a changed row
    emits workspace digests for every attributed workspace (the existing
-   `/code/updates` channel) plus one delivery update, and the delivery page
+   `/updates` channel) plus one delivery update, and the delivery page
    and background monitor drop their own poll timers. `GET
    /code/workspaces/{id}/pr` stops calling GitHub in the request path: it
    reads local git plus the row, so opening a workspace stops paying the
