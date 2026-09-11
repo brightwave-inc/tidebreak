@@ -443,7 +443,9 @@ The provider adapters own only their control-plane and command transports:
   execute API returns one merged output string (`result`) with no separate
   stderr stream. That merged text is filed as stdout; stderr on the normalized
   response stays empty unless a future toolbox payload includes distinct
-  `stdout` / `stderr` fields.
+  `stdout` / `stderr` fields. Daytona delivers exit code and output in one JSON
+  body; a response over the decode cap cannot be parsed, so oversized Daytona
+  output fails the command rather than returning a truncated capture.
 
 ### File staging
 

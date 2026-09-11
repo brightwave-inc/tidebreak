@@ -28,39 +28,6 @@ pub(crate) async fn decode_bounded_json<T: DeserializeOwned>(
         .map_err(|_| ExecError::Unavailable(format!("{provider} returned an invalid response")))
 }
 
-/// Decode JSON, keeping a truncation flag when the body exceeded `max_bytes`.
-///
-/// Extra bytes are drained so the connection can close cleanly. A body that
-/// was truncated may fail to parse; callers that need a partial command result
-/// should size `max_bytes` to hold a complete document.
-pub(crate) async fn decode_bounded_json_truncated<T: DeserializeOwned>(
-    response: Response,
-    provider: &str,
-    max_bytes: usize,
-) -> Result<(T, bool), ExecError> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
-            ExecError::Unavailable(format!("{provider} returned an incomplete response"))
-        })?;
-        if truncated {
-            continue;
-        }
-        if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            let keep = max_bytes.saturating_sub(bytes.len());
-            bytes.extend_from_slice(&chunk[..keep]);
-            truncated = true;
-            continue;
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let value = serde_json::from_slice(&bytes)
-        .map_err(|_| ExecError::Unavailable(format!("{provider} returned an invalid response")))?;
-    Ok((value, truncated))
-}
-
 /// Download one workspace file, refusing anything beyond the transfer bound.
 pub(crate) async fn download_bounded_file(
     response: Response,

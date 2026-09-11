@@ -10,9 +10,7 @@ use tidebreak_core::{ExecDegradation, SecretProvider};
 use tidebreak_egress::{EgressEnforcement, EgressPolicy};
 
 use crate::credential::SecretCredential;
-use crate::http::{
-    decode_bounded_json, decode_bounded_json_truncated, download_bounded_file, multipart_file,
-};
+use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
     connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
@@ -685,18 +683,14 @@ impl DaytonaExecutionProvider {
                     error.unwrap_or_default().into_execute(),
                     started,
                     true,
-                    false,
                 ));
             }
             return Err(provider_status_error(status).into());
         }
-        let (body, oversized) = decode_bounded_json_truncated::<ExecuteResponse>(
-            response,
-            "Daytona",
-            MAX_DAYTONA_EXECUTE_BYTES,
-        )
-        .await?;
-        Ok(daytona_captured_response(body, started, false, oversized))
+        let body =
+            decode_bounded_json::<ExecuteResponse>(response, "Daytona", MAX_DAYTONA_EXECUTE_BYTES)
+                .await?;
+        Ok(daytona_captured_response(body, started, false))
     }
 
     fn toolbox_file_url(&self, session: &RemoteSession, suffix: &str) -> Result<Url, ExecError> {
@@ -1195,7 +1189,6 @@ fn daytona_captured_response(
     body: ExecuteResponse,
     started: Instant,
     timed_out: bool,
-    oversized: bool,
 ) -> ExecResponse {
     let mut capture = Capture::default();
     match (body.stdout, body.stderr) {
@@ -1210,9 +1203,6 @@ fn daytona_captured_response(
                 capture.append(stderr.as_bytes(), StreamKind::Stderr);
             }
         }
-    }
-    if oversized {
-        capture.mark_truncated();
     }
     capture.response(
         ExecProviderKind::Daytona,

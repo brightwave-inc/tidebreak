@@ -14,7 +14,6 @@ pub(crate) enum StreamKind {
 pub(crate) struct Capture {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    total: usize,
     truncated: bool,
 }
 
@@ -27,7 +26,6 @@ impl Capture {
         let available = MAX_CAPTURE_BYTES.saturating_sub(target.len());
         let kept = available.min(bytes.len());
         target.extend_from_slice(&bytes[..kept]);
-        self.total = self.stdout.len().saturating_add(self.stderr.len());
         self.truncated |= kept < bytes.len();
     }
 

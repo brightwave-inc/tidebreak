@@ -471,6 +471,9 @@ impl DockerExecutionProvider {
         let output = bounded_output(child, CONTROL_TIMEOUT, CONTROL_CAPTURE_BYTES)
             .await
             .ok_or(ControlFailure::Unreachable)?;
+        if output.timed_out {
+            return Err(ControlFailure::Unreachable);
+        }
         if output.status == Some(0) {
             return Ok(output.stdout);
         }
@@ -718,7 +721,7 @@ impl DockerExecutionProvider {
         // exit status is how it says so. A command that exits 124 by itself is
         // indistinguishable from one that was stopped — the same conflation
         // every backend's timeout reporting carries.
-        let timed_out = output.status == Some(TIMEOUT_EXIT) || output.status.is_none();
+        let timed_out = output.status == Some(TIMEOUT_EXIT) || output.timed_out;
         Ok(capture.response(
             ExecProviderKind::Docker,
             started,
@@ -1124,6 +1127,9 @@ struct CapturedOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     truncated: bool,
+    /// True when the wait deadline fired. Distinct from a signal kill, which
+    /// is not a timeout.
+    timed_out: bool,
 }
 
 struct DrainedStream {
@@ -1161,17 +1167,32 @@ async fn bounded_output(
             .ok()
             .and_then(Result::ok),
     };
-    let stdout = stdout_task.await.unwrap_or_else(|_| DrainedStream {
-        bytes: Vec::new(),
-        truncated: false,
-    });
-    let stderr = stderr_task.await.unwrap_or_else(|_| DrainedStream {
-        bytes: Vec::new(),
-        truncated: false,
-    });
+    let stdout = match tokio::time::timeout(CLI_GRACE, stdout_task).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) => DrainedStream {
+            bytes: Vec::new(),
+            truncated: false,
+        },
+        Err(_) => DrainedStream {
+            bytes: Vec::new(),
+            truncated: true,
+        },
+    };
+    let stderr = match tokio::time::timeout(CLI_GRACE, stderr_task).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) => DrainedStream {
+            bytes: Vec::new(),
+            truncated: false,
+        },
+        Err(_) => DrainedStream {
+            bytes: Vec::new(),
+            truncated: true,
+        },
+    };
     Some(CapturedOutput {
         status: status.and_then(|status| status.code()),
         truncated: stdout.truncated || stderr.truncated || timed_out,
+        timed_out,
         stdout: stdout.bytes,
         stderr: stderr.bytes,
     })
@@ -1252,10 +1273,10 @@ fn inspect_args(reference: &str) -> Vec<String> {
 /// The documents image ships GNU coreutils `timeout`. Unless `--foreground` is
 /// given, that `timeout` starts `COMMAND` in a new process group and delivers
 /// `TERM`/`KILL` to the group, so descendants that stay in the group are
-/// stopped with the command. `--` keeps a command whose first byte is `-`
-/// from being parsed as a `timeout` option. We do not wrap the command in
-/// `setsid`: a new session would move descendants *out* of the group `timeout`
-/// signals.
+/// stopped with the command. Option parsing already stops at DURATION, so
+/// GNU `timeout` does not accept `--` after the duration (`timeout 2 -- cmd`
+/// tries to run `--`). We do not wrap the command in `setsid`: a new session
+/// would move descendants *out* of the group `timeout` signals.
 fn exec_command_args(
     container: &str,
     request: &ExecRequest,
@@ -1269,7 +1290,6 @@ fn exec_command_args(
         "timeout".to_owned(),
         format!("--kill-after={TIMEOUT_KILL_AFTER_SECS}"),
         timeout_seconds(timeout).to_string(),
-        "--".to_owned(),
         request.command.clone(),
     ];
     args.extend(request.arguments.iter().cloned());
@@ -1654,7 +1674,6 @@ mod tests {
                 "timeout",
                 "--kill-after=5",
                 "30",
-                "--",
                 "python3",
                 "-c",
                 "print('a; rm -rf /')",

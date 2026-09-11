@@ -575,9 +575,12 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
         if !response.status().is_success() {
             return Err(provider_status_error(response.status()).into());
         }
-        let body = decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_LIST_RESPONSE_BYTES)
-            .await
-            .map_err(RemoteSessionError::Provider)?;
+        let mut body =
+            decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_LIST_RESPONSE_BYTES)
+                .await
+                .map_err(RemoteSessionError::Provider)?;
+        let truncated = body.entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        body.entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         let mut entries = Vec::new();
         for entry in body.entries {
             if entry.name.is_empty() {
@@ -603,8 +606,6 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
             });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
-        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
-        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         Ok(WorkspaceListing { entries, truncated })
     }
 }
@@ -1572,6 +1573,19 @@ mod tests {
         assert_eq!(listing.entries[0].path, "data/report.bin");
         assert!(!listing.entries[0].directory);
         assert_eq!(listing.entries[0].size_bytes, Some(content.len() as u64));
+
+        {
+            let mut files = state.files.lock().unwrap();
+            for index in 0..MAX_WORKSPACE_LIST_ENTRIES + 1 {
+                files.insert(format!("/home/user/many-{index:03}"), vec![b'x']);
+            }
+        }
+        let listing = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.entries.len(), MAX_WORKSPACE_LIST_ENTRIES);
 
         provider.destroy_workspace(&workspace).await.unwrap();
         assert_eq!(state.deletes.load(Ordering::SeqCst), 1);

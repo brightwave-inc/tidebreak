@@ -152,23 +152,41 @@ impl ExecutionReceipt {
 
 /// Hash of the model-authored command identity.
 ///
-/// Host-injected fields such as per-turn overlay paths on folder grants are
-/// excluded: a replay across turns must not report [`ExecError::IdentityConflict`]
-/// merely because the overlay directory changed. The request has no model-set
-/// environment or stdin today; those belong here if they are ever added.
+/// Folder-grant overlay paths are per-turn host injection and are omitted so a
+/// replay across turns does not report [`ExecError::IdentityConflict`] merely
+/// because the overlay directory changed. The grant roots and access themselves
+/// stay in the hash. `workspace_id` is the chat workspace, not a per-turn
+/// field, so it is included. The request has no model-set environment or stdin
+/// today; those belong here if they are ever added.
 pub(crate) fn request_fingerprint(request: &ExecRequest) -> Result<String, ExecError> {
     #[derive(Serialize)]
+    struct FingerprintGrant<'a> {
+        path: &'a std::path::PathBuf,
+        access: crate::ExecFolderAccess,
+    }
+    #[derive(Serialize)]
     struct Fingerprint<'a> {
+        workspace_id: &'a crate::ExecutionWorkspaceId,
         command: &'a str,
         arguments: &'a [String],
         cwd: &'a str,
         files: &'a [crate::WorkspaceFilePath],
+        folder_grants: Vec<FingerprintGrant<'a>>,
     }
     let bytes = serde_json::to_vec(&Fingerprint {
+        workspace_id: &request.workspace_id,
         command: &request.command,
         arguments: &request.arguments,
         cwd: &request.cwd,
         files: &request.files,
+        folder_grants: request
+            .folder_grants
+            .iter()
+            .map(|grant| FingerprintGrant {
+                path: &grant.path,
+                access: grant.access,
+            })
+            .collect(),
     })
     .map_err(|_| ExecError::InvalidRequest("request is not serializable".into()))?;
     let digest = Sha256::digest(bytes);
@@ -188,9 +206,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{
-        ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, WorkspaceFilePath,
-    };
+    use crate::{ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId};
 
     fn request() -> ExecRequest {
         ExecRequest::new(
@@ -238,6 +254,17 @@ mod tests {
             request_fingerprint(&left).unwrap(),
             request_fingerprint(&right).unwrap()
         );
+        let other_root = request()
+            .with_folder_grants(vec![ExecFolderGrant::new(
+                PathBuf::from("/granted/other"),
+                ExecFolderAccess::ReadWrite,
+            )
+            .unwrap()])
+            .unwrap();
+        assert_ne!(
+            request_fingerprint(&left).unwrap(),
+            request_fingerprint(&other_root).unwrap()
+        );
         let receipt = ExecutionReceipt::from_outcome(
             request_fingerprint(&left).unwrap(),
             &Err(ExecError::Unavailable("gone".into())),
@@ -270,6 +297,5 @@ mod tests {
             request_fingerprint(&request()).unwrap(),
             request_fingerprint(&staged).unwrap()
         );
-        let _ = WorkspaceFilePath::parse("output/a.txt").unwrap();
     }
 }
