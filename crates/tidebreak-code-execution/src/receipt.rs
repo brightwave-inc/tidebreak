@@ -232,22 +232,27 @@ mod tests {
 
     #[test]
     fn overlay_path_is_not_part_of_the_fingerprint() {
+        let temp = std::env::temp_dir();
+        let grant_root = temp.join("tidebreak-exec-granted-folder");
+        let overlay_a = temp.join("tidebreak-exec-overlay-a");
+        let overlay_b = temp.join("tidebreak-exec-overlay-b");
+        let other_grant_root = temp.join("tidebreak-exec-granted-other");
         let left = request()
             .with_folder_grants(vec![ExecFolderGrant::new(
-                PathBuf::from("/granted/folder"),
+                grant_root.clone(),
                 ExecFolderAccess::ReadWrite,
             )
             .unwrap()
-            .staged_at(PathBuf::from("/tmp/overlay-a"))
+            .staged_at(overlay_a)
             .unwrap()])
             .unwrap();
         let right = request()
             .with_folder_grants(vec![ExecFolderGrant::new(
-                PathBuf::from("/granted/folder"),
+                grant_root,
                 ExecFolderAccess::ReadWrite,
             )
             .unwrap()
-            .staged_at(PathBuf::from("/tmp/overlay-b"))
+            .staged_at(overlay_b)
             .unwrap()])
             .unwrap();
         assert_eq!(
@@ -256,7 +261,7 @@ mod tests {
         );
         let other_root = request()
             .with_folder_grants(vec![ExecFolderGrant::new(
-                PathBuf::from("/granted/other"),
+                other_grant_root,
                 ExecFolderAccess::ReadWrite,
             )
             .unwrap()])
