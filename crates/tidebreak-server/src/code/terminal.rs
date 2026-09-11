@@ -7,12 +7,27 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
+#[cfg(unix)]
+use unix::ProcessTree;
+#[cfg(windows)]
+use windows::ProcessTree;
+#[cfg(unix)]
+type TerminalMaster = Box<dyn MasterPty + Send>;
+#[cfg(windows)]
+type TerminalMaster = windows::Master;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::PtySize;
+#[cfg(unix)]
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty};
 use tidebreak_core::{CodeTerminalId, OwnerId, WorkspaceId};
 use tokio::sync::broadcast;
 
@@ -55,6 +70,7 @@ pub struct TerminalHub {
 struct HubInner {
     by_id: HashMap<CodeTerminalId, Arc<Mutex<LiveTerminal>>>,
     by_workspace: HashMap<WorkspaceId, Vec<CodeTerminalId>>,
+    reservations: HashMap<WorkspaceId, usize>,
 }
 
 struct LiveTerminal {
@@ -75,14 +91,17 @@ struct LiveTerminal {
     producing: bool,
     created_at: DateTime<Utc>,
     writer: Option<Box<dyn Write + Send>>,
-    master: Option<Box<dyn MasterPty + Send>>,
-    killer: Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+    master: Option<TerminalMaster>,
+    tree: Option<Arc<ProcessTree>>,
+    reader_exit: Arc<TerminalExit>,
+    reader_thread: Option<thread::JoinHandle<()>>,
+    reaper_thread: Option<thread::JoinHandle<()>>,
     exit: Arc<TerminalExit>,
     coalesce: Coalesce,
 }
 
 struct TerminalExit {
-    done: Mutex<bool>,
+    done: Mutex<Option<bool>>,
     changed: Condvar,
 }
 
@@ -137,6 +156,7 @@ impl TerminalHub {
             inner: Mutex::new(HubInner {
                 by_id: HashMap::new(),
                 by_workspace: HashMap::new(),
+                reservations: HashMap::new(),
             }),
             notices: Mutex::new(HashMap::new()),
         }
@@ -166,7 +186,7 @@ impl TerminalHub {
     ) -> Result<TerminalSnapshot, TerminalError> {
         let cols = clamp_size(cols.unwrap_or(DEFAULT_COLS))?;
         let rows = clamp_size(rows.unwrap_or(DEFAULT_ROWS))?;
-        self.reserve_slot(workspace_id)?;
+        let reservation = self.reserve_slot(workspace_id)?;
         let spawned = spawn_pty(cwd, cols, rows)?;
         let id = CodeTerminalId::new();
         let live = LiveTerminal {
@@ -181,20 +201,28 @@ impl TerminalHub {
             created_at: Utc::now(),
             writer: Some(spawned.writer),
             master: Some(spawned.master),
-            killer: Some(spawned.killer),
+            tree: Some(spawned.tree),
+            reader_exit: Arc::new(TerminalExit::new(false)),
+            reader_thread: None,
+            reaper_thread: None,
             exit: Arc::new(TerminalExit::new(false)),
             coalesce: Coalesce::new(),
         };
         let handle = Arc::new(Mutex::new(live));
-        self.insert(workspace_id, id, handle.clone());
         let notices = self.notices_sender(owner);
-        start_reader(handle.clone(), notices.clone(), spawned.reader);
-        start_reaper(
+        let reader_thread = start_reader(handle.clone(), notices.clone(), spawned.reader);
+        let reaper_thread = start_reaper(
             handle.clone(),
             notices,
             spawned.child,
             handle.lock().expect("terminal").exit.clone(),
         );
+        {
+            let mut live = handle.lock().expect("terminal");
+            live.reader_thread = Some(reader_thread);
+            live.reaper_thread = Some(reaper_thread);
+        }
+        reservation.insert(id, handle.clone());
         Ok(lock_snapshot(&handle))
     }
 
@@ -209,7 +237,7 @@ impl TerminalHub {
     ) -> Result<TerminalSnapshot, TerminalError> {
         let cols = clamp_size(cols)?;
         let rows = clamp_size(rows)?;
-        self.reserve_slot(workspace_id)?;
+        let reservation = self.reserve_slot(workspace_id)?;
         let id = CodeTerminalId::new();
         let live = LiveTerminal {
             id,
@@ -223,12 +251,15 @@ impl TerminalHub {
             created_at: Utc::now(),
             writer: None,
             master: None,
-            killer: None,
+            tree: None,
+            reader_exit: Arc::new(TerminalExit::new(true)),
+            reader_thread: None,
+            reaper_thread: None,
             exit: Arc::new(TerminalExit::new(true)),
             coalesce: Coalesce::new(),
         };
         let handle = Arc::new(Mutex::new(live));
-        self.insert(workspace_id, id, handle.clone());
+        reservation.insert(id, handle.clone());
         Ok(lock_snapshot(&handle))
     }
 
@@ -350,34 +381,18 @@ impl TerminalHub {
         let handle = self
             .handle(workspace_id, id)
             .ok_or(TerminalError::NotFound)?;
-        {
-            let mut live = handle.lock().expect("terminal");
-            live.kill_and_end();
-        }
+        shutdown(&handle, Instant::now() + TERMINAL_EXIT_GRACE)?;
         self.remove(workspace_id, id);
         Ok(())
     }
 
-    pub fn close_workspace(&self, workspace_id: WorkspaceId) {
-        let ids = {
-            let inner = self.inner.lock().expect("terminal hub");
-            inner
-                .by_workspace
-                .get(&workspace_id)
-                .cloned()
-                .unwrap_or_default()
-        };
-        for id in ids {
-            let _ = self.close(workspace_id, id);
-        }
-    }
-
-    /// Stop every terminal and prove that each shell process exited.
-    ///
-    /// Archive treats a timeout as uncertainty and preserves the checkout.
+    /// Stop terminals and retain any uncertain shutdown so archive can retry it.
     pub async fn close_workspace_and_wait(&self, workspace_id: WorkspaceId) -> bool {
         let handles = {
             let inner = self.inner.lock().expect("terminal hub");
+            if inner.reservations.get(&workspace_id).copied().unwrap_or(0) != 0 {
+                return false;
+            }
             inner
                 .by_workspace
                 .get(&workspace_id)
@@ -386,24 +401,29 @@ impl TerminalHub {
                 .filter_map(|id| inner.by_id.get(id).cloned())
                 .collect::<Vec<_>>()
         };
-        let exits = handles
-            .iter()
-            .map(|handle| {
-                let mut live = handle.lock().expect("terminal");
-                live.kill_and_end();
-                live.exit.clone()
-            })
-            .collect::<Vec<_>>();
-        for handle in handles {
-            let id = handle.lock().expect("terminal").id;
-            self.remove(workspace_id, id);
-        }
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let deadline = Instant::now() + TERMINAL_EXIT_GRACE;
-            exits.into_iter().all(|exit| exit.wait_until(deadline))
+            handles
+                .into_iter()
+                .map(|handle| {
+                    let id = handle.lock().expect("terminal").id;
+                    (id, shutdown(&handle, deadline).is_ok())
+                })
+                .collect::<Vec<_>>()
         })
-        .await
-        .unwrap_or(false)
+        .await;
+        let Ok(results) = result else {
+            return false;
+        };
+        let mut complete = true;
+        for (id, stopped) in results {
+            if stopped {
+                self.remove(workspace_id, id);
+            } else {
+                complete = false;
+            }
+        }
+        complete
     }
 
     /// Append output as if the PTY had produced it. Tests and the reader thread.
@@ -423,28 +443,22 @@ impl TerminalHub {
         apply_coalesce(&mut live, &handle, &notices, workspace_id, id);
     }
 
-    fn reserve_slot(&self, workspace_id: WorkspaceId) -> Result<(), TerminalError> {
-        let inner = self.inner.lock().expect("terminal hub");
+    fn reserve_slot(&self, workspace_id: WorkspaceId) -> Result<Reservation<'_>, TerminalError> {
+        let mut inner = self.inner.lock().expect("terminal hub");
         let count = inner
             .by_workspace
             .get(&workspace_id)
             .map(Vec::len)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + inner.reservations.get(&workspace_id).copied().unwrap_or(0);
         if count >= MAX_TERMINALS_PER_WORKSPACE {
             return Err(TerminalError::WorkspaceCap);
         }
-        Ok(())
-    }
-
-    fn insert(
-        &self,
-        workspace_id: WorkspaceId,
-        id: CodeTerminalId,
-        handle: Arc<Mutex<LiveTerminal>>,
-    ) {
-        let mut inner = self.inner.lock().expect("terminal hub");
-        inner.by_id.insert(id, handle);
-        inner.by_workspace.entry(workspace_id).or_default().push(id);
+        *inner.reservations.entry(workspace_id).or_default() += 1;
+        Ok(Reservation {
+            hub: self,
+            workspace_id,
+        })
     }
 
     fn remove(&self, workspace_id: WorkspaceId, id: CodeTerminalId) {
@@ -480,34 +494,102 @@ impl Default for TerminalHub {
     }
 }
 
-impl LiveTerminal {
-    fn kill_and_end(&mut self) {
-        if let Some(mut killer) = self.killer.take() {
-            let _ = killer.kill();
-        }
-        self.writer = None;
-        self.master = None;
-        self.ended = true;
-        self.producing = false;
+struct Reservation<'a> {
+    hub: &'a TerminalHub,
+    workspace_id: WorkspaceId,
+}
+
+impl Reservation<'_> {
+    fn insert(self, id: CodeTerminalId, handle: Arc<Mutex<LiveTerminal>>) {
+        let mut inner = self.hub.inner.lock().expect("terminal hub");
+        inner.by_id.insert(id, handle);
+        inner
+            .by_workspace
+            .entry(self.workspace_id)
+            .or_default()
+            .push(id);
     }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.hub.inner.lock().expect("terminal hub");
+        if let Some(count) = inner.reservations.get_mut(&self.workspace_id) {
+            *count -= 1;
+            if *count == 0 {
+                inner.reservations.remove(&self.workspace_id);
+            }
+        }
+    }
+}
+
+fn shutdown(handle: &Arc<Mutex<LiveTerminal>>, deadline: Instant) -> Result<(), TerminalError> {
+    let (tree, exit, reader_exit) = {
+        let mut live = handle.lock().expect("terminal");
+        live.ended = true;
+        (
+            live.tree.clone(),
+            Arc::clone(&live.exit),
+            Arc::clone(&live.reader_exit),
+        )
+    };
+    if let Some(tree) = &tree {
+        if !tree
+            .terminate_and_wait(deadline)
+            .map_err(|error| TerminalError::Io(error.to_string()))?
+        {
+            return Err(TerminalError::Io("terminal processes did not stop".into()));
+        }
+        tree.cancel_reader();
+    }
+    if !exit.wait_until(deadline) || !reader_exit.wait_until(deadline) {
+        return Err(TerminalError::Io(
+            "terminal shutdown did not complete".into(),
+        ));
+    }
+    #[cfg(windows)]
+    if tree.as_ref().is_some_and(|tree| !tree.reader_done()) {
+        return Err(TerminalError::Io(
+            "terminal reader handle remains open".into(),
+        ));
+    }
+    let (reader, reaper, writer, master) = {
+        let mut live = handle.lock().expect("terminal");
+        (
+            live.reader_thread.take(),
+            live.reaper_thread.take(),
+            live.writer.take(),
+            live.master.take(),
+        )
+    };
+    // Completion is signaled after the blocking handles are released. Join
+    // outside the terminal mutex because each worker uses it on its way out.
+    for worker in [reader, reaper].into_iter().flatten() {
+        worker
+            .join()
+            .map_err(|_| TerminalError::Io("terminal worker failed".into()))?;
+    }
+    drop(writer);
+    drop(master);
+    Ok(())
 }
 
 impl TerminalExit {
     fn new(done: bool) -> Self {
         Self {
-            done: Mutex::new(done),
+            done: Mutex::new(done.then_some(true)),
             changed: Condvar::new(),
         }
     }
 
-    fn mark_done(&self) {
-        *self.done.lock().expect("terminal exit") = true;
+    fn mark_done(&self, succeeded: bool) {
+        *self.done.lock().expect("terminal exit") = Some(succeeded);
         self.changed.notify_all();
     }
 
     fn wait_until(&self, deadline: Instant) -> bool {
         let mut done = self.done.lock().expect("terminal exit");
-        while !*done {
+        while done.is_none() {
             let now = Instant::now();
             if now >= deadline {
                 return false;
@@ -517,22 +599,23 @@ impl TerminalExit {
                 .wait_timeout(done, deadline.saturating_duration_since(now))
                 .expect("terminal exit");
             done = waited.0;
-            if waited.1.timed_out() && !*done {
+            if waited.1.timed_out() && done.is_none() {
                 return false;
             }
         }
-        true
+        *done == Some(true)
     }
 }
 
 struct Spawned {
-    master: Box<dyn MasterPty + Send>,
+    master: TerminalMaster,
     writer: Box<dyn Write + Send>,
     reader: Box<dyn Read + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    tree: Arc<ProcessTree>,
 }
 
+#[cfg(unix)]
 fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
     let system = native_pty_system();
     let pair = system
@@ -548,25 +631,59 @@ fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError>
     for (key, value) in embedded_terminal_env() {
         cmd.env(key, value);
     }
-    let child = pair
+    let mut child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|err| TerminalError::Spawn(err.to_string()))?;
-    let killer = child.clone_killer();
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|err| TerminalError::Spawn(err.to_string()))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|err| TerminalError::Spawn(err.to_string()))?;
+    let setup = (|| {
+        let tree = ProcessTree::new(
+            child
+                .process_id()
+                .ok_or_else(|| std::io::Error::other("terminal process id unavailable"))?,
+        )?;
+        let fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| std::io::Error::other("terminal reader handle unavailable"))?;
+        let reader = tree.reader(fd)?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok::<_, std::io::Error>((tree, reader, writer))
+    })();
+    let (tree, reader, writer) = match setup {
+        Ok(parts) => parts,
+        Err(error) => {
+            if let Some(pid) = child.process_id() {
+                if let Ok(tree) = ProcessTree::new(pid) {
+                    let _ = tree.terminate_and_wait(Instant::now() + TERMINAL_EXIT_GRACE);
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(TerminalError::Spawn(error.to_string()));
+        }
+    };
     Ok(Spawned {
         master: pair.master,
         writer,
         reader,
         child,
-        killer,
+        tree,
+    })
+}
+
+#[cfg(windows)]
+fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
+    let spawned = windows::spawn(&user_shell(), cwd, cols, rows, &embedded_terminal_env())
+        .map_err(|error| TerminalError::Spawn(error.to_string()))?;
+    Ok(Spawned {
+        master: spawned.master,
+        writer: spawned.writer,
+        reader: spawned.reader,
+        child: spawned.child,
+        tree: spawned.tree,
     })
 }
 
@@ -612,7 +729,7 @@ fn start_reader(
     handle: Arc<Mutex<LiveTerminal>>,
     notices: broadcast::Sender<TerminalNotice>,
     mut reader: Box<dyn Read + Send>,
-) {
+) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("code-terminal-read".into())
         .spawn(move || {
@@ -639,7 +756,9 @@ fn start_reader(
                     Err(_) => break,
                 }
             }
+            drop(reader);
             if let Ok(mut live) = handle.lock() {
+                live.reader_exit.mark_done(true);
                 live.ended = true;
                 live.producing = false;
                 let workspace_id = live.workspace_id;
@@ -648,7 +767,7 @@ fn start_reader(
                 publish_notice(&notices, workspace_id, id);
             }
         })
-        .expect("code-terminal-read thread");
+        .expect("code-terminal-read thread")
 }
 
 fn start_reaper(
@@ -656,12 +775,29 @@ fn start_reaper(
     notices: broadcast::Sender<TerminalNotice>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     exit: Arc<TerminalExit>,
-) {
+) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("code-terminal-wait".into())
         .spawn(move || {
-            let _ = child.wait();
-            exit.mark_done();
+            #[cfg(unix)]
+            let succeeded = {
+                let tree = handle.lock().expect("terminal").tree.clone().expect("process tree");
+                // Keep the unreaped shell as the session identity until every
+                // descendant stops. A failed cleanup must retain that anchor.
+                loop {
+                    match tree.wait_and_reap(child.as_mut()) {
+                        Ok(_) => break true,
+                        Err(error) => {
+                            tracing::warn!(%error, "terminal process cleanup failed; retaining session ownership");
+                            thread::sleep(Duration::from_secs(1));
+                        }
+                    }
+                }
+            };
+            #[cfg(windows)]
+            let succeeded = child.wait().is_ok();
+            drop(child);
+            exit.mark_done(succeeded);
             if let Ok(mut live) = handle.lock() {
                 if !live.ended {
                     // The shell is gone, so nothing can be typed at it. Leave
@@ -677,7 +813,7 @@ fn start_reaper(
                 }
             }
         })
-        .expect("code-terminal-wait thread");
+        .expect("code-terminal-wait thread")
 }
 
 fn publish_notice(
@@ -691,31 +827,77 @@ fn publish_notice(
     });
 }
 
+struct PendingNotice {
+    due: Instant,
+    handle: Weak<Mutex<LiveTerminal>>,
+    notices: broadcast::Sender<TerminalNotice>,
+    workspace_id: WorkspaceId,
+    terminal_id: CodeTerminalId,
+}
+
 fn schedule_trailing_notice(
     handle: Arc<Mutex<LiveTerminal>>,
     notices: broadcast::Sender<TerminalNotice>,
     workspace_id: WorkspaceId,
     terminal_id: CodeTerminalId,
 ) {
-    thread::Builder::new()
-        .name("code-terminal-notice".into())
-        .spawn(move || {
-            thread::sleep(TERMINAL_NOTICE_COALESCE);
-            let mut live = match handle.lock() {
-                Ok(live) => live,
-                Err(_) => return,
-            };
-            if !live.coalesce.dirty {
-                live.coalesce.scheduled = false;
-                return;
-            }
-            live.coalesce.dirty = false;
-            live.coalesce.scheduled = false;
-            live.coalesce.quiet_until = Instant::now() + TERMINAL_NOTICE_COALESCE;
-            drop(live);
-            publish_notice(&notices, workspace_id, terminal_id);
-        })
-        .ok();
+    static SCHEDULER: std::sync::OnceLock<std::sync::mpsc::Sender<PendingNotice>> =
+        std::sync::OnceLock::new();
+    let scheduler = SCHEDULER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<PendingNotice>();
+        thread::Builder::new()
+            .name("code-terminal-notice".into())
+            .spawn(move || {
+                let mut pending = Vec::<PendingNotice>::new();
+                loop {
+                    let received = match pending.iter().map(|notice| notice.due).min() {
+                        Some(due) => {
+                            receiver.recv_timeout(due.saturating_duration_since(Instant::now()))
+                        }
+                        None => receiver
+                            .recv()
+                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+                    };
+                    match received {
+                        Ok(notice) => pending.push(notice),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    let now = Instant::now();
+                    pending.retain(|notice| {
+                        if notice.due > now {
+                            return true;
+                        }
+                        if let Some(handle) = notice.handle.upgrade() {
+                            if let Ok(mut live) = handle.lock() {
+                                let dirty = live.coalesce.dirty;
+                                live.coalesce.dirty = false;
+                                live.coalesce.scheduled = false;
+                                if dirty {
+                                    live.coalesce.quiet_until = now + TERMINAL_NOTICE_COALESCE;
+                                    drop(live);
+                                    publish_notice(
+                                        &notice.notices,
+                                        notice.workspace_id,
+                                        notice.terminal_id,
+                                    );
+                                }
+                            }
+                        }
+                        false
+                    });
+                }
+            })
+            .expect("code-terminal-notice thread");
+        sender
+    });
+    let _ = scheduler.send(PendingNotice {
+        due: Instant::now() + TERMINAL_NOTICE_COALESCE,
+        handle: Arc::downgrade(&handle),
+        notices,
+        workspace_id,
+        terminal_id,
+    });
 }
 
 fn apply_coalesce(
@@ -818,16 +1000,22 @@ impl ByteRing {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            if self.len == self.cap {
-                self.head = (self.head + 1) % self.cap;
-                self.start += 1;
-                self.len -= 1;
-            }
-            let idx = (self.head + self.len) % self.cap;
-            self.buf[idx] = byte;
-            self.len += 1;
+        if bytes.len() >= self.cap {
+            self.start = self.end() + bytes.len() as u64 - self.cap as u64;
+            self.buf.copy_from_slice(&bytes[bytes.len() - self.cap..]);
+            self.head = 0;
+            self.len = self.cap;
+            return;
         }
+        let discard = (self.len + bytes.len()).saturating_sub(self.cap);
+        self.start += discard as u64;
+        self.head = (self.head + discard) % self.cap;
+        self.len -= discard;
+        let tail = (self.head + self.len) % self.cap;
+        let first = bytes.len().min(self.cap - tail);
+        self.buf[tail..tail + first].copy_from_slice(&bytes[..first]);
+        self.buf[..bytes.len() - first].copy_from_slice(&bytes[first..]);
+        self.len += bytes.len();
     }
 
     fn read(&self, cursor: u64, max: usize) -> (Vec<u8>, u64, bool, bool) {
@@ -847,10 +1035,10 @@ impl ByteRing {
         }
         if take > 0 {
             let offset = (pos - self.start) as usize;
-            for i in 0..take {
-                let idx = (self.head + offset + i) % self.cap;
-                out.push(self.buf[idx]);
-            }
+            let first_index = (self.head + offset) % self.cap;
+            let first = take.min(self.cap - first_index);
+            out.extend_from_slice(&self.buf[first_index..first_index + first]);
+            out.extend_from_slice(&self.buf[..take - first]);
         }
         (out, pos + take as u64, overflow, take < available)
     }
@@ -859,6 +1047,73 @@ impl ByteRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reservations_enforce_the_cap_before_any_spawn_finishes() {
+        let hub = TerminalHub::new();
+        let workspace = workspace();
+        let reservations = (0..MAX_TERMINALS_PER_WORKSPACE)
+            .map(|_| hub.reserve_slot(workspace).unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            hub.reserve_slot(workspace),
+            Err(TerminalError::WorkspaceCap)
+        ));
+        drop(reservations);
+        assert!(hub.reserve_slot(workspace).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_stays_registered_for_the_next_archive_attempt() {
+        let hub = TerminalHub::new();
+        let workspace = workspace();
+        let snapshot = hub
+            .open_memory(&OwnerId::local(), workspace, 80, 24)
+            .unwrap();
+        let handle = handle_of(&hub, snapshot.id);
+        handle.lock().unwrap().exit = Arc::new(TerminalExit::new(false));
+        handle.lock().unwrap().exit.mark_done(false);
+        assert!(!hub.close_workspace_and_wait(workspace).await);
+        assert!(hub.get(workspace, snapshot.id).is_some());
+        handle.lock().unwrap().exit.mark_done(true);
+        assert!(hub.close_workspace_and_wait(workspace).await);
+        assert!(hub.get(workspace, snapshot.id).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_terminal_stops_background_jobs_and_joins_the_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = TerminalHub::new();
+        let workspace = workspace();
+        let snapshot = hub
+            .open(&OwnerId::local(), workspace, root.path(), None, None)
+            .unwrap();
+        let handle = handle_of(&hub, snapshot.id);
+        hub.write(
+            workspace,
+            snapshot.id,
+            b"/bin/sh -c 'trap \"\" HUP; sleep 60 & echo $! > terminal-child.pid; wait' &\n",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.path().join("terminal-child.pid").exists() {
+            assert!(Instant::now() < deadline, "terminal job never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        hub.close(workspace, snapshot.id).unwrap();
+        let live = handle.lock().unwrap();
+        assert!(!live.producing);
+        assert!(live.reader_thread.is_none());
+        assert!(live.reaper_thread.is_none());
+        assert!(live.master.is_none());
+        assert!(live
+            .tree
+            .as_ref()
+            .unwrap()
+            .terminate_and_wait(Instant::now())
+            .unwrap());
+    }
 
     fn workspace() -> WorkspaceId {
         WorkspaceId::new()

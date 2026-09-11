@@ -60,7 +60,11 @@ pub async fn close_workspace_terminals(
     Path(id): Path<WorkspaceId>,
 ) -> Result<StatusCode, ServerError> {
     let _ = code.get_workspace(id).await?;
-    state.terminals.close_workspace(id);
+    if !state.terminals.close_workspace_and_wait(id).await {
+        return Err(map_terminal(TerminalError::Io(
+            "terminal shutdown did not complete".into(),
+        )));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -70,9 +74,10 @@ pub async fn close_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
 ) -> Result<StatusCode, ServerError> {
     let _ = code.get_workspace(path.id).await?;
-    state
-        .terminals
-        .close(path.id, path.tid)
+    let terminals = state.terminals.clone();
+    tokio::task::spawn_blocking(move || terminals.close(path.id, path.tid))
+        .await
+        .map_err(|error| map_terminal(TerminalError::Io(error.to_string())))?
         .map_err(map_terminal)?;
     Ok(StatusCode::NO_CONTENT)
 }

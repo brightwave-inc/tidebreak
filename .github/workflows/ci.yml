@@ -634,6 +634,7 @@ jobs:
           $suites = @(
             @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-code-execution", "--locked"),
             @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-harness", "--locked"),
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server-core", "--lib", "code::terminal", "--locked"),
             @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server", "--lib", "code::", "--locked")
           )
           foreach ($suite in $suites) {
