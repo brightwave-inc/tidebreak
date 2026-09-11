@@ -230,10 +230,10 @@ pub struct WrittenTranscript {
 ///
 /// Every fork writes a fresh generation directory named by a UUID, so a
 /// child keeps reading a whole, immutable handoff no matter how many later
-/// forks the same session produces. Ending the parent session prunes
-/// generations that no live child still names. A failure before the
-/// transcript publishes removes the whole directory rather than leaving a
-/// partial handoff for the child to trip over.
+/// forks the same session produces. Generations stay until the owning
+/// workspace's private root is removed. A failure before the transcript
+/// publishes removes the whole directory rather than leaving a partial
+/// handoff for the child to trip over.
 pub(crate) async fn write_transcript(
     private_root: &super::scratch::ScratchRoot,
     blobs: &dyn BlobStore,
@@ -307,118 +307,6 @@ pub(crate) async fn write_transcript(
             .flatten(),
         truncated: rendered.truncated,
     })
-}
-
-/// Generation ids a live child still names in user input.
-///
-/// The composer puts the generation directory path in the child's first
-/// message. A UUID that is not that path's generation name is ignored.
-pub(crate) fn generations_named_by_children(
-    parent: tidebreak_core::SessionId,
-    texts: impl IntoIterator<Item = impl AsRef<str>>,
-) -> HashSet<uuid::Uuid> {
-    let marker = format!("/{FORKS_DIR}/{parent}/");
-    let mut named = HashSet::new();
-    for text in texts {
-        let text = text.as_ref();
-        let mut rest = text;
-        while let Some(at) = rest.find(&marker) {
-            let after = &rest[at + marker.len()..];
-            let token = after
-                .split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '-'))
-                .next()
-                .unwrap_or("");
-            if let Ok(generation) = token.parse::<uuid::Uuid>() {
-                named.insert(generation);
-            }
-            rest = after;
-        }
-    }
-    named
-}
-
-/// Named generations to keep after reading live children.
-///
-/// `None` for the child list, or `Err` for any live child's turns, means skip
-/// pruning so a failed read cannot delete a handoff still in use. Successful
-/// reads still produce a keep-set, including an empty one when nothing is named.
-pub(crate) fn keep_fork_generations_from_reads(
-    parent: tidebreak_core::SessionId,
-    live_child_reads: Option<Vec<Result<Vec<String>, ()>>>,
-) -> Option<HashSet<uuid::Uuid>> {
-    let reads = live_child_reads?;
-    let mut texts = Vec::new();
-    for read in reads {
-        texts.extend(read.ok()?);
-    }
-    Some(generations_named_by_children(parent, texts))
-}
-
-/// Delete this session's fork generations that no live child still names.
-///
-/// Unknown names stay. An empty keep-set removes every UUID generation.
-pub(crate) fn prune_session_fork_generations(
-    private_root: &super::scratch::ScratchRoot,
-    session_id: tidebreak_core::SessionId,
-    keep: &HashSet<uuid::Uuid>,
-) -> std::io::Result<()> {
-    let Some(session_dir) =
-        super::scratch::scratch_dir_if_exists(private_root, &format!("{FORKS_DIR}/{session_id}"))?
-    else {
-        return Ok(());
-    };
-    let mut failures = Vec::new();
-    let mut remaining = 0usize;
-    for entry in session_dir.read_dir()? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                failures.push(error.to_string());
-                remaining += 1;
-                continue;
-            }
-        };
-        let name = entry.file_name();
-        let Some(generation) = name
-            .to_str()
-            .and_then(|name| name.parse::<uuid::Uuid>().ok())
-        else {
-            remaining += 1;
-            continue;
-        };
-        if keep.contains(&generation) {
-            remaining += 1;
-            continue;
-        }
-        let result = match session_dir.symlink_metadata(&name) {
-            Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
-                session_dir.remove_file(&name)
-            }
-            Ok(metadata) if metadata.is_dir() => session_dir.remove_dir_all(&name),
-            Ok(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "fork generation is not a regular directory",
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        };
-        if let Err(error) = result {
-            remaining += 1;
-            failures.push(format!("{}: {error}", name.to_string_lossy()));
-        }
-    }
-    if remaining == 0 {
-        let _ = super::scratch::scratch_dir(private_root, FORKS_DIR)
-            .and_then(|forks| forks.remove_dir_all(std::ffi::OsStr::new(&session_id.to_string())));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "could not prune every fork generation: {}",
-            failures.join("; ")
-        )))
-    }
 }
 
 /// A turn's full-record file name, `turn-0007.md` for turn 7.
@@ -2082,22 +1970,27 @@ mod tests {
         );
     }
 
-    /// Ending the parent session deletes fork generations that no live child
-    /// still names in its first message.
+    /// Desktop `forkConversation` writes the transcript before any child
+    /// session exists, and `createCodeSession` does not bind `parent_session`.
+    /// Those generations must survive parent-session private-root removal and
+    /// only leave with the workspace private root.
     #[tokio::test]
-    async fn ending_a_session_removes_its_fork_generations() {
-        let private = tempfile::tempdir().expect("tempdir");
+    async fn fork_generations_stay_until_the_workspace_private_root_is_removed() {
+        let data_dir = tempfile::tempdir().expect("data dir");
         let blob_root = tempfile::tempdir().expect("blob tempdir");
         let blobs = FsBlobStore::new(blob_root.path());
-        let session = session();
-        let turns = vec![turn(session.id, 1, "hello")];
+        let workspace_id = WorkspaceId::new();
+        let private_root =
+            crate::code::scratch::workspace_root(data_dir.path(), workspace_id).expect("workspace");
+        let parent = session();
+        let turns = vec![turn(parent.id, 1, "hello")];
         let complete = all_turn_ids(&turns);
-        let private_root = test_root(&private);
 
-        let first = write_transcript(
+        // Draft: transcript on disk, no child session row yet.
+        let draft = write_transcript(
             &private_root,
             &blobs,
-            &session,
+            &parent,
             ForkCut {
                 turns: &turns,
                 excluded: 0,
@@ -2106,11 +1999,13 @@ mod tests {
             &complete,
         )
         .await
-        .expect("first write");
-        let second = write_transcript(
+        .expect("draft write");
+        // Unparented sibling: another generation the composer would attach
+        // without `parent_session_id`.
+        let unparented = write_transcript(
             &private_root,
             &blobs,
-            &session,
+            &parent,
             ForkCut {
                 turns: &turns,
                 excluded: 0,
@@ -2119,60 +2014,25 @@ mod tests {
             &complete,
         )
         .await
-        .expect("second write");
-        let first_generation = Path::new(&first.dir)
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let keep = generations_named_by_children(
-            session.id,
-            [format!(
-                "Read the attached transcript first\n`{}/transcript.md`",
-                first.dir
-            )],
+        .expect("unparented write");
+
+        crate::code::scratch::remove_session_root(data_dir.path(), parent.id).expect("parent end");
+
+        assert!(
+            Path::new(&draft.dir).is_dir(),
+            "an open fork draft must survive parent session end"
         );
-        assert!(keep.contains(&first_generation));
+        assert!(
+            Path::new(&unparented.dir).is_dir(),
+            "an unparented fork session's generation must survive parent session end"
+        );
 
-        prune_session_fork_generations(&private_root, session.id, &keep).expect("prune");
+        crate::code::scratch::remove_workspace_root(data_dir.path(), workspace_id)
+            .expect("workspace gone");
 
-        assert!(Path::new(&first.dir).is_dir());
-        assert!(!Path::new(&second.dir).exists());
-
-        prune_session_fork_generations(&private_root, session.id, &HashSet::new()).expect("end");
-
-        assert!(!Path::new(&first.dir).exists());
-        assert!(!private
-            .path()
-            .join(FORKS_DIR)
-            .join(session.id.to_string())
-            .exists());
-    }
-
-    #[test]
-    fn a_failed_live_child_read_skips_prune_instead_of_dropping_named_generations() {
-        let parent = tidebreak_core::SessionId::new();
-        let named = uuid::Uuid::new_v4();
-        let unnamed = uuid::Uuid::new_v4();
-        let text = format!("Read `/{FORKS_DIR}/{parent}/{named}/transcript.md`");
-
-        let failed_list = keep_fork_generations_from_reads(parent, None);
-        assert!(failed_list.is_none());
-
-        let failed_turns =
-            keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![text.clone()]), Err(())]));
-        assert!(failed_turns.is_none());
-
-        let keep = keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![text])]))
-            .expect("successful reads still prune");
-        assert!(keep.contains(&named));
-        assert!(!keep.contains(&unnamed));
-
-        let empty = keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![])]))
-            .expect("empty successful reads still prune");
-        assert!(empty.is_empty());
+        assert!(!Path::new(&draft.dir).exists());
+        assert!(!Path::new(&unparented.dir).exists());
+        assert!(!private_root.path().exists());
     }
 
     #[tokio::test]

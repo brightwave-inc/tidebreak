@@ -592,87 +592,20 @@ impl CodeRuntime {
         Ok(())
     }
 
-    /// Drop the session private root and fork generations no live child names.
+    /// Drop this session's private root. Fork generations stay under the
+    /// workspace private root until that workspace is archived or released.
+    ///
+    /// Desktop forks do not set `parent_session_id`, and `forkConversation`
+    /// writes the transcript before any child session exists, so pruning from
+    /// `child_sessions` at parent end would delete an open draft or a live
+    /// unparented sibling's handoff.
     async fn prune_session_private_scratch(&self, session: &Session) {
-        if let Some(workspace_id) = session.workspace_id {
-            match crate::code::scratch::workspace_root(&self.data_dir, workspace_id) {
-                Ok(private_root) => match self.live_child_fork_generations(session).await {
-                    Some(keep) => {
-                        if let Err(error) = crate::code::fork::prune_session_fork_generations(
-                            &private_root,
-                            session.id,
-                            &keep,
-                        ) {
-                            tracing::warn!(
-                                session = %session.id,
-                                "code-mode: could not prune fork generations: {error}"
-                            );
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            session = %session.id,
-                            "code-mode: skipping fork generation prune after a child read failed"
-                        );
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        session = %session.id,
-                        "code-mode: could not open private storage to prune fork generations: {error}"
-                    );
-                }
-            }
-        }
         if let Err(error) = crate::code::scratch::remove_session_root(&self.data_dir, session.id) {
             tracing::warn!(
                 session = %session.id,
                 "code-mode: could not delete the session private root: {error}"
             );
         }
-    }
-
-    /// Named generations to keep, or `None` to skip pruning so a failed read
-    /// cannot delete a handoff a live child still names.
-    async fn live_child_fork_generations(&self, parent: &Session) -> Option<HashSet<uuid::Uuid>> {
-        let children = match tidebreak_core::db::code::child_sessions(
-            &self.db,
-            &parent.owner,
-            parent.id,
-        )
-        .await
-        {
-            Ok(children) => children,
-            Err(error) => {
-                tracing::warn!(
-                    session = %parent.id,
-                    error = %error,
-                    "code-mode: could not list child sessions before pruning fork generations"
-                );
-                return None;
-            }
-        };
-        let mut reads = Vec::new();
-        for child in children {
-            if child.lifecycle == SessionLifecycle::Ended {
-                continue;
-            }
-            match list_turns(&self.db, &parent.owner, child.id).await {
-                Ok(turns) => {
-                    reads.push(Ok(turns.into_iter().map(|turn| turn.user_input).collect()));
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        session = %parent.id,
-                        child = %child.id,
-                        error = %error,
-                        "code-mode: could not read a child session before pruning fork generations"
-                    );
-                    reads.push(Err(()));
-                }
-            }
-        }
-        crate::code::fork::keep_fork_generations_from_reads(parent.id, Some(reads))
     }
 
     pub async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {
