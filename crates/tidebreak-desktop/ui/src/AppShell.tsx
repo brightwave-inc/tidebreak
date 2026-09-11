@@ -429,9 +429,17 @@ export function AppShell() {
     "code-view-pr": () => askWorkspace("view_pr"),
     "code-source-control": () => askWorkspace("source_control"),
     "code-archive-workspace": () => {
-      if (!codeWorkspaceIdFromPath(router.state.location.pathname))
-        return false;
-      useCodeUiStore.getState().requestArchiveWorkspace();
+      // A rail selection wins over the open workspace: the reader who
+      // cmd-clicked three cards means those three, whichever page is up. The
+      // chord is consumed either way so macOS never reads it as the
+      // "Search man Page Index" text service over a stray selection.
+      const code = useCodeUiStore.getState();
+      if (code.selectedWorkspaceIds.length > 0) {
+        code.requestArchiveSelection();
+        return;
+      }
+      if (!codeWorkspaceIdFromPath(router.state.location.pathname)) return;
+      code.requestArchiveWorkspace();
     },
     "code-prev-tab": () => applyCodeLayout((l) => stepCenterTab(l, -1)),
     "code-next-tab": () => applyCodeLayout((l) => stepCenterTab(l, 1)),

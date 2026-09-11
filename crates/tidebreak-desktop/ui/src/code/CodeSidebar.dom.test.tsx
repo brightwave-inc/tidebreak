@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -833,6 +834,81 @@ describe("CodeSidebar", () => {
       "ws-channel",
     ]);
     expect(router.state.location.pathname).toBe("/code");
+  });
+
+  it("archives every selected workspace from the keyboard chord", async () => {
+    const archiveCodeWorkspace = vi.fn(
+      async (id: string) =>
+        ({
+          id,
+          repo_id: "repo-1",
+          title: id,
+          worktree_path: `/tmp/app/.worktrees/${id}`,
+          branch_name: `tidebreak/${id}`,
+          base_ref: "main",
+          status: "archived",
+          created_at: "2026-08-15T00:00:00.000Z",
+        }) as never,
+    );
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "ws-1",
+        repo_id: "repo-1",
+        title: "Fix login",
+        worktree_path: "/tmp/app/.worktrees/fix-login",
+        branch_name: "tidebreak/fix-login",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-2",
+        repo_id: "repo-1",
+        title: "Fix logout",
+        worktree_path: "/tmp/app/.worktrees/fix-logout",
+        branch_name: "tidebreak/fix-logout",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+    ]);
+    await renderWithRouter(
+      <AppContextProvider
+        value={{
+          ...app,
+          client: { ...client, archiveCodeWorkspace } as never,
+        }}
+      >
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code/w/ws-1" },
+    );
+    const first = await screen.findByRole("button", { name: /^Fix login/ });
+    const second = await screen.findByRole("button", { name: /^Fix logout/ });
+    fireEvent.click(second, { metaKey: true });
+    expect(first).toHaveAttribute("aria-selected", "true");
+    expect(second).toHaveAttribute("aria-selected", "true");
+
+    // Cmd+Shift+A with the rail focused must not widen the selection first.
+    fireEvent.keyDown(second, { key: "A", metaKey: true, shiftKey: true });
+    expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([
+      "ws-1",
+      "ws-2",
+    ]);
+
+    // What the shell does with the chord when the rail holds a selection.
+    act(() => useCodeUiStore.getState().requestArchiveSelection());
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText("Archive 2 workspaces?"),
+    ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(archiveCodeWorkspace).toHaveBeenCalledTimes(2));
+    expect(archiveCodeWorkspace.mock.calls.map(([id]) => id)).toEqual([
+      "ws-1",
+      "ws-2",
+    ]);
+    expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([]);
   });
 
   it("opens and clears selection on an unmodified click", async () => {

@@ -409,7 +409,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyA"],
     mod: true,
     shift: true,
-    description: "Archive this workspace",
+    description: "Archive this workspace or the selected ones",
     group: "Ship",
     scope: "code",
     allowInEditable: true,
