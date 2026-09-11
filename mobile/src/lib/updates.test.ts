@@ -169,5 +169,4 @@ describe("attentionSessionCount", () => {
       attentionSessionCount([needsYou, stalled, quiet, doneIdle, endedDone]),
     ).toBe(2);
   });
->>>>>>> ba4e156e (feat(mobile): replace the home launcher with an orienting hub)
 });

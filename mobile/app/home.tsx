@@ -303,59 +303,64 @@ export default function HomeScreen() {
 
         <View className="gap-2">
           <SectionLabel>Machine</SectionLabel>
-          <View className="rounded-xl border border-border bg-background p-4 gap-2">
-            <Text className="text-xs uppercase tracking-wide text-muted-foreground">
-              Code workspaces
-            </Text>
+          <View className="rounded-xl border border-border bg-background px-4">
+            <View className="flex-row items-center justify-between py-3">
+              <Text className="text-xs uppercase tracking-wide text-muted-foreground">
+                Code workspaces
+              </Text>
+              {!workspacesQuery.isLoading && !workspacesQuery.isError ? (
+                <Text className="text-xs text-muted-foreground">
+                  {workspaces.length}
+                </Text>
+              ) : null}
+            </View>
             {workspacesQuery.isError ? (
-              <ErrorText>
-                {workspacesQuery.error instanceof Error
-                  ? workspacesQuery.error.message
-                  : "Could not list workspaces."}
-              </ErrorText>
+              <View className="border-t border-border py-3">
+                <ErrorText>
+                  {workspacesQuery.error instanceof Error
+                    ? workspacesQuery.error.message
+                    : "Could not list workspaces."}
+                </ErrorText>
+              </View>
+            ) : workspacesQuery.isLoading ? (
+              <View className="border-t border-border py-3">
+                <Text className="text-sm text-muted-foreground">Loading…</Text>
+              </View>
+            ) : workspaces.length === 0 ? (
+              <View className="border-t border-border py-3">
+                <Text className="text-sm text-muted-foreground">
+                  No active workspaces are available on this machine.
+                </Text>
+              </View>
             ) : (
-              <Text className="text-base text-foreground">
-                {workspacesQuery.isLoading
-                  ? "Loading…"
-                  : `${workspaces.length} workspace${workspaces.length === 1 ? "" : "s"}`}
-              </Text>
-            )}
-            {!workspacesQuery.isLoading &&
-            !workspacesQuery.isError &&
-            workspaces.length === 0 ? (
-              <Text className="text-sm text-muted-foreground">
-                No active workspaces are available on this machine.
-              </Text>
-            ) : null}
-            {workspaces.map((workspace) => (
-              <Pressable
-                key={workspace.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Start a session in ${workspace.title || workspace.branch_name}`}
-                className="gap-1 border-t border-border py-3 first:border-t-0"
-                onPress={() =>
-                  router.push({
-                    pathname: "/workspace/[id]/start",
-                    params: { id: workspace.id },
-                  })
-                }
-              >
-                <Text className="text-sm font-medium text-foreground">
-                  {workspace.title || "Untitled workspace"}
-                </Text>
-                <Text
-                  className="font-mono text-xs text-muted-foreground"
-                  numberOfLines={1}
+              workspaces.map((workspace) => (
+                <Pressable
+                  key={workspace.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Start a session in ${workspace.title || workspace.branch_name}`}
+                  className="flex-row items-center justify-between gap-3 border-t border-border py-3"
+                  onPress={() =>
+                    router.push({
+                      pathname: "/workspace/[id]/start",
+                      params: { id: workspace.id },
+                    })
+                  }
                 >
-                  {workspace.branch_name}
-                </Text>
-              </Pressable>
-            ))}
-            {workspaces.length > 0 ? (
-              <Text className="text-xs text-muted-foreground">
-                Tap a workspace to start a session.
-              </Text>
-            ) : null}
+                  <View className="min-w-0 flex-1 gap-1">
+                    <Text className="text-base text-foreground">
+                      {workspace.title || "Untitled workspace"}
+                    </Text>
+                    <Text
+                      className="font-mono text-xs text-muted-foreground"
+                      numberOfLines={1}
+                    >
+                      {workspace.branch_name}
+                    </Text>
+                  </View>
+                  <Text className="text-sm text-muted-foreground">Start  ›</Text>
+                </Pressable>
+              ))
+            )}
           </View>
         </View>
       </ScrollView>
