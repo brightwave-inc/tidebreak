@@ -88,6 +88,36 @@ pub async fn list_workspaces(
         .collect()
 }
 
+/// Workspaces owned by the caller or containing a session they may read.
+/// Shared workspace metadata does not grant access to sibling sessions or files.
+pub async fn list_readable_workspaces(
+    store: &DbStore,
+    owner: &OwnerId,
+    repo_id: Option<RepoId>,
+) -> Result<Vec<CodeWorkspace>> {
+    let shared: Vec<uuid::Uuid> = super::list_accessible_sessions(store, owner)
+        .await?
+        .into_iter()
+        .filter_map(|session| session.workspace_id.map(|id| id.0))
+        .collect();
+    let mut query = entities::code_workspace::Entity::find().filter(
+        sea_orm::Condition::any()
+            .add(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+            .add(entities::code_workspace::Column::Id.is_in(shared)),
+    );
+    if let Some(repo_id) = repo_id {
+        query = query.filter(entities::code_workspace::Column::RepoId.eq(repo_id.0));
+    }
+    query
+        .order_by_desc(entities::code_workspace::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(workspace_from_row)
+        .collect()
+}
+
 /// Every workspace on the machine, across owners.
 ///
 /// A system path, not a request path: boot recovery sweeps private scratch

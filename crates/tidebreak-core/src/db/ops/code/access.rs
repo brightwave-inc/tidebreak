@@ -317,6 +317,7 @@ pub async fn replace_external_session_contributors(
     id: SessionId,
     channel_kind: &str,
     identities: &[String],
+    visibility: Option<SessionVisibility>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<Vec<SessionAccess>>> {
     if !owns_session(store, owner, id).await? {
@@ -358,6 +359,18 @@ pub async fn replace_external_session_contributors(
             .await
             .map_err(store_err)?;
         kept.push(access_from_row(model.try_into_model().map_err(store_err)?)?);
+    }
+    if let Some(visibility) = visibility {
+        entities::session::Entity::update_many()
+            .col_expr(
+                entities::session::Column::Visibility,
+                Expr::value(visibility.as_str()),
+            )
+            .filter(entities::session::Column::Id.eq(id.0))
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
     }
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(kept))

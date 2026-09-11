@@ -1025,3 +1025,32 @@ function seedMixedSources() {
     });
   }
 }
+
+it("discovers a shared workspace without owner-only status or bulk actions", async () => {
+  const [owned] = await client.listCodeWorkspaces();
+  client.listCodeWorkspaces.mockResolvedValueOnce([
+    { ...owned, read_only: true } as typeof owned,
+  ]);
+  const getCodeWorkspacePr = vi.fn();
+  const sharedApp = {
+    ...app,
+    client: { ...client, getCodeWorkspacePr } as never,
+  };
+  const { router } = await renderWithRouter(
+    <AppContextProvider value={sharedApp}>
+      <CodeSidebar />
+    </AppContextProvider>,
+    { initialUrl: "/code" },
+  );
+  const card = await screen.findByRole("button", { name: /^Fix login/ });
+  fireEvent.click(card, { metaKey: true });
+  await waitFor(() =>
+    expect(router.state.location.pathname).toBe("/code/w/ws-1"),
+  );
+  expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([]);
+  fireEvent.contextMenu(card);
+  expect(
+    screen.queryByRole("menuitem", { name: /Archive/ }),
+  ).not.toBeInTheDocument();
+  expect(getCodeWorkspacePr).not.toHaveBeenCalled();
+});

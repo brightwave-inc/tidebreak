@@ -104,11 +104,16 @@ pub async fn list_workspaces(
     code: ScopedCode,
     Query(query): Query<ListWorkspacesQuery>,
 ) -> Result<Json<Vec<CodeWorkspaceSnapshot>>, ServerError> {
-    let workspaces = code.list_workspaces(query.repo_id).await?;
+    let workspaces = code.list_readable_workspaces(query.repo_id).await?;
     Ok(Json(
         workspaces
             .into_iter()
-            .map(CodeWorkspaceSnapshot::from)
+            .map(|workspace| {
+                let read_only = workspace.owner != *code.owner();
+                let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
+                snapshot.read_only = Some(read_only);
+                snapshot
+            })
             .collect(),
     ))
 }

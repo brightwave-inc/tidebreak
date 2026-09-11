@@ -10,7 +10,7 @@ import type { DigestsByWorkspace } from "./CodeUpdatesStore";
 
 type TargetWorkspace = Pick<
   CodeWorkspaceSnapshot,
-  "id" | "repo_id" | "status" | "pr"
+  "id" | "repo_id" | "status" | "pr" | "read_only"
 >;
 
 /**
@@ -37,6 +37,7 @@ export function codeTriggerTargetForRepository({
     workspaces
       .filter(
         (workspace) =>
+          !workspace.read_only &&
           workspace.repo_id === repoId &&
           workspace.status === "active" &&
           workspace.pr !== undefined,

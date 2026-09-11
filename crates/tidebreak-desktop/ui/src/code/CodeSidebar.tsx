@@ -166,7 +166,9 @@ export function CodeSidebar() {
   );
   const selectableIds = groups.flatMap((group) =>
     group.workspaces
-      .filter((workspace) => workspace.status !== "creating")
+      .filter(
+        (workspace) => workspace.status !== "creating" && !workspace.read_only,
+      )
       .map((workspace) => workspace.id),
   );
   const selectedWorkspaces = workspaces.filter(
@@ -689,7 +691,10 @@ function SidebarEmptyAction({
 
 function LiveWorkspaceCard(props: ComponentProps<typeof WorkspaceCard>) {
   const { client } = useApp();
-  if (typeof client.getCodeWorkspacePr !== "function") {
+  if (
+    props.workspace.read_only ||
+    typeof client.getCodeWorkspacePr !== "function"
+  ) {
     return <WorkspaceCard {...props} />;
   }
   return <ObservedWorkspaceCard {...props} client={client} />;

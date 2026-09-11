@@ -102,4 +102,25 @@ describe("codeTriggerTargetForRepository", () => {
       }),
     ).toBeNull();
   });
+  it("excludes shared read-only sessions from the owner's trigger target", () => {
+    const conversationsByWorkspace: DigestsByWorkspace = {
+      "ws-trigger": {
+        "sess-shared": codeDigest({
+          workspace: "ws-trigger",
+          session: "sess-shared",
+          harness_kind: "codex",
+          title: "Shared Slack task",
+          trigger_target_at: "2026-08-29T11:00:00Z",
+        }),
+      },
+    };
+    expect(
+      codeTriggerTargetForRepository({
+        repoId: "repo-trigger",
+        workspaces: [workspace({ read_only: true })],
+        conversationsByWorkspace,
+        doctor: harnessDoctor,
+      }),
+    ).toBeNull();
+  });
 });

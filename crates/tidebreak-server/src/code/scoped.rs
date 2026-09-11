@@ -376,6 +376,19 @@ impl ScopedCode {
         self.runtime.list_workspaces(&self.owner, repo_id).await
     }
 
+    /// Discover shared workspaces without widening owner-only mutation paths.
+    pub async fn list_readable_workspaces(
+        &self,
+        repo_id: Option<RepoId>,
+    ) -> Result<Vec<CodeWorkspace>, ServerError> {
+        Ok(tidebreak_core::db::code::list_readable_workspaces(
+            &self.runtime.db,
+            &self.owner,
+            repo_id,
+        )
+        .await?)
+    }
+
     pub async fn get_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
         self.runtime.get_workspace(&self.owner, id).await
     }
