@@ -104,6 +104,12 @@ pub trait TurnHandle: Send {
         }
     }
 
+    /// Drain native acknowledgments that arrive after a steering request returns.
+    /// Only correlated acceptance belongs here; a write or timeout proves nothing.
+    fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
+        Vec::new()
+    }
+
     /// Stops the turn. The next [`TurnHandle::wait`] reports how it ended —
     /// usually [`TurnEnd::Interrupted`], but a turn that finished first keeps
     /// its own outcome.

@@ -389,6 +389,7 @@ enum Terminal {
 struct TurnSink {
     last: Mutex<Option<Terminal>>,
     assistant: Mutex<AssistantBuffer>,
+    steer_acks: Mutex<Vec<uuid::Uuid>>,
 }
 
 #[derive(Default)]
@@ -402,6 +403,7 @@ impl TurnSink {
     fn clear(&self) {
         *self.last.lock().unwrap() = None;
         *self.assistant.lock().unwrap() = AssistantBuffer::default();
+        self.steer_acks.lock().unwrap().clear();
     }
 
     fn read(&self) -> Option<Terminal> {
@@ -463,6 +465,10 @@ impl HarnessEventSink for TurnSink {
             HarnessEvent::TurnInterrupted => {
                 *self.last.lock().unwrap() = Some(Terminal::Interrupted);
             }
+            HarnessEvent::UserSteered {
+                correlation_uuid: Some(correlation_uuid),
+                ..
+            } => self.steer_acks.lock().unwrap().push(correlation_uuid),
             HarnessEvent::AssistantMessage {
                 text,
                 parent_call_id: None,
@@ -595,6 +601,10 @@ impl TurnHandle for HarnessTurn {
         let _ = self.session.interrupt().await;
     }
 
+    fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
+        std::mem::take(&mut *self.sink.steer_acks.lock().unwrap())
+    }
+
     fn assistant_record(&mut self) -> Option<AssistantRecord> {
         self.sink.take_record()
     }
@@ -659,6 +669,20 @@ mod tests {
 
         async fn steer(&self, _text: String) -> Result<(), HarnessError> {
             Err(HarnessError::SteeringUnsupported)
+        }
+
+        async fn steer_with_correlation(
+            &self,
+            text: String,
+            correlation_uuid: Option<uuid::Uuid>,
+        ) -> Result<(), HarnessError> {
+            if correlation_uuid.is_some() {
+                Err(HarnessError::Other(
+                    "timed out waiting for native acknowledgment".into(),
+                ))
+            } else {
+                self.steer(text).await
+            }
         }
 
         fn resume_ref(&self) -> Option<String> {
@@ -1041,6 +1065,52 @@ mod tests {
             SteerOutcome::Ended(TurnEnd::Completed { success: true })
         );
         assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_steer_can_drain_its_later_native_acknowledgment() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![HarnessEvent::TurnInterrupted],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: true,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("work")).await.unwrap();
+        let correlation = uuid::Uuid::new_v4();
+        assert_eq!(
+            turn.steer_with_correlation("guidance".into(), Some(correlation))
+                .await,
+            SteerOutcome::Unacknowledged
+        );
+        assert!(turn.drain_steer_acks().is_empty());
+        engine
+            .sink
+            .emit(HarnessEvent::UserSteered {
+                text: "uncorrelated".into(),
+                correlation_uuid: None,
+            })
+            .await;
+        assert!(turn.drain_steer_acks().is_empty());
+        engine
+            .sink
+            .emit(HarnessEvent::UserSteered {
+                text: "guidance".into(),
+                correlation_uuid: Some(correlation),
+            })
+            .await;
+        assert_eq!(turn.drain_steer_acks(), vec![correlation]);
+        assert!(turn.drain_steer_acks().is_empty());
+        engine
+            .sink
+            .emit(HarnessEvent::UserSteered {
+                text: "stale".into(),
+                correlation_uuid: Some(correlation),
+            })
+            .await;
+        engine.sink.clear();
+        assert!(turn.drain_steer_acks().is_empty());
+        turn.interrupt().await;
+        assert_eq!(turn.wait().await, TurnEnd::Interrupted);
     }
 
     #[tokio::test]

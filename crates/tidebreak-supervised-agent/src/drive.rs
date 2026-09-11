@@ -14,7 +14,7 @@
 //!   that cannot reach its supervisor for ten minutes is not supervised and
 //!   must not pretend to be.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -28,7 +28,9 @@ use crate::wip::{self, CheckpointPoint, WipContext};
 use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 use tidebreak_core::code::supervisor_tools::is_result_frame;
-use tidebreak_core::code::supervisor_tools::{decode_steer_frame, is_steer_frame};
+use tidebreak_core::code::supervisor_tools::{
+    decode_steer_frame, is_steer_frame, SupervisorSteerFrame,
+};
 
 /// Consecutive retryable poll failures before the agent gives up.
 ///
@@ -104,6 +106,8 @@ pub struct Driver<E> {
     sandbox_id: Option<String>,
     /// A fresh process identity fences inbox redelivery after a pod restart.
     runtime_id: uuid::Uuid,
+    /// Original targets whose native acceptance is still unknown in this turn.
+    pending_steers: HashMap<uuid::Uuid, (i64, SupervisorSteerFrame)>,
 }
 
 enum SteerFrameStep {
@@ -144,6 +148,7 @@ impl<E: Engine> Driver<E> {
             embedded_engine: None,
             sandbox_id: inputs.sandbox_id.clone(),
             runtime_id: uuid::Uuid::new_v4(),
+            pending_steers: HashMap::new(),
         }
     }
 
@@ -345,6 +350,7 @@ impl<E: Engine> Driver<E> {
         }
 
         let end = loop {
+            self.drain_steer_acks(handle.as_mut());
             let step = tokio::select! {
                 end = handle.wait() => TurnStep::End(end),
                 () = tokio::time::sleep(self.poll_interval) => TurnStep::Tick,
@@ -364,6 +370,10 @@ impl<E: Engine> Driver<E> {
             }
         };
 
+        // The native stream can acknowledge steering while its terminal result arrives.
+        // Flush that evidence before reporting completion, then forget unresolved targets.
+        self.drain_steer_acks(handle.as_mut());
+        self.pending_steers.clear();
         let record = handle.assistant_record();
         match end {
             TurnEnd::Interrupted => {
@@ -478,6 +488,35 @@ impl<E: Engine> Driver<E> {
         None
     }
 
+    fn emit_steer_ack(&mut self, seq: i64, frame: &SupervisorSteerFrame) {
+        self.outbox.push(
+            "steer_ack",
+            serde_json::json!({
+                "seq": seq,
+                "expected_turn_id": frame.expected_turn_id,
+                "sandbox_id": frame.sandbox_id,
+                "runtime_id": frame.runtime_id,
+                "native_turn": frame.native_turn,
+                "correlation_uuid": frame.correlation_uuid,
+            }),
+        );
+    }
+
+    /// Resolve only acknowledgments for validated requests from this runtime turn.
+    fn drain_steer_acks(&mut self, handle: &mut dyn TurnHandle) {
+        for correlation in handle.drain_steer_acks() {
+            let Some((seq, frame)) = self.pending_steers.remove(&correlation) else {
+                continue;
+            };
+            if frame.native_turn == self.turn
+                && self.sandbox_id.as_deref() == Some(frame.sandbox_id.as_str())
+                && uuid::Uuid::parse_str(&frame.runtime_id).ok() == Some(self.runtime_id)
+            {
+                self.emit_steer_ack(seq, &frame);
+            }
+        }
+    }
+
     /// Delivers exactly one framed steering admission.
     async fn steer_frame(
         &mut self,
@@ -526,25 +565,26 @@ impl<E: Engine> Driver<E> {
             );
             return SteerFrameStep::Continue;
         }
+        let correlation_uuid = correlation_uuid.expect("a validated frame has a correlation");
+        if self.pending_steers.contains_key(&correlation_uuid) {
+            // A transport replay cannot replace or resend the first admitted instruction.
+            let message = self.inbox.pop_front().expect("front was just observed");
+            self.delivered_through = Some(message.seq);
+            self.advance_acknowledged_frames();
+            return SteerFrameStep::Continue;
+        }
+        self.pending_steers
+            .insert(correlation_uuid, (message.seq, frame.clone()));
         match handle
-            .steer_with_correlation(frame.body.clone(), correlation_uuid)
+            .steer_with_correlation(frame.body.clone(), Some(correlation_uuid))
             .await
         {
             SteerOutcome::Delivered => {
+                self.pending_steers.remove(&correlation_uuid);
                 let message = self.inbox.pop_front().expect("front was just observed");
                 self.delivered_through = Some(message.seq);
                 self.advance_acknowledged_frames();
-                self.outbox.push(
-                    "steer_ack",
-                    serde_json::json!({
-                        "seq": message.seq,
-                        "expected_turn_id": frame.expected_turn_id,
-                    "sandbox_id": frame.sandbox_id,
-                    "runtime_id": frame.runtime_id,
-                    "native_turn": frame.native_turn,
-                        "correlation_uuid": frame.correlation_uuid,
-                    }),
-                );
+                self.emit_steer_ack(message.seq, &frame);
                 SteerFrameStep::Continue
             }
             SteerOutcome::Unacknowledged => {
@@ -565,6 +605,7 @@ impl<E: Engine> Driver<E> {
                 SteerFrameStep::Continue
             }
             SteerOutcome::Refused => {
+                self.pending_steers.remove(&correlation_uuid);
                 // The engine refused; consume the frame so it can never run as
                 // an ordinary text turn beside the server's durable row. The
                 // server owns queue fallback through the original queue id.
@@ -586,6 +627,7 @@ impl<E: Engine> Driver<E> {
                 SteerFrameStep::Continue
             }
             SteerOutcome::Ended(end) => {
+                self.pending_steers.remove(&correlation_uuid);
                 let message = self.inbox.pop_front().expect("front was just observed");
                 self.delivered_through = Some(message.seq);
                 self.advance_acknowledged_frames();
@@ -977,6 +1019,8 @@ mod tests {
         refuse_steer: AtomicBool,
         correlated_outcome: Mutex<Option<SteerOutcome>>,
         correlated_calls: AtomicUsize,
+        steer_acks: Mutex<Vec<uuid::Uuid>>,
+        steer_acks_on_end: Mutex<Vec<uuid::Uuid>>,
         ends: tokio::sync::Mutex<mpsc::UnboundedReceiver<TurnEnd>>,
         end_sender: mpsc::UnboundedSender<TurnEnd>,
         records: Mutex<VecDeque<Option<AssistantRecord>>>,
@@ -997,6 +1041,8 @@ mod tests {
                     refuse_steer: AtomicBool::new(false),
                     correlated_outcome: Mutex::new(None),
                     correlated_calls: AtomicUsize::new(0),
+                    steer_acks: Mutex::new(Vec::new()),
+                    steer_acks_on_end: Mutex::new(Vec::new()),
                     ends: tokio::sync::Mutex::new(ends),
                     end_sender,
                     records: Mutex::new(VecDeque::new()),
@@ -1026,9 +1072,12 @@ mod tests {
     impl TurnHandle for MockTurnHandle {
         async fn wait(&mut self) -> TurnEnd {
             let mut ends = self.state.ends.lock().await;
-            ends.recv().await.unwrap_or(TurnEnd::Fatal {
+            let ended = ends.recv().await.unwrap_or(TurnEnd::Fatal {
                 message: "the scripted engine hung up".to_owned(),
-            })
+            });
+            let acks = std::mem::take(&mut *self.state.steer_acks_on_end.lock().unwrap());
+            self.state.steer_acks.lock().unwrap().extend(acks);
+            ended
         }
 
         async fn steer(&mut self, body: String) -> SteerOutcome {
@@ -1066,6 +1115,10 @@ mod tests {
 
         async fn interrupt(&mut self) {
             self.state.end_sender.send(TurnEnd::Interrupted).unwrap();
+        }
+
+        fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
+            std::mem::take(&mut *self.state.steer_acks.lock().unwrap())
         }
 
         fn assistant_record(&mut self) -> Option<AssistantRecord> {
@@ -1209,6 +1262,172 @@ mod tests {
             assert_eq!(events[0].payload["sandbox_id"], frame.sandbox_id);
             assert_eq!(events[0].payload["native_turn"], frame.native_turn);
             assert_eq!(events[0].payload["runtime_id"], frame.runtime_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_steering_ack_preserves_target_and_ignores_duplicate_or_unknown_ids() {
+        let engine = MockEngine::new();
+        *engine.state.correlated_outcome.lock().unwrap() = Some(SteerOutcome::Unacknowledged);
+        let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        let message = steering_message(1, 1, driver.runtime_id);
+        let frame = decode_steer_frame(&message.body).unwrap();
+        let correlation = frame.correlation_uuid.parse::<uuid::Uuid>().unwrap();
+        let mut handle = MockTurnHandle {
+            state: Arc::clone(&engine.state),
+        };
+        driver.inbox.push_back(message.clone());
+        assert!(driver.steer_pending(&mut handle).await.is_none());
+        assert_eq!(driver.outbox.take_batch()[0].kind, "steer_unacknowledged");
+        assert_eq!(driver.pending_steers.len(), 1);
+
+        // A duplicate transport delivery must not replace the original target or text.
+        let mut replay_frame = frame.clone();
+        replay_frame.expected_turn_id = uuid::Uuid::new_v4().to_string();
+        replay_frame.body = "changed replay".into();
+        let mut replay = message;
+        replay.seq = 2;
+        replay.body = tidebreak_core::code::supervisor_tools::encode_steer_frame(&replay_frame);
+        driver.inbox.push_back(replay);
+        assert!(driver.steer_pending(&mut handle).await.is_none());
+        assert_eq!(engine.state.correlated_calls.load(Ordering::SeqCst), 1);
+        engine.state.steer_acks.lock().unwrap().extend([
+            uuid::Uuid::new_v4(),
+            correlation,
+            correlation,
+        ]);
+        driver.drain_steer_acks(&mut handle);
+        let events = driver.outbox.take_batch();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "steer_ack");
+        assert_eq!(events[0].payload["seq"], 1);
+        assert_eq!(
+            events[0].payload["expected_turn_id"],
+            frame.expected_turn_id
+        );
+        assert_eq!(
+            events[0].payload["correlation_uuid"],
+            frame.correlation_uuid
+        );
+        assert_eq!(events[0].payload["sandbox_id"], frame.sandbox_id);
+        assert_eq!(events[0].payload["runtime_id"], frame.runtime_id);
+        assert_eq!(events[0].payload["native_turn"], frame.native_turn);
+        assert!(driver.pending_steers.is_empty());
+        engine.state.steer_acks.lock().unwrap().push(correlation);
+        driver.drain_steer_acks(&mut handle);
+        assert!(driver.outbox.take_batch().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delayed_acks_cannot_settle_stale_or_already_resolved_frames() {
+        for outcome in [SteerOutcome::Delivered, SteerOutcome::Refused] {
+            let engine = MockEngine::new();
+            *engine.state.correlated_outcome.lock().unwrap() = Some(outcome);
+            let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+            driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+            let message = steering_message(1, 1, driver.runtime_id);
+            let correlation = decode_steer_frame(&message.body)
+                .unwrap()
+                .correlation_uuid
+                .parse::<uuid::Uuid>()
+                .unwrap();
+            let stale = steering_message(2, 99, driver.runtime_id);
+            let stale_correlation = decode_steer_frame(&stale.body)
+                .unwrap()
+                .correlation_uuid
+                .parse::<uuid::Uuid>()
+                .unwrap();
+            let mut handle = MockTurnHandle {
+                state: Arc::clone(&engine.state),
+            };
+            driver.inbox.extend([message, stale]);
+            assert!(driver.steer_pending(&mut handle).await.is_none());
+            driver.outbox.take_batch();
+            assert!(driver.pending_steers.is_empty());
+            engine
+                .state
+                .steer_acks
+                .lock()
+                .unwrap()
+                .extend([correlation, stale_correlation]);
+            driver.drain_steer_acks(&mut handle);
+            assert!(driver.outbox.take_batch().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn running_ticks_flush_late_acks_and_terminal_drain_precedes_completion() {
+        for at_terminal in [false, true] {
+            let (state, url) = start_supervisor().await;
+            let engine = MockEngine::new();
+            *engine.state.correlated_outcome.lock().unwrap() = Some(SteerOutcome::Unacknowledged);
+            let mut driver = driver(engine.clone(), &url, &inputs("turn", None));
+            driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+            let message = steering_message(1, 1, driver.runtime_id);
+            let correlation = decode_steer_frame(&message.body)
+                .unwrap()
+                .correlation_uuid
+                .parse::<uuid::Uuid>()
+                .unwrap();
+            // This second request never acknowledges; turn completion must not invent one.
+            driver
+                .inbox
+                .extend([message, steering_message(2, 1, driver.runtime_id)]);
+            let run = tokio::spawn(async move {
+                driver
+                    .run_turn(TurnRequest {
+                        turn: 1,
+                        source: TurnSource::SpawnTask,
+                        input: "work".into(),
+                    })
+                    .await
+                    .unwrap();
+                driver
+            });
+            wait_for(&state, |supervisor| {
+                supervisor
+                    .events
+                    .iter()
+                    .filter(|(kind, _)| kind == "steer_unacknowledged")
+                    .count()
+                    == 2
+            })
+            .await;
+            if at_terminal {
+                engine
+                    .state
+                    .steer_acks_on_end
+                    .lock()
+                    .unwrap()
+                    .push(correlation);
+            } else {
+                engine.state.steer_acks.lock().unwrap().push(correlation);
+                wait_for(&state, |supervisor| {
+                    supervisor
+                        .events
+                        .iter()
+                        .any(|(kind, _)| kind == "steer_ack")
+                })
+                .await;
+            }
+            engine.finish(TurnEnd::Completed { success: true });
+            let driver = run.await.unwrap();
+            assert!(driver.pending_steers.is_empty());
+            let kinds = event_kinds(&state);
+            assert_eq!(
+                kinds
+                    .iter()
+                    .filter(|kind| kind.as_str() == "steer_ack")
+                    .count(),
+                1
+            );
+            let ack_position = kinds.iter().position(|kind| kind == "steer_ack").unwrap();
+            let completed_position = kinds
+                .iter()
+                .position(|kind| kind == "turn_completed")
+                .unwrap();
+            assert!(ack_position < completed_position);
         }
     }
 

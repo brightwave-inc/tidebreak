@@ -8175,3 +8175,328 @@ async fn native_tool_receipts_survive_restart_without_reexecuting_running_work()
     assert_eq!(restored.result, Some(result));
     assert_eq!(restored.call_id, row.call_id);
 }
+
+async fn pending_sandbox_steer(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+) -> crate::db::code::ExternalSteerTarget {
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::ExecutionLocation,
+            sea_orm::sea_query::Expr::value(crate::code::ExecutionLocation::Sandbox.as_str()),
+        )
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let (_, expected, correlation) = record_pending_steer(store, owner, session_id, event_id).await;
+    assert!(crate::db::code::claim_external_steer_target(
+        store,
+        owner,
+        session_id,
+        event_id,
+        expected,
+        correlation,
+        "sandbox-original",
+        2,
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .unwrap());
+    crate::db::code::external_steer_target_by_correlation(store, owner, session_id, correlation)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sandbox_steer_ack_preserves_original_text_once() {
+    use crate::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    use crate::db::code::settle_sandbox_external_steer_admission;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "sandbox-transcript").await;
+    let target = pending_sandbox_steer(&store, &owner, session, "EvTranscript").await;
+    let tail = enqueue_queued_turn(&store, &owner, &queued_message(session, "later"))
+        .await
+        .unwrap();
+    let (settled, journaled) = settle_sandbox_external_steer_admission(
+        &store,
+        &owner,
+        session,
+        &target,
+        ExternalSteerAdmission::Steered,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(settled);
+    let journaled = journaled.expect("first acknowledgment preserves the admitted input");
+    assert_eq!(
+        journaled.event,
+        Event::UserSteered {
+            text: "redirect".into(),
+            message_id: Some(target.turn_id.0),
+        }
+    );
+    let queue = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].id, tail.id);
+    assert!(matches!(
+        crate::db::code::external_steer_admission(&store, &owner, session, &target.event_id,)
+            .await
+            .unwrap(),
+        Some(ExternalMessageRecord::Replay {
+            admission: Some(ExternalSteerAdmission::Steered),
+            ..
+        })
+    ));
+    for _ in 0..2 {
+        assert_eq!(
+            settle_sandbox_external_steer_admission(
+                &store,
+                &owner,
+                session,
+                &target,
+                ExternalSteerAdmission::Steered,
+                None,
+            )
+            .await
+            .unwrap(),
+            (true, None)
+        );
+    }
+    let events = list_events(&store, &owner, session, 0, MAX_REPLAY_EVENTS)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(events, vec![journaled]);
+}
+
+#[tokio::test]
+async fn sandbox_steer_journal_failure_rolls_back_receipt_and_queue_consumption() {
+    use crate::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    use crate::db::code::settle_sandbox_external_steer_admission;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "sandbox-rollback").await;
+    let target = pending_sandbox_steer(&store, &owner, session, "EvRollback").await;
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_sandbox_steer_event BEFORE INSERT ON event \
+         BEGIN SELECT RAISE(ABORT, 'forced sandbox steering journal failure'); END",
+        )
+        .await
+        .unwrap();
+    assert!(settle_sandbox_external_steer_admission(
+        &store,
+        &owner,
+        session,
+        &target,
+        ExternalSteerAdmission::Steered,
+        None,
+    )
+    .await
+    .is_err());
+    assert!(matches!(
+        crate::db::code::external_steer_admission(&store, &owner, session, &target.event_id,)
+            .await
+            .unwrap(),
+        Some(ExternalMessageRecord::Replay {
+            admission: None,
+            ..
+        })
+    ));
+    let queue = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].id, target.turn_id);
+    assert!(list_events(&store, &owner, session, 0, MAX_REPLAY_EVENTS)
+        .await
+        .unwrap()
+        .events
+        .is_empty());
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_sandbox_steer_event")
+        .await
+        .unwrap();
+    let (settled, journaled) = settle_sandbox_external_steer_admission(
+        &store,
+        &owner,
+        session,
+        &target,
+        ExternalSteerAdmission::Steered,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(settled);
+    assert!(journaled.is_some());
+    assert!(list_queued_turns(&store, &owner, session)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn sandbox_steer_ack_requires_the_full_frozen_target_and_owner() {
+    use crate::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    use crate::db::code::settle_sandbox_external_steer_admission;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "sandbox-target-check").await;
+    let target = pending_sandbox_steer(&store, &owner, session, "EvTargetCheck").await;
+    for mismatch in [
+        "event",
+        "queue",
+        "expected",
+        "correlation",
+        "sandbox",
+        "native",
+        "runtime",
+        "owner",
+        "session",
+        "location",
+    ] {
+        let mut changed = target.clone();
+        let mut changed_owner = owner.clone();
+        let mut changed_session = session;
+        match mismatch {
+            "event" => changed.event_id = "different".into(),
+            "queue" => changed.turn_id = TurnId::new(),
+            "expected" => changed.expected_turn_id = TurnId::new(),
+            "correlation" => changed.correlation_uuid = uuid::Uuid::new_v4(),
+            "sandbox" => changed.sandbox_id = "different".into(),
+            "native" => changed.native_turn += 1,
+            "runtime" => changed.runtime_id = uuid::Uuid::new_v4(),
+            "owner" => changed_owner = OwnerId::new("different").unwrap(),
+            "session" => changed_session = SessionId::new(),
+            "location" => {
+                entities::session::Entity::update_many()
+                    .col_expr(
+                        entities::session::Column::ExecutionLocation,
+                        sea_orm::sea_query::Expr::value(
+                            crate::code::ExecutionLocation::Machine.as_str(),
+                        ),
+                    )
+                    .filter(entities::session::Column::Id.eq(session.0))
+                    .exec(&store.conn)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            settle_sandbox_external_steer_admission(
+                &store,
+                &changed_owner,
+                changed_session,
+                &changed,
+                ExternalSteerAdmission::Steered,
+                None,
+            )
+            .await
+            .unwrap(),
+            (false, None),
+            "{mismatch}"
+        );
+        assert!(
+            matches!(
+                crate::db::code::external_steer_admission(
+                    &store,
+                    &owner,
+                    session,
+                    &target.event_id,
+                )
+                .await
+                .unwrap(),
+                Some(ExternalMessageRecord::Replay {
+                    admission: None,
+                    ..
+                })
+            ),
+            "{mismatch}"
+        );
+        assert_eq!(
+            list_queued_turns(&store, &owner, session)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{mismatch}"
+        );
+        assert!(
+            list_events(&store, &owner, session, 0, MAX_REPLAY_EVENTS)
+                .await
+                .unwrap()
+                .events
+                .is_empty(),
+            "{mismatch}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sandbox_steer_refusal_and_deleted_input_do_not_create_transcript_text() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+    use crate::db::code::settle_sandbox_external_steer_admission;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "sandbox-no-text").await;
+    let refused = pending_sandbox_steer(&store, &owner, session, "EvRefused").await;
+    assert_eq!(
+        settle_sandbox_external_steer_admission(
+            &store,
+            &owner,
+            session,
+            &refused,
+            ExternalSteerAdmission::Queued,
+            Some(ExternalSteerQueuedReason::SteerUnsupported),
+        )
+        .await
+        .unwrap(),
+        (true, None)
+    );
+    assert_eq!(
+        settle_sandbox_external_steer_admission(
+            &store,
+            &owner,
+            session,
+            &refused,
+            ExternalSteerAdmission::Steered,
+            None,
+        )
+        .await
+        .unwrap(),
+        (false, None)
+    );
+    let deleted = pending_sandbox_steer(&store, &owner, session, "EvDeleted").await;
+    assert!(delete_queued_turn(&store, &owner, session, deleted.turn_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        settle_sandbox_external_steer_admission(
+            &store,
+            &owner,
+            session,
+            &deleted,
+            ExternalSteerAdmission::Steered,
+            None,
+        )
+        .await
+        .unwrap(),
+        (true, None)
+    );
+    let queue = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].id, refused.turn_id);
+    assert!(list_events(&store, &owner, session, 0, MAX_REPLAY_EVENTS)
+        .await
+        .unwrap()
+        .events
+        .is_empty());
+}

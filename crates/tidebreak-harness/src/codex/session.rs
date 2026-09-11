@@ -572,7 +572,7 @@ impl CodexSession {
                     .deadline
                     .get_or_insert_with(|| Instant::now() + CONTROL_RPC_TIMEOUT);
                 if let Some(reply) = pending.reply.take() {
-                    let _ = reply.send(Err(pending_steer_failure(&pending, detail)));
+                    let _ = reply.send(Err(pending_steer_failure(pending, detail)));
                 }
             }
             (removed, state.interrupt.take())

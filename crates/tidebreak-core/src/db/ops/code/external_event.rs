@@ -663,6 +663,83 @@ pub struct ExternalSteerTarget {
     pub runtime_id: uuid::Uuid,
 }
 
+/// Settle the frozen sandbox delivery and preserve its admitted text together.
+/// Replays return the same outcome without adding another transcript event.
+pub async fn settle_sandbox_external_steer_admission(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    target: &ExternalSteerTarget,
+    admission: ExternalSteerAdmission,
+    reason: Option<ExternalSteerQueuedReason>,
+) -> Result<(bool, Option<crate::code::SequencedEvent>)> {
+    use crate::code::{Event, ExecutionLocation, SequencedEvent};
+
+    if (admission == ExternalSteerAdmission::Steered) != reason.is_none() {
+        return Ok((false, None));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok((false, None));
+    }
+    let session = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(
+            entities::session::Column::ExecutionLocation.eq(ExecutionLocation::Sandbox.as_str()),
+        )
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    if session.is_none() {
+        return Ok((false, None));
+    }
+    let Some(receipt) = find_event_on(&transaction, owner, session_id, &target.event_id).await?
+    else {
+        return Ok((false, None));
+    };
+    if !receipt.steer_requested
+        || receipt.turn_id != target.turn_id.0
+        || receipt.expected_turn_id != Some(target.expected_turn_id.0)
+        || receipt.correlation_uuid != Some(target.correlation_uuid)
+        || receipt.steer_sandbox_id.as_deref() != Some(target.sandbox_id.as_str())
+        || receipt.steer_native_turn != Some(i64::from(target.native_turn))
+        || receipt.steer_runtime_id != Some(target.runtime_id)
+    {
+        return Ok((false, None));
+    }
+    let original = if receipt.outcome.is_none() && admission == ExternalSteerAdmission::Steered {
+        entities::code_queued_turn::Entity::find_by_id(target.turn_id.0)
+            .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+    } else {
+        None
+    };
+    let settled =
+        settle_external_steer_on(&transaction, owner, session_id, receipt, admission, reason)
+            .await?;
+    let journaled = if settled {
+        if let Some(original) = original {
+            let event = Event::UserSteered {
+                text: original.message,
+                message_id: Some(target.turn_id.0),
+            };
+            let seq =
+                super::journal::append_event_on_locked(&transaction, owner, session_id, &event)
+                    .await?;
+            Some(SequencedEvent { seq, event })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    transaction.commit().await.map_err(store_err)?;
+    Ok((settled, journaled))
+}
+
 /// Claim one sandbox dispatch before sending its frame.
 ///
 /// Only the first claim returns true. A retry never sends again after an

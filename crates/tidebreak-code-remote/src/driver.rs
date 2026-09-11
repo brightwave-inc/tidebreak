@@ -474,6 +474,7 @@ fn steer_ack_matches_target(
 
 async fn settle_sandbox_steer_admissions(
     db: &Arc<DbStore>,
+    bus: &dyn RemoteSessionHost,
     owner: &OwnerId,
     session_id: SessionId,
     source_sandbox: &str,
@@ -513,16 +514,13 @@ async fn settle_sandbox_steer_admissions(
                 Some(ExternalSteerQueuedReason::SteerUnsupported),
             )
         };
-        tidebreak_core::db::code::settle_external_steer_admission(
-            db,
-            owner,
-            session_id,
-            &target.event_id,
-            target.expected_turn_id,
-            outcome,
-            reason,
+        let (_, journal) = tidebreak_core::db::code::settle_sandbox_external_steer_admission(
+            db, owner, session_id, &target, outcome, reason,
         )
         .await?;
+        if let Some(event) = journal {
+            bus.publish(session_id, event);
+        }
     }
     Ok(())
 }
@@ -1206,7 +1204,8 @@ impl RemoteDriver<'_> {
         }
         // Commit native admission before advancing the event cursor. A failed
         // ingest can replay this idempotently; the inverse order loses ACKs.
-        settle_sandbox_steer_admissions(db, &owner, session.id, &sandbox_id, &read.events).await?;
+        settle_sandbox_steer_admissions(db, bus, &owner, session.id, &sandbox_id, &read.events)
+            .await?;
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
 
@@ -1481,7 +1480,7 @@ mod tests {
     use tidebreak_core::db::code::get_session;
     use tidebreak_core::{AttentionState, CodeIncarnationId};
 
-    use super::super::fixtures::seed;
+    use super::super::fixtures::{seed, TestEvents};
     use super::super::wire::{
         MessageReceipt, SandboxEvent, SandboxEvents, SandboxLease, SandboxState, SandboxStatus,
     };
@@ -1526,6 +1525,86 @@ mod tests {
                 !steer_ack_matches_target(&missing, "sandbox-1", &target),
                 "missing {key}"
             );
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingHost {
+        inner: TestEvents,
+        published: Mutex<Vec<(SessionId, tidebreak_core::code::SequencedEvent)>>,
+        fail_after_publish: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl RemoteSessionHost for RecordingHost {
+        fn publish(&self, session: SessionId, event: tidebreak_core::code::SequencedEvent) {
+            self.published.lock().unwrap().push((session, event));
+            if self
+                .fail_after_publish
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                panic!(
+                    "simulated process failure after publishing and before advancing the cursor"
+                );
+            }
+        }
+
+        async fn persist_session(
+            &self,
+            store: &DbStore,
+            session: &Session,
+        ) -> Result<bool, tidebreak_core::AgentError> {
+            self.inner.persist_session(store, session).await
+        }
+
+        async fn apply_attention(
+            &self,
+            store: &DbStore,
+            owner: &OwnerId,
+            session_id: SessionId,
+            next: Attention,
+        ) -> Result<(), tidebreak_core::AgentError> {
+            self.inner
+                .apply_attention(store, owner, session_id, next)
+                .await
+        }
+
+        async fn journal_event(
+            &self,
+            store: &DbStore,
+            owner: &OwnerId,
+            session_id: SessionId,
+            spawn_epoch: i64,
+            event: tidebreak_core::Event,
+        ) {
+            self.inner
+                .journal_event(store, owner, session_id, spawn_epoch, event)
+                .await;
+        }
+
+        async fn fence_session(
+            &self,
+            store: &DbStore,
+            session: &mut Session,
+            reason: FenceReason,
+        ) -> Result<(), tidebreak_core::AgentError> {
+            self.inner.fence_session(store, session, reason).await
+        }
+
+        async fn recover_dead_worker(
+            &self,
+            store: &DbStore,
+            session: &Session,
+        ) -> Result<Option<Session>, tidebreak_core::AgentError> {
+            self.inner.recover_dead_worker(store, session).await
+        }
+
+        async fn reap_session(
+            &self,
+            store: &DbStore,
+            session: Session,
+        ) -> Result<Session, RemoteReapError> {
+            self.inner.reap_session(store, session).await
         }
     }
 
@@ -1835,6 +1914,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let (db, bus, mut session, _, _) = seed(dir.path()).await;
+        session.id = SessionId::new();
+        session.execution_location = tidebreak_core::ExecutionLocation::Sandbox;
+        tidebreak_core::db::code::insert_session(&db, &session)
+            .await
+            .unwrap();
         super::super::fixtures::seeded_incarnation(&db, &session).await;
         let target = TurnId::new();
         let correlation = uuid::Uuid::new_v4();
@@ -1932,6 +2016,179 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn steering_transcript_survives_failure_before_cursor_and_replays_once() {
+        use tidebreak_core::code::{ExternalMessageRecord, ExternalSteerAdmission};
+        use tidebreak_core::db::code::{
+            claim_external_steer_target, external_steer_admission, insert_session, list_events,
+            list_queued_turns, record_external_message_with_steer, ExternalSteerAdmissionInput,
+        };
+        for fail_before_cursor in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, _, mut session, _, _) = seed(dir.path()).await;
+            session.id = SessionId::new();
+            session.execution_location = tidebreak_core::ExecutionLocation::Sandbox;
+            insert_session(&db, &session).await.unwrap();
+            super::super::fixtures::seeded_incarnation(&db, &session).await;
+            let target = TurnId::new();
+            let correlation = uuid::Uuid::new_v4();
+            let runtime_id = uuid::Uuid::new_v4();
+            let original = "Preserve the exact original message.\nInclude the tests.";
+            let record = record_external_message_with_steer(
+                &db,
+                &session.owner,
+                session.id,
+                "ev-transcript",
+                "1.1",
+                original,
+                &Default::default(),
+                None,
+                ExternalSteerAdmissionInput {
+                    request_steer: true,
+                    expected_turn_id: Some(target),
+                    correlation_uuid: Some(correlation),
+                },
+            )
+            .await
+            .unwrap();
+            let ExternalMessageRecord::Recorded(queued) = record else {
+                panic!("first delivery must be recorded");
+            };
+            assert!(claim_external_steer_target(
+                &db,
+                &session.owner,
+                session.id,
+                "ev-transcript",
+                target,
+                correlation,
+                "sb-1",
+                1,
+                runtime_id
+            )
+            .await
+            .unwrap());
+            let acknowledgment = event(
+                1,
+                "steer_ack",
+                json!({
+                    "sandbox_id": "sb-1",
+                    "runtime_id": runtime_id.to_string(),
+                    "native_turn": 1,
+                    "expected_turn_id": target.to_string(),
+                    "correlation_uuid": correlation.to_string(),
+                    "text": "Do not trust a transcript supplied by the sandbox.",
+                }),
+            );
+            let fake = Arc::new(FakeProvisioner::default());
+            fake.event_reads.lock().unwrap().push_back(read(
+                SandboxState::Running,
+                1,
+                vec![acknowledgment.clone()],
+            ));
+            let bus = Arc::new(RecordingHost::default());
+            bus.fail_after_publish
+                .store(fail_before_cursor, std::sync::atomic::Ordering::SeqCst);
+            let settings = settings();
+            let task = tokio::spawn({
+                let db = db.clone();
+                let bus = bus.clone();
+                let fake = fake.clone();
+                let settings = settings.clone();
+                let mut session = session.clone();
+                async move {
+                    RemoteDriver {
+                        db: &db,
+                        bus: bus.as_ref(),
+                        provisioner: fake.as_ref(),
+                        settings: &settings,
+                        host_tool: None,
+                    }
+                    .pump(&mut session, 0)
+                    .await
+                }
+            });
+            let result = task.await;
+            if fail_before_cursor {
+                assert!(result.unwrap_err().is_panic());
+            } else {
+                result.unwrap().unwrap();
+            }
+            assert_eq!(
+                latest_incarnation(&db, &session.owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .events_cursor,
+                if fail_before_cursor { 0 } else { 1 }
+            );
+            assert!(matches!(
+                external_steer_admission(&db, &session.owner, session.id, "ev-transcript")
+                    .await
+                    .unwrap(),
+                Some(ExternalMessageRecord::Replay {
+                    admission: Some(ExternalSteerAdmission::Steered),
+                    ..
+                })
+            ));
+            assert!(list_queued_turns(&db, &session.owner, session.id)
+                .await
+                .unwrap()
+                .is_empty());
+            let stored = list_events(&db, &session.owner, session.id, 0, 100)
+                .await
+                .unwrap()
+                .events;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(
+                stored[0].event,
+                tidebreak_core::Event::UserSteered {
+                    text: original.into(),
+                    message_id: Some(queued.id.0)
+                }
+            );
+            assert_eq!(
+                *bus.published.lock().unwrap(),
+                vec![(session.id, stored[0].clone())]
+            );
+
+            // Restart from the durable cursor; repeated native evidence must not duplicate text or publication.
+            let driver = RemoteDriver {
+                db: &db,
+                bus: bus.as_ref(),
+                provisioner: fake.as_ref(),
+                settings: &settings,
+                host_tool: None,
+            };
+            for _ in 0..2 {
+                fake.event_reads.lock().unwrap().push_back(read(
+                    SandboxState::Running,
+                    1,
+                    vec![acknowledgment.clone()],
+                ));
+                driver.pump(&mut session, 0).await.unwrap();
+            }
+            assert_eq!(
+                latest_incarnation(&db, &session.owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .events_cursor,
+                1
+            );
+            assert_eq!(
+                list_events(&db, &session.owner, session.id, 0, 100)
+                    .await
+                    .unwrap()
+                    .events,
+                stored
+            );
+            assert_eq!(
+                *bus.published.lock().unwrap(),
+                vec![(session.id, stored[0].clone())]
+            );
+        }
     }
 
     #[tokio::test]
