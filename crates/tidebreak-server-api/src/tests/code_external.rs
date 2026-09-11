@@ -5091,3 +5091,198 @@ async fn steering_receipt_reads_are_scoped_and_never_resend() {
         reqwest::StatusCode::UNAUTHORIZED
     );
 }
+
+#[tokio::test]
+async fn steering_recovery_requires_binding_and_preserves_receipt() {
+    let (router, fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (_, foreign) = runtime
+        .mint_adapter_grant(&owner, "slack", "U2", "T1")
+        .await
+        .unwrap();
+    client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key":"T1/C1/recovery", "repo_id":repo_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let session = bound_session_id(&runtime, &owner, "T1/C1/recovery").await;
+    runtime
+        .set_queue_paused(&owner, session, true)
+        .await
+        .unwrap();
+    let target = tidebreak_core::TurnId::new();
+    tidebreak_core::db::code::record_external_message_with_steer(
+        &runtime.db,
+        &owner,
+        session,
+        "Ev-recovery",
+        "1.1",
+        "follow up",
+        &Default::default(),
+        None,
+        tidebreak_core::db::code::ExternalSteerAdmissionInput {
+            request_steer: true,
+            expected_turn_id: Some(target),
+            correlation_uuid: Some(uuid::Uuid::new_v4()),
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{addr}/external/code/sessions/{session}/messages/Ev-recovery");
+    let url = format!("{base}/recovery");
+    let retry = serde_json::json!({"action":"retry", "accept_duplicate_risk":true});
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&retry)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&foreign.token)
+            .json(&retry)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"action":"retry"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"action":"invalid"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let first: serde_json::Value = client
+        .post(&url)
+        .bearer_auth(&pair.token)
+        .json(&retry)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let replay: serde_json::Value = client
+        .post(&url)
+        .bearer_auth(&pair.token)
+        .json(&retry)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(first["action"], "retry");
+    assert!(first["retry_turn_id"].is_string());
+    assert!(first["recovered_at"].is_string());
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({"action":"discard"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    let receipt: serde_json::Value = client
+        .get(format!("{base}/admission"))
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(receipt["outcome"], "pending");
+    assert_eq!(receipt["recovery"], first);
+    tidebreak_core::db::code::settle_external_steer_admission(
+        &runtime.db,
+        &owner,
+        session,
+        "Ev-recovery",
+        target,
+        tidebreak_core::code::ExternalSteerAdmission::Steered,
+        None,
+    )
+    .await
+    .unwrap();
+    let settled: serde_json::Value = client
+        .get(format!("{base}/admission"))
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(settled["outcome"], "steered");
+    assert_eq!(settled["recovery"], first);
+    let rows = tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].id.to_string(),
+        first["retry_turn_id"].as_str().unwrap()
+    );
+    assert!(fake.spawns.lock().unwrap().is_empty());
+    assert!(fake.sends.lock().unwrap().is_empty());
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "test revocation")
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(&pair.token)
+            .json(&retry)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}

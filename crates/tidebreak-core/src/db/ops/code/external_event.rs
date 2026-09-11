@@ -355,6 +355,9 @@ pub async fn record_external_message_with_steer(
         outcome: Set(None),
         outcome_reason: Set(None),
         outcome_at: Set(None),
+        recovery_action: Set(None),
+        recovery_retry_turn_id: Set(None),
+        recovered_at: Set(None),
     }
     .insert(&transaction)
     .await;
@@ -844,4 +847,180 @@ pub async fn external_steer_target_by_correlation(
         native_turn,
         runtime_id,
     }))
+}
+
+/// A recovery request could not safely change an unconfirmed admission.
+#[derive(Debug, thiserror::Error)]
+pub enum ExternalSteerRecoveryError {
+    #[error("steering admission not found")]
+    NotFound,
+    #[error("The native admission already resolved. Refresh its status before recovering.")]
+    AdmissionResolved,
+    #[error("This admission already has a different recovery decision.")]
+    ConflictingAction,
+    #[error(
+        "Accept that the original instruction may already have run before queuing another copy."
+    )]
+    DuplicateRiskNotAccepted,
+    #[error("The original held message is no longer available to retry.")]
+    OriginalMissing,
+    #[error("The session ended and cannot accept another copy.")]
+    SessionEnded,
+    #[error(transparent)]
+    Store(#[from] AgentError),
+}
+
+fn recovery_from_event(
+    event: &entities::code_external_event::Model,
+) -> Result<Option<crate::code::ExternalSteerRecovery>> {
+    use crate::code::{ExternalSteerRecovery, ExternalSteerRecoveryAction};
+    let Some(action) = event.recovery_action.as_deref() else {
+        return Ok(None);
+    };
+    let action = ExternalSteerRecoveryAction::from_str(action)
+        .ok_or_else(|| AgentError::Store("invalid stored steering recovery action".into()))?;
+    let recovered_at = event
+        .recovered_at
+        .ok_or_else(|| AgentError::Store("steering recovery has no timestamp".into()))?;
+    if (action == ExternalSteerRecoveryAction::Retry) != event.recovery_retry_turn_id.is_some() {
+        return Err(AgentError::Store(
+            "steering recovery has an invalid retry identity".into(),
+        ));
+    }
+    Ok(Some(ExternalSteerRecovery {
+        action,
+        retry_turn_id: event.recovery_retry_turn_id.map(TurnId),
+        recovered_at,
+    }))
+}
+
+/// Read the immutable recovery decision under the event's owner and session.
+pub async fn external_steer_recovery(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+) -> Result<Option<crate::code::ExternalSteerRecovery>> {
+    let Some(event) = find_event_on(&store.conn, owner, session_id, event_id).await? else {
+        return Ok(None);
+    };
+    recovery_from_event(&event)
+}
+
+/// Recover one unresolved admission without claiming anything about native execution.
+/// The original receipt is the idempotency key; its decision never changes.
+pub async fn recover_external_steer(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+    action: crate::code::ExternalSteerRecoveryAction,
+    accept_duplicate_risk: bool,
+) -> std::result::Result<crate::code::ExternalSteerRecovery, ExternalSteerRecoveryError> {
+    use crate::code::{ExternalSteerRecovery, ExternalSteerRecoveryAction, SessionLifecycle};
+    if action == ExternalSteerRecoveryAction::Retry && !accept_duplicate_risk {
+        return Err(ExternalSteerRecoveryError::DuplicateRiskNotAccepted);
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    // The same owner-scoped session lock serializes recovery with native settlement.
+    let locked = entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::UnrecognizedEventCount,
+            sea_orm::sea_query::Expr::col(entities::session::Column::UnrecognizedEventCount),
+        )
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if locked.rows_affected != 1 {
+        return Err(ExternalSteerRecoveryError::NotFound);
+    }
+    let event = find_event_on(&transaction, owner, session_id, event_id)
+        .await?
+        .filter(|event| event.steer_requested)
+        .ok_or(ExternalSteerRecoveryError::NotFound)?;
+    if let Some(recovery) = recovery_from_event(&event)? {
+        if recovery.action != action {
+            return Err(ExternalSteerRecoveryError::ConflictingAction);
+        }
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(recovery);
+    }
+    if event.outcome.is_some() {
+        return Err(ExternalSteerRecoveryError::AdmissionResolved);
+    }
+    let now = database_now(&transaction).await?;
+    let retry_turn_id = if action == ExternalSteerRecoveryAction::Retry {
+        let session = entities::session::Entity::find_by_id(session_id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or(ExternalSteerRecoveryError::NotFound)?;
+        if session.lifecycle == SessionLifecycle::Ended.as_str() {
+            return Err(ExternalSteerRecoveryError::SessionEnded);
+        }
+        let original = entities::code_queued_turn::Entity::find_by_id(event.turn_id)
+            .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or(ExternalSteerRecoveryError::OriginalMissing)?;
+        let tail = entities::code_queued_turn::Entity::find()
+            .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+            .order_by_desc(entities::code_queued_turn::Column::Position)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let position = tail
+            .map_or(Some(0), |row| row.position.checked_add(1))
+            .ok_or_else(|| AgentError::Store("the queue position limit was reached".into()))?;
+        let id = TurnId::new();
+        entities::code_queued_turn::ActiveModel {
+            id: Set(id.0),
+            owner: Set(owner.as_str().to_owned()),
+            session_id: Set(session_id.0),
+            message: Set(original.message),
+            attachments_json: Set(original.attachments_json),
+            file_attachments_json: Set(original.file_attachments_json),
+            invoked_skills_json: Set(original.invoked_skills_json),
+            voice_input_used: Set(original.voice_input_used),
+            fingerprint: Set(None),
+            actor: Set(original.actor),
+            position: Set(position),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+        Some(id)
+    } else {
+        None
+    };
+    entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::Id.eq(event.turn_id))
+        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::code_external_event::ActiveModel {
+        id: Set(event.id),
+        recovery_action: Set(Some(action.as_str().into())),
+        recovery_retry_turn_id: Set(retry_turn_id.map(|id| id.0)),
+        recovered_at: Set(Some(now)),
+        ..Default::default()
+    }
+    .update(&transaction)
+    .await
+    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(ExternalSteerRecovery {
+        action,
+        retry_turn_id,
+        recovered_at: now,
+    })
 }

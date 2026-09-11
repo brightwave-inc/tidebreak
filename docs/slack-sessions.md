@@ -866,6 +866,29 @@ the stored sandbox, runtime UUID, native turn, Tidebreak turn, and correlation.
 A replacement process cannot consume a frame addressed to its predecessor. A late local acknowledgment can
 settle the original receipt while its worker still owns the turn.
 
+To retire an unconfirmed admission, call
+`POST /external/code/sessions/{id}/messages/{event_id}/recovery` with the bound
+adapter token. Send `{"action":"discard"}` to remove its held queue row.
+Discard does not undo work that the harness may already have performed. Send
+`{"action":"retry","accept_duplicate_risk":true}` to queue another copy of the
+original message. Require explicit acceptance that the original may already
+have run before sending a retry request.
+
+Recovery returns `action`, `recovered_at`, and `retry_turn_id` for a retry.
+The admission GET also includes this object as `recovery`. Repeating the same
+action returns the original decision and retry ID; choosing a different action
+returns a conflict. Retry creates a fresh ordinary queue row. Recovery wakes
+queue processing and preserves an explicit queue pause. An idle machine session
+with no worker starts one so the recovered queue can run without another message.
+If its prior worker still needs recovery, the endpoint reports that the decision
+is saved but queued work cannot start.
+
+Recovery remains separate from native admission. If native confirmation arrives
+first, recovery refuses the request. If recovery commits first, late confirmation
+can still settle the original receipt without deleting the retry. Clients can
+retire recovery polling when `recovery` appears, even if `outcome` remains
+`pending`. An ended session allows discard but refuses retry.
+
 Keep automatic adapter steering disabled until the adapter exposes pending
 admissions and their recovery controls. Native acceptance followed by process
 loss can remain unknown; transport idempotency cannot settle that case.

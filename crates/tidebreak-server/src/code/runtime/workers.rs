@@ -818,4 +818,147 @@ mod tests {
             .await
             .is_empty());
     }
+
+    #[tokio::test]
+    async fn steering_recovery_starts_missing_idle_worker_and_runs_one_retry() {
+        use tidebreak_core::code::ExternalSteerRecoveryAction as Action;
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = scripted_runtime(tmp.path()).await;
+        let owner = OwnerId::local();
+        let mut session = workspaceless_session(&owner, HarnessKind::ClaudeCode);
+        session.lifecycle = SessionLifecycle::Idle;
+        insert_session(&runtime.db, &session).await.unwrap();
+        tidebreak_core::db::code::record_external_message_with_steer(
+            &runtime.db,
+            &owner,
+            session.id,
+            "recover-idle",
+            "1.1",
+            "recovered instruction",
+            &Default::default(),
+            None,
+            tidebreak_core::db::code::ExternalSteerAdmissionInput {
+                request_steer: true,
+                expected_turn_id: Some(TurnId::new()),
+                correlation_uuid: Some(uuid::Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!runtime.has_worker(session.id));
+        let (first, replay) = tokio::join!(
+            runtime.recover_external_steer(&owner, session.id, "recover-idle", Action::Retry, true),
+            runtime.recover_external_steer(&owner, session.id, "recover-idle", Action::Retry, true)
+        );
+        let first = first.unwrap();
+        assert_eq!(first, replay.unwrap());
+        assert!(runtime.has_worker(session.id));
+        let turns = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let turns = tidebreak_core::db::code::list_turns(&runtime.db, &owner, session.id)
+                    .await
+                    .unwrap();
+                if !turns.is_empty() {
+                    break turns;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the recovered queue starts without another message");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(Some(turns[0].id), first.retry_turn_id);
+        assert_eq!(turns[0].user_input, "recovered instruction");
+        assert_eq!(
+            runtime
+                .get_session(&owner, session.id)
+                .await
+                .unwrap()
+                .spawn_epoch,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_recovery_preserves_pause_and_never_reopens_ended_session() {
+        use tidebreak_core::code::ExternalSteerRecoveryAction as Action;
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = scripted_runtime(tmp.path()).await;
+        let owner = OwnerId::local();
+        let mut session = workspaceless_session(&owner, HarnessKind::ClaudeCode);
+        session.lifecycle = SessionLifecycle::Idle;
+        insert_session(&runtime.db, &session).await.unwrap();
+        runtime
+            .set_queue_paused(&owner, session.id, true)
+            .await
+            .unwrap();
+        tidebreak_core::db::code::record_external_message_with_steer(
+            &runtime.db,
+            &owner,
+            session.id,
+            "recover-paused",
+            "1.1",
+            "paused instruction",
+            &Default::default(),
+            None,
+            tidebreak_core::db::code::ExternalSteerAdmissionInput {
+                request_steer: true,
+                expected_turn_id: Some(TurnId::new()),
+                correlation_uuid: Some(uuid::Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+        let decision = runtime
+            .recover_external_steer(&owner, session.id, "recover-paused", Action::Retry, true)
+            .await
+            .unwrap();
+        assert!(runtime.has_worker(session.id));
+        assert!(
+            tidebreak_core::db::code::queue_paused(&runtime.db, &owner, session.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            tidebreak_core::db::code::list_turns(&runtime.db, &owner, session.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        runtime
+            .set_queue_paused(&owner, session.id, false)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !tidebreak_core::db::code::list_turns(&runtime.db, &owner, session.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("unpausing starts the recovered instruction");
+        runtime.end_session_row(&owner, session.id).await.unwrap();
+        assert_eq!(
+            runtime
+                .recover_external_steer(&owner, session.id, "recover-paused", Action::Retry, true)
+                .await
+                .unwrap(),
+            decision
+        );
+        assert!(!runtime.has_worker(session.id));
+        assert_eq!(
+            runtime
+                .get_session(&owner, session.id)
+                .await
+                .unwrap()
+                .lifecycle,
+            SessionLifecycle::Ended
+        );
+    }
 }

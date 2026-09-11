@@ -1181,6 +1181,9 @@ pub(crate) enum CodeExternalEvent {
     Outcome,
     OutcomeReason,
     OutcomeAt,
+    RecoveryAction,
+    RecoveryRetryTurnId,
+    RecoveredAt,
 }
 
 #[derive(DeriveIden)]

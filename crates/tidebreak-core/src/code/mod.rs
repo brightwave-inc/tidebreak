@@ -2217,6 +2217,48 @@ impl ExternalSteerAdmission {
     }
 }
 
+/// The explicit recovery chosen for an instruction whose delivery is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSteerRecoveryAction {
+    /// Remove the held message without undoing any native execution.
+    Discard,
+    /// Queue another copy after accepting that the original may already have run.
+    Retry,
+}
+
+impl ExternalSteerRecoveryAction {
+    /// Stable database token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discard => "discard",
+            Self::Retry => "retry",
+        }
+    }
+
+    /// Parse a stored recovery action.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "discard" => Some(Self::Discard),
+            "retry" => Some(Self::Retry),
+            _ => None,
+        }
+    }
+}
+
+/// An immutable recovery decision, separate from the original native admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalSteerRecovery {
+    /// The action explicitly chosen for the unconfirmed instruction.
+    pub action: ExternalSteerRecoveryAction,
+    /// A fresh ordinary queue row created by retry; never the original receipt ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_turn_id: Option<TurnId>,
+    /// When the recovery transaction committed its decision.
+    pub recovered_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A bounded reason attached to a queued steering admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

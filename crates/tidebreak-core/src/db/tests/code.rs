@@ -8500,3 +8500,327 @@ async fn sandbox_steer_refusal_and_deleted_input_do_not_create_transcript_text()
         .events
         .is_empty());
 }
+
+#[tokio::test]
+async fn steer_recovery_retry_is_immutable_and_survives_late_ack() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerRecoveryAction as Action};
+    use crate::db::code::{recover_external_steer, ExternalSteerRecoveryError as Error};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-retry").await;
+    let (original, expected, _) = record_pending_steer(&store, &owner, session, "retry").await;
+    assert!(matches!(
+        recover_external_steer(&store, &owner, session, "retry", Action::Retry, false).await,
+        Err(Error::DuplicateRiskNotAccepted)
+    ));
+    let result = recover_external_steer(&store, &owner, session, "retry", Action::Retry, true)
+        .await
+        .unwrap();
+    let retry = result.retry_turn_id.unwrap();
+    assert_ne!(retry, original.id);
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, retry);
+    assert_eq!(rows[0].message, original.message);
+    assert_eq!(rows[0].actor, original.actor);
+    assert_eq!(rows[0].attachments, original.attachments);
+    let replay = recover_external_steer(&store, &owner, session, "retry", Action::Retry, true)
+        .await
+        .unwrap();
+    assert_eq!(result, replay);
+    assert!(matches!(
+        recover_external_steer(&store, &owner, session, "retry", Action::Discard, false).await,
+        Err(Error::ConflictingAction)
+    ));
+    update_queued_turn(&store, &owner, session, retry, Some("edited retry"), None)
+        .await
+        .unwrap();
+    assert!(crate::db::code::settle_external_steer_admission(
+        &store,
+        &owner,
+        session,
+        "retry",
+        expected,
+        ExternalSteerAdmission::Steered,
+        None
+    )
+    .await
+    .unwrap());
+    let row = queued_turn_head(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.id, retry);
+    assert_eq!(row.message, "edited retry");
+    assert!(
+        promote_queued_turn(&store, &owner, &row, &turn_for(&row, 1))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        recover_external_steer(&store, &owner, session, "retry", Action::Retry, true)
+            .await
+            .unwrap(),
+        result
+    );
+    assert!(list_queued_turns(&store, &owner, session)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn steer_recovery_discard_is_scoped_and_releases_tail() {
+    use crate::code::ExternalSteerRecoveryAction as Action;
+    use crate::db::code::{
+        external_steer_recovery, recover_external_steer, ExternalSteerRecoveryError as Error,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let other = OwnerId::new("foreign").unwrap();
+    let session = seed_external_session(&store, &owner, "recovery-discard").await;
+    let unrelated = seed_external_session(&store, &owner, "recovery-unrelated").await;
+    record_pending_steer(&store, &owner, session, "discard").await;
+    let tail = enqueue_queued_turn(&store, &owner, &queued_message(session, "later"))
+        .await
+        .unwrap();
+    for (who, id) in [(&other, session), (&owner, unrelated)] {
+        assert!(matches!(
+            recover_external_steer(&store, who, id, "discard", Action::Discard, false).await,
+            Err(Error::NotFound)
+        ));
+        assert!(external_steer_recovery(&store, who, id, "discard")
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let result = recover_external_steer(&store, &owner, session, "discard", Action::Discard, false)
+        .await
+        .unwrap();
+    assert!(result.retry_turn_id.is_none());
+    assert_eq!(
+        queued_turn_head(&store, &owner, session)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        tail.id
+    );
+    assert_eq!(
+        recover_external_steer(&store, &owner, session, "discard", Action::Discard, false)
+            .await
+            .unwrap(),
+        result
+    );
+    let (missing, _, _) = record_pending_steer(&store, &owner, session, "missing").await;
+    delete_queued_turn(&store, &owner, session, missing.id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        recover_external_steer(&store, &owner, session, "missing", Action::Retry, true).await,
+        Err(Error::OriginalMissing)
+    ));
+    recover_external_steer(&store, &owner, session, "missing", Action::Discard, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn steer_recovery_ack_first_rejects_and_concurrent_ack_is_safe() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerRecoveryAction as Action};
+    use crate::db::code::{
+        recover_external_steer, settle_external_steer_admission,
+        ExternalSteerRecoveryError as Error,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-race").await;
+    let (_, expected, _) = record_pending_steer(&store, &owner, session, "ack-first").await;
+    settle_external_steer_admission(
+        &store,
+        &owner,
+        session,
+        "ack-first",
+        expected,
+        ExternalSteerAdmission::Steered,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        recover_external_steer(&store, &owner, session, "ack-first", Action::Retry, true).await,
+        Err(Error::AdmissionResolved)
+    ));
+    let (_, expected, _) = record_pending_steer(&store, &owner, session, "race").await;
+    let (ack, recovery) = tokio::join!(
+        settle_external_steer_admission(
+            &store,
+            &owner,
+            session,
+            "race",
+            expected,
+            ExternalSteerAdmission::Steered,
+            None
+        ),
+        recover_external_steer(&store, &owner, session, "race", Action::Retry, true)
+    );
+    assert!(ack.unwrap());
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    match recovery {
+        Ok(result) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(Some(rows[0].id), result.retry_turn_id);
+        }
+        Err(Error::AdmissionResolved) => assert!(rows.is_empty()),
+        other => panic!("unexpected race result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn steer_recovery_receipt_failure_rolls_back_retry_and_delete() {
+    use crate::code::ExternalSteerRecoveryAction as Action;
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-rollback").await;
+    let (original, _, _) = record_pending_steer(&store, &owner, session, "rollback").await;
+    store.conn.execute_raw(Statement::from_string(DatabaseBackend::Sqlite,
+        "CREATE TRIGGER fail_recovery BEFORE UPDATE OF recovery_action ON code_external_event BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;".to_owned())).await.unwrap();
+    assert!(crate::db::code::recover_external_steer(
+        &store,
+        &owner,
+        session,
+        "rollback",
+        Action::Retry,
+        true
+    )
+    .await
+    .is_err());
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, original.id);
+    assert!(
+        crate::db::code::external_steer_recovery(&store, &owner, session, "rollback")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn steer_recovery_ended_session_refuses_retry_but_allows_discard() {
+    use crate::code::{ExternalSteerRecoveryAction as Action, SessionLifecycle};
+    use crate::db::code::{recover_external_steer, ExternalSteerRecoveryError as Error};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-ended").await;
+    record_pending_steer(&store, &owner, session, "ended").await;
+    let mut stored = crate::db::code::get_session(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    stored.lifecycle = SessionLifecycle::Ended;
+    assert!(save_session(&store, &stored).await.unwrap());
+    assert!(matches!(
+        recover_external_steer(&store, &owner, session, "ended", Action::Retry, true).await,
+        Err(Error::SessionEnded)
+    ));
+    recover_external_steer(&store, &owner, session, "ended", Action::Discard, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn steer_recovery_late_sandbox_ack_preserves_edited_retry() {
+    use crate::code::{ExternalSteerAdmission, ExternalSteerRecoveryAction as Action};
+    use crate::db::code::{recover_external_steer, settle_sandbox_external_steer_admission};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-native-late").await;
+    let target = pending_sandbox_steer(&store, &owner, session, "native-late").await;
+    let result =
+        recover_external_steer(&store, &owner, session, "native-late", Action::Retry, true)
+            .await
+            .unwrap();
+    let retry = result.retry_turn_id.unwrap();
+    update_queued_turn(
+        &store,
+        &owner,
+        session,
+        retry,
+        Some("edited after recovery"),
+        None,
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let (settled, event) = settle_sandbox_external_steer_admission(
+            &store,
+            &owner,
+            session,
+            &target,
+            ExternalSteerAdmission::Steered,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(settled);
+        assert!(
+            event.is_none(),
+            "late acknowledgment cannot journal the new copy as original text"
+        );
+    }
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, retry);
+    assert_eq!(rows[0].message, "edited after recovery");
+}
+
+#[tokio::test]
+async fn steer_recovery_late_machine_ack_preserves_edited_retry() {
+    use crate::code::ExternalSteerRecoveryAction as Action;
+    use crate::db::code::{recover_external_steer, settle_machine_external_steer_ack};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-machine-late").await;
+    let (row, expected, correlation) =
+        record_pending_steer(&store, &owner, session, "machine-late").await;
+    let mut running = get_session(&store, &owner, session).await.unwrap().unwrap();
+    running.lifecycle = SessionLifecycle::Running;
+    assert!(save_session(&store, &running).await.unwrap());
+    let mut turn = turn_for(&row, 1);
+    turn.id = expected;
+    turn.status = TurnStatus::Running;
+    insert_turn(&store, &owner, &turn).await.unwrap();
+    let decision =
+        recover_external_steer(&store, &owner, session, "machine-late", Action::Retry, true)
+            .await
+            .unwrap();
+    let retry = decision.retry_turn_id.unwrap();
+    update_queued_turn(
+        &store,
+        &owner,
+        session,
+        retry,
+        Some("edited machine retry"),
+        None,
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        assert!(settle_machine_external_steer_ack(
+            &store,
+            &owner,
+            session,
+            running.spawn_epoch,
+            expected,
+            correlation
+        )
+        .await
+        .unwrap());
+    }
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, retry);
+    assert_eq!(rows[0].message, "edited machine retry");
+}

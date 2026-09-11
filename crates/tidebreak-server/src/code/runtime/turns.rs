@@ -512,6 +512,96 @@ impl CodeRuntime {
         Ok(tidebreak_core::db::code::delete_queued_turn(&self.db, owner, id, queued_id).await?)
     }
 
+    /// Recover an unconfirmed external instruction and wake the remaining queue.
+    pub async fn recover_external_steer(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        event_id: &str,
+        action: tidebreak_core::code::ExternalSteerRecoveryAction,
+        accept_duplicate_risk: bool,
+    ) -> Result<tidebreak_core::code::ExternalSteerRecovery, ServerError> {
+        use tidebreak_core::db::code::ExternalSteerRecoveryError;
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
+        self.get_session(owner, id).await?;
+        let recovery = tidebreak_core::db::code::recover_external_steer(
+            &self.db,
+            owner,
+            id,
+            event_id,
+            action,
+            accept_duplicate_risk,
+        )
+        .await
+        .map_err(|error| match error {
+            ExternalSteerRecoveryError::NotFound => {
+                ServerError::not_found("steering admission not found")
+            }
+            ExternalSteerRecoveryError::DuplicateRiskNotAccepted => {
+                ServerError::bad_request(error.to_string())
+            }
+            ExternalSteerRecoveryError::Store(error) => error.into(),
+            other => ServerError::conflict_kind("steering_recovery_conflict", other.to_string()),
+        })?;
+        self.resume_recovered_queue(owner, id).await?;
+        Ok(recovery)
+    }
+
+    /// Start an idle machine worker when explicit recovery releases its queue.
+    async fn resume_recovered_queue(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<(), ServerError> {
+        let session = self.get_session(owner, id).await?;
+        if session.lifecycle == SessionLifecycle::Ended
+            || tidebreak_core::db::code::queued_turn_head(&self.db, owner, id)
+                .await?
+                .is_none()
+        {
+            return Ok(());
+        }
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            let remote = self.remote_sessions().ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "remote_disabled",
+                    "Recovery is saved, but this deployment has no sandbox runtime configured.",
+                )
+            })?;
+            remote.wake_sweep();
+            return Ok(());
+        }
+        if let Ok(handle) = self.require_worker(id) {
+            if !handle.commands.is_closed() {
+                wake_queue(&handle);
+                return Ok(());
+            }
+            self.take_worker_for_epoch(id, handle.spawn_epoch);
+        }
+        if !matches!(
+            session.lifecycle,
+            SessionLifecycle::Created | SessionLifecycle::Idle
+        ) || session.child_pid.is_some()
+        {
+            return Err(ServerError::conflict_kind("session_needs_recovery",
+                "The decision is saved, but the prior worker must be recovered before queued work can start."));
+        }
+        if let Some(workspace) = self.session_workspace(&session).await? {
+            if workspace.status != CodeWorkspaceStatus::Active {
+                return Err(ServerError::conflict_kind(
+                    "workspace_not_ready",
+                    format!(
+                        "Recovery is saved, but the workspace is {}.",
+                        workspace.status.as_str()
+                    ),
+                ));
+            }
+        }
+        self.attach_and_spawn_worker(session).await?;
+        self.wake_session_queue(id);
+        Ok(())
+    }
+
     /// Pause or release the session's queue. A release wakes the worker so a
     /// waiting head starts without a new send.
     pub async fn set_queue_paused(
