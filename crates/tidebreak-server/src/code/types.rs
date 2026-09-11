@@ -1809,6 +1809,10 @@ pub struct SessionDigest {
     #[ts(optional)]
     pub fence_reason: Option<FenceReason>,
     pub title: String,
+    /// Source of this conversation, including sessions without a repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub external_origin: Option<SessionExternalOrigin>,
     pub turn_count: i64,
     /// Timestamp trigger delivery uses to rank candidate sessions: the newest
     /// turn start, or session creation before the first turn. Optional so a
@@ -1873,6 +1877,7 @@ impl From<crate::code::bus::SessionDigest> for SessionDigest {
             attention: digest.attention,
             fence_reason: digest.fence_reason,
             title: digest.title,
+            external_origin: digest.external_origin,
             turn_count: digest.turn_count,
             trigger_target_at: Some(digest.trigger_target_at),
             activity: digest.activity,
@@ -1915,6 +1920,9 @@ pub enum UpdateNotice {
         fence_reason: Option<Box<tidebreak_core::FenceReason>>,
         attention: Attention,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        external_origin: Option<SessionExternalOrigin>,
         turn_count: i64,
         /// Timestamp trigger delivery uses to rank candidate sessions.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2054,6 +2062,7 @@ impl UpdateNotice {
             fence_reason: wire.fence_reason.map(Box::new),
             attention: wire.attention,
             title: wire.title,
+            external_origin: wire.external_origin,
             turn_count: wire.turn_count,
             trigger_target_at: wire.trigger_target_at,
             activity: wire.activity,

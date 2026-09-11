@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
-import type { CodeWorkspaceSnapshot } from "@/api/types";
+import type { CodeSessionDigest, CodeWorkspaceSnapshot } from "@/api/types";
 import { cn } from "@/lib/utils";
 import { FOCUS_RING_INSET } from "./interactive";
 import { WorkspaceStatusMark } from "./WorkspaceCard";
@@ -94,24 +94,31 @@ export function WorkspaceRailGroups({
   collapsedKeys,
   onToggle,
   renderWorkspace,
+  renderConversation,
 }: {
   sections: readonly WorkspaceSourceSection[];
   mode: WorkspaceSortMode;
   collapsedKeys: readonly string[];
   onToggle: (key: string) => void;
   renderWorkspace: (workspace: CodeWorkspaceSnapshot) => ReactNode;
+  renderConversation?: (digest: CodeSessionDigest) => ReactNode;
 }) {
   const multipleSources = sections.length > 1;
   function renderGroups(section: WorkspaceSourceSection) {
     return section.groups.map((group) => {
       const key = workspaceGroupCollapseKey(section.key, mode, group.key);
-      const rows = group.workspaces.map(renderWorkspace);
+      const rows = (
+        <>
+          {group.workspaces.map(renderWorkspace)}
+          {group.conversations?.map((digest) => renderConversation?.(digest))}
+        </>
+      );
       return group.label ? (
         <Disclosure
           key={key}
           sectionKey={key}
           label={group.label}
-          count={group.workspaces.length}
+          count={group.workspaces.length + (group.conversations?.length ?? 0)}
           expanded={!collapsedKeys.includes(key)}
           onToggle={() => onToggle(key)}
           level="group"
@@ -138,7 +145,10 @@ export function WorkspaceRailGroups({
         sectionKey={sourceKey}
         label={section.label}
         count={section.groups.reduce(
-          (total, group) => total + group.workspaces.length,
+          (total, group) =>
+            total +
+            group.workspaces.length +
+            (group.conversations?.length ?? 0),
           0,
         )}
         expanded={!collapsedKeys.includes(sourceKey)}

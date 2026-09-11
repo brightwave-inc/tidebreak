@@ -72,3 +72,74 @@ export const LongTitle: Story = {
 export const Untitled: Story = {
   args: { digest: { ...runningDigest, workspace: null, title: "" } },
 };
+
+const slackOrigin = {
+  channel_kind: "slack",
+  external_key: "T123/C456/1789160411.270339",
+};
+export const SlackChannel: Story = {
+  args: {
+    active: true,
+    digest: {
+      ...idleCompleteDigest,
+      workspace: null,
+      title: "Inspect both repositories",
+      external_origin: slackOrigin,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(
+      within(canvasElement).getByRole("button", {
+        name: /Inspect both repositories, Slack channel/,
+      }),
+    ).toHaveAttribute("aria-current", "page");
+  },
+};
+export const SlackRunning: Story = {
+  args: {
+    digest: {
+      ...runningDigest,
+      workspace: null,
+      title: "Fix the deployment failure",
+      external_origin: slackOrigin,
+    },
+  },
+};
+export const SlackFault: Story = {
+  args: {
+    digest: {
+      ...stalledDigest,
+      workspace: null,
+      title: "Fix the deployment failure",
+      external_origin: slackOrigin,
+    },
+  },
+};
+export const SlackUntitled: Story = {
+  args: {
+    digest: {
+      ...runningDigest,
+      workspace: null,
+      title: "",
+      external_origin: slackOrigin,
+    },
+  },
+};
+export const SlackDirectMessage: Story = {
+  args: {
+    digest: {
+      ...idleCompleteDigest,
+      workspace: null,
+      title: "Review the latest changes",
+      external_origin: {
+        ...slackOrigin,
+        external_key: "T123/D456/1789160411.270339",
+      },
+    },
+  },
+};
+export const SlackCompact: Story = {
+  ...SlackChannel,
+  args: { ...SlackChannel.args, density: "compact" },
+  play: undefined,
+};

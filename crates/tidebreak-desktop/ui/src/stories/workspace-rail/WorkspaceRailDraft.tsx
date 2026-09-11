@@ -12,6 +12,8 @@ import { SegmentedControl } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Logomark } from "@/Logomark";
 import { cn } from "@/lib/utils";
+import { WorkspaceLessSessionRow } from "@/code/WorkspaceLessSessionRow";
+import { runningDigest, idleCompleteDigest } from "../fixtures";
 import { WorkspaceCard } from "@/code/WorkspaceCard";
 import {
   arrangeWorkspaceSections,
@@ -24,6 +26,8 @@ import { WorkspaceRailToolbar } from "@/code/WorkspaceRailToolbar";
 import { railEntries, railRepositories } from "./fixtures";
 
 export type RailScenario =
+  | "scratch"
+  | "scratch-status"
   | "repository"
   | "status"
   | "single-source"
@@ -42,7 +46,9 @@ export function WorkspaceRailDraft({
   onNewWorkspace: () => void;
 }) {
   const [mode, setMode] = useState<WorkspaceSortMode>(
-    scenario === "status" ? "by-status" : "by-repo",
+    scenario === "status" || scenario === "scratch-status"
+      ? "by-status"
+      : "by-repo",
   );
   const [density, setDensity] = useState<CardDensity>(
     scenario === "long-names" ? "compact" : "detailed",
@@ -103,6 +109,24 @@ export function WorkspaceRailDraft({
     Object.fromEntries(
       entries.map((entry) => [entry.workspace.id, entry.session]),
     ),
+    scenario.startsWith("scratch")
+      ? [
+          {
+            ...runningDigest,
+            session: "scratch-running",
+            workspace: null,
+            title: "Fix the deployment across both repositories",
+            external_origin: { channel_kind: "slack", external_key: "T/C/123" },
+          },
+          {
+            ...idleCompleteDigest,
+            session: "scratch-done",
+            workspace: null,
+            title: "Inspect the default branches",
+            external_origin: { channel_kind: "slack", external_key: "T/C/124" },
+          },
+        ]
+      : [],
   );
   const multipleSources = sections.length > 1;
   const entryById = new Map(
@@ -218,6 +242,15 @@ export function WorkspaceRailDraft({
               mode={mode}
               collapsedKeys={[...collapsed]}
               onToggle={toggle}
+              renderConversation={(digest) => (
+                <WorkspaceLessSessionRow
+                  key={digest.session}
+                  digest={digest}
+                  active={selected === digest.session}
+                  density={density}
+                  onOpen={setSelected}
+                />
+              )}
               renderWorkspace={(workspace) => {
                 const entry = entryById.get(workspace.id)!;
                 return (

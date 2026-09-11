@@ -503,6 +503,18 @@ async fn build_digest(
     // interface uses it to name the same session that a fire would reach.
     let trigger_target_at =
         trigger_target_at(session.created_at, turns.last().map(|turn| turn.started_at));
+    let input_title = turns
+        .iter()
+        .find_map(|turn| conversation_title(&turn.user_input));
+    let external_origin =
+        tidebreak_core::db::code::list_bindings_for_session(db, &session.owner, session.id)
+            .await?
+            .into_iter()
+            .next()
+            .map(|binding| super::types::SessionExternalOrigin {
+                channel_kind: binding.channel_kind,
+                external_key: binding.external_key,
+            });
     // The newest recapped turn speaks for the session: a turn the model
     // declined to recap, or one whose call is still in flight, leaves the
     // previous line standing rather than blanking the row mid-work.
@@ -520,6 +532,8 @@ async fn build_digest(
             db.get_chat_scoped(&session.owner, session.id)
                 .await?
                 .and_then(|chat| chat.title)
+                .filter(|title| !title.trim().is_empty())
+                .or(input_title)
                 .unwrap_or_default(),
             None,
         ),
@@ -535,6 +549,7 @@ async fn build_digest(
         attention: session.attention.clone(),
         fence_reason: session.fence_reason.clone(),
         title,
+        external_origin,
         turn_count,
         trigger_target_at,
         activity,
@@ -639,6 +654,33 @@ fn session_activity(
         }
     }
     (SessionActivity::Agent, None)
+}
+
+fn conversation_title(input: &str) -> Option<String> {
+    let mut title = String::new();
+    let mut pending_space = false;
+    let mut length = 0;
+    for character in input.chars() {
+        if character.is_whitespace() {
+            pending_space = !title.is_empty();
+            continue;
+        }
+        if preview_formatting_character(character) {
+            continue;
+        }
+        if pending_space && length < 120 {
+            title.push(' ');
+            length += 1;
+        }
+        pending_space = false;
+        if length == 120 {
+            title.push('…');
+            break;
+        }
+        title.push(character);
+        length += 1;
+    }
+    (!title.is_empty()).then_some(title)
 }
 
 /// One line naming what the tool is doing, or nothing when the detail has no
@@ -827,6 +869,104 @@ mod tests {
         let mut foreign = session.clone();
         foreign.owner = OwnerId::new("other").unwrap();
         assert_eq!(build_digest(&db, &foreign).await.unwrap().title, "");
+    }
+
+    #[test]
+    fn conversation_titles_are_bounded_single_line_previews() {
+        assert_eq!(
+            conversation_title("  Inspect\n both\t repositories  "),
+            Some("Inspect both repositories".into())
+        );
+        assert_eq!(
+            conversation_title("\u{202e}Inspect\u{0000}"),
+            Some("Inspect".into())
+        );
+        assert_eq!(conversation_title(" \n "), None);
+        assert_eq!(
+            conversation_title(&"x".repeat(121))
+                .unwrap()
+                .chars()
+                .count(),
+            121
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_digest_uses_first_prompt_without_a_chat_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("scratch.db").display()
+        ))
+        .await
+        .unwrap();
+        let mut session = session_with(auto_working());
+        session.workspace_id = None;
+        tidebreak_core::db::code::insert_session(&db, &session)
+            .await
+            .unwrap();
+        let turn = tidebreak_core::Turn {
+            id: tidebreak_core::TurnId::new(),
+            session_id: session.id,
+            ordinal: 1,
+            status: tidebreak_core::TurnStatus::Completed,
+            model: None,
+            fast_mode: false,
+            actor: None,
+            user_input: "Inspect both repositories\nReport their default branches".into(),
+            user_input_blob_id: None,
+            attachments: vec![],
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            rewrite: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            park_ref: None,
+            park_wait: None,
+        };
+        tidebreak_core::db::code::insert_turn(&db, &session.owner, &turn)
+            .await
+            .unwrap();
+        let grant = tidebreak_core::db::code::mint_external_grant(
+            &db,
+            &session.owner,
+            tidebreak_core::db::code::MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U123",
+                workspace_identity: "T123",
+                kind: tidebreak_core::CodeGrantKind::Person,
+            },
+            &"a".repeat(64),
+            &"b".repeat(64),
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::bind_external_session(
+            &db,
+            &session.owner,
+            grant.id,
+            "slack",
+            "T123/C456/123.456",
+            session.id,
+        )
+        .await
+        .unwrap();
+        let digest = build_digest(&db, &session).await.unwrap();
+        assert_eq!(
+            digest.external_origin.as_ref().unwrap().channel_kind,
+            "slack"
+        );
+        assert_eq!(
+            digest.external_origin.as_ref().unwrap().external_key,
+            "T123/C456/123.456"
+        );
+        assert_eq!(digest.workspace, None);
+        assert_eq!(
+            digest.title,
+            "Inspect both repositories Report their default branches"
+        );
     }
 
     fn auto_working() -> Attention {
