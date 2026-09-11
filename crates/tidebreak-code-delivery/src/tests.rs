@@ -1388,13 +1388,412 @@ fn run_attention_ignores_cancelled_but_keeps_actionable_failures() {
 }
 
 #[test]
-fn cursors_are_bounded_offsets() {
-    let (page, next) = paginate(vec![1, 2, 3], None, Some(2)).unwrap();
-    assert_eq!(page, vec![1, 2]);
-    assert_eq!(next.as_deref(), Some("2"));
-    let (page, next) = paginate(vec![1, 2, 3], Some("2"), Some(2)).unwrap();
-    assert_eq!(page, vec![3]);
-    assert_eq!(next, None);
+fn a_numeric_offset_cursor_is_rejected() {
+    assert!(decode_updated_at_id_cursor("2").is_err());
+    let mut query = pull_request_query();
+    query.cursor = Some("2".into());
+    query.limit = Some(2);
+    let err = pull_request_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items: vec![pull_request_list_row("a", Utc::now())],
+            errors: Vec::new(),
+        },
+        &query,
+    )
+    .expect_err("stored offset cursors must not page");
+    assert!(err.to_string().contains("invalid delivery cursor"));
+
+    let mut run_query = run_list_query();
+    run_query.cursor = Some("2".into());
+    run_query.limit = Some(2);
+    let err = run_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items: vec![run_list_row(
+                "github.com/brightwave-inc/tidebreak:workflow:1",
+                CodeDeliveryRunKind::WorkflowRun,
+                Utc::now(),
+            )],
+            errors: Vec::new(),
+        },
+        &run_query,
+    )
+    .expect_err("stored offset cursors must not page runs");
+    assert!(err.to_string().contains("invalid delivery cursor"));
+}
+
+fn pull_request_list_row(id: &str, updated_at: DateTime<Utc>) -> CodeDeliveryPullRequestSummary {
+    CodeDeliveryPullRequestSummary {
+        id: id.into(),
+        repository: repository_ref(),
+        number: 1,
+        url: format!("https://github.com/brightwave-inc/tidebreak/pull/{id}"),
+        title: id.into(),
+        state: "open".into(),
+        draft: false,
+        author: None,
+        author_avatar_url: None,
+        head_branch: "head".into(),
+        base_branch: "main".into(),
+        head_sha: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        auto_merge_enabled: false,
+        in_merge_queue: None,
+        comment_count: None,
+        checks: Vec::new(),
+        attention_reasons: Vec::new(),
+        ready_to_merge: false,
+        workspace_links: Vec::new(),
+        stack_number: None,
+        stack_size: None,
+        stack_parent_number: None,
+        unregistered_stack_numbers: None,
+        labels: Vec::new(),
+        created_at: updated_at,
+        updated_at,
+        merged_at: None,
+        closed_at: None,
+    }
+}
+
+fn capability() -> CodeGitHubCapability {
+    CodeGitHubCapability {
+        found: true,
+        authenticated: Some(true),
+        viewer_login: Some("octocat".into()),
+        remediation: String::new(),
+    }
+}
+
+fn list_page(
+    items: Vec<CodeDeliveryPullRequestSummary>,
+    cursor: Option<String>,
+    limit: u16,
+) -> CodeDeliveryPullRequestsPage {
+    let mut query = pull_request_query();
+    query.cursor = cursor;
+    query.limit = Some(limit);
+    pull_request_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items,
+            errors: Vec::new(),
+        },
+        &query,
+    )
+    .unwrap()
+}
+
+fn run_list_query() -> CodeDeliveryRunQuery {
+    CodeDeliveryRunQuery {
+        repositories: Vec::new(),
+        search: None,
+        kinds: Vec::new(),
+        statuses: Vec::new(),
+        conclusions: Vec::new(),
+        workflows: Vec::new(),
+        environments: Vec::new(),
+        branches: Vec::new(),
+        events: Vec::new(),
+        actors: Vec::new(),
+        attention_only: false,
+        tidebreak_linked: None,
+        created_after: None,
+        cursor: None,
+        limit: None,
+        refresh: false,
+    }
+}
+
+fn run_list_row(
+    id: &str,
+    kind: CodeDeliveryRunKind,
+    updated_at: DateTime<Utc>,
+) -> CodeDeliveryRunSummary {
+    CodeDeliveryRunSummary {
+        id: id.into(),
+        repository: repository_ref(),
+        kind,
+        github_id: 1,
+        run_attempt: None,
+        name: id.into(),
+        url: format!("https://github.com/brightwave-inc/tidebreak/{id}"),
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        workflow: None,
+        environment: None,
+        branch: None,
+        sha: None,
+        event: None,
+        actor: None,
+        attention_reasons: Vec::new(),
+        workspace_links: Vec::new(),
+        created_at: updated_at,
+        updated_at,
+    }
+}
+
+fn run_list_page(
+    items: Vec<CodeDeliveryRunSummary>,
+    cursor: Option<String>,
+    limit: u16,
+) -> CodeDeliveryRunsPage {
+    let mut query = run_list_query();
+    query.cursor = cursor;
+    query.limit = Some(limit);
+    run_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items,
+            errors: Vec::new(),
+        },
+        &query,
+    )
+    .unwrap()
+}
+
+fn run_ids(page: &CodeDeliveryRunsPage) -> Vec<&str> {
+    page.items.iter().map(|item| item.id.as_str()).collect()
+}
+
+/// After the 30 s list cache lapses, a "load more" re-reads a shorter
+/// aggregate. An offset cursor would be out of range; the sort-key cursor
+/// returns the remaining rows (or none) without that error.
+#[test]
+fn pull_request_load_more_survives_a_shorter_reread() {
+    let t0 = Utc::now();
+    let t1 = t0 - chrono::Duration::seconds(1);
+    let t2 = t0 - chrono::Duration::seconds(2);
+    let t3 = t0 - chrono::Duration::seconds(3);
+    let first = list_page(
+        vec![
+            pull_request_list_row("a", t0),
+            pull_request_list_row("b", t1),
+            pull_request_list_row("c", t2),
+            pull_request_list_row("d", t3),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    let cursor = first.next_cursor.expect("page continues");
+
+    let shorter = vec![pull_request_list_row("a", t0)];
+    let mut query = pull_request_query();
+    query.cursor = Some(cursor.clone());
+    query.limit = Some(2);
+    let page = pull_request_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items: shorter,
+            errors: Vec::new(),
+        },
+        &query,
+    )
+    .expect("a shorter aggregate must not treat a keyset cursor as out of range");
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+}
+
+/// A longer re-read inserts a newer row at the front. An offset of 2 would
+/// repeat the last row of page one; the sort-key cursor continues after it.
+#[test]
+fn pull_request_load_more_neither_skips_nor_repeats_on_a_longer_reread() {
+    let t0 = Utc::now();
+    let t1 = t0 - chrono::Duration::seconds(1);
+    let t2 = t0 - chrono::Duration::seconds(2);
+    let t3 = t0 - chrono::Duration::seconds(3);
+    let first = list_page(
+        vec![
+            pull_request_list_row("b", t1),
+            pull_request_list_row("c", t2),
+            pull_request_list_row("d", t3),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b", "c"]
+    );
+    let cursor = first.next_cursor.expect("page continues");
+
+    let longer = vec![
+        pull_request_list_row("a", t0),
+        pull_request_list_row("b", t1),
+        pull_request_list_row("c", t2),
+        pull_request_list_row("d", t3),
+    ];
+    let page = list_page(longer, Some(cursor), 2);
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["d"]
+    );
+    assert!(page.next_cursor.is_none());
+}
+
+/// After the 30 s list cache lapses, a "load more" re-reads a shorter
+/// mixed workflow/deployment aggregate. An offset cursor would be out of
+/// range; the sort-key cursor returns the remaining rows (or none).
+#[test]
+fn run_load_more_survives_a_shorter_reread() {
+    let t0 = Utc::now();
+    let t1 = t0 - chrono::Duration::seconds(1);
+    let t2 = t0 - chrono::Duration::seconds(2);
+    let t3 = t0 - chrono::Duration::seconds(3);
+    let first = run_list_page(
+        vec![
+            run_list_row("w-a", CodeDeliveryRunKind::WorkflowRun, t0),
+            run_list_row("d-b", CodeDeliveryRunKind::Deployment, t1),
+            run_list_row("w-c", CodeDeliveryRunKind::WorkflowRun, t2),
+            run_list_row("d-d", CodeDeliveryRunKind::Deployment, t3),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(run_ids(&first), vec!["w-a", "d-b"]);
+    let cursor = first.next_cursor.expect("page continues");
+
+    let shorter = vec![run_list_row("w-a", CodeDeliveryRunKind::WorkflowRun, t0)];
+    let mut query = run_list_query();
+    query.cursor = Some(cursor);
+    query.limit = Some(2);
+    let page = run_page(
+        capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items: shorter,
+            errors: Vec::new(),
+        },
+        &query,
+    )
+    .expect("a shorter aggregate must not treat a keyset cursor as out of range");
+    assert!(run_ids(&page).is_empty());
+}
+
+/// A longer re-read inserts a newer row at the front. An offset of 2 would
+/// repeat the last row of page one; the sort-key cursor continues after it.
+#[test]
+fn run_load_more_neither_skips_nor_repeats_on_a_longer_reread() {
+    let t0 = Utc::now();
+    let t1 = t0 - chrono::Duration::seconds(1);
+    let t2 = t0 - chrono::Duration::seconds(2);
+    let t3 = t0 - chrono::Duration::seconds(3);
+    let first = run_list_page(
+        vec![
+            run_list_row("w-b", CodeDeliveryRunKind::WorkflowRun, t1),
+            run_list_row("d-c", CodeDeliveryRunKind::Deployment, t2),
+            run_list_row("w-d", CodeDeliveryRunKind::WorkflowRun, t3),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(run_ids(&first), vec!["w-b", "d-c"]);
+    let cursor = first.next_cursor.expect("page continues");
+
+    let longer = vec![
+        run_list_row("d-a", CodeDeliveryRunKind::Deployment, t0),
+        run_list_row("w-b", CodeDeliveryRunKind::WorkflowRun, t1),
+        run_list_row("d-c", CodeDeliveryRunKind::Deployment, t2),
+        run_list_row("w-d", CodeDeliveryRunKind::WorkflowRun, t3),
+    ];
+    let page = run_list_page(longer, Some(cursor), 2);
+    assert_eq!(run_ids(&page), vec!["w-d"]);
+    assert!(page.next_cursor.is_none());
+}
+
+/// Deleting the last row of page one after expiry must not duplicate the
+/// next row; inserting between pages must still appear on load more.
+#[test]
+fn run_load_more_handles_deletes_and_inserts_after_expiry() {
+    let t0 = Utc::now();
+    let t1 = t0 - chrono::Duration::seconds(1);
+    let t2 = t0 - chrono::Duration::seconds(2);
+    let t3 = t0 - chrono::Duration::seconds(3);
+    let t4 = t0 - chrono::Duration::seconds(4);
+    let first = run_list_page(
+        vec![
+            run_list_row("w-a", CodeDeliveryRunKind::WorkflowRun, t0),
+            run_list_row("d-b", CodeDeliveryRunKind::Deployment, t1),
+            run_list_row("w-c", CodeDeliveryRunKind::WorkflowRun, t3),
+            run_list_row("d-d", CodeDeliveryRunKind::Deployment, t4),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(run_ids(&first), vec!["w-a", "d-b"]);
+    let cursor = first.next_cursor.expect("page continues");
+
+    let reread = vec![
+        run_list_row("w-a", CodeDeliveryRunKind::WorkflowRun, t0),
+        run_list_row("d-mid", CodeDeliveryRunKind::Deployment, t2),
+        run_list_row("w-c", CodeDeliveryRunKind::WorkflowRun, t3),
+        run_list_row("d-d", CodeDeliveryRunKind::Deployment, t4),
+    ];
+    let page = run_list_page(reread, Some(cursor), 2);
+    assert_eq!(run_ids(&page), vec!["d-mid", "w-c"]);
+    assert_eq!(
+        page.next_cursor
+            .as_deref()
+            .map(|cursor| decode_updated_at_id_cursor(cursor).unwrap().1),
+        Some("w-c")
+    );
+}
+
+/// Equal `updated_at` is ordered by `id` so mixed kinds with the same stamp
+/// do not skip or repeat across a page boundary.
+#[test]
+fn run_load_more_breaks_updated_at_ties_by_id() {
+    let t0 = Utc::now();
+    let first = run_list_page(
+        vec![
+            run_list_row("a-workflow", CodeDeliveryRunKind::WorkflowRun, t0),
+            run_list_row("b-deploy", CodeDeliveryRunKind::Deployment, t0),
+            run_list_row("c-workflow", CodeDeliveryRunKind::WorkflowRun, t0),
+        ],
+        None,
+        2,
+    );
+    assert_eq!(run_ids(&first), vec!["a-workflow", "b-deploy"]);
+    let cursor = first.next_cursor.expect("page continues");
+    let page = run_list_page(
+        vec![
+            run_list_row("a-workflow", CodeDeliveryRunKind::WorkflowRun, t0),
+            run_list_row("b-deploy", CodeDeliveryRunKind::Deployment, t0),
+            run_list_row("c-workflow", CodeDeliveryRunKind::WorkflowRun, t0),
+        ],
+        Some(cursor),
+        2,
+    );
+    assert_eq!(run_ids(&page), vec!["c-workflow"]);
+    assert!(page.next_cursor.is_none());
 }
 
 #[test]

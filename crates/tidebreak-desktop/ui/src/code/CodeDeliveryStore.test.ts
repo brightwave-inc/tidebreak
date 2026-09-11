@@ -194,7 +194,7 @@ describe("trackedCodeDeliveryRepositories", () => {
         window.localStorage.getItem("tidebreak.code-delivery") ?? "{}",
       ),
     ).toMatchObject({
-      version: 1,
+      version: 2,
       excludedRegisteredRepoIds: ["repo-zeta"],
       pinnedRepositoryKeys: ["github.com/other-org/beta"],
     });

@@ -5,7 +5,7 @@ const STORAGE_KEY = "tidebreak.code-delivery";
 
 function legacyState() {
   return {
-    version: 1,
+    version: 2,
     manualRepositories: [],
     excludedRegisteredRepoIds: [],
     pinnedRepositoryKeys: [],

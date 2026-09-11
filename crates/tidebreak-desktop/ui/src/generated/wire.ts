@@ -1236,7 +1236,10 @@ export type CodeDeliveryRunKind = "workflow_run" | "deployment";
 
 export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number,
 /**
- * Skip the short list cache and reread GitHub. See the pull-request query.
+ * Skip the short list cache and reread GitHub.
+ *
+ * Set only by an explicit user refresh. Paging never sets it, so
+ * following a cursor stays on the aggregate the first page came from.
  */
 refresh: boolean, };
 

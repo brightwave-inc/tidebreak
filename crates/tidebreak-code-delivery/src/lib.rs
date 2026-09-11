@@ -170,24 +170,67 @@ fn contains_token(values: &[String], target: &str) -> bool {
         .any(|value| value.eq_ignore_ascii_case(target))
 }
 
-fn paginate<T>(
+/// Last seen `(updated_at, id)` in list order: newest `updated_at` first,
+/// then `id` ascending. A re-read aggregate resumes after this key.
+fn encode_updated_at_id_cursor(updated_at: DateTime<Utc>, id: &str) -> String {
+    format!("{}|{id}", updated_at.to_rfc3339())
+}
+
+fn decode_updated_at_id_cursor(cursor: &str) -> Result<(DateTime<Utc>, &str), ServerError> {
+    let (stamp, id) = cursor
+        .split_once('|')
+        .ok_or_else(|| ServerError::bad_request("invalid delivery cursor"))?;
+    if id.is_empty() {
+        return Err(ServerError::bad_request("invalid delivery cursor"));
+    }
+    let updated_at = DateTime::parse_from_rfc3339(stamp)
+        .map_err(|_| ServerError::bad_request("invalid delivery cursor"))?
+        .with_timezone(&Utc);
+    Ok((updated_at, id))
+}
+
+fn sorts_after_updated_at_id(
+    last_updated_at: DateTime<Utc>,
+    last_id: &str,
+    updated_at: DateTime<Utc>,
+    id: &str,
+) -> bool {
+    updated_at
+        .cmp(&last_updated_at)
+        .then_with(|| last_id.cmp(id))
+        == std::cmp::Ordering::Less
+}
+
+fn paginate_by_updated_at_id<T, F>(
     items: Vec<T>,
     cursor: Option<&str>,
     limit: Option<u16>,
-) -> Result<(Vec<T>, Option<String>), ServerError> {
-    let offset = match cursor {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|_| ServerError::bad_request("invalid delivery cursor"))?,
+    key: F,
+) -> Result<(Vec<T>, Option<String>), ServerError>
+where
+    T: Clone,
+    F: Fn(&T) -> (DateTime<Utc>, &str),
+{
+    let limit = usize::from(limit.unwrap_or(50)).clamp(1, MAX_PAGE_SIZE);
+    let start = match cursor {
+        Some(value) => {
+            let (updated_at, id) = decode_updated_at_id_cursor(value)?;
+            items
+                .iter()
+                .position(|item| {
+                    let (item_updated_at, item_id) = key(item);
+                    sorts_after_updated_at_id(updated_at, id, item_updated_at, item_id)
+                })
+                .unwrap_or(items.len())
+        }
         None => 0,
     };
-    let limit = usize::from(limit.unwrap_or(50)).clamp(1, MAX_PAGE_SIZE);
-    if offset > items.len() {
-        return Err(ServerError::bad_request("delivery cursor is out of range"));
-    }
-    let end = (offset + limit).min(items.len());
-    let next = (end < items.len()).then(|| end.to_string());
-    Ok((items.into_iter().skip(offset).take(limit).collect(), next))
+    let end = (start + limit).min(items.len());
+    let next = (end < items.len()).then(|| {
+        let (updated_at, id) = key(&items[end - 1]);
+        encode_updated_at_id_cursor(updated_at, id)
+    });
+    Ok((items[start..end].to_vec(), next))
 }
 
 fn string_array_path(value: &Value, path: &[&str], field: &str) -> Vec<String> {

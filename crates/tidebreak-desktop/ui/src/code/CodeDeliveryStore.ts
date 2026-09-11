@@ -13,7 +13,7 @@ import type {
 } from "../api/types";
 
 const STORAGE_KEY = "tidebreak.code-delivery";
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2;
 const MAX_KNOWN_AUTHORS = 50;
 const REPOSITORY_CACHE_MS = 2 * 60 * 1_000;
 const MAX_PULL_REQUEST_PAGE_CACHE = 8;
@@ -125,7 +125,7 @@ type StoredCodeDeliveryState = {
 };
 
 type PersistedCodeDeliveryState = StoredCodeDeliveryState & {
-  version: 1;
+  version: 2;
   notificationRulesMigrated?: true;
   notificationRules?: CodeDeliveryNotificationRule[];
 };
