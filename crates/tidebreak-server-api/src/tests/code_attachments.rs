@@ -45,7 +45,7 @@ async fn publish_one_pixel_png(
 ) -> String {
     let response = client
         .post(format!(
-            "http://{addr}/code/sessions/{session_id}/attachments/images"
+            "http://{addr}/sessions/{session_id}/attachments/images"
         ))
         .bearer_auth(token)
         .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -91,7 +91,7 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
     let pixels = crate::routes::image_attachment::png_header(4, 4);
     let published = client
         .post(format!(
-            "http://{addr}/code/sessions/{session}/attachments/images"
+            "http://{addr}/sessions/{session}/attachments/images"
         ))
         .bearer_auth(&token)
         .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -107,7 +107,7 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
         let client = client.clone();
         let token = token.clone();
         let blob_id = blob_id.clone();
-        let turn_url = format!("http://{addr}/code/sessions/{session}/turns");
+        let turn_url = format!("http://{addr}/sessions/{session}/turns");
         tokio::spawn(async move {
             client
                 .post(turn_url)
@@ -166,7 +166,7 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
 
     // The transcript keeps what was typed, not what the engine was handed.
     let turns: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/code/sessions/{session}/turns"))
+        .get(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&token)
         .send()
         .await
@@ -200,7 +200,7 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
 
     let published = client
         .post(format!(
-            "http://{addr}/code/sessions/{session}/attachments/images"
+            "http://{addr}/sessions/{session}/attachments/images"
         ))
         .bearer_auth(&token)
         .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -212,7 +212,7 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
     let attachment: serde_json::Value = published.json().await.unwrap();
 
     let accepted = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .post(format!("http://{addr}/sessions/{session}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "message": "what is in this",
@@ -280,7 +280,7 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
 
     let accepted = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -306,7 +306,7 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
 
     let listed = client
         .get(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -345,7 +345,7 @@ async fn a_live_session_image_upload_is_idempotently_published() {
     for _ in 0..2 {
         let response = client
             .post(format!(
-                "http://{addr}/code/sessions/{session}/attachments/images"
+                "http://{addr}/sessions/{session}/attachments/images"
             ))
             .bearer_auth(&token)
             .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -402,7 +402,7 @@ async fn an_image_upload_losing_the_session_end_race_conflicts_and_queues_retire
         async move {
             client
                 .post(format!(
-                    "http://{addr}/code/sessions/{session}/attachments/images"
+                    "http://{addr}/sessions/{session}/attachments/images"
                 ))
                 .bearer_auth(&token)
                 .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -501,7 +501,7 @@ async fn a_session_cannot_attach_an_image_published_to_another_session() {
     ];
     let published = client
         .post(format!(
-            "http://{addr}/code/sessions/{owning}/attachments/images"
+            "http://{addr}/sessions/{owning}/attachments/images"
         ))
         .bearer_auth(&token)
         .header(reqwest::header::CONTENT_TYPE, "image/png")
@@ -528,7 +528,7 @@ async fn a_session_cannot_attach_an_image_published_to_another_session() {
         let blob_id = blob_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session}/turns"))
+                .post(format!("http://{addr}/sessions/{session}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({
                     "message": "look at this",
@@ -651,7 +651,7 @@ async fn the_first_turn_of_a_new_session_accepts_an_image_published_after_create
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/code/sessions/{session_id}/attachments/images"))
+                .uri(format!("/sessions/{session_id}/attachments/images"))
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "image/png")
                 .body(Body::from(one_pixel_png()))
@@ -676,7 +676,7 @@ async fn the_first_turn_of_a_new_session_accepts_an_image_published_after_create
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/code/sessions/{session_id}/turns"))
+                .uri(format!("/sessions/{session_id}/turns"))
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -712,7 +712,7 @@ async fn the_first_turn_of_a_new_session_accepts_an_image_published_after_create
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/code/sessions/{session_id}/turns"))
+                .uri(format!("/sessions/{session_id}/turns"))
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(

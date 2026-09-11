@@ -257,26 +257,42 @@ describe the current schema, not the frozen baseline.
   ([`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)).
 
 Boot recovery (`code/recovery.rs`, per
-[`0032`](decisions/0032-code-workspaces-worktrees-checkpoints.md)): sessions
-recorded `Running` are probed by recorded pid. Dead → the open turn closes
-as `Interrupted` (journaled), session `Idle`, attention
-`NeedsYou { source: Lifecycle }`. Alive → `Fenced { OrphanAlive }` until an
-explicit reap. Never signal a pid not recorded at spawn; `EPERM` counts as
-alive. A pid is reused once its original process exits, so the probe also
-matches the recorded `child_process_identity` — the operating system's
-creation identity for that child — before it treats the pid as the session's
-own. A pid that is alive under a different identity is a stranger's process,
-and signalling it is what the match exists to prevent.
+[`0032`](decisions/0032-code-workspaces-worktrees-checkpoints.md)) checks
+sessions recorded as `Running` against their recorded process identity. A
+dead external process closes its open turn as `Interrupted`; the transcript
+stays intact. Internal-engine checkpoints keep their existing durable resume
+path.
 
-A resume ref is only worth persisting once it would actually resume:
-`HarnessSession::resume_ref` reports a token after the engine has committed
-it, not when the engine first names it. Codex, for instance, does not write a
-thread that has run no turn, so a thread id from `thread/start` alone stays
-unreported and a session whose engine dies before its first turn re-attaches
-with a fresh `thread/start`. When an engine does refuse a stored ref, the
-adapter reports `HarnessError::ResumeLost` and the session is
-`Fenced { ResumeLost }` — the fence drops the dead ref, so the reap it asks
-for starts a clean engine session instead of failing every turn identically.
+Routine recovery runs automatically. A verified leftover local process can
+be stopped before a replacement worker attaches. If an engine rejects a
+stored resume reference, recovery drops that reference and starts a fresh
+engine session. Neither path resubmits the interrupted input. Recovery leaves
+queued work paused so an interrupted session does not start another turn
+without a fresh action.
+
+Process ownership remains a hard boundary. Never signal a process without its
+recorded creation identity. A reused process ID belongs to another process,
+and an ambiguous probe must stay blocked. Automatic attempts are bounded and
+serialized with manual recovery. Repeated turn failures require the underlying
+problem to be fixed rather than an automatic restart loop.
+
+Remote recovery also requires proof that the previous sandbox stopped and
+that its terminal events reached the journal. Existing checkpoint and spend
+limits still apply. Automatic recovery never waives
+missing output or treats a best-effort cancellation as proof of termination.
+
+`Fenced` remains an internal lifecycle value. The UI stays quiet during brief
+recovery, shows “Reconnecting…” when it takes longer, and shows the specific
+problem when recovery cannot proceed. An existing manual attention pin remains
+intact. The recovery notice still exposes the blocking reason and any explicit
+retry action. Session digests and live digest notices carry an optional
+`fence_reason` so a manual pin cannot hide a recovery failure. Older clients
+can ignore the added field.
+
+A resume reference is persisted only after the engine commits it.
+`HarnessSession::resume_ref` does not report a token merely because the engine
+names it. For example, Codex does not persist a thread before its first turn,
+so a bare `thread/start` ID is not reused after a restart.
 
 ## The adapter contract
 
@@ -351,7 +367,7 @@ drift from captured reality
 Decision 48 step 5 puts Tidebreak's own agent loop behind the same contract.
 `HarnessKind::Internal` is registered by
 `crates/tidebreak-server/src/engine/internal/`, and a session created with
-no workspace (`POST /code/sessions`) selects it; the workspace-bound create
+no workspace (`POST /sessions`) selects it; the workspace-bound create
 path refuses it. The engine probes as found with no binary, needs no pin,
 and takes its inference from the server's own provider resolution.
 
@@ -383,7 +399,7 @@ Every decision settles the row through the one settle operation in
 `db/ops/code/approval.rs` and journals one `ApprovalResolved` there: the
 chat routes (`POST /chats/{id}/approvals/{call}`, `/questions/{call_id}/answer`,
 `/plans/{call}/decision`), the session route (`POST
-/code/approvals/{id}/decision`, which claims the row, delivers the decision
+/approvals/{id}/decision`, which claims the row, delivers the decision
 to `decide`, and settles on acknowledgement), the internal engine's
 Auto-mode judge, and the turn lane's cancellation and terminal sweeps. The
 agent loop journals no decision of its own; it reads the settled row and
@@ -467,7 +483,6 @@ bounded):
 | `TurnInterrupted` | usage up to the interruption, when the engine reports it |
 | `CheckpointRecorded` | turn id, diffstat |
 | `HarnessNotice` | level, message — the visible-degradation channel |
-| `AttentionChanged` | state, source |
 | `CredentialRefused` | provider and refusal message |
 
 The internal engine's own rows, which no external adapter writes:
@@ -497,12 +512,13 @@ whose completion payload carries no arguments leaves it unset.
 The block below is the spine, not the whole router. `crates/tidebreak-server-api/src/lib.rs`
 carries the complete list, and the generated wire types are what clients bind
 to; transcribing every route here only buys a page that drifts.
+Sessions, updates, and approvals use the unprefixed routes shown here.
 
 ```
 POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
 GET             /code/repos/sources        POST /code/repos/clone    GET /code/repos/clone/{job}
-POST/GET        /code/sessions             a session with no workspace (internal engine)
-GET             /code/sessions/{id}
+POST/GET        /sessions                  a session with no workspace (internal engine)
+GET             /sessions/{id}
 GET             /code/harnesses            doctor    POST /code/harnesses/refresh
 POST            /code/harnesses/{kind}/install       warm the pinned install (0045)
 GET             /code/harnesses/{kind}/models
@@ -515,26 +531,26 @@ POST            /code/workspaces/{id}/restore        back from a reclaim tier (0
 POST            /code/workspaces/{id}/retry-setup    run setup again on the same worktree
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode,
                                                      model?, reasoning_effort?, fast_mode?}
-POST/GET        /code/sessions/{id}/turns            {message}  (queued while running —
+POST/GET        /sessions/{id}/turns                 {message}  (queued while running —
                                                      the chat product's queue-default rule;
                                                      steering is the explicit alternative,
                                                      available only where the adapter's
                                                      mid_turn_steering capability carries it)
-GET             /code/sessions/{id}/queued           the durable queue (0069)
-PATCH/DELETE    /code/sessions/{id}/queued/{queued_id}
-PUT             /code/sessions/{id}/queue-paused
-POST            /code/sessions/{id}/queued/send-now
-POST            /code/sessions/{id}/steer            one mid-turn message
-POST            /code/sessions/{id}/interrupt | /reap | /fork
-POST            /code/sessions/{id}/mode | /effort | /fast-mode | /attention
-WS              /code/sessions/{id}/events?after=    snapshot → replay → live
+GET             /sessions/{id}/queued                the durable queue (0069)
+PATCH/DELETE    /sessions/{id}/queued/{queued_id}
+PUT             /sessions/{id}/queue-paused
+POST            /sessions/{id}/queued/send-now
+POST            /sessions/{id}/steer                 one mid-turn message
+POST            /sessions/{id}/interrupt | /reap | /fork
+POST            /sessions/{id}/mode | /effort | /fast-mode | /attention
+WS              /sessions/{id}/events?after=         snapshot → replay → live
                                                      (replay is capped and flags truncation;
                                                      assistant deltas ride the same socket
                                                      as live-only frames — record 0058)
-WS              /code/updates                        digests, restated on connect
+WS              /updates                             digests, restated on connect
 
-GET             /code/approvals?state=pending
-POST            /code/approvals/{id}/decision        {decision: approve | deny | approve_with_grant | answers | plan_decision, ...}
+GET             /approvals?state=pending
+POST            /approvals/{id}/decision             {decision: approve | deny | approve_with_grant | answers | plan_decision, ...}
 POST            /code/mcp/approval-prompt            loopback approval endpoint (0033)
 POST            /code/mcp/connected-apps             loopback MCP bridge over every mounted MCP server, for external engines
 
@@ -556,11 +572,11 @@ POST            /code/delivery/pull-requests/query | /detail | /action
 POST            /code/delivery/runs/query  | /detail | /action
 POST            /code/workspace-title      generate a workspace title
 
-POST/GET        /sessions                 shared conversation collection
+POST/GET        /sessions                      shared conversation collection
 GET/POST        /sessions/{id}/...        turns, queue, events, controls, access
-GET             /approvals                pending approvals
-POST            /approvals/{id}/decision  settle an approval
-WS              /updates                  shared updates stream
+GET             /approvals                     pending approvals
+POST            /approvals/{id}/decision       settle an approval
+WS              /updates                       shared updates stream
 
 POST/GET/DELETE /code/workspaces/{id}/terminals      DELETE closes every terminal at once
 DELETE          /code/workspaces/{id}/terminals/{tid}    close one
@@ -614,7 +630,7 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   "Workspaces" header carrying list settings, add repo, and new workspace,
   then workspace cards with attention badges, and the mode switch back to
   chat.
-- `CodeUpdatesStore.ts` — one singleton store fed by `/code/updates`;
+- `CodeUpdatesStore.ts` — one singleton store fed by `/updates`;
   everything list-shaped reads from it.
 - `CodeSessionRegistry.ts` — `Map<sessionId, {store, controller, refCount}>`
   of per-session stores from a `createCodeSessionStore()` factory; only

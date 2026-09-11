@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Attention } from "../api/types";
 import { AttentionBadge } from "./AttentionBadge";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 const cases: Array<{ attention: Attention; label: string; type: string }> = [
@@ -29,14 +30,6 @@ const cases: Array<{ attention: Attention; label: string; type: string }> = [
     },
     label: "Stalled",
     type: "stalled",
-  },
-  {
-    attention: {
-      state: { type: "fenced", reason: { type: "orphan_alive" } },
-      source: "lifecycle",
-    },
-    label: "Fenced",
-    type: "fenced",
   },
   {
     attention: { state: { type: "done_unreviewed" }, source: "lifecycle" },
@@ -115,4 +108,26 @@ describe("AttentionBadge", () => {
       "needs_you",
     );
   });
+});
+
+it("shows recovery after a brief delay without a warning mark", () => {
+  vi.useFakeTimers();
+  const { container } = render(
+    <AttentionBadge
+      attention={{
+        state: { type: "fenced", reason: { type: "orphan_alive" } },
+        source: "lifecycle",
+      }}
+      compact
+    />,
+  );
+  expect(container).toBeEmptyDOMElement();
+  act(() => vi.advanceTimersByTime(1500));
+  expect(screen.getByLabelText("Reconnecting…")).toHaveAttribute(
+    "data-attention",
+    "fenced",
+  );
+  expect(
+    container.querySelector("[data-loader-variant='comet']"),
+  ).not.toBeNull();
 });

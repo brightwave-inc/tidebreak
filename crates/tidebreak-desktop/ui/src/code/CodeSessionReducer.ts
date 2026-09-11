@@ -1,6 +1,5 @@
 import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
-  Attention,
   CodeApprovalState,
   CodeSessionLifecycle,
   CodeTurnSnapshot,
@@ -192,11 +191,6 @@ export type CodeSessionState = {
    * after assistant rows exist.
    */
   storedRewrites: Record<string, string>;
-  /**
-   * Latest `attention_changed` from the journal. Not a transcript item — the
-   * header badge reads this so a stall or a need-you does not grow the log.
-   */
-  attention: Attention | null;
 };
 
 export type CodeSessionEffect =
@@ -251,7 +245,6 @@ export function initialCodeSessionState(): CodeSessionState {
     lifecycle: null,
     contentRevision: 0,
     storedRewrites: {},
-    attention: null,
   };
 }
 
@@ -1124,16 +1117,6 @@ export function reduceCodeSessionEvent(
             turnId: attributedTurnId,
             text: event.text,
           }),
-        },
-        effects,
-      };
-    }
-
-    case "attention_changed": {
-      return {
-        state: {
-          ...state,
-          attention: { state: event.state, source: event.source },
         },
         effects,
       };

@@ -1328,7 +1328,6 @@ fn render_event(
         | Event::ApprovalResolved { .. }
         | Event::UserSteered { .. }
         | Event::CheckpointRecorded { .. }
-        | Event::AttentionChanged { .. }
         | _ => {}
     }
     dangling

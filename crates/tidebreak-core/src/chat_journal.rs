@@ -12,7 +12,7 @@
 //! This is the aliasing the decision's amendment permits — one route family
 //! over one set of entities — and nothing else maps one side's entities into
 //! the other's shapes. Rows only an external engine writes (`SessionStarted`,
-//! `FileChanged`, `AttentionChanged`, …) have no chat reading and project to
+//! `FileChanged`, …) have no chat reading and project to
 //! nothing.
 
 use crate::code::{
@@ -300,7 +300,6 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
         }
         | Event::CheckpointRecorded { .. }
         | Event::HarnessNotice { .. }
-        | Event::AttentionChanged { .. }
         | Event::CredentialRefused { .. } => return Ok(None),
     }))
 }

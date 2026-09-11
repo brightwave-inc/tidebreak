@@ -1023,6 +1023,7 @@ impl CodeRuntime {
         let Some(remote) = self.remote_sessions() else {
             return Ok(());
         };
+        let _recovery_guard = self.session_recovery_lock(session.id).lock_owned().await;
         let lock = remote.promotion_lock(session.id);
         let _guard = lock.lock().await;
         let mut session = self.get_session(&session.owner, session.id).await?;

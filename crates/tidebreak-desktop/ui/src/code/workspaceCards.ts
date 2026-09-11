@@ -1,3 +1,4 @@
+import { recoveryDigest } from "./sessionRecovery";
 import type {
   Attention,
   CodeRepoSnapshot,
@@ -193,7 +194,7 @@ export function readyToMergeNotice(
  *
  * A stalled state is only a silence heuristic. While the lifecycle still says
  * running, the workspace stays with live work and the session row carries the
- * warning. A stale stalled state and a fenced session join needs-you. Ready to
+ * warning. A stale stalled state joins needs-you; automatic recovery stays with live work. Ready to
  * merge does not: notify and watch store it as needs-you, but it is a
  * successful pull-request state, and a merged or closed pull request makes
  * that prompt stale. Idle or ended sessions with turns join Done, matching
@@ -205,17 +206,18 @@ export function workspaceStatusRank(
   workspace: CodeWorkspaceSnapshot,
   digest: CodeSessionDigest | undefined,
 ): WorkspaceStatusRank {
+  digest = digest ? recoveryDigest(digest) : undefined;
   if (isPutAway(workspace)) return "archived";
   const attentionType = digest?.attention.state.type;
   const pr = digest?.pr_state ?? workspace.pr;
   if (
-    (attentionType === "needs_you" &&
-      !isReadyToMergeAttention(digest?.attention)) ||
-    attentionType === "fenced"
+    attentionType === "needs_you" &&
+    !isReadyToMergeAttention(digest?.attention)
   ) {
     return "needs_you";
   }
-  if (digest?.lifecycle === "running") return "running";
+  if (digest?.lifecycle === "running" || attentionType === "fenced")
+    return "running";
   if (attentionType === "stalled") return "needs_you";
   if (pr) {
     const lifecycle = pullRequestLifecycle(pr);
@@ -489,6 +491,7 @@ export function isSessionRowWorthy(
 
 /** Short lifecycle word for the nested session row. */
 export function sessionRowLabel(digest: CodeSessionDigest): string {
+  digest = recoveryDigest(digest);
   if (digest.attention.state.type === "needs_you") {
     const notice = readyToMergeNotice(digest.attention, digest.pr_state);
     if (notice === "ready") {
@@ -501,7 +504,7 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
     case "stalled":
       return "Stalled";
     case "fenced":
-      return "Fenced";
+      return "Reconnecting…";
     case "done_unreviewed":
       return "Done";
     case "manual":
@@ -531,6 +534,7 @@ export function sessionActivityLineLabel(
   digest: CodeSessionDigest,
   pr: PrStateInput | undefined = digest.pr_state,
 ): string {
+  digest = recoveryDigest(digest);
   if (digest.attention.state.type === "needs_you") {
     const notice = readyToMergeNotice(digest.attention, pr);
     if (notice !== "stale") {
@@ -545,6 +549,7 @@ export function sessionActivityLineLabel(
     if (detail && !hasRunningSubagents(digest)) return detail;
     return sessionActivityLabel(digest);
   }
+  if (digest.attention.state.type === "fenced") return "Reconnecting…";
   const recap = digest.recap?.trim();
   if (recap) return recap;
   return sessionRowLabel(digest);

@@ -155,6 +155,7 @@ impl CodeRuntime {
                 return Ok(SubmitTurnOutcome::AlreadyDelivered);
             }
         }
+        let recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let mut session = self.get_session(owner, id).await?;
         let workspace = self.session_workspace(&session).await?;
         if let Some(workspace) = &workspace {
@@ -168,7 +169,7 @@ impl CodeRuntime {
         if session.lifecycle == SessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "session_fenced",
-                "session is fenced until it is reaped",
+                super::auto_recovery::recovery_message(&session),
             ));
         }
         if session.lifecycle == SessionLifecycle::Ended {
@@ -310,6 +311,7 @@ impl CodeRuntime {
             })
             .await
             .map_err(|_| ServerError::internal("session worker is gone"))?;
+        drop(recovery_guard);
         let turn = match rx
             .await
             .map_err(|_| ServerError::internal("session worker dropped the turn"))?
@@ -518,6 +520,7 @@ impl CodeRuntime {
         id: SessionId,
         paused: bool,
     ) -> Result<(), ServerError> {
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, paused).await?;
         if !paused {
@@ -530,6 +533,7 @@ impl CodeRuntime {
     /// head row. The tray composes send-now client-side exactly as chat does:
     /// pause, move the row first, stop the live turn, then this.
     pub async fn send_queued_now(&self, owner: &OwnerId, id: SessionId) -> Result<(), ServerError> {
+        let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
         self.wake_queue_for_location(&session);
@@ -737,12 +741,46 @@ impl CodeRuntime {
     }
 
     pub async fn reap(&self, owner: &OwnerId, id: SessionId) -> Result<Session, ServerError> {
+        let _guard = self.session_recovery_lock(id).lock_owned().await;
         let session = self.get_session(owner, id).await?;
         if session.lifecycle != SessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "not_fenced",
-                "only a fenced session can be reaped",
+                "this session does not need connection recovery",
             ));
+        }
+        self.recovery_attempts
+            .lock()
+            .expect("recovery attempts")
+            .remove(&id);
+        tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, true).await?;
+        let result = self.reap_inner(owner, id).await;
+        if let Err(error) = &result {
+            self.retain_failed_recovery(&session, error.message())
+                .await?;
+        }
+        result
+    }
+
+    pub(super) async fn reap_inner(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<Session, ServerError> {
+        let mut session = self.get_session(owner, id).await?;
+        if session.lifecycle != SessionLifecycle::Fenced {
+            return Err(ServerError::conflict_kind(
+                "not_fenced",
+                "this session does not need connection recovery",
+            ));
+        }
+        let fresh_context = matches!(session.fence_reason, Some(FenceReason::ResumeLost { .. }));
+        if fresh_context && session.harness_resume_ref.is_some() {
+            let reason = session
+                .fence_reason
+                .clone()
+                .expect("resume loss has a cause");
+            recovery::fence_session(&self.db, &self.bus, &mut session, reason).await?;
         }
         if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
             // No worker to shut down and nothing to relaunch: the driver
@@ -775,7 +813,16 @@ impl CodeRuntime {
             // the new spawn must not be started against a row it is still
             // moving. Wait for it, then reap the row as it stands now.
             Some(handle) => {
-                Self::shut_down_worker(id, handle).await;
+                if !Self::shut_down_worker(id, handle.clone()).await {
+                    self.workers
+                        .lock()
+                        .expect("code workers")
+                        .insert(id, handle);
+                    return Err(ServerError::conflict_kind(
+                        "session_not_reaped",
+                        "The previous engine did not stop. Wait for it to exit before retrying recovery.",
+                    ));
+                }
                 self.get_session(owner, id).await?
             }
             None => session,
@@ -786,6 +833,18 @@ impl CodeRuntime {
                 recovery::ReapSessionError::Store(error) => ServerError::from(error),
                 other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
             })?;
-        self.attach_and_spawn_worker(session).await
+        let attached = self.attach_and_spawn_worker(session).await?;
+        if fresh_context {
+            if let Err(error) = crate::code::session_worker::journal_event(
+                &self.db, &self.bus, &attached.owner, attached.id, attached.spawn_epoch,
+                Event::HarnessNotice {
+                    level: tidebreak_core::HarnessNoticeLevel::Info,
+                    message: "The previous engine context expired. A fresh engine is ready; your saved transcript remains, and the interrupted turn was not replayed.".into(),
+                },
+            ).await {
+                tracing::warn!(session = %attached.id, %error, "could not journal fresh engine context after recovery");
+            }
+        }
+        Ok(attached)
     }
 }

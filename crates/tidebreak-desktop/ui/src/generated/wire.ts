@@ -2298,15 +2298,7 @@ message: string,
 /**
  * Bounded remedy sentence for the person.
  */
-remediation: string, } | { "type": "attention_changed",
-/**
- * New state.
- */
-state: AttentionState,
-/**
- * Who or what set it.
- */
-source: AttentionSource, } | { "type": "stream_interrupted" } | { "type": "tool_args_delta",
+remediation: string, } | { "type": "stream_interrupted" } | { "type": "tool_args_delta",
 /**
  * The call these args belong to.
  */
@@ -4825,7 +4817,11 @@ can_open_chat?: boolean, session: SessionId, kind: SessionKind,
  * one workspace row. Optional on the wire so a desktop can still read a
  * digest from an older server during an update.
  */
-harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention,
+/**
+ * Recovery cause, independent of a manual attention pin.
+ */
+fence_reason?: FenceReason, title: string, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions: the newest
  * turn start, or session creation before the first turn. Optional so a
@@ -5708,7 +5704,7 @@ sessions: Array<SessionDigest>, } | { "type": "digest", workspace: WorkspaceId |
 /**
  * Engine identity for the session represented by this digest.
  */
-harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, title: string, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions.
  */

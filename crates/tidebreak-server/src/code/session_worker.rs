@@ -150,6 +150,7 @@ pub(crate) enum WorkerError {
     UpdateQuiesced,
 }
 
+#[derive(Clone)]
 pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
     /// The engine executable this worker launches, copied from the probe at

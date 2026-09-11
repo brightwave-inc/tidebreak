@@ -200,12 +200,6 @@ function applyEvent(
       };
     case "harness_notice":
       return appendStatus(state, `note:${state.lastSeq}`, event.message);
-    case "attention_changed":
-      return appendStatus(
-        state,
-        `att:${state.lastSeq}`,
-        `Attention: ${event.state.type}`,
-      );
     default:
       return state;
   }

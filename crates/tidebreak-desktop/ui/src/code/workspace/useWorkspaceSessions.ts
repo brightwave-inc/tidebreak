@@ -392,8 +392,10 @@ export function useWorkspaceSessions({
     }
   }
 
-  async function reap() {
-    if (!session) return;
+  const [retryingRecovery, setRetryingRecovery] = useState(false);
+  async function retryRecovery() {
+    if (!session || retryingRecovery) return;
+    setRetryingRecovery(true);
     try {
       const next = await client.reapCodeSession(session.id);
       catalog.rememberSession(next);
@@ -401,7 +403,9 @@ export function useWorkspaceSessions({
         current.map((entry) => (entry.id === next.id ? next : entry)),
       );
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not reap the session"));
+      toast.error(friendlyErrorMessage(err, "Could not recover the session"));
+    } finally {
+      setRetryingRecovery(false);
     }
   }
 
@@ -578,7 +582,8 @@ export function useWorkspaceSessions({
     error,
     retry: () => setReloadToken((token) => token + 1),
     startSession,
-    reap,
+    retryRecovery,
+    retryingRecovery,
     selectConversation,
     newConversation,
     forkConversation,

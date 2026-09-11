@@ -32,7 +32,7 @@ describe("attentionStatusTone", () => {
     expect(STATUS_MOTION[tone]).toBeTruthy();
   });
 
-  it("separates the two warnings from the one critical", () => {
+  it("separates recovery progress, warnings, and a direct need", () => {
     const tone = (state: Attention["state"]) =>
       attentionStatusTone({ state, source: "lifecycle" });
     expect(tone({ type: "needs_you", prompt: "", source: "structured" })).toBe(
@@ -40,7 +40,7 @@ describe("attentionStatusTone", () => {
     );
     expect(tone({ type: "stalled", idle_secs: 90 })).toBe("warning");
     expect(tone({ type: "fenced", reason: { type: "orphan_alive" } })).toBe(
-      "warning",
+      "pending",
     );
     expect(tone({ type: "done_unreviewed" })).toBe("neutral");
   });

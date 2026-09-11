@@ -6,6 +6,7 @@ import type {
 import {
   EMPTY_UPDATES,
   attentionBadgeLabel,
+  sessionRecoveryPresentation,
   listedSessions,
   noticeToAction,
   reduceUpdates,
@@ -114,7 +115,7 @@ describe("reduceUpdates", () => {
 });
 
 describe("attentionBadgeLabel", () => {
-  it("shows needs-you, done, stalled, and fenced; hides working and idle", () => {
+  it("shows needs-you, done, and stalled; hides recovery, working, and idle", () => {
     expect(attentionBadgeLabel(need)).toBe("an approval is waiting");
     expect(attentionBadgeLabel(done)).toBe("Done");
     expect(
@@ -123,9 +124,17 @@ describe("attentionBadgeLabel", () => {
         source: "lifecycle",
       }),
     ).toBe("Stalled");
+    expect(attentionBadgeLabel({ state: { type: "fenced", reason: { type: "orphan_alive" } }, source: "lifecycle" })).toBeNull();
     expect(attentionBadgeLabel(working)).toBeNull();
     expect(
       attentionBadgeLabel({ state: { type: "idle" }, source: "lifecycle" }),
     ).toBeNull();
   });
+});
+
+it("shows a recovery blocker without losing the manual pin", () => {
+  const row = { ...digest(), lifecycle: "fenced" as const, attention: { state: { type: "manual" as const, note: "Review today" }, source: "user" as const }, fence_reason: { type: "probe_ambiguous" as const, detail: "Automatic recovery failed" } };
+  expect(sessionRecoveryPresentation(row)).toEqual({ recovering: false, prompt: "Automatic recovery failed" });
+  expect(row.attention.state.type).toBe("manual");
+  expect(noticeToAction({ type: "digest", ...row })).toMatchObject({ digest: { fence_reason: row.fence_reason } });
 });

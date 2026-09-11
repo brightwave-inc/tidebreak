@@ -50,7 +50,7 @@ by the session worker.**
   runs under the session's model and effort as they are then, not as they
   were at enqueue.
 - The same REST surface as chat, one path segment over: `GET
-  /code/sessions/{id}/queued`, `PATCH`/`DELETE
+  /sessions/{id}/queued`, `PATCH`/`DELETE
   …/queued/{queued_id}`, `PUT …/queue-paused` (a settings key,
   `code.sessions.{id}.queue_paused`), `POST …/queued/send-now`. The queued
   submit receipt returns the row.

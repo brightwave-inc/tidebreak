@@ -4134,20 +4134,6 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         ...(actor ? { actor } : {}),
       };
     }
-    case "attention_changed": {
-      if (
-        !onlyKeys<Extract<WireCodeEvent, { type: "attention_changed" }>>(
-          value,
-          ["type", "state", "source"],
-        ) ||
-        !isMember(value.source, ATTENTION_SOURCES)
-      ) {
-        return null;
-      }
-      const state = parseAttentionState(value.state);
-      if (!state) return null;
-      return { type: "attention_changed", state, source: value.source };
-    }
     case "file_changed": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "file_changed" }>>(value, [
@@ -4374,6 +4360,7 @@ export function parseCodeSessionDigest(
       "harness_kind",
       "lifecycle",
       "attention",
+      "fence_reason",
       "title",
       "turn_count",
       "trigger_target_at",
@@ -4413,6 +4400,11 @@ export function parseCodeSessionDigest(
   ) {
     return null;
   }
+  const fence_reason =
+    value.fence_reason === undefined
+      ? undefined
+      : parseFenceReason(value.fence_reason);
+  if (value.fence_reason !== undefined && !fence_reason) return null;
   const attention = parseAttention(value.attention);
   if (!attention) return null;
   const pr_state =
@@ -4433,6 +4425,7 @@ export function parseCodeSessionDigest(
       : {}),
     lifecycle: value.lifecycle,
     attention,
+    ...(fence_reason ? { fence_reason } : {}),
     title: value.title,
     turn_count: value.turn_count,
     ...(value.trigger_target_at !== undefined
@@ -4492,6 +4485,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "harness_kind",
           "lifecycle",
           "attention",
+          "fence_reason",
           "title",
           "turn_count",
           "trigger_target_at",
@@ -4530,6 +4524,11 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
       ) {
         return null;
       }
+      const fence_reason =
+        value.fence_reason === undefined
+          ? undefined
+          : parseFenceReason(value.fence_reason);
+      if (value.fence_reason !== undefined && !fence_reason) return null;
       const attention = parseAttention(value.attention);
       if (!attention) return null;
       const pr_state =
@@ -4550,6 +4549,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           : {}),
         lifecycle: value.lifecycle,
         attention,
+        ...(fence_reason ? { fence_reason } : {}),
         title: value.title,
         turn_count: value.turn_count,
         ...(value.trigger_target_at !== undefined

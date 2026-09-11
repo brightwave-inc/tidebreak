@@ -34,12 +34,12 @@ rides that pipeline.
 **Per-session journals, identical discipline.** Code sessions journal into
 their own table (`code_event`: session id, monotonic per-session sequence,
 event payload), written before any live publication. The per-session
-WebSocket (`/code/sessions/{id}/events?after=`) implements exactly the chat
+WebSocket (`/sessions/{id}/events?after=`) implements exactly the chat
 contract: subscribe live first, snapshot, replay `seq > after`, then live,
 with sequence-based dedupe. One socket exists per *open* session view; a
 session nobody is looking at streams to no one.
 
-**One install-wide updates channel.** A single WebSocket (`/code/updates`)
+**One install-wide updates channel.** A single WebSocket (`/updates`)
 carries unsequenced digest notices: per-session
 `{workspace, session, lifecycle, attention, title, turn count, pull-request
 state}`. Digests are restated in full on connect, so a dropped notice costs

@@ -153,7 +153,7 @@ async fn clone_from_a_local_origin_registers_the_repo() {
     let parent = dir.path().join("checkouts");
     std::fs::create_dir_all(&parent).unwrap();
 
-    let mut request = format!("ws://{addr}/code/updates")
+    let mut request = format!("ws://{addr}/updates")
         .into_client_request()
         .unwrap();
     request

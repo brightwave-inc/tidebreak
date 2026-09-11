@@ -8,7 +8,6 @@
 //! the structured facts the chat surface replays (the alias layer the
 //! decision's amendment permits), and external adapters never produce them.
 
-use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -773,13 +772,6 @@ pub enum Event {
         /// Bounded remedy sentence for the person.
         remediation: String,
     },
-    /// Server-computed attention changed.
-    AttentionChanged {
-        /// New state.
-        state: AttentionState,
-        /// Who or what set it.
-        source: AttentionSource,
-    },
     /// The provider stream was preempted; clients discard the assistant and
     /// tool deltas streamed since the last stable boundary. Internal engine.
     StreamInterrupted,
@@ -835,7 +827,6 @@ pub struct SequencedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attention::FenceReason;
     use crate::code::HarnessKind;
     use uuid::Uuid;
 
@@ -984,15 +975,14 @@ mod tests {
             Event::TurnInterrupted { .. } => 14,
             Event::CheckpointRecorded { .. } => 15,
             Event::HarnessNotice { .. } => 16,
-            Event::AttentionChanged { .. } => 17,
-            Event::TurnRefused { .. } => 18,
-            Event::StreamInterrupted => 19,
-            Event::ToolArgsDelta { .. } => 20,
-            Event::TaskPlanUpdated { .. } => 21,
-            Event::ContextTruncated { .. } => 22,
-            Event::CompactionStarted => 23,
-            Event::CompactionFinished { .. } => 24,
-            Event::CredentialRefused { .. } => 25,
+            Event::TurnRefused { .. } => 17,
+            Event::StreamInterrupted => 18,
+            Event::ToolArgsDelta { .. } => 19,
+            Event::TaskPlanUpdated { .. } => 20,
+            Event::ContextTruncated { .. } => 21,
+            Event::CompactionStarted => 22,
+            Event::CompactionFinished { .. } => 23,
+            Event::CredentialRefused { .. } => 24,
         }
     }
 
@@ -1108,12 +1098,6 @@ mod tests {
                 reason: CredentialRefusalReason::ConnectionEnded,
                 message: "this external connection has no live gateway delegation".into(),
                 remediation: "Reconnect this session from Slack.".into(),
-            },
-            Event::AttentionChanged {
-                state: AttentionState::Fenced {
-                    reason: FenceReason::OrphanAlive,
-                },
-                source: AttentionSource::Lifecycle,
             },
             // The internal engine's rows. Their optional fields are pinned
             // on the chat journal fixture, which round-trips through these

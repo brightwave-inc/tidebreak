@@ -518,6 +518,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
     [workflowJob(ci, "desktop"), "rust"],
     [workflowJob(ci, "windows-check"), "rust"],
     [workflowJob(ci, "windows-native"), "windows_native"],
+    [workflowJob(ci, "macos-sandbox"), "workspace"],
     [testPartitions, "workspace"],
     [postgres, "workspace"],
     [workflowJob(ci, "ui"), "ui"],
@@ -772,6 +773,23 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.doesNotMatch(ci, /matrix\.task/);
 });
 
+test("macOS CI exercises Seatbelt and the egress broker without signing setup", () => {
+  const sandbox = workflowJob(workflows["ci.yml"], "macos-sandbox");
+  assert.match(sandbox, /runs-on: macos-latest/);
+  assert.match(sandbox, /needs: changes/);
+  assert.match(sandbox, /TIDEBREAK_DEV_SIGNING_IDENTITY: ""/);
+  assert.match(sandbox, /test -x \/usr\/bin\/sandbox-exec/);
+  assert.match(sandbox, /\/usr\/bin\/sandbox-exec -p/);
+  assert.match(sandbox, /\/usr\/bin\/python3 -c/);
+  for (const suite of ["local", "network", "sbpl"]) {
+    assert.ok(
+      sandbox.includes(`run: cargo test -p tidebreak-code-execution --locked --lib ${suite}::tests`),
+      `macOS CI must run the ${suite} suite`,
+    );
+  }
+  assert.doesNotMatch(sandbox, /continue-on-error|--ignored|\|\| true/);
+});
+
 test("compiler caches use OIDC-scoped S3 access", () => {
   const ci = workflows["ci.yml"];
   const ciJobs = [
@@ -779,6 +797,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "desktop",
     "windows-check",
     "windows-native",
+    "macos-sandbox",
     "test",
     "postgres",
     "self-host-build",

@@ -373,7 +373,7 @@ fn state_token<'a>(
 
 /// A follow-up cannot authorize another budget after a spend stop. A failed
 /// checkout without a saved checkpoint cannot silently restart from the base.
-fn recovery_block(row: &CodeSessionIncarnation) -> Option<(&'static str, &'static str)> {
+pub fn recovery_block(row: &CodeSessionIncarnation) -> Option<(&'static str, &'static str)> {
     row.sandbox_id.as_ref()?;
     match row.stop_reason.as_deref() {
         Some("ceiling_exceeded" | "spend_ceiling_exceeded") => Some((

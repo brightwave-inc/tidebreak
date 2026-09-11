@@ -106,7 +106,7 @@ async fn ran_one_ask_turn(
     let turn = tokio::time::timeout(
         Duration::from_secs(10),
         client
-            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .post(format!("http://{addr}/sessions/{session_id}/turns"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "message": "run it" }))
             .send(),
@@ -126,9 +126,7 @@ async fn approvals_for(
     session_id: SessionId,
 ) -> Vec<serde_json::Value> {
     client
-        .get(format!(
-            "http://{addr}/code/approvals?session_id={session_id}"
-        ))
+        .get(format!("http://{addr}/approvals?session_id={session_id}"))
         .bearer_auth(token)
         .send()
         .await
@@ -187,7 +185,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -199,7 +197,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -231,7 +229,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     let decided = tokio::time::timeout(Duration::from_secs(2), async {
         client
             .post(format!(
-                "http://{addr}/code/approvals/{}/decision",
+                "http://{addr}/approvals/{}/decision",
                 approval["id"].as_str().unwrap()
             ))
             .bearer_auth(&token)
@@ -316,7 +314,7 @@ async fn concurrent_approval_decisions_deliver_exactly_once() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -327,7 +325,7 @@ async fn concurrent_approval_decisions_deliver_exactly_once() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -350,9 +348,7 @@ async fn concurrent_approval_decisions_deliver_exactly_once() {
         let approval_id = approval_id.clone();
         async move {
             client
-                .post(format!(
-                    "http://{addr}/code/approvals/{approval_id}/decision"
-                ))
+                .post(format!("http://{addr}/approvals/{approval_id}/decision"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "decision": decision }))
                 .send()
@@ -434,7 +430,7 @@ async fn a_definite_native_approval_delivery_failure_is_abandoned() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -445,7 +441,7 @@ async fn a_definite_native_approval_delivery_failure_is_abandoned() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -464,7 +460,7 @@ async fn a_definite_native_approval_delivery_failure_is_abandoned() {
 
     let refused = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -487,9 +483,7 @@ async fn a_definite_native_approval_delivery_failure_is_abandoned() {
     );
 
     let interrupted = client
-        .post(format!(
-            "http://{addr}/code/sessions/{session_id}/interrupt"
-        ))
+        .post(format!("http://{addr}/sessions/{session_id}/interrupt"))
         .bearer_auth(&token)
         .send()
         .await
@@ -534,7 +528,7 @@ async fn shutdown_waits_for_an_accepted_approval_to_finish_durably() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -545,7 +539,7 @@ async fn shutdown_waits_for_an_accepted_approval_to_finish_durably() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -569,9 +563,7 @@ async fn shutdown_waits_for_an_accepted_approval_to_finish_durably() {
         let approval_id = approval_id.clone();
         async move {
             client
-                .post(format!(
-                    "http://{addr}/code/approvals/{approval_id}/decision"
-                ))
+                .post(format!("http://{addr}/approvals/{approval_id}/decision"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "decision": "approve" }))
                 .send()
@@ -660,7 +652,7 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -671,7 +663,7 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -694,9 +686,7 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
         .unwrap();
 
     let unknown = client
-        .post(format!(
-            "http://{addr}/code/approvals/{approval_id}/decision"
-        ))
+        .post(format!("http://{addr}/approvals/{approval_id}/decision"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "decision": "approve" }))
         .send()
@@ -790,7 +780,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
         let session_id = json_id(&session).to_owned();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -802,7 +792,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -856,7 +846,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
 
     let decided = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -919,7 +909,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
         let session_id = session_id.clone();
         async move {
             let _ = client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -929,7 +919,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -974,7 +964,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
     let addr2 = serve(app(state)).await;
 
     let pending = reqwest::Client::new()
-        .get(format!("http://{addr2}/code/approvals?state=pending"))
+        .get(format!("http://{addr2}/approvals?state=pending"))
         .bearer_auth(&token2)
         .send()
         .await
@@ -985,9 +975,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
     assert!(pending.is_empty());
 
     let rows = reqwest::Client::new()
-        .get(format!(
-            "http://{addr2}/code/approvals?session_id={session_id}"
-        ))
+        .get(format!("http://{addr2}/approvals?session_id={session_id}"))
         .bearer_auth(&token2)
         .send()
         .await
@@ -1018,7 +1006,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
 
     let decided = reqwest::Client::new()
         .post(format!(
-            "http://{addr2}/code/approvals/{}/decision",
+            "http://{addr2}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token2)
@@ -1051,7 +1039,7 @@ async fn an_approval_is_abandoned_when_its_tool_call_resolves_undecided() {
     );
 
     let pending: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/code/approvals?state=pending"))
+        .get(format!("http://{addr}/approvals?state=pending"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1096,7 +1084,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
     let session = session.json::<serde_json::Value>().await.unwrap();
     let session_id = json_id(&session).parse::<SessionId>().unwrap();
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "finish" }))
         .send()
@@ -1189,9 +1177,7 @@ async fn deciding_an_abandoned_approval_is_refused() {
     let rows = approvals_for(&client, addr, &token, session_id).await;
     let approval_id = rows[0]["id"].as_str().unwrap().to_owned();
     let refused = client
-        .post(format!(
-            "http://{addr}/code/approvals/{approval_id}/decision"
-        ))
+        .post(format!("http://{addr}/approvals/{approval_id}/decision"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "decision": "approve" }))
         .send()
@@ -1281,7 +1267,7 @@ async fn oversized_write_approval_is_still_decidable() {
         let session_id = json_id(&session).to_owned();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -1293,7 +1279,7 @@ async fn oversized_write_approval_is_still_decidable() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -1318,7 +1304,7 @@ async fn oversized_write_approval_is_still_decidable() {
 
     let decided = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -1370,7 +1356,7 @@ async fn attention_follows_approval_completion_and_view() {
         let session_id = session_id.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "write it" }))
                 .send()
@@ -1383,7 +1369,7 @@ async fn attention_follows_approval_completion_and_view() {
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
-                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .get(format!("http://{addr}/approvals?state=pending"))
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -1416,7 +1402,7 @@ async fn attention_follows_approval_completion_and_view() {
 
     let decided = client
         .post(format!(
-            "http://{addr}/code/approvals/{}/decision",
+            "http://{addr}/approvals/{}/decision",
             approval["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
@@ -1458,7 +1444,7 @@ async fn attention_follows_approval_completion_and_view() {
     .unwrap();
     assert_eq!(row.attention.state, AttentionState::DoneUnreviewed);
 
-    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+    let mut request = format!("ws://{addr}/sessions/{session_id}/events?after=0")
         .into_client_request()
         .unwrap();
     request
@@ -1515,9 +1501,7 @@ async fn user_can_pin_and_clear_attention() {
     let session_id = json_id(&session);
 
     let pinned = client
-        .post(format!(
-            "http://{addr}/code/sessions/{session_id}/attention"
-        ))
+        .post(format!("http://{addr}/sessions/{session_id}/attention"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "note": "look at this later" }))
         .send()
@@ -1559,9 +1543,7 @@ async fn user_can_pin_and_clear_attention() {
     );
 
     let cleared = client
-        .post(format!(
-            "http://{addr}/code/sessions/{session_id}/attention"
-        ))
+        .post(format!("http://{addr}/sessions/{session_id}/attention"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "clear": true }))
         .send()

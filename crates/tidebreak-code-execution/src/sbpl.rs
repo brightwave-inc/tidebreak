@@ -69,3 +69,73 @@ fn checked(path: &Path) -> Result<&str, UnsafeSandboxPath> {
 pub fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_quotes_and_backslashes_without_changing_other_characters() {
+        for (input, expected) in [
+            ("", ""),
+            ("/tmp/a folder/資料", "/tmp/a folder/資料"),
+            (r#"/tmp/a"b\c"#, r#"/tmp/a\"b\\c"#),
+            (r#"\""#, r#"\\\""#),
+            (r#"\\"#, r#"\\\\"#),
+        ] {
+            assert_eq!(escape(input), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn path_clauses_keep_injected_profile_rules_inside_the_string() {
+        let path = r#"/tmp/") (allow default) ;\"#;
+        let expected_literal = r#"(literal "/tmp/\") (allow default) ;\\")"#;
+        let expected_subpath = r#"(subpath "/tmp/\") (allow default) ;\\")"#;
+        assert_eq!(literal_str(path), expected_literal);
+        assert_eq!(subpath_str(path), expected_subpath);
+        assert_eq!(literal(Path::new(path)).unwrap(), expected_literal);
+        assert_eq!(subpath(Path::new(path)).unwrap(), expected_subpath);
+    }
+
+    #[test]
+    fn resolved_paths_reject_control_characters() {
+        // C0, DEL, and C1 controls include newlines and NUL. Escaping quotes
+        // must never admit a path that the profile parser interprets differently.
+        for control in (0..=0x1f).chain(0x7f..=0x9f) {
+            let path = format!("/tmp/before{}after", char::from_u32(control).unwrap());
+            for result in [literal(Path::new(&path)), subpath(Path::new(&path))] {
+                assert_eq!(result, Err(UnsafeSandboxPath::ControlCharacters));
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_paths_preserve_unicode_and_spaces() {
+        let path = Path::new("/tmp/a folder/資料");
+        assert_eq!(literal(path).unwrap(), r#"(literal "/tmp/a folder/資料")"#);
+        assert_eq!(subpath(path).unwrap(), r#"(subpath "/tmp/a folder/資料")"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_paths_reject_non_utf8_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/tmp/\xff"));
+        assert_eq!(literal(path), Err(UnsafeSandboxPath::NotUtf8));
+        assert_eq!(subpath(path), Err(UnsafeSandboxPath::NotUtf8));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolved_paths_reject_unpaired_utf16_surrogates() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xd800]);
+        assert_eq!(literal(Path::new(&path)), Err(UnsafeSandboxPath::NotUtf8));
+        assert_eq!(subpath(Path::new(&path)), Err(UnsafeSandboxPath::NotUtf8));
+    }
+}

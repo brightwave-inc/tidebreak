@@ -1137,7 +1137,11 @@ impl CodeRuntime {
     ) -> Result<bool, ServerError> {
         let mut all_stopped = true;
         let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
-        for mut session in sessions {
+        for session in sessions {
+            let _recovery_guard = self.session_recovery_lock(session.id).lock_owned().await;
+            let Some(mut session) = get_session(&self.db, owner, session.id).await? else {
+                continue;
+            };
             if session.lifecycle == SessionLifecycle::Ended {
                 self.bus.forget(session.id);
                 continue;

@@ -549,6 +549,7 @@ impl CodeRuntime {
                 .map(|(id, handle)| (*id, handle.spawn_epoch, handle.sink.owner().clone()))
                 .collect();
             for (id, spawn_epoch, owner) in stale {
+                let _recovery_guard = self.session_recovery_lock(id).lock_owned().await;
                 let Ok(session) = self.get_session(&owner, id).await else {
                     continue;
                 };
@@ -559,11 +560,23 @@ impl CodeRuntime {
                     self.defer_worker_resync(*kind, id, owner);
                     continue;
                 }
+                if matches!(
+                    session.lifecycle,
+                    SessionLifecycle::Fenced | SessionLifecycle::Ended
+                ) {
+                    continue;
+                }
                 let Some(handle) = self.take_worker_for_epoch(id, spawn_epoch) else {
                     continue;
                 };
                 self.revoke_worker_channels(id);
-                Self::shut_down_worker(id, handle).await;
+                if !Self::shut_down_worker(id, handle.clone()).await {
+                    self.workers
+                        .lock()
+                        .expect("code workers")
+                        .insert(id, handle);
+                    continue;
+                }
                 let respawned = match self.get_session(&owner, id).await {
                     Ok(session) => self.attach_and_spawn_worker(session).await,
                     Err(error) => Err(error),

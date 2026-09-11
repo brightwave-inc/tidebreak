@@ -49,7 +49,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
         .unwrap();
     let session_id = json_id(&session).to_owned();
 
-    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+    let mut request = format!("ws://{addr}/sessions/{session_id}/events?after=0")
         .into_client_request()
         .unwrap();
     request
@@ -58,7 +58,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     let (mut socket, _) = connect_async(request).await.unwrap();
 
     let _ = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "hi" }))
         .send()
@@ -208,7 +208,7 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
     .unwrap();
 
     let mut replay_request =
-        format!("ws://{addr}/code/sessions/{session_id}/events?after={replay_after_seq}")
+        format!("ws://{addr}/sessions/{session_id}/events?after={replay_after_seq}")
             .into_client_request()
             .unwrap();
     replay_request
@@ -289,7 +289,7 @@ async fn a_turn_journals_its_message_and_none_of_the_deltas_that_built_it() {
     let session_id = json_id(&session).to_owned();
     let parsed: SessionId = session_id.parse().unwrap();
 
-    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+    let mut request = format!("ws://{addr}/sessions/{session_id}/events?after=0")
         .into_client_request()
         .unwrap();
     request
@@ -298,7 +298,7 @@ async fn a_turn_journals_its_message_and_none_of_the_deltas_that_built_it() {
     let (mut socket, _) = connect_async(request).await.unwrap();
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "hi" }))
         .send()
@@ -372,7 +372,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     let session_id = json_id(&session).to_owned();
     let parsed: SessionId = session_id.parse().unwrap();
 
-    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+    let mut request = format!("ws://{addr}/sessions/{session_id}/events?after=0")
         .into_client_request()
         .unwrap();
     request
@@ -462,7 +462,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
         },
     );
 
-    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after={cursor}")
+    let mut request = format!("ws://{addr}/sessions/{session_id}/events?after={cursor}")
         .into_client_request()
         .unwrap();
     request
@@ -582,7 +582,7 @@ async fn updates_channel_restates_the_full_digest_on_reconnect() {
         .unwrap();
     let session_id = json_id(&session);
 
-    let mut request = format!("ws://{addr}/code/updates")
+    let mut request = format!("ws://{addr}/updates")
         .into_client_request()
         .unwrap();
     request
@@ -599,7 +599,7 @@ async fn updates_channel_restates_the_full_digest_on_reconnect() {
     assert_eq!(sessions[0]["turn_count"], 0);
 
     let _ = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "hi" }))
         .send()
@@ -623,7 +623,7 @@ async fn updates_channel_restates_the_full_digest_on_reconnect() {
     assert!(saw_turn, "live digest must carry the new turn count");
     drop(socket);
 
-    let mut request = format!("ws://{addr}/code/updates")
+    let mut request = format!("ws://{addr}/updates")
         .into_client_request()
         .unwrap();
     request

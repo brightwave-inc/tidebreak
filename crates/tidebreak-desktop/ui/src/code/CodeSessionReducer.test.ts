@@ -2192,23 +2192,6 @@ describe("unattributed terminals", () => {
   });
 });
 
-describe("attention_changed", () => {
-  it("reduces into state.attention and does not add a transcript item", () => {
-    const { state } = play([
-      {
-        type: "attention_changed",
-        state: { type: "stalled", idle_secs: 90 },
-        source: "heuristic",
-      },
-    ]);
-    expect(state.attention).toEqual({
-      state: { type: "stalled", idle_secs: 90 },
-      source: "heuristic",
-    });
-    expect(state.items).toEqual([]);
-  });
-});
-
 describe("user item createdAt", () => {
   it("carries the turn's started_at on accept and hydrate", () => {
     const accepted = applyAcceptedTurn(

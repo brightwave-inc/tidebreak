@@ -20,7 +20,8 @@ pub mod host_paths;
 pub mod host_tools;
 mod http;
 mod local;
-#[cfg(target_os = "macos")]
+// Only the macOS provider starts the broker, but every platform checks its policy.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod network;
 pub mod office_render;
 mod output;

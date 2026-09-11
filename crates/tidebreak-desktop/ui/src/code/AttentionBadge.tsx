@@ -1,5 +1,7 @@
-import { Ban, CircleAlert, CircleCheck, Clock, Pin } from "lucide-react";
+import { recoveryAttention } from "./sessionRecovery";
+import { CircleAlert, CircleCheck, Clock, Pin } from "lucide-react";
 
+import { useRecoveryDelay } from "./useRecoveryDelay";
 import { Loader } from "@/components/motion/loader";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -15,7 +17,7 @@ import {
 /**
  * Status affordance for a server-computed attention state.
  *
- * NeedsYou is strongest. Stalled and Fenced are distinct warnings.
+ * NeedsYou requests an action. Recovery stays quiet during brief disconnects.
  * DoneUnreviewed is a quiet mark.
  *
  * Working is a comet loader but not a pill. Compact surfaces use a distinct
@@ -46,7 +48,11 @@ export function AttentionBadge({
   compact?: boolean;
   className?: string;
 }) {
-  if (!attention) return null;
+  if (attention?.state.type === "fenced")
+    attention = recoveryAttention("fenced", attention, attention.state.reason);
+  const recovering = attention?.state.type === "fenced";
+  const showRecovery = useRecoveryDelay(recovering);
+  if (!attention || (recovering && !showRecovery)) return null;
   if (attention.state.type === "idle") return null;
   if (attention.state.type === "working" && !compact) return null;
   const label = attentionLabel(attention);
@@ -100,7 +106,14 @@ function CompactAttentionMark({
     case "stalled":
       return <Clock className={className} aria-hidden="true" />;
     case "fenced":
-      return <Ban className={className} aria-hidden="true" />;
+      return (
+        <Loader
+          variant="comet"
+          size={12}
+          className="text-muted-foreground"
+          decorative
+        />
+      );
     case "done_unreviewed":
       return <CircleCheck className={className} aria-hidden="true" />;
     case "idle":

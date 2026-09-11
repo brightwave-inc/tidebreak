@@ -44,6 +44,7 @@ export function noticeToAction(
           : {}),
         lifecycle: notice.lifecycle,
         attention: notice.attention,
+        ...(notice.fence_reason ? { fence_reason: notice.fence_reason } : {}),
         title: notice.title,
         turn_count: notice.turn_count,
         ...(notice.activity !== undefined ? { activity: notice.activity } : {}),
@@ -135,7 +136,7 @@ export function listedSessions(state: UpdatesState): CodeSessionDigest[] {
 }
 
 /**
- * Badge when a human should look: waiting approval/question, stalled/fenced,
+ * Badge when a human should look: waiting approval/question, stalled,
  * or a finished turn that has not been reviewed.
  */
 export function attentionBadgeLabel(
@@ -148,7 +149,7 @@ export function attentionBadgeLabel(
     case "stalled":
       return "Stalled";
     case "fenced":
-      return "Fenced";
+      return null;
     case "done_unreviewed":
       return "Done";
     case "working":
@@ -167,7 +168,7 @@ export function lifecycleLabel(lifecycle: CodeSessionDigest["lifecycle"]): strin
     case "running":
       return "Running";
     case "fenced":
-      return "Fenced";
+      return "Reconnecting…";
     case "ended":
       return "Ended";
   }
@@ -201,4 +202,13 @@ export function isCodeUpdateNotice(value: unknown): value is CodeUpdateNotice {
     type === "harness_install" ||
     type === "delivery"
   );
+}
+
+export function sessionRecoveryPresentation(digest: CodeSessionDigest): { recovering: boolean; prompt: string | null } {
+  if (digest.lifecycle !== "fenced") return { recovering: false, prompt: null };
+  if (digest.attention.state.type === "needs_you") return { recovering: false, prompt: digest.attention.state.prompt };
+  const reason = digest.fence_reason ?? (digest.attention.state.type === "fenced" ? digest.attention.state.reason : undefined);
+  if (digest.fence_reason && (reason?.type === "orphan_alive" || reason?.type === "resume_lost" || reason?.type === "sandbox_lost")) return { recovering: true, prompt: null };
+  if (!digest.fence_reason && digest.attention.state.type === "fenced") return { recovering: false, prompt: "The engine connection stopped. Open this session on desktop to recover it." };
+  return { recovering: false, prompt: reason && "detail" in reason ? reason.detail : "This session needs your attention." };
 }

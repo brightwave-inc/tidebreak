@@ -397,6 +397,23 @@ describe("parseCodeSession attention states", () => {
     expect(parsed?.attention.state.type).toBe(state.type);
   });
 
+  it.each(STATES)("preserves %o in the session digest", (state) => {
+    const digest = {
+      workspace: "ws-1",
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: { state, source: "lifecycle" },
+      title: "Fix login",
+      turn_count: 3,
+    };
+    expect(parseCodeSessionDigest(digest)).toEqual(digest);
+    expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({
+      type: "digest",
+      ...digest,
+    });
+  });
+
   it("still rejects a state the server cannot send", () => {
     expect(
       parseCodeSession({
@@ -933,6 +950,37 @@ describe("pull request state in live updates", () => {
     activity: "shell",
     pr_state: richPr,
   };
+
+  it("preserves recovery reasons on pinned snapshots and live notices", () => {
+    const pinned = {
+      ...digest,
+      lifecycle: "fenced",
+      attention: {
+        state: { type: "manual", note: "Review today" },
+        source: "user",
+      },
+      fence_reason: {
+        type: "probe_ambiguous",
+        detail: "Automatic recovery failed",
+      },
+    };
+    expect(parseCodeSessionDigest(pinned)).toEqual(pinned);
+    expect(parseCodeUpdateNotice({ type: "digest", ...pinned })).toEqual({
+      type: "digest",
+      ...pinned,
+    });
+    expect(
+      parseCodeSessionDigest({ ...pinned, fence_reason: { type: "unknown" } }),
+    ).toBeNull();
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...pinned,
+        fence_reason: { type: "unknown" },
+      }),
+    ).toBeNull();
+    expect(parseCodeSessionDigest(digest)).toEqual(digest);
+  });
 
   it("preserves the complete PR digest in a digest notice", () => {
     expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({

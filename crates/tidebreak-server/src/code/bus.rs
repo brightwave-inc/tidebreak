@@ -58,6 +58,8 @@ pub struct SessionDigest {
     pub harness_kind: HarnessKind,
     pub lifecycle: SessionLifecycle,
     pub attention: Attention,
+    /// Recovery cause, independent of a manual attention pin.
+    pub fence_reason: Option<tidebreak_core::FenceReason>,
     pub title: String,
     pub turn_count: i64,
     /// Timestamp trigger delivery uses to rank candidate sessions: the newest

@@ -294,9 +294,9 @@ async fn malformed_url_shaped_denied_path_is_normalized_after_successful_exit() 
     let denied_path = "/tmp/sentinel-malformed-url-denied-path-do-not-leak";
     let script = r#"path = "/" + "tmp" + "/sentinel-malformed-url-denied-path-do-not-leak"
 try:
-open(path).read()
+    open(path).read()
 except PermissionError as error:
-print("Operation not permitted: https://" + error.filename)"#;
+    print("Operation not permitted: https://" + error.filename)"#;
     let request = ExecRequest::new(
         ExecutionId::parse("call-malformed-url-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
@@ -326,19 +326,19 @@ async fn escaped_denied_paths_are_normalized_across_output_channels() {
             r#"import sys
 path = "/" + "tmp" + "/sentinel-escaped-slash-denied-path-do-not-leak"
 try:
-open(path).read()
+    open(path).read()
 except PermissionError as error:
-print("Operation not permitted")
-print(error.filename.replace("/", "\\/"), file=sys.stderr)"#,
+    print("Operation not permitted")
+    print(error.filename.replace("/", "\\/"), file=sys.stderr)"#,
             "sentinel-escaped-slash-denied-path-do-not-leak",
         ),
         (
             "call-unicode-slash-denied-path",
             r#"path = "/" + "tmp" + "/sentinel-unicode-slash-denied-path-do-not-leak"
 try:
-open(path).read()
+    open(path).read()
 except PermissionError as error:
-print("Operation not permitted: " + error.filename.replace("/", "\\u002F"))"#,
+    print("Operation not permitted: " + error.filename.replace("/", "\\u002F"))"#,
             "sentinel-unicode-slash-denied-path-do-not-leak",
         ),
     ];
@@ -378,9 +378,9 @@ async fn file_url_denied_path_is_normalized_after_successful_exit() {
     let script = r#"import sys
 path = "/" + "tmp" + "/sentinel-file-url-denied-path-do-not-leak"
 try:
-open(path).read()
+    open(path).read()
 except PermissionError as error:
-print("Operation not permitted: file://" + error.filename, file=sys.stderr)"#;
+    print("Operation not permitted: file://" + error.filename, file=sys.stderr)"#;
     let request = ExecRequest::new(
         ExecutionId::parse("call-file-url-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
@@ -1407,14 +1407,14 @@ files = {
 record = "tidebreakproof-1.0.0.dist-info/RECORD"
 rows = []
 with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
-for name, data in files.items():
-    archive.writestr(name, data)
-    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-    rows.append((name, f"sha256={digest}", str(len(data))))
-rows.append((record, "", ""))
-out = io.StringIO()
-csv.writer(out, lineterminator="\n").writerows(rows)
-archive.writestr(record, out.getvalue())
+    for name, data in files.items():
+        archive.writestr(name, data)
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        rows.append((name, f"sha256={digest}", str(len(data))))
+    rows.append((record, "", ""))
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\n").writerows(rows)
+    archive.writestr(record, out.getvalue())
 "#;
 
     let Some(runtime) =

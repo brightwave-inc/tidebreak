@@ -160,6 +160,9 @@ pub async fn compute_attention(
     opts: ComputeOpts,
 ) -> Result<Attention, tidebreak_core::AgentError> {
     if session.lifecycle == SessionLifecycle::Fenced {
+        if matches!(session.attention.state, AttentionState::NeedsYou { .. }) {
+            return Ok(session.attention.clone());
+        }
         if let Some(reason) = session.fence_reason.clone() {
             return Ok(Attention::new(
                 AttentionState::Fenced { reason },
@@ -530,6 +533,7 @@ async fn build_digest(
         harness_kind: session.harness_kind,
         lifecycle: session.lifecycle,
         attention: session.attention.clone(),
+        fence_reason: session.fence_reason.clone(),
         title,
         turn_count,
         trigger_target_at,

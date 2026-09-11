@@ -137,7 +137,7 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
 
     let turn = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             json_id(&session)
         ))
         .bearer_auth(&token)
@@ -638,7 +638,7 @@ async fn archive_refuses_a_running_session_without_force() {
         let token = token.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "busy" }))
                 .send()

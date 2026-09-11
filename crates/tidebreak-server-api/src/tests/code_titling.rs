@@ -309,7 +309,7 @@ async fn a_first_turn_names_an_untitled_workspace_without_moving_it() {
 
     let turn = client
         .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
+            "http://{addr}/sessions/{}/turns",
             session["id"].as_str().unwrap()
         ))
         .bearer_auth(&token)
