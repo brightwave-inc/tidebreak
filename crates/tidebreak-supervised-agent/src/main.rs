@@ -23,7 +23,8 @@ use tidebreak_harness::HostEnv;
 use tidebreak_supervised_agent::control::Control;
 use tidebreak_supervised_agent::drive::Driver;
 use tidebreak_supervised_agent::harness_engine::{
-    gateway_inference_from_env, GatewayInference, HarnessEngine, HarnessEngineSpec,
+    gateway_apps_from_env, gateway_inference_from_env, GatewayInference, HarnessEngine,
+    HarnessEngineSpec,
 };
 use tidebreak_supervised_agent::inputs::{resolve, Inputs, RawInputs};
 use tidebreak_supervised_agent::trust::TrustOptions;
@@ -181,7 +182,15 @@ async fn run_inputs(
         None
     };
 
+    let apps = match gateway_apps_from_env() {
+        Ok(apps) => apps,
+        Err(error) => {
+            eprintln!("{error}");
+            return EXIT_MISSING_INPUT;
+        }
+    };
     let engine = HarnessEngine::new(HarnessEngineSpec {
+        apps,
         session_id,
         adapter,
         probe,
