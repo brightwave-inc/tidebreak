@@ -3,7 +3,8 @@
 //! Every git call is a bounded, non-interactive subprocess of the user's own
 //! `git` binary. Arguments are an argv array, never a shell string.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions as StdOpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -215,7 +216,12 @@ struct WorktreeOperationMarker {
 #[derive(Debug)]
 pub struct WorktreeOperation {
     repo_root: PathBuf,
+    worktree_path: PathBuf,
     marker_path: PathBuf,
+    /// Exclusive lock on the path marker. Dropping it without removing the
+    /// file is how a crash looks to the next reserve: the file remains, the
+    /// lock does not.
+    _marker_lock: File,
     marker: WorktreeOperationMarker,
     branch_created: bool,
 }
@@ -875,12 +881,17 @@ impl WorktreeOperation {
 
     async fn add_existing_branch(&mut self) -> Result<(), WorktreeError> {
         let repo_root = &self.repo_root;
-        let worktree_path = Path::new(&self.marker.worktree_path);
+        let worktree_path = self.worktree_path.as_path();
         let branch = self.marker.branch.as_str();
         self.require_repository_identity().await?;
         let add = git(
             Some(repo_root),
-            &["worktree", "add", &worktree_path.to_string_lossy(), branch],
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                git_fs_arg(worktree_path),
+                OsString::from(branch),
+            ],
             GIT_WORKTREE_TIMEOUT,
         )
         .await;
@@ -895,11 +906,10 @@ impl WorktreeOperation {
     pub async fn complete(self) {
         if let Err(error) = self.remove_registration_marker().await {
             tracing::warn!(
-                path = %self.marker.worktree_path,
+                path = %self.worktree_path.display(),
                 operation = %self.marker.operation_id,
                 "code-mode: could not release worktree registration marker: {error}"
             );
-            return;
         }
         if let Err(error) = self.remove_owned_marker().await {
             tracing::warn!(
@@ -938,7 +948,7 @@ impl WorktreeOperation {
         }
 
         let repo_root = &self.repo_root;
-        let worktree_path = Path::new(&self.marker.worktree_path);
+        let worktree_path = self.worktree_path.as_path();
         let expected_branch = format!("refs/heads/{}", self.marker.branch);
         match registered_worktree(repo_root, worktree_path).await {
             Ok(Some(registered))
@@ -948,11 +958,11 @@ impl WorktreeOperation {
                 match self.owns_registration_marker().await {
                     Ok(true) => match git(
                         Some(repo_root),
-                        &[
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &registered.path.to_string_lossy(),
+                        [
+                            OsString::from("worktree"),
+                            OsString::from("remove"),
+                            OsString::from("--force"),
+                            git_fs_arg(&registered.path),
                         ],
                         GIT_WORKTREE_TIMEOUT,
                     )
@@ -1057,8 +1067,8 @@ impl WorktreeOperation {
     }
 
     async fn registration_marker_path(&self) -> Result<PathBuf, WorktreeError> {
-        let git_dir = git_stdout(
-            Some(Path::new(&self.marker.worktree_path)),
+        let git_dir = git_fs_stdout(
+            Some(&self.worktree_path),
             &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
             GIT_TIMEOUT,
         )
@@ -1066,7 +1076,7 @@ impl WorktreeOperation {
         .map_err(|error| {
             WorktreeError::internal(format!("could not resolve worktree git directory: {error}"))
         })?;
-        Ok(PathBuf::from(git_dir.trim()).join(WORKTREE_REGISTRATION_MARKER))
+        Ok(git_dir.join(WORKTREE_REGISTRATION_MARKER))
     }
 
     async fn owns_registration_marker(&self) -> Result<bool, WorktreeError> {
@@ -1142,6 +1152,8 @@ async fn reserve_worktree_target(
     let marker = WorktreeOperationMarker {
         operation_id: uuid::Uuid::new_v4(),
         repository,
+        // Display form stays the on-disk JSON shape so existing markers still
+        // parse. Live git argv uses `worktree_path` as an OsString.
         worktree_path: worktree_path.display().to_string(),
         branch: branch.to_owned(),
         expected_tip: expected_tip.to_owned(),
@@ -1151,44 +1163,12 @@ async fn reserve_worktree_target(
             "could not encode worktree operation marker: {error}"
         ))
     })?;
-    let mut options = tokio::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    let mut file = match options.open(&marker_path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(WorktreeError::conflict(
-                "worktree_path_busy",
-                format!(
-                    "another worktree operation owns {}",
-                    worktree_path.display()
-                ),
-            ));
-        }
-        Err(error) => {
-            return Err(WorktreeError::internal(format!(
-                "could not reserve worktree path {}: {error}",
-                worktree_path.display()
-            )));
-        }
-    };
-    if let Err(error) = file.write_all(&bytes).await {
-        let _ = tokio::fs::remove_file(&marker_path).await;
-        return Err(WorktreeError::internal(format!(
-            "could not write worktree operation marker {}: {error}",
-            marker_path.display()
-        )));
-    }
-    if let Err(error) = file.sync_all().await {
-        let _ = tokio::fs::remove_file(&marker_path).await;
-        return Err(WorktreeError::internal(format!(
-            "could not sync worktree operation marker {}: {error}",
-            marker_path.display()
-        )));
-    }
-    drop(file);
+    let marker_lock = claim_worktree_operation_marker(&marker_path, &bytes, worktree_path)?;
     let operation = WorktreeOperation {
         repo_root,
+        worktree_path: worktree_path.to_path_buf(),
         marker_path,
+        _marker_lock: marker_lock,
         marker,
         branch_created: false,
     };
@@ -1244,6 +1224,103 @@ async fn marker_matches(
         Err(error) => Err(WorktreeError::internal(format!(
             "could not read operation marker {}: {error}",
             path.display()
+        ))),
+    }
+}
+
+/// Git argv entry for a filesystem path. Never UTF-8-lossy.
+fn git_fs_arg(path: &Path) -> OsString {
+    path.as_os_str().to_os_string()
+}
+
+fn claim_worktree_operation_marker(
+    marker_path: &Path,
+    bytes: &[u8],
+    worktree_path: &Path,
+) -> Result<File, WorktreeError> {
+    loop {
+        match StdOpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(marker_path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.try_lock() {
+                    let _ = std::fs::remove_file(marker_path);
+                    return Err(WorktreeError::internal(format!(
+                        "could not lock worktree operation marker {}: {error}",
+                        marker_path.display()
+                    )));
+                }
+                if let Err(error) = std::io::Write::write_all(&mut file, bytes) {
+                    let _ = std::fs::remove_file(marker_path);
+                    return Err(WorktreeError::internal(format!(
+                        "could not write worktree operation marker {}: {error}",
+                        marker_path.display()
+                    )));
+                }
+                if let Err(error) = file.sync_all() {
+                    let _ = std::fs::remove_file(marker_path);
+                    return Err(WorktreeError::internal(format!(
+                        "could not sync worktree operation marker {}: {error}",
+                        marker_path.display()
+                    )));
+                }
+                return Ok(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                recover_abandoned_worktree_marker(marker_path, worktree_path)?;
+            }
+            Err(error) => {
+                return Err(WorktreeError::internal(format!(
+                    "could not reserve worktree path {}: {error}",
+                    worktree_path.display()
+                )));
+            }
+        }
+    }
+}
+
+fn recover_abandoned_worktree_marker(
+    marker_path: &Path,
+    worktree_path: &Path,
+) -> Result<(), WorktreeError> {
+    let file = match StdOpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(marker_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(WorktreeError::internal(format!(
+                "could not inspect worktree operation marker {}: {error}",
+                marker_path.display()
+            )));
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            drop(file);
+            match std::fs::remove_file(marker_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(WorktreeError::internal(format!(
+                    "could not reclaim abandoned worktree marker {}: {error}",
+                    marker_path.display()
+                ))),
+            }
+        }
+        Err(TryLockError::WouldBlock) => Err(WorktreeError::conflict(
+            "worktree_path_busy",
+            format!(
+                "another worktree operation owns {}",
+                worktree_path.display()
+            ),
+        )),
+        Err(TryLockError::Error(error)) => Err(WorktreeError::internal(format!(
+            "could not inspect worktree operation lock {}: {error}",
+            marker_path.display()
         ))),
     }
 }
@@ -1613,10 +1690,14 @@ pub async fn archive_blockers(
 /// has uncommitted or unpushed work; this function uses `git worktree remove
 /// --force` so a dirty tree does not block the removal itself.
 pub async fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), WorktreeError> {
-    let path = worktree_path.to_string_lossy();
     match git(
         Some(repo_root),
-        &["worktree", "remove", "--force", path.as_ref()],
+        [
+            OsString::from("worktree"),
+            OsString::from("remove"),
+            OsString::from("--force"),
+            git_fs_arg(worktree_path),
+        ],
         GIT_WORKTREE_TIMEOUT,
     )
     .await
@@ -1697,12 +1778,12 @@ pub async fn create_bundle(
     // bundle carries `refs/heads/<branch>` and a restore can fetch it by name.
     git(
         Some(repo_root),
-        &[
-            "bundle",
-            "create",
-            &out.to_string_lossy(),
-            &format!("{base_ref}..refs/heads/{branch}"),
-            &format!("refs/heads/{branch}"),
+        [
+            OsString::from("bundle"),
+            OsString::from("create"),
+            git_fs_arg(out),
+            OsString::from(format!("{base_ref}..refs/heads/{branch}")),
+            OsString::from(format!("refs/heads/{branch}")),
         ],
         GIT_WORKTREE_TIMEOUT,
     )
@@ -1731,14 +1812,19 @@ async fn restore_released_branch(
             bundle.display()
         )));
     }
-    let path = bundle.to_string_lossy();
     git(
         Some(repo_root),
-        &["bundle", "verify", path.as_ref()],
+        [
+            OsString::from("bundle"),
+            OsString::from("verify"),
+            git_fs_arg(bundle),
+        ],
         GIT_WORKTREE_TIMEOUT,
     )
     .await
-    .map_err(|err| WorktreeError::user(format!("bundle {path} is not usable: {err}")))?;
+    .map_err(|err| {
+        WorktreeError::user(format!("bundle {} is not usable: {err}", bundle.display()))
+    })?;
 
     let temporary_ref = format!(
         "refs/tidebreak/restores/{}",
@@ -1747,10 +1833,10 @@ async fn restore_released_branch(
     let result = async {
         git(
             Some(repo_root),
-            &[
-                "fetch",
-                path.as_ref(),
-                &format!("refs/heads/{branch}:{temporary_ref}"),
+            [
+                OsString::from("fetch"),
+                git_fs_arg(bundle),
+                OsString::from(format!("refs/heads/{branch}:{temporary_ref}")),
             ],
             GIT_WORKTREE_TIMEOUT,
         )
@@ -2282,14 +2368,8 @@ fn take_non_disposable_ignored_path(pending: &mut Vec<u8>, disposable: &[PathBuf
 }
 
 async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {
-    match git_stdout(
-        Some(worktree_path),
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        GIT_TIMEOUT,
-    )
-    .await
-    {
-        Ok(_) => {
+    match remote_branch_is_present(worktree_path).await? {
+        Some(true) => {
             let count = git_stdout(
                 Some(worktree_path),
                 &["rev-list", "--count", "@{u}..HEAD"],
@@ -2299,28 +2379,83 @@ async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool,
             .map_err(|err| WorktreeError::internal(format!("git rev-list failed: {err}")))?;
             Ok(count.parse::<u64>().unwrap_or(1) > 0)
         }
-        Err(_) => {
-            // No upstream: unique commits versus the workspace base would be lost
-            // only if the branch were deleted; still report them so archive is honest.
-            let Some(base_commit) = resolve_archive_base(worktree_path, base_ref).await? else {
-                tracing::warn!(
-                    base_ref,
-                    path = %worktree_path.display(),
-                    "code-mode: workspace base is missing; treating the branch as unpushed"
-                );
-                return Ok(true);
-            };
-            let range = format!("{base_commit}..HEAD");
-            let count = git_stdout(
-                Some(worktree_path),
-                &["rev-list", "--count", &range, "--"],
-                GIT_TIMEOUT,
-            )
-            .await
-            .map_err(|err| WorktreeError::internal(format!("git rev-list failed: {err}")))?;
-            Ok(count.parse::<u64>().unwrap_or(1) > 0)
-        }
+        Some(false) | None => unpushed_versus_base(worktree_path, base_ref).await,
     }
+}
+
+/// Whether the configured upstream branch still exists on the remote.
+///
+/// `None` means there is no upstream to observe. A stale remote-tracking ref
+/// is not enough: deleting the branch on the remote leaves `@{u}` resolvable.
+/// Network failures fail closed so archive cannot treat the branch as pushed.
+async fn remote_branch_is_present(worktree_path: &Path) -> Result<Option<bool>, WorktreeError> {
+    let branch = match git_stdout(
+        Some(worktree_path),
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(branch) if !branch.is_empty() && branch != "HEAD" => branch,
+        Ok(_) => return Ok(None),
+        Err(error) => {
+            return Err(WorktreeError::archive_uncertain(format!(
+                "could not resolve the current branch: {error}"
+            )));
+        }
+    };
+    let remote = match git_stdout(
+        Some(worktree_path),
+        &["config", "--get", &format!("branch.{branch}.remote")],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(remote) if !remote.is_empty() => remote,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+    let merge = match git_stdout(
+        Some(worktree_path),
+        &["config", "--get", &format!("branch.{branch}.merge")],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(merge) if !merge.is_empty() => merge,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+    match git(
+        Some(worktree_path),
+        ["ls-remote", &remote, &merge],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(output) => Ok(Some(!output.stdout.is_empty())),
+        Err(error) => Err(WorktreeError::archive_uncertain(format!(
+            "could not observe remote branch {merge} on {remote}: {error}"
+        ))),
+    }
+}
+
+async fn unpushed_versus_base(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {
+    let Some(base_commit) = resolve_archive_base(worktree_path, base_ref).await? else {
+        tracing::warn!(
+            base_ref,
+            path = %worktree_path.display(),
+            "code-mode: workspace base is missing; treating the branch as unpushed"
+        );
+        return Ok(true);
+    };
+    let range = format!("{base_commit}..HEAD");
+    let count = git_stdout(
+        Some(worktree_path),
+        &["rev-list", "--count", &range, "--"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git rev-list failed: {err}")))?;
+    Ok(count.parse::<u64>().unwrap_or(1) > 0)
 }
 
 /// Resolve a stored workspace base without assuming that a local branch exists.
@@ -2386,10 +2521,45 @@ struct GitOutput {
     stdout: String,
 }
 
-async fn git(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Result<GitOutput, String> {
+struct GitRawOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn trim_git_stdout(bytes: &[u8]) -> &[u8] {
+    bytes.trim_ascii()
+}
+
+fn path_from_git_stdout(bytes: &[u8]) -> PathBuf {
+    let trimmed = trim_git_stdout(bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(OsString::from_vec(trimmed.to_vec()))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(trimmed).as_ref())
+    }
+}
+
+async fn git_raw(
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    limit: Duration,
+) -> Result<GitRawOutput, String> {
+    let args: Vec<OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect();
+    let rendered = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut command = Command::new("git");
     command
-        .args(args)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2403,19 +2573,47 @@ async fn git(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Result<GitOu
         .map_err(|err| format!("failed to spawn git: {err}"))?;
     let output = timeout(limit, child.wait_with_output())
         .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        .map_err(|_| format!("git {rendered} timed out"))?
+        .map_err(|err| format!("git {rendered} failed: {err}"))?;
     if output.status.success() {
-        Ok(GitOutput { stdout })
+        Ok(GitRawOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     } else {
+        let stdout = String::from_utf8_lossy(trim_git_stdout(&output.stdout)).into_owned();
+        let stderr = String::from_utf8_lossy(trim_git_stdout(&output.stderr)).into_owned();
         Err(if stderr.is_empty() { stdout } else { stderr })
     }
 }
 
-async fn git_stdout(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Result<String, String> {
+async fn git(
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    limit: Duration,
+) -> Result<GitOutput, String> {
+    let output = git_raw(cwd, args, limit).await?;
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(trim_git_stdout(&output.stdout)).into_owned(),
+    })
+}
+
+async fn git_stdout(
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    limit: Duration,
+) -> Result<String, String> {
     Ok(git(cwd, args, limit).await?.stdout)
+}
+
+async fn git_fs_stdout(
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    limit: Duration,
+) -> Result<PathBuf, String> {
+    let output = git_raw(cwd, args, limit).await?;
+    let _ = output.stderr;
+    Ok(path_from_git_stdout(&output.stdout))
 }
 
 async fn git_nul_stdout(
@@ -3433,6 +3631,215 @@ mod tests {
         ));
         assert!(!branch_exists(&repo, "tidebreak/released").await.unwrap());
         assert!(bundle.exists());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn complete_releases_the_path_marker_when_registration_cleanup_fails() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "reg-cleanup");
+        let operation = create_worktree(&repo, &path, "tidebreak/reg-cleanup", "main")
+            .await
+            .unwrap();
+        let git_dir = git_stdout(
+            Some(&path),
+            &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::write(
+            Path::new(git_dir.trim()).join(WORKTREE_REGISTRATION_MARKER),
+            b"not-this-operation",
+        )
+        .unwrap();
+        let marker_path = worktree_operation_marker_path(&path).unwrap();
+        assert!(marker_path.is_file());
+        operation.complete().await;
+        assert!(
+            !marker_path.exists(),
+            "path marker must not survive a failed registration cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_reclaims_a_crashed_owners_path_marker() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "crashed");
+        let marker_path = worktree_operation_marker_path(&path).unwrap();
+        std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &marker_path,
+            serde_json::to_vec(&WorktreeOperationMarker {
+                operation_id: uuid::Uuid::new_v4(),
+                repository: "abandoned".into(),
+                worktree_path: path.display().to_string(),
+                branch: "tidebreak/crashed".into(),
+                expected_tip: "dead".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        create_ready(&repo, &path, "tidebreak/crashed", "main").await;
+        verify_inside_worktree(&path).await.unwrap();
+        assert!(!marker_path.exists());
+    }
+
+    #[tokio::test]
+    async fn reserve_does_not_steal_a_live_competitors_path_marker() {
+        let (_dir, repo) = init_repo();
+        let expected_tip = branch_tip(&repo, "main").await.unwrap();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "live");
+        let live = reserve_worktree_target(&repo, &path, "tidebreak/live", &expected_tip)
+            .await
+            .unwrap();
+        let err = reserve_worktree_target(&repo, &path, "tidebreak/other", &expected_tip)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WorktreeError::Conflict {
+                kind: "worktree_path_busy",
+                ..
+            }
+        ));
+        live.rollback().await;
+    }
+
+    #[tokio::test]
+    async fn archive_treats_a_deleted_remote_branch_as_unpushed() {
+        let (dir, origin_checkout) = init_repo();
+        let bare = dir.path().join("origin.git");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                "--bare",
+                origin_checkout.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let work = dir.path().join("work");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        run(&work, &["git", "config", "user.email", "dev@example.com"]);
+        run(&work, &["git", "config", "user.name", "Dev"]);
+        run(&work, &["git", "checkout", "-b", "tidebreak/gone"]);
+        std::fs::write(work.join("gone.txt"), "only here\n").unwrap();
+        run(&work, &["git", "add", "gone.txt"]);
+        run(&work, &["git", "commit", "-m", "unique"]);
+        run(&work, &["git", "push", "-u", "origin", "tidebreak/gone"]);
+        run(&bare, &["git", "branch", "-D", "tidebreak/gone"]);
+
+        let upstream = git_stdout(
+            Some(&work),
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(upstream, "origin/tidebreak/gone");
+        let ahead = git_stdout(
+            Some(&work),
+            &["rev-list", "--count", "@{u}..HEAD"],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ahead.trim(), "0");
+        assert_eq!(
+            archive_blockers(&work, "main").await.unwrap(),
+            Some(ArchiveBlock::Unpushed)
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_fails_closed_when_the_remote_cannot_be_observed() {
+        let (dir, origin_checkout) = init_repo();
+        let bare = dir.path().join("origin.git");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                "--bare",
+                origin_checkout.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let work = dir.path().join("work");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        run(&work, &["git", "checkout", "-b", "tidebreak/net"]);
+        run(&work, &["git", "push", "-u", "origin", "tidebreak/net"]);
+        run(
+            &work,
+            &[
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                "https://127.0.0.1:1/missing.git",
+            ],
+        );
+
+        let err = archive_blockers(&work, "main").await.unwrap_err();
+        assert!(matches!(err, WorktreeError::ArchiveUncertain(_)), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_fs_arg_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let raw = b"wt-\x80name";
+        let path = PathBuf::from(OsString::from_vec(raw.to_vec()));
+        assert_eq!(git_fs_arg(&path).as_bytes(), raw);
+        assert_ne!(path.to_string_lossy().as_bytes(), raw);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_add_remove_and_bundle_preserve_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (dir, repo) = init_repo();
+        let parent = data_dir_worktree_root(dir.path()).join("demo");
+        std::fs::create_dir_all(&parent).unwrap();
+        let path = parent.join(OsString::from_vec(b"fix-\x80login".to_vec()));
+        create_ready(&repo, &path, "tidebreak/non-utf8", "main").await;
+        assert!(path.join("README.md").is_file());
+        std::fs::write(path.join("note.txt"), "work\n").unwrap();
+        run(&path, &["git", "add", "note.txt"]);
+        run(&path, &["git", "commit", "-m", "note"]);
+        let bundle = dir
+            .path()
+            .join(OsString::from_vec(b"b-\x80.bundle".to_vec()));
+        let bytes = create_bundle(&repo, "main", "tidebreak/non-utf8", &bundle)
+            .await
+            .unwrap();
+        assert!(bytes > 0);
+        assert!(bundle.is_file());
+        remove_worktree(&repo, &path).await.unwrap();
         assert!(!path.exists());
     }
 }
