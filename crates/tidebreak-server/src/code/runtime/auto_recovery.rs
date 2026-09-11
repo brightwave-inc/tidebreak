@@ -228,6 +228,8 @@ impl CodeRuntime {
             return self.publish_recovery_blocker(session).await;
         };
 
+        let already_paused =
+            tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await?;
         // A resumed worker normally drains its queue immediately. Recovery
         // never grants permission to run queued or interrupted work.
         tidebreak_core::db::code::set_queue_paused(&self.db, &session.owner, session.id, true)
@@ -245,6 +247,14 @@ impl CodeRuntime {
         };
         match result {
             Ok(recovered) => {
+                if !already_paused {
+                    tidebreak_core::db::code::resume_empty_recovered_queue(
+                        &self.db,
+                        &recovered.owner,
+                        recovered.id,
+                    )
+                    .await?;
+                }
                 // Preserve a manual pin. Otherwise show queued work that needs
                 // review, or let the composer accept a fresh message.
                 let queued = tidebreak_core::db::code::list_queued_turns(
@@ -835,6 +845,18 @@ mod remote_and_admission_tests {
             );
             assert_eq!(latest.stop_reason.as_deref(), Some(stop));
             assert_eq!(launches.load(Ordering::SeqCst), 0);
+            if recovered {
+                assert!(
+                    !tidebreak_core::db::code::queue_paused(
+                        &runtime.db,
+                        &session.owner,
+                        session.id,
+                    )
+                    .await
+                    .unwrap(),
+                    "an empty recovered queue must accept fresh Slack input"
+                );
+            }
             if !recovered {
                 assert!(matches!(
                     current.attention.state,

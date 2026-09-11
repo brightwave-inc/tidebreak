@@ -1553,6 +1553,113 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn slack_message_after_reap_starts_without_replaying_queued_work() {
+        for (pending, manual_pause) in [(false, false), (true, false), (false, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
+            let grant = tidebreak_core::CodeGrantId::new();
+            let (resolution, _) = runtime
+                .external_get_or_create(
+                    &owner,
+                    None,
+                    grant,
+                    "slack",
+                    "T1/C1/recovery",
+                    None,
+                    None,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+                panic!("expected creation");
+            };
+            let message = |event: &str| crate::code::runtime::ExternalMessage {
+                text: event.into(),
+                event_id: event.into(),
+                channel_ts: "1.0".into(),
+                actor: tidebreak_core::TurnActor::default(),
+                context: None,
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
+            };
+            runtime
+                .external_submit_message(&owner, grant, binding.session_id, message("start"))
+                .await
+                .unwrap();
+            if pending {
+                runtime
+                    .external_submit_message(
+                        &owner,
+                        grant,
+                        binding.session_id,
+                        message("old queued work"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut session = runtime
+                .get_session(&owner, binding.session_id)
+                .await
+                .unwrap();
+            crate::code::recovery::fence_session(
+                &runtime.db,
+                runtime.bus.as_ref(),
+                &mut session,
+                FenceReason::SandboxLost {
+                    detail: "idle timeout".into(),
+                },
+            )
+            .await
+            .unwrap();
+            if manual_pause {
+                runtime
+                    .set_queue_paused(&owner, session.id, true)
+                    .await
+                    .unwrap();
+            }
+            runtime.reap(&owner, session.id).await.unwrap();
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                1,
+                "clearing a fault must not start work"
+            );
+            let result = runtime
+                .external_submit_message(&owner, grant, session.id, message("fresh retry"))
+                .await
+                .unwrap();
+            if pending || manual_pause {
+                assert!(matches!(result, ExternalMessageOutcome::Queued(_)));
+                assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+                assert!(
+                    runtime
+                        .list_queued_turns(&owner, session.id)
+                        .await
+                        .unwrap()
+                        .1
+                );
+            } else {
+                assert!(
+                    matches!(result, ExternalMessageOutcome::NewTurn(_)),
+                    "fresh input must start after clearing an empty queue: {result:?}"
+                );
+                assert_eq!(fake.spawns.lock().unwrap().len(), 2);
+                assert!(
+                    !runtime
+                        .list_queued_turns(&owner, session.id)
+                        .await
+                        .unwrap()
+                        .1
+                );
+            }
+        }
+    }
+
     /// Stop on a remote session sends an interrupt to the sandbox instead of
     /// looking for a host worker.
     #[tokio::test]
