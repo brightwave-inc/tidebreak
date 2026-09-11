@@ -1375,9 +1375,12 @@ async fn bind_inner(
         cancellation_acceleration,
     );
     let session_tools = Arc::new(code::session_tools::SessionTools::default());
+    let conversation_tools = Arc::new(code::conversation_tools::ConversationTools::default());
     let mut tools = tools;
     session_tools.register(&mut tools);
+    conversation_tools.register(&mut tools);
     let tools = Arc::new(tools);
+    let process_tools = tools.clone();
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
     // runtime, so it is injected at assembly rather than patched in after:
     // attestation contexts live in a per-instance registry (a second
@@ -1532,8 +1535,16 @@ async fn bind_inner(
         }
         _ => runtime,
     };
-    let code = Arc::new(runtime);
+    let code = Arc::new(runtime.with_tool_registry(process_tools));
     session_tools.attach(&code);
+    conversation_tools.attach(&code);
+    // The protected tool bridge is served by the code runtime through the
+    // sandbox's event/inbox transport once pumps start.
+    if let Some(remote) = code.remote_sessions() {
+        remote.with_host_tool(Arc::new(code::sandbox_tools::SandboxToolExecutor::new(
+            Arc::downgrade(&code),
+        )));
+    }
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());

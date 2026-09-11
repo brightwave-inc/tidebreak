@@ -431,3 +431,64 @@ async fn missing_file_is_a_model_facing_error_not_err() {
         .unwrap();
     assert!(output.is_error);
 }
+
+#[tokio::test]
+async fn conversation_artifacts_are_confined_and_immutable() {
+    let scratch = tempfile::tempdir().unwrap();
+    let ctx = crate::ToolCtx::new_legacy_workspace(
+        crate::SessionId::new(),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    super::publish_conversation_artifact(&ctx, "conversation/thread.jsonl", b"one\n".to_vec())
+        .await
+        .unwrap();
+    super::publish_conversation_artifact(&ctx, "conversation/thread.jsonl", b"one\n".to_vec())
+        .await
+        .unwrap();
+    assert!(super::publish_conversation_artifact(
+        &ctx,
+        "conversation/thread.jsonl",
+        b"changed".to_vec()
+    )
+    .await
+    .is_err());
+    assert!(
+        super::publish_conversation_artifact(&ctx, "conversation/../../escape", b"x".to_vec())
+            .await
+            .is_err()
+    );
+    assert!(
+        super::publish_conversation_artifact(&ctx, "output/thread.jsonl", b"x".to_vec())
+            .await
+            .is_err()
+    );
+    assert!(
+        super::publish_conversation_artifact(&ctx, "/tmp/thread.jsonl", b"x".to_vec())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("conversation/thread.jsonl")).unwrap(),
+        b"one\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn conversation_artifacts_do_not_follow_a_scratch_escape_symlink() {
+    let scratch = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), scratch.path().join("conversation")).unwrap();
+    let ctx = crate::ToolCtx::new_legacy_workspace(
+        crate::SessionId::new(),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    assert!(
+        super::publish_conversation_artifact(&ctx, "conversation/thread.jsonl", b"x".to_vec())
+            .await
+            .is_err()
+    );
+    assert!(!outside.path().join("thread.jsonl").exists());
+}

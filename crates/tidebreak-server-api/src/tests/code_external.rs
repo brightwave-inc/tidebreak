@@ -31,7 +31,7 @@ use tidebreak_server_core::obo_gateway::{
 const ADAPTER_BOOTSTRAP_TOKEN: &str = "adapter-bootstrap-token-padded-to-forty-eight-characters";
 
 #[derive(Default)]
-struct FakeProvisioner {
+pub(super) struct FakeProvisioner {
     spawns: StdMutex<Vec<SpawnArguments>>,
     sends: StdMutex<Vec<SandboxMessage>>,
     event_reads: StdMutex<VecDeque<SandboxEvents>>,
@@ -869,7 +869,7 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
             .lock()
             .unwrap()
             .iter()
-            .any(|message| message.body == "continue from the browser")
+            .any(|message| matches!(&message.body, crate::code::remote::wire::SupervisorMessageBody::Input(body) if body == "continue from the browser"))
     })
     .await;
     assert_eq!(fake.spawns.lock().unwrap().len(), 1);
@@ -1801,6 +1801,13 @@ async fn machine_app() -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) 
 async fn machine_app_built(
     customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
 ) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
+    machine_app_built_with_config(customize, |_| {}).await
+}
+
+async fn machine_app_built_with_config(
+    customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
+    configure: impl FnOnce(&mut Config),
+) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -1843,8 +1850,10 @@ async fn machine_app_built(
         origin_name: None,
     };
     insert_repo(&runtime.db, &repo).await.unwrap();
+    let mut config = Config::desktop(dir.path());
+    configure(&mut config);
     let mut state = AppState::new(
-        Config::desktop(dir.path()),
+        config,
         store_trait,
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
@@ -4519,8 +4528,8 @@ async fn repositoryless_external_sessions_honor_explicit_harness_and_private_scr
 }
 
 #[tokio::test]
-async fn repositoryless_external_harnesses_respect_sandbox_placement_before_launch() {
-    use tidebreak_core::{ExecutionLocation, ExternalSessionResolution, HarnessKind};
+async fn repositoryless_external_harnesses_use_sandbox_placement_when_configured() {
+    use tidebreak_core::{ExecutionLocation, HarnessKind};
     use tidebreak_harness::HarnessAdapter;
 
     let adapters: Vec<_> = [
@@ -4548,7 +4557,7 @@ async fn repositoryless_external_harnesses_respect_sandbox_placement_before_laun
     })
     .await;
     let owner = OwnerId::local();
-    let (grant, pair) = runtime
+    let (_grant, pair) = runtime
         .mint_adapter_grant(&owner, "slack", "U1", "T1")
         .await
         .unwrap();
@@ -4563,24 +4572,34 @@ async fn repositoryless_external_harnesses_respect_sandbox_placement_before_laun
             Some(serde_json::json!({"external_key": key, "harness": harness})),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["kind"], "repositoryless_harness_requires_machine");
-        assert_eq!(adapter.probe_count(), 0, "refuse before probing {harness}");
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id: tidebreak_core::SessionId =
+            serde_json::from_value(body["session_id"].clone()).unwrap();
+        let session = runtime.get_session(&owner, id).await.unwrap();
+        assert_eq!(session.harness_kind, harness);
+        assert_eq!(session.execution_location, ExecutionLocation::Sandbox);
+        assert!(
+            session.workspace_id.is_none(),
+            "repositoryless sandbox sessions carry no fake workspace row"
+        );
+        assert_eq!(
+            adapter.probe_count(),
+            0,
+            "no host probe for a sandbox {harness}"
+        );
         assert!(
             adapter.launched_approvals().is_empty(),
             "no host launch for {harness}"
         );
-        assert!(
-            tidebreak_core::db::code::get_external_binding(&runtime.db, &owner, "slack", &key,)
-                .await
-                .unwrap()
-                .is_none()
-        );
     }
-    assert!(runtime.list_sessions(&owner).await.unwrap().is_empty());
-    assert!(!directory.path().join("code/private/sessions").exists());
-    assert!(fake.spawns.lock().unwrap().is_empty());
+    assert_eq!(
+        fake.spawns.lock().unwrap().len(),
+        0,
+        "sandbox spawns happen on the first turn, not create"
+    );
 
+    // A legacy runtime with no declared engine keeps the machine-side
+    // Internal default.
     let key = "T1/D1/internal-default";
     let (status, body) = call_json(
         &router,
@@ -4592,57 +4611,11 @@ async fn repositoryless_external_harnesses_respect_sandbox_placement_before_laun
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let id = serde_json::from_value(body["session_id"].clone()).unwrap();
-    let mut session = runtime.get_session(&owner, id).await.unwrap();
+    let session = runtime.get_session(&owner, id).await.unwrap();
     assert_eq!(session.harness_kind, HarnessKind::Internal);
     assert_eq!(session.execution_location, ExecutionLocation::Machine);
     assert_eq!(adapters[2].launched_approvals().len(), 1);
-
-    // Runtime callers must resolve retries before applying the admission gate.
-    for ended in [false, true] {
-        if ended {
-            session.lifecycle = tidebreak_core::SessionLifecycle::Ended;
-            assert!(
-                tidebreak_core::db::code::save_session(&runtime.db, &session)
-                    .await
-                    .unwrap()
-            );
-        }
-        let (resolution, _) = runtime
-            .external_get_or_create(
-                &owner,
-                None,
-                grant.id,
-                "slack",
-                key,
-                None,
-                None,
-                HarnessKind::Codex,
-                crate::code::runtime::NewSessionSettings {
-                    permission_mode: tidebreak_core::PermissionMode::Ask,
-                    model: None,
-                    reasoning_effort: None,
-                    fast_mode: false,
-                    permission_mode_ceiling: None,
-                    acts_as: None,
-                },
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        match resolution {
-            ExternalSessionResolution::Existing(binding) if !ended => {
-                assert_eq!(binding.session_id, id);
-            }
-            ExternalSessionResolution::Ended { session_id } if ended => {
-                assert_eq!(session_id, id);
-            }
-            other => panic!("retry must preserve its binding: {other:?}"),
-        }
-    }
-    assert_eq!(runtime.list_sessions(&owner).await.unwrap().len(), 1);
-    assert!(adapters[1].launched_approvals().is_empty());
-    assert!(fake.spawns.lock().unwrap().is_empty());
+    assert!(directory.path().join("code/private/sessions").exists());
 }
 
 #[tokio::test]
@@ -4683,4 +4656,323 @@ async fn repositoryless_explicit_harness_refuses_missing_authentication() {
     .await
     .unwrap()
     .is_none());
+}
+
+#[tokio::test]
+async fn channel_preferences_share_workspace_scope_and_enforce_admin_writes() {
+    let (router, runtime, repo, service, _dir) = workspace_grant_app().await;
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-first").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", grant.id);
+    let prefs = serde_json::json!({"harness":"claude_code", "model":null, "respond_automatically":false, "instructions":"Keep replies brief."});
+    for token in [BOB_TOKEN, CAROL_TOKEN] {
+        let (status, _) = call_json(&router, "PUT", &route, token, Some(prefs.clone())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, saved) = call_json(&router, "PUT", &route, ALICE_TOKEN, Some(prefs.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["instructions"], "Keep replies brief.");
+    let (status, _) = call_json(&router, "GET", &route, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    tidebreak_core::db::code::revoke_external_grant(&runtime.db, &service, grant.id, "reconnect")
+        .await
+        .unwrap();
+    let replacement =
+        repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-second").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", replacement.id);
+    let (status, read) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C1/preferences",
+        "prefs-second",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["respond_automatically"], false);
+    assert_eq!(read["instructions"], "Keep replies brief.");
+    let (_, other_channel) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C2/preferences",
+        "prefs-second",
+        None,
+    )
+    .await;
+    assert_eq!(other_channel["instructions"], "");
+    let _other = repository_scope_workspace_grant(&runtime, &service, "T2", "prefs-other").await;
+    let (_, other_workspace) = call_json(
+        &router,
+        "GET",
+        "/external/code/channels/C1/preferences",
+        "prefs-other",
+        None,
+    )
+    .await;
+    assert_eq!(other_workspace["instructions"], "");
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &route,
+        ALICE_TOKEN,
+        Some(serde_json::json!({"instructions":"x".repeat(8193)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        "prefs-second",
+        Some(serde_json::json!({"external_key":"T1/C1/prefs", "channel_id":"C1", "repo_id":repo})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["harness"], "claude_code");
+    let session = serde_json::from_value(created["session_id"].clone()).unwrap();
+    assert_eq!(
+        crate::code::channel_preferences::session_instructions(&runtime.db, &service, session)
+            .await
+            .unwrap(),
+        "Keep replies brief."
+    );
+    let mut updated = prefs;
+    updated["instructions"] = "Changed instructions".into();
+    updated["harness"] = "codex".into();
+    let (status, _) = call_json(&router, "PUT", &route, ALICE_TOKEN, Some(updated)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, existing) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        "prefs-second",
+        Some(serde_json::json!({"external_key":"T1/C1/prefs", "channel_id":"C1", "repo_id":repo})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{existing}");
+    assert_eq!(existing["harness"], "claude_code");
+    assert_eq!(
+        crate::code::channel_preferences::session_instructions(&runtime.db, &service, session)
+            .await
+            .unwrap(),
+        "Keep replies brief."
+    );
+}
+
+#[tokio::test]
+async fn channel_preferences_preserve_supervised_model_ids() {
+    let (router, runtime, repo, service, _dir) = workspace_grant_app().await;
+    let grant = repository_scope_workspace_grant(&runtime, &service, "T1", "prefs-model").await;
+    let route = format!("/code/grants/{}/channels/C1/preferences", grant.id);
+    for (harness, model) in [
+        ("claude_code", "custom-anthropic-alias"),
+        ("codex", "custom-openai-alias"),
+        ("opencode", "model-gateway/custom-openai-alias"),
+    ] {
+        let (status, saved) = call_json(
+            &router,
+            "PUT",
+            &route,
+            ALICE_TOKEN,
+            Some(serde_json::json!({"harness": harness, "model": model})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (status, created) = call_json(&router, "POST", "/external/code/sessions", "prefs-model",
+            Some(serde_json::json!({"external_key":format!("T1/C1/{harness}"), "channel_id":"C1", "repo_id":repo}))).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["harness"], harness);
+        assert_eq!(created["model"], model);
+    }
+}
+
+#[tokio::test]
+async fn repositoryless_slack_defaults_to_configured_sandbox_and_preserves_internal_choices() {
+    use tidebreak_core::{ExecutionLocation, HarnessKind};
+    for sandbox in [true, false] {
+        let fake = Arc::new(FakeProvisioner::default());
+        let (router, runtime, _, _directory) = machine_app_built_with_config(
+            |mut runtime| {
+                runtime.adapters.register(Arc::new(
+                    crate::scripted_harness::ScriptedAdapter::new(
+                        crate::scripted_harness::plain_text_script(),
+                    )
+                    .with_kind(HarnessKind::Internal)
+                    .with_approvals(tidebreak_core::CapLevel::Supported),
+                ));
+                if sandbox {
+                    let mut settings = remote_settings();
+                    settings.engine = Some(HarnessKind::Codex);
+                    settings.engines = Some(vec![HarnessKind::Codex]);
+                    settings.embedded_engine_registration = true;
+                    runtime.with_remote_sessions(RemoteSessions::new(fake.clone(), settings))
+                } else {
+                    runtime
+                }
+            },
+            |config| {
+                // Runtime admission, rather than a copied config value, owns the default.
+                config.runtime_engine = if sandbox {
+                    None
+                } else {
+                    Some(HarnessKind::Codex)
+                };
+            },
+        )
+        .await;
+        let owner = OwnerId::local();
+        let (grant, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        for (suffix, harness, expected) in [
+            (
+                "default",
+                None,
+                if sandbox {
+                    HarnessKind::Codex
+                } else {
+                    HarnessKind::Internal
+                },
+            ),
+            (
+                "explicit",
+                Some(HarnessKind::Internal),
+                HarnessKind::Internal,
+            ),
+        ] {
+            let mut request =
+                serde_json::json!({"external_key":format!("T1/C1/{suffix}"), "channel_id":"C1"});
+            if let Some(harness) = harness {
+                request["harness"] = serde_json::to_value(harness).unwrap();
+            }
+            let (status, body) = call_json(
+                &router,
+                "POST",
+                "/external/code/sessions",
+                &pair.token,
+                Some(request),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let session = runtime
+                .get_session(
+                    &owner,
+                    serde_json::from_value(body["session_id"].clone()).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(session.harness_kind, expected);
+            assert_eq!(
+                session.execution_location,
+                if expected == HarnessKind::Internal {
+                    ExecutionLocation::Machine
+                } else {
+                    ExecutionLocation::Sandbox
+                }
+            );
+            assert!(session.workspace_id.is_none());
+        }
+        crate::code::channel_preferences::write(
+            &runtime.db,
+            &grant,
+            "C1",
+            &crate::code::channel_preferences::ChannelPreferences {
+                harness: Some(HarnessKind::Internal),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({"external_key":"T1/C1/channel-default", "channel_id":"C1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let session = runtime
+            .get_session(
+                &owner,
+                serde_json::from_value(body["session_id"].clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.harness_kind, HarnessKind::Internal);
+        assert_eq!(session.execution_location, ExecutionLocation::Machine);
+        assert!(
+            fake.spawns.lock().unwrap().is_empty(),
+            "creation defers sandbox provisioning until the first turn"
+        );
+    }
+}
+
+#[tokio::test]
+async fn repositoryless_slack_refuses_invalid_sandbox_defaults_without_machine_fallback() {
+    use tidebreak_core::HarnessKind;
+    for (engine, engines) in [
+        (
+            Some(HarnessKind::Internal),
+            Some(vec![HarnessKind::Internal]),
+        ),
+        (
+            Some(HarnessKind::Codex),
+            Some(vec![HarnessKind::ClaudeCode]),
+        ),
+        (None, Some(vec![HarnessKind::Codex])),
+    ] {
+        let fake = Arc::new(FakeProvisioner::default());
+        let declared = engines.clone();
+        let (router, runtime, _, _directory) = machine_app_built_with_config(
+            |mut runtime| {
+                runtime.adapters.register(Arc::new(
+                    crate::scripted_harness::ScriptedAdapter::new(
+                        crate::scripted_harness::plain_text_script(),
+                    )
+                    .with_kind(HarnessKind::Internal)
+                    .with_approvals(tidebreak_core::CapLevel::Supported),
+                ));
+                let mut settings = remote_settings();
+                settings.engine = engine;
+                settings.engines = engines;
+                settings.embedded_engine_registration = true;
+                runtime.with_remote_sessions(RemoteSessions::new(fake.clone(), settings))
+            },
+            |config| {
+                config.runtime_engine = engine;
+                config.runtime_engines = declared;
+                config.runtime_embedded_engine_registration = true;
+            },
+        )
+        .await;
+        let owner = OwnerId::local();
+        let (_, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(serde_json::json!({"external_key":"T1/C1/invalid-default"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(runtime.list_sessions(&owner).await.unwrap().is_empty());
+        let (status, body) = call_json(
+            &router,
+            "POST",
+            "/external/code/sessions",
+            &pair.token,
+            Some(
+                serde_json::json!({"external_key":"T1/C1/explicit-internal", "harness":"internal"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["harness"], "internal");
+        assert!(fake.spawns.lock().unwrap().is_empty());
+    }
 }

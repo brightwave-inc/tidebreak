@@ -39,6 +39,7 @@ import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 import { QuickActionsPanel } from "./QuickActionsPanel";
 import { ChannelsPanel } from "./ChannelsPanel";
+import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
 import { MemoryPanel } from "./MemoryPanel";
 
@@ -198,6 +199,18 @@ function QuickActionsSection() {
 
 function ChannelsSection() {
   const { client } = useApp();
+  const search = useRouterState({
+    select: (state) => state.location.search,
+  }) as Record<string, unknown>;
+  if (typeof search.grant === "string" && typeof search.channel === "string") {
+    return (
+      <ChannelPreferencesPanel
+        client={client}
+        grantId={search.grant}
+        channelId={search.channel}
+      />
+    );
+  }
   return <ChannelsPanel client={client} />;
 }
 
@@ -334,6 +347,10 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: MessagesSquare,
     iconClass: "text-icon-green",
     Component: ChannelsSection,
+    validateSearch: (search: Record<string, unknown>) => ({
+      grant: typeof search.grant === "string" ? search.grant : undefined,
+      channel: typeof search.channel === "string" ? search.channel : undefined,
+    }),
   },
   {
     path: "connected-apps",

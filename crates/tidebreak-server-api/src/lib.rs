@@ -54,6 +54,8 @@ const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
 const MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_EXTERNAL_CONNECT_BODY_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_CONVERSATION_REQUEST_RESULT_BODY_BYTES: usize =
+    tidebreak_core::ConversationRequest::MAX_JSON_BYTES;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -499,6 +501,10 @@ pub fn app(state: AppState) -> Router {
     // `require_token` like the inference relay above.
     let external_adapter_api = Router::new()
         .route(
+            "/external/code/channels/{channel_id}/preferences",
+            get(routes::code::external_channel_preferences),
+        )
+        .route(
             "/external/code/sessions",
             post(routes::code::external_get_or_create),
         )
@@ -509,6 +515,16 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/external/code/sessions/{id}/messages",
             post(routes::code::external_messages),
+        )
+        .route(
+            "/external/code/sessions/{id}/conversation-requests",
+            get(routes::code::external_conversation_requests),
+        )
+        .route(
+            "/external/code/sessions/{id}/conversation-requests/{request_id}",
+            post(routes::code::external_conversation_request_result).layer(DefaultBodyLimit::max(
+                MAX_CONVERSATION_REQUEST_RESULT_BODY_BYTES,
+            )),
         )
         .route(
             "/external/code/sessions/{id}/events",
@@ -930,6 +946,14 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::decide_approval),
         )
         .route("/code/grants", get(routes::code::list_grants))
+        .route(
+            "/code/grants/{id}/channels/{channel_id}/preferences",
+            get(routes::code::get_channel_preferences).put(routes::code::put_channel_preferences),
+        )
+        .route(
+            "/code/grants/{id}/channels/{channel_id}/harnesses",
+            get(routes::code::get_channel_harness_catalog),
+        )
         .route(
             "/code/grants/workspace",
             post(routes::code::start_workspace_grant),

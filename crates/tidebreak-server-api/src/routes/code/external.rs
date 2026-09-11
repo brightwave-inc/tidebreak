@@ -67,7 +67,7 @@ impl FromRequestParts<AppState> for ExternalGrantAuth {
 }
 
 /// Refuse a session the grant does not tag, with the not-found shape.
-async fn require_bound(
+pub(super) async fn require_bound(
     state: &AppState,
     grant: &CodeExternalGrant,
     session: SessionId,
@@ -187,6 +187,10 @@ pub struct ExternalSessionBody {
 
 #[derive(serde::Serialize)]
 pub struct ExternalSessionResponse {
+    pub harness: HarnessKind,
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_path: Option<String>,
     /// `created`, `existing`, or `ended`.
     pub status: &'static str,
     pub session_id: SessionId,
@@ -207,16 +211,97 @@ pub struct ExternalSessionResponse {
 
 /// Freeze the chat default against the connection that admitted this session.
 /// Browser credentials never select or authorize an external conversation's model.
+#[cfg(test)]
 pub(crate) async fn resolve_external_model(
     state: &AppState,
     grant: &CodeExternalGrant,
 ) -> Result<String, ServerError> {
+    resolve_external_model_selection(state, grant, None).await
+}
+
+/// Preserve the model identifier that the selected harness sends to its provider.
+/// Only the internal engine understands Tidebreak's frozen chat selectors.
+async fn resolve_external_harness_model(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    harness: HarnessKind,
+    selection: Option<&str>,
+) -> Result<Option<String>, ServerError> {
+    if harness.is_in_process() {
+        return resolve_external_model_selection(state, grant, selection)
+            .await
+            .map(Some);
+    }
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let runtime = state
+        .code
+        .as_ref()
+        .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
+    if let Some(relay) = runtime.harness_llm() {
+        let (anthropic, openai) = match relay.external_delegations() {
+            Some(external) => {
+                external
+                    .for_grant(&grant.owner, grant.id)
+                    .await?
+                    .compat_listings(&grant.owner)
+                    .await?
+            }
+            None => relay.listings(&grant.owner).await?,
+        };
+        return select_external_compat_model(harness, selection, anthropic, openai).map(Some);
+    }
+    Ok(Some(selection.to_owned()))
+}
+
+fn select_external_compat_model(
+    harness: HarnessKind,
+    selection: &str,
+    anthropic: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+    openai: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+) -> Result<String, ServerError> {
+    let (models, id) = match harness {
+        HarnessKind::ClaudeCode => (anthropic?, selection),
+        HarnessKind::Codex | HarnessKind::Grok => (openai?, selection),
+        HarnessKind::Opencode => {
+            if let Some(id) = selection.strip_prefix("anthropic/") {
+                (anthropic?, id)
+            } else if let Some(id) = selection.strip_prefix("model-gateway/") {
+                (openai?, id)
+            } else {
+                return Err(unavailable_external_harness_model());
+            }
+        }
+        HarnessKind::Internal => return Err(unavailable_external_harness_model()),
+    };
+    if !models.iter().any(|model| model.id == id) {
+        return Err(unavailable_external_harness_model());
+    }
+    Ok(selection.to_owned())
+}
+
+fn unavailable_external_harness_model() -> ServerError {
+    ServerError::conflict_kind(
+        "model_provider_unavailable",
+        "this Slack connection cannot use the selected harness model; choose an available model in channel settings",
+    )
+}
+
+async fn resolve_external_model_selection(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    selection: Option<&str>,
+) -> Result<String, ServerError> {
     use crate::model_roles::{self, ModelRole};
-    let (selected, explicit) =
+    let (selected, explicit) = if let Some(model) = selection {
+        (model.to_owned(), true)
+    } else {
         match model_roles::read_selection(&*state.store, ModelRole::Chat).await? {
             Some(model) => (model, true),
             None => (state.agent_config.model.clone(), false),
-        };
+        }
+    };
     let runtime = state
         .code
         .as_ref()
@@ -371,6 +456,16 @@ pub async fn external_get_or_create(
         return Ok((
             StatusCode::OK,
             Json(ExternalSessionResponse {
+                harness: session.harness_kind,
+                model: session.model.clone(),
+                settings_path: tidebreak_core::db::code::session_context(
+                    &runtime.db,
+                    &grant.owner,
+                    session.id,
+                )
+                .await?
+                .and_then(|context| context.channel_id)
+                .map(|channel| crate::code::channel_preferences::settings_path(&grant, &channel)),
                 status: if ended { "ended" } else { "existing" },
                 session_id: binding.session_id,
                 binding_id: (!ended).then_some(binding.id),
@@ -381,6 +476,12 @@ pub async fn external_get_or_create(
             }),
         ));
     }
+    let preferences = match body.channel_id.as_deref() {
+        Some(channel) if grant.channel_kind == "slack" => {
+            crate::code::channel_preferences::read(&runtime.db, &grant, channel).await?
+        }
+        _ => Default::default(),
+    };
     let registered = match body.repo_id {
         Some(id) => Some(runtime.get_repo(&grant.owner, id).await?),
         None => None,
@@ -420,20 +521,21 @@ pub async fn external_get_or_create(
             )
         }
     };
-    // Keep repository orchestration on the internal engine by default until
-    // external engines carry the same tools. An explicit harness is honored.
-    let harness = body.harness.unwrap_or(if repo_id.is_none() {
-        HarnessKind::Internal
-    } else {
-        HarnessKind::ClaudeCode
-    });
-    let model = if harness.is_in_process() {
-        Some(resolve_external_model(&state, &grant).await?)
-    } else {
-        None
+    // Explicit choices retain their placement, including machine-side Internal.
+    // Only omitted choices consult the admitted default of the actual runtime.
+    let harness = match body.harness.or(preferences.harness) {
+        Some(harness) => harness,
+        None if repo_id.is_none() && grant.channel_kind == "slack" => runtime
+            .default_channel_sandbox_harness(&grant.owner)?
+            .unwrap_or(HarnessKind::Internal),
+        None if repo_id.is_none() => HarnessKind::Internal,
+        None => HarnessKind::ClaudeCode,
     };
+    let model =
+        resolve_external_harness_model(&state, &grant, harness, preferences.model.as_deref())
+            .await?;
     let (resolution, identity) = runtime
-        .external_get_or_create(
+        .external_get_or_create_with_channel_context(
             &grant.owner,
             owner_kind,
             grant.id,
@@ -452,6 +554,12 @@ pub async fn external_get_or_create(
             },
             body.permission_mode,
             body.acts_as,
+            (grant.channel_kind == "slack").then_some(
+                tidebreak_core::db::code::ExternalSessionChannelContext {
+                    channel_id: body.channel_id.as_deref(),
+                    instructions: &preferences.instructions,
+                },
+            ),
         )
         .await?;
     if let ExternalSessionResolution::Created(binding)
@@ -459,8 +567,25 @@ pub async fn external_get_or_create(
     {
         repair_original_context(&runtime, &grant, binding, body.channel_id.as_deref()).await?;
     }
+    let resolved_session_id = match &resolution {
+        ExternalSessionResolution::Created(binding)
+        | ExternalSessionResolution::Existing(binding) => binding.session_id,
+        ExternalSessionResolution::Ended { session_id } => *session_id,
+        ExternalSessionResolution::GrantMismatch => {
+            return Err(ServerError::not_found("code session not found"))
+        }
+    };
+    let actual = runtime
+        .get_session(&grant.owner, resolved_session_id)
+        .await?;
     let response_from =
         |status: &'static str, session_id: SessionId, binding_id| ExternalSessionResponse {
+            harness: actual.harness_kind,
+            model: actual.model.clone(),
+            settings_path: body
+                .channel_id
+                .as_deref()
+                .map(|channel| crate::code::channel_preferences::settings_path(&grant, channel)),
             status,
             session_id,
             binding_id,
@@ -757,6 +882,38 @@ pub async fn external_session_access(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Resolve the saved session selection without consulting channel or chat defaults.
+async fn external_session_model_display_name(
+    state: &AppState,
+    grant: &CodeExternalGrant,
+    session: &tidebreak_core::Session,
+) -> Option<String> {
+    let selection = session.model.as_deref()?;
+    if !session.harness_kind.is_in_process() {
+        return Some(selection.to_owned());
+    }
+    let runtime = state.code.as_ref()?;
+    let snapshot = if let Some(relay) = runtime.harness_llm() {
+        let result = if relay.external_delegations().is_some() {
+            relay.catalog_for_grant(&grant.owner, grant.id).await
+        } else {
+            relay.catalog(&grant.owner).await
+        };
+        // A label lookup must not prevent the adapter from reading session state.
+        match result {
+            Ok(snapshot) => snapshot,
+            Err(_) => return None,
+        }
+    } else {
+        None
+    };
+    crate::providers::resolve_model_policy(&*state.store, selection, true, snapshot.as_ref())
+        .await
+        .ok()
+        .flatten()
+        .map(|policy| policy.display_name)
+}
+
 /// `WS /external/code/sessions/{id}/events?after=` — the desktop event
 /// stream, scoped by grant, prefixed with a session snapshot (lifecycle
 /// and attention), and severed the moment the grant is revoked.
@@ -771,6 +928,7 @@ pub async fn external_events(
     let session = runtime.get_session(&grant.owner, id).await?;
     let bindings =
         tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
+    let model_display_name = external_session_model_display_name(&state, &grant, &session).await;
     let mut session_snapshot = SessionSnapshot::from(session);
     session_snapshot.set_external_origins(
         bindings
@@ -795,9 +953,10 @@ pub async fn external_events(
         // The renderer needs the session's standing before the journal:
         // lifecycle and the attention snapshot arrive first, as their own
         // frame shape.
-        let snapshot = serde_json::json!({
+        let mut snapshot = serde_json::json!({
             "snapshot": session_snapshot,
         });
+        snapshot["snapshot"]["model_display_name"] = serde_json::json!(model_display_name);
         if let Ok(json) = serde_json::to_string(&snapshot) {
             if socket
                 .send(axum::extract::ws::Message::Text(json.into()))
@@ -1020,4 +1179,67 @@ async fn external_decide(
         .decide_approval(&grant.owner, call, decision, Some(actor))
         .await?;
     Ok(Json(ApprovalSnapshot::from(settled)))
+}
+
+#[cfg(test)]
+mod harness_model_tests {
+    use super::*;
+
+    fn listing(id: &str) -> tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>> {
+        Ok(vec![crate::obo_gateway::GatewayCompatModel {
+            id: id.to_owned(),
+            display_name: None,
+            family_default: false,
+        }])
+    }
+
+    #[test]
+    fn external_compat_models_preserve_harness_namespace_and_protocol() {
+        for (harness, selected) in [
+            (HarnessKind::ClaudeCode, "anthropic-alias"),
+            (HarnessKind::Codex, "openai-alias"),
+            (HarnessKind::Grok, "openai-alias"),
+            (HarnessKind::Opencode, "anthropic/anthropic-alias"),
+            (HarnessKind::Opencode, "model-gateway/openai-alias"),
+        ] {
+            assert_eq!(
+                select_external_compat_model(
+                    harness,
+                    selected,
+                    listing("anthropic-alias"),
+                    listing("openai-alias")
+                )
+                .unwrap(),
+                selected
+            );
+        }
+        for (harness, selected) in [
+            (HarnessKind::ClaudeCode, "openai-alias"),
+            (HarnessKind::Codex, "anthropic-alias"),
+            (HarnessKind::Opencode, "openai-alias"),
+            (HarnessKind::Opencode, "anthropic/openai-alias"),
+            (
+                HarnessKind::Codex,
+                "model_gateway::__tidebreak_gateway_v1.route",
+            ),
+        ] {
+            assert!(select_external_compat_model(
+                harness,
+                selected,
+                listing("anthropic-alias"),
+                listing("openai-alias")
+            )
+            .is_err());
+        }
+        assert_eq!(
+            select_external_compat_model(
+                HarnessKind::ClaudeCode,
+                "anthropic-alias",
+                listing("anthropic-alias"),
+                Err(tidebreak_core::AgentError::msg("unrelated listing down"))
+            )
+            .unwrap(),
+            "anthropic-alias"
+        );
+    }
 }

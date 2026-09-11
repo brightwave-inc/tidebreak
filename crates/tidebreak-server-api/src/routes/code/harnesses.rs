@@ -183,6 +183,14 @@ async fn hosted_models(
         .harness_llm()
         .expect("hosted means the relay is active");
     let (anthropic, openai) = relay.listings(code.owner()).await?;
+    hosted_models_from_listings(kind, anthropic, openai)
+}
+
+pub(super) fn hosted_models_from_listings(
+    kind: HarnessKind,
+    anthropic: tidebreak_core::Result<Vec<GatewayCompatModel>>,
+    openai: tidebreak_core::Result<Vec<GatewayCompatModel>>,
+) -> Result<Vec<HarnessModel>, ServerError> {
     match kind {
         HarnessKind::ClaudeCode => Ok(anthropic?
             .into_iter()

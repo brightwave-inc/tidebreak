@@ -130,12 +130,15 @@ pub struct SupervisorInstructions {
 pub struct SupervisorMessage {
     /// Per-sandbox monotonic, gap-free sequence number.
     pub seq: i64,
-    /// Ordinary input for the engine.
+    /// Ordinary input or a framed result over the string-only transport.
     pub body: String,
     /// Whether the turn in flight should be preempted to deliver it.
     #[serde(default)]
     pub interrupt: bool,
 }
+
+pub use tidebreak_core::code::supervisor_tools::{SupervisorArtifact, SupervisorToolResult};
+pub use tidebreak_core::code::SupervisorToolRequest;
 
 /// The error body the endpoint returns on a refused poll.
 #[derive(Clone, Debug, Deserialize)]
@@ -187,7 +190,7 @@ mod tests {
             "state": "running",
             "stop": false,
             "cursor": 3,
-            "messages": [{"seq": 4, "body": "go", "interrupt": false, "created_at": "2026-08-27T00:00:00Z"}],
+            "messages": [{"seq": 4, "body": "ordinary input", "interrupt": false, "created_at": "2026-08-27T00:00:00Z"}],
             "acceptance_met": true,
             "wrap_up_due": [{"ceiling": "spend"}],
             "spend_microusd": 12,
