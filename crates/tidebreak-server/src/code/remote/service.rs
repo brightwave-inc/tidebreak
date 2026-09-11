@@ -89,6 +89,11 @@ pub struct RemoteSessions {
     /// after a machine-side refusal. In-memory on purpose: a restart retries
     /// once and re-arms the hold from the fresh refusal.
     promotion_holds: Mutex<HashMap<SessionId, std::time::Instant>>,
+    /// The last published startup failure, independent of display attention.
+    /// A successful promotion clears it; expiring a retry hold does not.
+    startup_failures: Mutex<HashMap<SessionId, String>>,
+    /// Serialize promotion through failure publication for each session.
+    promotion_locks: Mutex<HashMap<SessionId, Weak<tokio::sync::Mutex<()>>>>,
     /// Wakes the sweep for an immediate pass. A wake with no waiter is kept
     /// until the sweep next listens, so none is lost between passes.
     sweep_wake: Notify,
@@ -105,6 +110,8 @@ impl RemoteSessions {
             host_tool: std::sync::OnceLock::new(),
             pumps: Mutex::new(HashMap::new()),
             promotion_holds: Mutex::new(HashMap::new()),
+            startup_failures: Mutex::new(HashMap::new()),
+            promotion_locks: Mutex::new(HashMap::new()),
             sweep_wake: Notify::new(),
         })
     }
@@ -168,6 +175,51 @@ impl RemoteSessions {
         let now = std::time::Instant::now();
         holds.retain(|_, until| *until > now);
         holds.remove(&session);
+    }
+
+    pub(crate) fn promotion_lock(&self, session: SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.promotion_locks.lock().expect("promotion locks");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&session).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(session, Arc::downgrade(&lock));
+        lock
+    }
+
+    pub(crate) fn startup_failure_matches(&self, session: SessionId, message: &str) -> bool {
+        self.startup_failures
+            .lock()
+            .expect("startup failures")
+            .get(&session)
+            .is_some_and(|last| last == message)
+    }
+
+    pub(crate) fn record_startup_failure(&self, session: SessionId, message: String) {
+        self.startup_failures
+            .lock()
+            .expect("startup failures")
+            .insert(session, message);
+    }
+
+    pub(crate) fn clear_startup_failure(&self, session: SessionId) {
+        self.startup_failures
+            .lock()
+            .expect("startup failures")
+            .remove(&session);
+    }
+
+    /// Fresh input retries startup failures but does not bypass capacity holds.
+    pub(crate) fn retry_startup_failure(&self, session: SessionId) {
+        if self
+            .startup_failures
+            .lock()
+            .expect("startup failures")
+            .contains_key(&session)
+        {
+            self.clear_promotion_hold(session);
+        }
     }
 
     /// Make sure `session` has a pump task, spawning one when it has none.
@@ -1782,7 +1834,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_failures_are_visible_safe_deduplicated_and_retryable_from_slack() {
-        for sign_in in [false, true] {
+        for (sign_in, pinned) in [(false, false), (true, false), (false, true), (true, true)] {
             let dir = tempfile::tempdir().unwrap();
             let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
             let remote = runtime.remote_sessions().unwrap();
@@ -1806,6 +1858,18 @@ mod tests {
             let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
                 panic!("expected creation");
             };
+            if pinned {
+                crate::code::attention::apply_attention(
+                    &runtime.db,
+                    &runtime.bus,
+                    &owner,
+                    binding.session_id,
+                    tidebreak_core::Attention::manual("Keep this pinned"),
+                    true,
+                )
+                .await
+                .unwrap();
+            }
             for _ in 0..2 {
                 fake.spawn_errors.lock().unwrap().push_back(if sign_in {
                     RemoteSandboxError::SignInRequired("private-token-and-upstream-body".into())
@@ -1916,6 +1980,17 @@ mod tests {
                 "retry promotes the original queue head"
             );
             assert!(!remote.promotion_held(binding.session_id));
+            if pinned {
+                assert_eq!(
+                    runtime
+                        .get_session(&owner, binding.session_id)
+                        .await
+                        .unwrap()
+                        .attention,
+                    tidebreak_core::Attention::manual("Keep this pinned"),
+                    "startup and recovery preserve the manual pin"
+                );
+            }
             let queue = tidebreak_core::db::code::list_queued_turns(
                 &runtime.db,
                 &owner,
@@ -1928,6 +2003,129 @@ mod tests {
                 1,
                 "the retry message follows the original turn"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_startup_retries_publish_failure_before_the_next_attempt() {
+        for failures in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
+            let remote = runtime.remote_sessions().unwrap();
+            let grant = tidebreak_core::CodeGrantId::new();
+            let (resolution, _) = runtime
+                .external_get_or_create(
+                    &owner,
+                    None,
+                    grant,
+                    "slack",
+                    "T1/C1/concurrent-startup",
+                    None,
+                    None,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+                panic!("expected creation");
+            };
+            for _ in 0..failures {
+                fake.spawn_errors
+                    .lock()
+                    .unwrap()
+                    .push_back(RemoteSandboxError::Unavailable {
+                        operation: "spawn",
+                        detail: "private transport failure".into(),
+                    });
+            }
+            let message = |event: &str| crate::code::runtime::ExternalMessage {
+                text: "start work".into(),
+                event_id: event.into(),
+                channel_ts: "1.0".into(),
+                actor: tidebreak_core::TurnActor::default(),
+                context: None,
+            };
+            let lock = remote.promotion_lock(binding.session_id);
+            let guard = lock.lock().await;
+            let (first, second, ()) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::join!(
+                        runtime.external_submit_message(
+                            &owner,
+                            grant,
+                            binding.session_id,
+                            message("Ev1")
+                        ),
+                        runtime.external_submit_message(
+                            &owner,
+                            grant,
+                            binding.session_id,
+                            message("Ev2")
+                        ),
+                        async {
+                            // Both requests must queue before either can attempt startup.
+                            loop {
+                                let queue = tidebreak_core::db::code::list_queued_turns(
+                                    &runtime.db,
+                                    &owner,
+                                    binding.session_id,
+                                )
+                                .await
+                                .unwrap();
+                                if queue.len() == 2 {
+                                    break;
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                            assert!(fake.spawns.lock().unwrap().is_empty());
+                            drop(guard);
+                        }
+                    )
+                })
+                .await
+                .expect("concurrent retries must finish");
+            first.unwrap();
+            second.unwrap();
+            assert_eq!(fake.spawns.lock().unwrap().len(), 2);
+            let events = tidebreak_core::db::code::list_events(
+                &runtime.db,
+                &owner,
+                binding.session_id,
+                0,
+                50,
+            )
+            .await
+            .unwrap()
+            .events;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|row| matches!(
+                        row.event,
+                        tidebreak_core::Event::HarnessNotice {
+                            level: tidebreak_core::HarnessNoticeLevel::Warning,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(remote.promotion_held(binding.session_id), failures == 2);
+            assert_eq!(
+                remote
+                    .startup_failures
+                    .lock()
+                    .unwrap()
+                    .contains_key(&binding.session_id),
+                failures == 2
+            );
+            let turn = latest_turn(&runtime.db, &owner, binding.session_id)
+                .await
+                .unwrap();
+            assert_eq!(turn.is_some(), failures == 1);
         }
     }
 

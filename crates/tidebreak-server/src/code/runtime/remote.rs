@@ -64,12 +64,15 @@ impl CodeRuntime {
         attention: Attention,
         message: String,
     ) -> Result<(), ServerError> {
-        if session.attention == attention {
+        let Some(remote) = self.remote_sessions() else {
+            return Ok(());
+        };
+        if remote.startup_failure_matches(session.id, &message) {
             return Ok(());
         }
         let event = tidebreak_core::Event::HarnessNotice {
             level: tidebreak_core::HarnessNoticeLevel::Warning,
-            message,
+            message: message.clone(),
         };
         let seq = tidebreak_core::db::code::append_event(
             &self.db,
@@ -82,6 +85,7 @@ impl CodeRuntime {
         .map_err(|error| tidebreak_core::AgentError::Store(error.to_string()))?;
         self.bus
             .publish(session.id, tidebreak_core::SequencedEvent { seq, event });
+        remote.record_startup_failure(session.id, message);
         crate::code::attention::apply_attention(
             &self.db,
             &self.bus,
@@ -979,7 +983,7 @@ impl CodeRuntime {
         turn_id: tidebreak_core::TurnId,
     ) -> Result<(), ServerError> {
         match session.execution_location {
-            ExecutionLocation::Sandbox => self.try_promote_remote_head(session).await,
+            ExecutionLocation::Sandbox => self.promote_remote_head(session, true).await,
             ExecutionLocation::Machine => {
                 let owner = session.owner.clone();
                 let session_id = session.id;
@@ -1006,11 +1010,31 @@ impl CodeRuntime {
     /// rather than waiting out a sweep tick.
     pub(super) async fn try_promote_remote_head(
         &self,
-        mut session: Session,
+        session: Session,
+    ) -> Result<(), ServerError> {
+        self.promote_remote_head(session, false).await
+    }
+
+    async fn promote_remote_head(
+        &self,
+        session: Session,
+        fresh_input: bool,
     ) -> Result<(), ServerError> {
         let Some(remote) = self.remote_sessions() else {
             return Ok(());
         };
+        let lock = remote.promotion_lock(session.id);
+        let _guard = lock.lock().await;
+        let mut session = self.get_session(&session.owner, session.id).await?;
+        if fresh_input {
+            remote.retry_startup_failure(session.id);
+        }
+        if matches!(
+            session.lifecycle,
+            SessionLifecycle::Ended | SessionLifecycle::Fenced
+        ) {
+            remote.clear_startup_failure(session.id);
+        }
         if session.execution_location != ExecutionLocation::Sandbox
             || session.lifecycle != SessionLifecycle::Idle
         {
@@ -1024,6 +1048,7 @@ impl CodeRuntime {
             return Ok(());
         }
         let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
+            remote.clear_startup_failure(session.id);
             return Ok(());
         };
         let repo = match workspace.as_ref() {
@@ -1057,6 +1082,7 @@ impl CodeRuntime {
             // looks again now rather than at its next floor.
             Ok(Outcome::Delivered { .. }) | Ok(Outcome::Reincarnated { .. }) => {
                 remote.clear_promotion_hold(session.id);
+                remote.clear_startup_failure(session.id);
                 remote.wake_sweep();
             }
             // Permanent for this session: nothing exposes a way to raise
@@ -1085,6 +1111,7 @@ impl CodeRuntime {
                 ).await?;
             }
             Ok(Outcome::CapExhausted { .. }) => {
+                remote.clear_startup_failure(session.id);
                 remote.hold_promotion(session.id);
             }
             // Busy shapes: the row stays queued for the next idle.
@@ -1177,13 +1204,6 @@ impl CodeRuntime {
         if fresh {
             // Best effort: a refusal leaves the row queued for the sweep.
             let session = self.get_session(owner, session_id).await?;
-            if matches!(&session.attention.state, tidebreak_core::AttentionState::NeedsYou { prompt, .. }
-                if prompt.starts_with("Sandbox startup failed (") || prompt == "sign in to the sandbox environment")
-            {
-                if let Some(remote) = self.remote_sessions() {
-                    remote.clear_promotion_hold(session_id);
-                }
-            }
             if let Err(error) = self.promote_external_head(session, turn_id).await {
                 tracing::warn!(
                     session = %session_id,
