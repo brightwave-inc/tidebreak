@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MachineClient } from "../lib/machine";
-import { connectWithBackoff, type ReconnectingSocket } from "../lib/machine";
-import { isCodeUpdateNotice, noticeToAction } from "../lib/updates";
+import { acquireUpdatesFeed } from "./updatesFeed";
 import { useUpdatesStore } from "./updatesStore";
 
 export function useUpdatesFeed(client: MachineClient | null): {
   live: boolean;
   refresh: () => void;
 } {
-  const apply = useUpdatesStore((state) => state.apply);
   const reset = useUpdatesStore((state) => state.reset);
   const [live, setLive] = useState(false);
-  const connRef = useRef<ReconnectingSocket | null>(null);
+  const refreshRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!client) {
@@ -19,33 +17,19 @@ export function useUpdatesFeed(client: MachineClient | null): {
       setLive(false);
       return;
     }
-    const conn = connectWithBackoff(
-      () => client.openSocket("/updates"),
-      {
-        onMessage: (data) => {
-          try {
-            const parsed: unknown = JSON.parse(data);
-            if (!isCodeUpdateNotice(parsed)) return;
-            const action = noticeToAction(parsed);
-            if (action) apply(action);
-          } catch {
-            // Drop malformed notices; the next snapshot heals the list.
-          }
-        },
-        onConnectionState: (state) => setLive(state === "live"),
-      },
+    const handle = acquireUpdatesFeed(client, (state) =>
+      setLive(state === "live"),
     );
-    connRef.current = conn;
-    conn.start();
+    setLive(handle.state === "live");
+    refreshRef.current = handle.refresh;
     return () => {
-      conn.dispose();
-      connRef.current = null;
-      reset();
+      refreshRef.current = null;
+      handle.release();
     };
-  }, [apply, client, reset]);
+  }, [client, reset]);
 
   const refresh = useCallback(() => {
-    connRef.current?.refresh();
+    refreshRef.current?.();
   }, []);
 
   return { live, refresh };

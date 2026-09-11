@@ -3,6 +3,7 @@ import type { MachineClient } from "./machine";
 import {
   groupMobileDeliveryPullRequests,
   listMobileDeliveryRepositories,
+  mobileDeliveryAttentionCountLabel,
   mobileDeliveryCheckProgress,
   mobileDeliveryLaneCountLabel,
   mobileDeliveryLaneIsConfirmedEmpty,
@@ -327,5 +328,33 @@ describe("mobile Delivery API contracts", () => {
     expect(
       mobileDeliveryLaneIsConfirmedEmpty(parsed!.items, false),
     ).toBe(false);
+  });
+
+  it("labels the hub's attention count from one page, marking overflow", () => {
+    const items = parseMobileDeliveryPullRequestsPage({
+      ...pullRequestsPage,
+      next_cursor: undefined,
+      items: [
+        {
+          ...pullRequest,
+          id: "attention",
+          attention_reasons: ["checks_failed"],
+          ready_to_merge: false,
+        },
+        {
+          ...pullRequest,
+          id: "ready",
+          attention_reasons: [],
+          ready_to_merge: true,
+        },
+      ],
+    })!.items;
+    expect(
+      mobileDeliveryAttentionCountLabel({ items }),
+    ).toBe("1");
+    expect(
+      mobileDeliveryAttentionCountLabel({ items, next_cursor: "cursor-2" }),
+    ).toBe("1+");
+    expect(mobileDeliveryAttentionCountLabel({ items: [] })).toBe("0");
   });
 });

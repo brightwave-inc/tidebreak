@@ -159,6 +159,23 @@ export function attentionBadgeLabel(
   }
 }
 
+/**
+ * A session a human should look at now: any badge-worthy attention on a
+ * session that has not ended.
+ */
+export function sessionNeedsAttention(digest: CodeSessionDigest): boolean {
+  return (
+    digest.lifecycle !== "ended" &&
+    attentionBadgeLabel(digest.attention) !== null
+  );
+}
+
+export function attentionSessionCount(
+  sessions: readonly CodeSessionDigest[],
+): number {
+  return sessions.filter(sessionNeedsAttention).length;
+}
+
 export function lifecycleLabel(lifecycle: CodeSessionDigest["lifecycle"]): string {
   switch (lifecycle) {
     case "created":

@@ -444,6 +444,19 @@ export function mobileDeliveryLaneCountLabel(
   return hasNextPage ? `${count} loaded` : String(count);
 }
 
+/**
+ * Attention-lane count from the first fetched page, labeled honestly when
+ * more pages exist ("2+"): the hub never fetches beyond page one.
+ */
+export function mobileDeliveryAttentionCountLabel(
+  page: Pick<MobileDeliveryPullRequestsPage, "items" | "next_cursor">,
+): string {
+  const count = page.items.filter(
+    (pullRequest) => mobileDeliveryLane(pullRequest) === "attention",
+  ).length;
+  return page.next_cursor !== undefined ? `${count}+` : String(count);
+}
+
 export function mobileDeliveryLaneIsConfirmedEmpty(
   pullRequests: readonly MobileDeliveryPullRequest[],
   hasNextPage: boolean,
