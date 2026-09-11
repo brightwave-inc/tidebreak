@@ -422,6 +422,41 @@ pub async fn record_checkpoint(
     })
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // mirrors record_checkpoint plus a test-only output budget
+async fn record_checkpoint_with_output_budget(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    ordinal: i64,
+    status: TurnStatus,
+    previous_oid: Option<&str>,
+    base_ref: &str,
+    output_budget: OutputBudget,
+) -> Result<RecordedCheckpoint, CheckpointError> {
+    let r#ref = checkpoint_ref(workspace_id, session_id, ordinal);
+    let message = format!("checkpoint turn {ordinal} ({})", status.as_str());
+    let commit = write_snapshot_ref(worktree, &r#ref, previous_oid, &message).await?;
+
+    let from = match previous_oid {
+        Some(oid) => oid.to_owned(),
+        None => merge_base(worktree, base_ref).await?,
+    };
+    let files = collect_changes_inner(
+        worktree,
+        &from,
+        &commit,
+        DiffBounds::default(),
+        None,
+        output_budget,
+    )
+    .await?;
+    Ok(RecordedCheckpoint {
+        checkpoint_ref: r#ref,
+        diffstat: files.stat,
+    })
+}
+
 /// Snapshot the worktree, commit it, and move `r#ref` onto the commit.
 ///
 /// The commit's parent is `parent_oid`, or `HEAD` when there is none, so a
@@ -1128,8 +1163,10 @@ async fn collect_changes_inner(
         }
     }
     .map_err(CheckpointError::internal)?;
-    let stats = parse_numstat(&numstat);
-    let mut files = parse_name_status(&name_status);
+    let name_status = complete_nul_terminated_records(&name_status, name_truncated);
+    let numstat = complete_nul_terminated_records(&numstat, numstat_truncated);
+    let stats = parse_numstat(numstat);
+    let mut files = parse_name_status(name_status);
     for file in &mut files {
         if let Some((insertions, deletions)) = stats
             .get(&file.path)
@@ -1162,6 +1199,18 @@ async fn collect_changes_inner(
             truncated,
         },
     })
+}
+
+/// A head-budget cut can land mid-record. `-z` records end at NUL; drop the
+/// dangling fragment so parsers never invent a path that was not in the tree.
+fn complete_nul_terminated_records(raw: &[u8], truncated: bool) -> &[u8] {
+    if !truncated {
+        return raw;
+    }
+    match raw.iter().rposition(|byte| *byte == 0) {
+        Some(end) => &raw[..=end],
+        None => &[],
+    }
 }
 
 fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
@@ -2041,10 +2090,20 @@ mod tests {
         for index in 0..80 {
             std::fs::write(tree.join(format!("file-{index:02}.txt")), "changed\n").unwrap();
         }
-        let recorded =
-            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
-                .await
-                .unwrap();
+        let recorded = record_checkpoint_with_output_budget(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            TurnStatus::Completed,
+            None,
+            "main",
+            OutputBudget::head(64, 4),
+        )
+        .await
+        .expect("a truncating budget must still record a checkpoint");
+        assert!(recorded.diffstat.truncated);
+        assert!(recorded.diffstat.files > 0);
         let from = merge_base(&tree, "main").await.unwrap();
         let listed = collect_changes_inner(
             &tree,
@@ -2059,6 +2118,13 @@ mod tests {
         assert!(listed.truncated);
         assert!(listed.stat.truncated);
         assert!(!listed.files.is_empty());
+        for file in &listed.files {
+            let path = file.path.to_wire();
+            assert!(
+                path.starts_with("file-") && path.ends_with(".txt"),
+                "truncated -z stream must not keep a dangling path fragment: {path}"
+            );
+        }
     }
 
     #[tokio::test]

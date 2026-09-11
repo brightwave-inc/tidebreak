@@ -96,9 +96,10 @@ impl CodeRuntime {
             return self.repo_by_origin(owner, origin).await;
         }
         let origin = origin.to_ascii_lowercase();
+        let now = Instant::now();
         let previous = {
             let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
-            prune_completed_jobs(&mut jobs, Instant::now());
+            prune_completed_jobs(&mut jobs, now);
             let matching = jobs
                 .values()
                 .filter(|job| {
@@ -110,13 +111,51 @@ impl CodeRuntime {
                 .iter()
                 .find(|job| !job.done)
                 .cloned()
-                .or_else(|| matching.into_iter().find(|job| job.error.is_none()))
+                .or_else(|| {
+                    matching
+                        .iter()
+                        .find(|job| job.done && job.error.is_none())
+                        .cloned()
+                })
+                .or_else(|| {
+                    matching
+                        .into_iter()
+                        .filter(|job| job.error.is_some())
+                        .max_by_key(|job| job.finished_at)
+                })
         };
         if let Some(job) = previous {
-            if job.done {
+            if !job.done {
+                return Err(preparing());
+            }
+            if job.error.is_none() {
                 return Err(ServerError::conflict_kind("repo_removed", "This repository registration was removed. Register it again before starting a session."));
             }
-            return Err(preparing());
+            let failed = {
+                let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
+                if let Some(live) = jobs.get_mut(&job.id) {
+                    let reason = live.error.clone().unwrap_or_else(|| "clone failed".into());
+                    if !live.error_surfaced {
+                        live.error_surfaced = true;
+                        Some(reason)
+                    } else {
+                        let wait = live.finished_at.map_or(Duration::ZERO, |finished_at| {
+                            now.saturating_duration_since(finished_at)
+                        });
+                        if wait < EXTERNAL_CLONE_RETRY_BACKOFF {
+                            Some(reason)
+                        } else {
+                            jobs.remove(&job.id);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(reason) = failed {
+                return Err(repository_clone_failed(reason));
+            }
         }
         let lender: Option<Arc<dyn GitCredentialLender>> = if let Some(external) = self
             .harness_llm()
@@ -151,6 +190,10 @@ impl CodeRuntime {
 
 fn preparing() -> ServerError {
     ServerError::conflict_kind("repository_preparing", "Tidebreak is cloning this repository for the session owner. Your request resumes when the checkout is ready.")
+}
+
+fn repository_clone_failed(reason: impl Into<String>) -> ServerError {
+    ServerError::conflict_kind("repository_clone_failed", reason)
 }
 
 #[cfg(test)]
@@ -283,10 +326,47 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(
-            after_failure.kind(),
-            "repository_preparing",
-            "a failed job must not block a later clone of the same origin"
+        assert_eq!(after_failure.kind(), "repository_clone_failed");
+        assert!(
+            !after_failure.message().is_empty(),
+            "the failed job's error must be returned once"
         );
+
+        let during_backoff = runtime
+            .prepare_external_repository(
+                &owner,
+                grant,
+                "acme/tools",
+                GitForgeAttributionRequest::Installation,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            during_backoff.kind(),
+            "repository_clone_failed",
+            "a retry must wait for the backoff after a failed clone"
+        );
+        assert_eq!(runtime.clone_jobs.jobs.lock().unwrap().len(), 1);
+
+        {
+            let mut jobs = runtime.clone_jobs.jobs.lock().expect("clone jobs");
+            let job = jobs.get_mut(&job_id).expect("clone job");
+            job.finished_at = Some(Instant::now() - EXTERNAL_CLONE_RETRY_BACKOFF);
+        }
+        let after_backoff = runtime
+            .prepare_external_repository(
+                &owner,
+                grant,
+                "acme/tools",
+                GitForgeAttributionRequest::Installation,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            after_backoff.kind(),
+            "repository_preparing",
+            "a failed job must not block a later clone of the same origin after backoff"
+        );
+        assert_eq!(runtime.clone_jobs.jobs.lock().unwrap().len(), 1);
     }
 }
