@@ -218,15 +218,21 @@ pub(crate) fn remove_session_root(
     )
 }
 
-/// Delete private roots whose workspace or session row is gone.
+/// Parseable private-root directory names observed on disk.
 ///
-/// Unknown names stay untouched. Per-entry failures are logged; this never
-/// fails the caller, so boot cannot get stuck on one undeletable leftover.
-pub(crate) fn sweep_orphan_private_roots(
-    data_dir: &Path,
-    live_workspaces: &HashSet<WorkspaceId>,
-    live_sessions: &HashSet<tidebreak_core::SessionId>,
-) {
+/// Recovery lists these first, then snapshots workspace and session rows,
+/// then deletes only names that were already present before that snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct PrivateRootListing {
+    pub workspaces: Vec<WorkspaceId>,
+    pub sessions: Vec<tidebreak_core::SessionId>,
+}
+
+/// List workspace and session private-root ids without deleting anything.
+///
+/// Returns `None` when the tree cannot be opened; the caller must not sweep.
+/// Unparseable names and the `sessions` directory itself are omitted.
+pub(crate) fn list_private_roots(data_dir: &Path) -> Option<PrivateRootListing> {
     let data_dir = match absolute_path(data_dir) {
         Ok(path) => path,
         Err(error) => {
@@ -234,19 +240,19 @@ pub(crate) fn sweep_orphan_private_roots(
                 %error,
                 "code-mode: could not resolve the data directory for a private-root sweep"
             );
-            return;
+            return None;
         }
     };
     let root = match open_root_if_exists(&data_dir) {
         Ok(Some(root)) => root,
-        Ok(None) => return,
+        Ok(None) => return Some(PrivateRootListing::default()),
         Err(error) => {
             tracing::warn!(
                 path = %data_dir.display(),
                 %error,
                 "code-mode: could not open the data directory for a private-root sweep"
             );
-            return;
+            return None;
         }
     };
     let private = match open_existing_child(&root, OsStr::new(CODE_DIR)).and_then(|code| match code
@@ -255,68 +261,97 @@ pub(crate) fn sweep_orphan_private_roots(
         None => Ok(None),
     }) {
         Ok(Some(private)) => private,
-        Ok(None) => return,
+        Ok(None) => return Some(PrivateRootListing::default()),
         Err(error) => {
             tracing::warn!(
                 %error,
                 "code-mode: could not open code/private for a private-root sweep"
             );
-            return;
+            return None;
         }
     };
-    if let Err(error) = sweep_named_orphans(&private, |name| {
+    let mut listing = PrivateRootListing::default();
+    match list_named_ids(&private, |name| {
         if name == SESSIONS_DIR {
-            return SweepDecision::Skip;
+            return None;
         }
-        match name
-            .to_str()
+        name.to_str()
             .and_then(|name| name.parse::<WorkspaceId>().ok())
-        {
-            Some(id) if live_workspaces.contains(&id) => SweepDecision::Keep,
-            Some(_) => SweepDecision::Remove,
-            None => SweepDecision::Skip,
-        }
     }) {
-        tracing::warn!(
-            %error,
-            "code-mode: could not list workspace private roots"
-        );
+        Ok(ids) => listing.workspaces = ids,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "code-mode: could not list workspace private roots"
+            );
+            return None;
+        }
     }
-    let sessions = match open_existing_child(&private, OsStr::new(SESSIONS_DIR)) {
-        Ok(Some(sessions)) => sessions,
-        Ok(None) => return,
+    match open_existing_child(&private, OsStr::new(SESSIONS_DIR)) {
+        Ok(Some(sessions)) => match list_named_ids(&sessions, |name| {
+            name.to_str()
+                .and_then(|name| name.parse::<tidebreak_core::SessionId>().ok())
+        }) {
+            Ok(ids) => listing.sessions = ids,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "code-mode: could not list session private roots"
+                );
+                return None;
+            }
+        },
+        Ok(None) => {}
         Err(error) => {
             tracing::warn!(
                 %error,
                 "code-mode: could not open code/private/sessions for a private-root sweep"
             );
-            return;
+            return None;
         }
-    };
-    if let Err(error) = sweep_named_orphans(&sessions, |name| {
-        match name
-            .to_str()
-            .and_then(|name| name.parse::<tidebreak_core::SessionId>().ok())
-        {
-            Some(id) if live_sessions.contains(&id) => SweepDecision::Keep,
-            Some(_) => SweepDecision::Remove,
-            None => SweepDecision::Skip,
+    }
+    Some(listing)
+}
+
+/// Delete private roots whose workspace or session row is gone.
+///
+/// `listed` must come from [`list_private_roots`] taken **before** the live
+/// row snapshot. Unknown names stay untouched. Per-entry failures are logged;
+/// this never fails the caller, so boot cannot get stuck on one leftover.
+pub(crate) fn sweep_orphan_private_roots(
+    data_dir: &Path,
+    listed: &PrivateRootListing,
+    live_workspaces: &HashSet<WorkspaceId>,
+    live_sessions: &HashSet<tidebreak_core::SessionId>,
+) {
+    for id in &listed.workspaces {
+        if live_workspaces.contains(id) {
+            continue;
         }
-    }) {
-        tracing::warn!(
-            %error,
-            "code-mode: could not list session private roots"
-        );
+        if let Err(error) = remove_workspace_root(data_dir, *id) {
+            tracing::warn!(
+                workspace = %id,
+                %error,
+                "code-mode: could not delete an orphaned private root"
+            );
+        }
+    }
+    for id in &listed.sessions {
+        if live_sessions.contains(id) {
+            continue;
+        }
+        if let Err(error) = remove_session_root(data_dir, *id) {
+            tracing::warn!(
+                session = %id,
+                %error,
+                "code-mode: could not delete an orphaned private root"
+            );
+        }
     }
 }
 
-enum SweepDecision {
-    Keep,
-    Remove,
-    Skip,
-}
-
-fn sweep_named_orphans(parent: &Dir, decide: impl Fn(&OsStr) -> SweepDecision) -> io::Result<()> {
+fn list_named_ids<T>(parent: &Dir, parse: impl Fn(&OsStr) -> Option<T>) -> io::Result<Vec<T>> {
+    let mut ids = Vec::new();
     for entry in parent.read_dir(".")? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -328,20 +363,11 @@ fn sweep_named_orphans(parent: &Dir, decide: impl Fn(&OsStr) -> SweepDecision) -
                 continue;
             }
         };
-        let name = entry.file_name();
-        match decide(&name) {
-            SweepDecision::Keep | SweepDecision::Skip => continue,
-            SweepDecision::Remove => {}
-        }
-        if let Err(error) = remove_named_entry(parent, &name) {
-            tracing::warn!(
-                name = %name.to_string_lossy(),
-                %error,
-                "code-mode: could not delete an orphaned private root"
-            );
+        if let Some(id) = parse(&entry.file_name()) {
+            ids.push(id);
         }
     }
-    Ok(())
+    Ok(ids)
 }
 
 fn remove_private_named_child(data_dir: &Path, parents: &[&str], name: &str) -> io::Result<()> {
@@ -1086,6 +1112,39 @@ mod tests {
 
         assert!(!private_root.path().exists());
         assert!(data_dir.path().join(CODE_DIR).join(PRIVATE_DIR).is_dir());
+    }
+
+    #[test]
+    fn sweep_keeps_live_ids_removes_dead_ids_and_leaves_unknown_names() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let live_workspace = WorkspaceId::new();
+        let dead_workspace = WorkspaceId::new();
+        let live_session = tidebreak_core::SessionId::new();
+        let dead_session = tidebreak_core::SessionId::new();
+        let live_workspace_root = workspace_root(data_dir.path(), live_workspace).unwrap();
+        let dead_workspace_root = workspace_root(data_dir.path(), dead_workspace).unwrap();
+        let live_session_root = session_root(data_dir.path(), live_session).unwrap();
+        let dead_session_root = session_root(data_dir.path(), dead_session).unwrap();
+        std::fs::write(live_workspace_root.path().join("keep.txt"), b"live").unwrap();
+        std::fs::write(dead_workspace_root.path().join("gone.txt"), b"dead").unwrap();
+        std::fs::write(live_session_root.path().join("keep.txt"), b"live").unwrap();
+        std::fs::write(dead_session_root.path().join("gone.txt"), b"dead").unwrap();
+        let private = data_dir.path().join(CODE_DIR).join(PRIVATE_DIR);
+        let odd = private.join("not-a-uuid");
+        std::fs::create_dir(&odd).unwrap();
+        std::fs::write(odd.join("stay.txt"), b"odd").unwrap();
+
+        let listed = list_private_roots(data_dir.path()).expect("list");
+        let live_workspaces = HashSet::from([live_workspace]);
+        let live_sessions = HashSet::from([live_session]);
+        sweep_orphan_private_roots(data_dir.path(), &listed, &live_workspaces, &live_sessions);
+
+        assert!(live_workspace_root.path().join("keep.txt").is_file());
+        assert!(!dead_workspace_root.path().exists());
+        assert!(live_session_root.path().join("keep.txt").is_file());
+        assert!(!dead_session_root.path().exists());
+        assert!(private.join(SESSIONS_DIR).is_dir());
+        assert_eq!(std::fs::read(odd.join("stay.txt")).unwrap(), b"odd");
     }
 
     #[cfg(unix)]
