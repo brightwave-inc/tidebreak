@@ -426,7 +426,13 @@ pub(super) async fn serve(router: Router) -> std::net::SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
+        // Served the way `Server::serve` does, so routes gated on the peer
+        // address (the engine relay) see one.
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
     addr
 }

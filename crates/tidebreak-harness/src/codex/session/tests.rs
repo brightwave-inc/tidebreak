@@ -56,6 +56,41 @@ fn permission_mode_mapping_matches_0033() {
 }
 
 #[test]
+fn turn_policy_does_not_put_allowed_read_roots_in_writable_roots() {
+    let root = std::env::temp_dir().join("tidebreak-private");
+    let (sandbox, _) =
+        turn_start_policy(PermissionMode::Auto, std::slice::from_ref(&root)).unwrap();
+    assert_eq!(sandbox["type"], "workspaceWrite");
+    match sandbox.get("writableRoots") {
+        None => {}
+        Some(roots) => {
+            let roots = roots.as_array().expect("writableRoots is an array");
+            let root_str = root.to_string_lossy();
+            assert!(
+                !roots
+                    .iter()
+                    .any(|value| value.as_str() == Some(root_str.as_ref())),
+                "allowed_read_roots must not appear in writableRoots: {roots:?}"
+            );
+            assert!(
+                roots.is_empty(),
+                "workspace-write must not gain extra writable roots; got {roots:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn turn_policy_refuses_a_relative_read_root() {
+    let err =
+        turn_start_policy(PermissionMode::Auto, &[PathBuf::from("relative/private")]).unwrap_err();
+    assert!(matches!(
+        err,
+        HarnessError::AllowedReadRootNotAbsolute(root) if root == "relative/private"
+    ));
+}
+
+#[test]
 fn thread_loads_allow_a_longer_inactivity_window_than_initialization() {
     assert!(THREAD_LOAD_TIMEOUT > HANDSHAKE_TIMEOUT);
     assert_eq!(THREAD_LOAD_TIMEOUT, Duration::from_secs(120));
@@ -762,6 +797,35 @@ async fn a_parked_thread_is_resumed_on_the_next_turn() {
     assert_eq!(session.resume_ref().as_deref(), Some("THREAD-1"));
 }
 
+/// A park/respawn inside `run_turn` must publish the new pid so a crash
+/// mid-wake cannot orphan the replacement child.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_respawn_publishes_a_pid_transition() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("codex");
+    write_app_server(&binary, FAKE_RESUMABLE_APP_SERVER);
+
+    let session = CodexSession::new(spec_for(dir.path(), &binary, None));
+    assert!(
+        session.child_pid_changes().is_some(),
+        "an adapter that owns a child must stream its pid"
+    );
+    let rx = session.child_pid_changes().expect("pid stream");
+
+    session.run_turn(turn("one")).await.unwrap();
+    let first = session.child_pid().expect("the child outlives its turn");
+    assert_eq!(*rx.borrow(), Some(first));
+
+    session.park().await.unwrap();
+    assert_eq!(*rx.borrow(), None);
+
+    session.run_turn(turn("two")).await.unwrap();
+    let second = session.child_pid().expect("the wake turn spawned a child");
+    assert_ne!(first, second);
+    assert_eq!(*rx.borrow(), Some(second));
+}
+
 /// Codex never persisted a thread that ran no turn, so waking one must
 /// start clean. Resuming it would fence the session on "thread not
 /// found" — the fake's own answer catches a wrong ensure here.
@@ -832,6 +896,54 @@ async fn rejected_turn_start_keeps_posture_pending() {
     for request in requests {
         assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
         assert_eq!(request["params"]["approvalPolicy"], "untrusted");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn allowed_read_roots_reach_turn_start_sandbox_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("codex");
+    write_app_server(&binary, FAKE_POSTURE_APP_SERVER);
+    let private = dir.path().join("private");
+    std::fs::create_dir_all(&private).unwrap();
+    let mut spec = spec_for(dir.path(), &binary, None);
+    spec.allowed_read_roots = vec![private.clone()];
+    spec.extra_env.push((
+        "FAKE_CODEX_TURNS".into(),
+        dir.path()
+            .join("turns.ndjson")
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let session = CodexSession::new(spec);
+    session
+        .set_permission_mode(PermissionMode::Plan)
+        .await
+        .unwrap();
+
+    session.run_turn(turn("first")).await.unwrap();
+    session.run_turn(turn("second")).await.unwrap();
+
+    let requests = std::fs::read_to_string(dir.path().join("turns.ndjson")).unwrap();
+    let requests = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
+        let writable = request["params"]["sandboxPolicy"].get("writableRoots");
+        let private_str = private.to_string_lossy();
+        assert!(
+            writable.is_none()
+                || !writable
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.as_str() == Some(private_str.as_ref())),
+            "allowed_read_roots must not appear in writableRoots: {writable:?}"
+        );
     }
 }
 

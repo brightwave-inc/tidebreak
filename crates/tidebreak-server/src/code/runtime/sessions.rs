@@ -224,6 +224,43 @@ impl CodeRuntime {
         self.attach_and_spawn_worker(session).await
     }
 
+    /// Shape a repository-less sandbox session value, uninserted. No workspace
+    /// row exists: the sandbox carries the private scratch, and `submit_turn`
+    /// passes `repo: None` to the remote driver.
+    pub(super) fn remote_scratch_session_value(
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Session {
+        Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
+            id: SessionId::new(),
+            owner: owner.clone(),
+            owner_kind: owner_kind.map(str::to_owned),
+            workspace_id: None,
+            kind: SessionKind::Interactive,
+            harness_kind: harness,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: settings.permission_mode,
+            model: normalize_model(settings.model),
+            reasoning_effort: settings.reasoning_effort,
+            fast_mode: settings.fast_mode,
+            lifecycle: SessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+            execution_location: tidebreak_core::ExecutionLocation::Sandbox,
+            acts_as: settings.acts_as,
+        }
+    }
+
     /// Build without inserting so external sessions commit their grant binding
     /// before a worker can resolve credentials or recover the conversation.
     pub(super) async fn build_internal_session(
@@ -322,6 +359,24 @@ impl CodeRuntime {
             execution_location: tidebreak_core::ExecutionLocation::Machine,
             acts_as,
         };
+        Ok(session)
+    }
+
+    /// Build a repository-less sandbox session with no workspace and no repo.
+    ///
+    /// The session's engine runs in a supervised sandbox whose task payload
+    /// declares a private scratch run; there is no fake repository row and no
+    /// forge access. The remote driver accepts an absent repo and sends no
+    /// repository fields to the runtime.
+    pub(super) async fn build_repositoryless_remote_session(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Result<Session, ServerError> {
+        let session = Self::remote_scratch_session_value(owner, owner_kind, harness, settings);
+        self.validate_remote_execution(&session)?;
         Ok(session)
     }
 
@@ -516,6 +571,14 @@ impl CodeRuntime {
         };
         if session.lifecycle == SessionLifecycle::Ended {
             self.bus.forget(session.id);
+            if let Err(error) =
+                crate::code::scratch::remove_session_root(&self.data_dir, session.id)
+            {
+                tracing::warn!(
+                    session = %session.id,
+                    "code-mode: could not delete the session private root: {error}"
+                );
+            }
             return Ok(());
         }
         if let Ok(Some(workspace)) = self.session_workspace(&session).await {
@@ -587,6 +650,12 @@ impl CodeRuntime {
             );
         }
         self.bus.forget(current.id);
+        if let Err(error) = crate::code::scratch::remove_session_root(&self.data_dir, current.id) {
+            tracing::warn!(
+                session = %current.id,
+                "code-mode: could not delete the session private root: {error}"
+            );
+        }
         Ok(())
     }
 

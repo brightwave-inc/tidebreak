@@ -215,6 +215,14 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
                 "The environment lost the sandbox's pod.".to_owned(),
             ));
         }
+        "host_tool_request" => {
+            let request_id = payload_str(payload, "request_id").unwrap_or_default();
+            let tool = payload_str(payload, "tool").unwrap_or_default();
+            out.journal.push(notice(
+                HarnessNoticeLevel::Info,
+                format!("A sandbox requested the protected tool {tool} ({request_id})."),
+            ));
+        }
         other => {
             // Environment lifecycle events are named after the state itself;
             // recognize them so they are not counted as vocabulary drift.

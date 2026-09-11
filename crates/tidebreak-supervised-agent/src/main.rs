@@ -38,6 +38,15 @@ async fn main() {
 }
 
 async fn run() -> i32 {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("tool-call")) {
+        return match tidebreak_supervised_agent::tool_bridge::run_cli().await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                EXIT_CONTROL_FATAL
+            }
+        };
+    }
     let inputs = match resolve(RawInputs::from_env()) {
         Ok(inputs) => inputs,
         Err(error) => {
@@ -139,12 +148,38 @@ async fn run_inputs(
         vec![workspace]
     };
 
-    let trust_env: Vec<(OsString, OsString)> = bootstrap
+    let mut trust_env: Vec<(OsString, OsString)> = bootstrap
         .trust
         .environment()
         .iter()
         .map(|(name, path)| (OsString::from(name), path.as_os_str().to_owned()))
         .collect();
+
+    let tool_bridge = if inputs.embedded_engine.is_some() {
+        match tidebreak_supervised_agent::tool_bridge::LocalToolBridge::start(&workdir) {
+            Ok(bridge) => {
+                let helper = match std::env::current_exe() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("could not locate native tool helper: {error}");
+                        return EXIT_CONTROL_FATAL;
+                    }
+                };
+                trust_env.push((
+                    "TIDEBREAK_TOOL_SOCKET".into(),
+                    bridge.socket_path().into_os_string(),
+                ));
+                trust_env.push(("TIDEBREAK_TOOL_HELPER".into(), helper.into_os_string()));
+                Some(bridge)
+            }
+            Err(error) => {
+                eprintln!("could not start native tool bridge: {error}");
+                return EXIT_CONTROL_FATAL;
+            }
+        }
+    } else {
+        None
+    };
 
     let engine = HarnessEngine::new(HarnessEngineSpec {
         session_id,
@@ -178,6 +213,9 @@ async fn run_inputs(
     let mut driver = Driver::new(control, engine, &inputs)
         .preload_events(bootstrap.events)
         .with_workdir(workdir);
+    if let Some(bridge) = tool_bridge {
+        driver = driver.with_tool_bridge(bridge);
+    }
     if let Some(wip) = wip {
         driver = driver.with_wip(wip);
     }

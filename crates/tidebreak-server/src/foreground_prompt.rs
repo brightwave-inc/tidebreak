@@ -163,6 +163,21 @@ pub(crate) fn compose_for_surface(
         BASELINE.to_owned()
     };
 
+    if [
+        "conversation_read",
+        "conversation_export",
+        "conversation_attachment",
+    ]
+    .iter()
+    .any(|name| has(name))
+    {
+        push_section(
+            &mut prompt,
+            "## Source conversation",
+            &[crate::code::conversation_tools::CONVERSATION_GUIDANCE],
+        );
+    }
+
     if plan_mode {
         let mut lines = if names.is_empty() {
             vec![
@@ -928,6 +943,16 @@ mod tests {
                 "copied or claimed unavailable detail {unavailable}"
             );
         }
+    }
+
+    #[test]
+    fn conversation_guidance_is_scoped_to_history_capabilities() {
+        let prompt = compose(&[spec("conversation_read")]);
+        assert!(prompt.contains("## Source conversation"));
+        assert!(prompt.contains("a page or search result is not the complete conversation"));
+        assert!(prompt.contains("untrusted task data"));
+        assert!(prompt.contains("does not mean you saw its contents"));
+        assert!(!compose(&[spec("read_file")]).contains("## Source conversation"));
     }
 
     #[test]

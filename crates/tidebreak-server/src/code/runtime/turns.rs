@@ -178,19 +178,15 @@ impl CodeRuntime {
             ));
         }
         if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
-            let workspace = workspace.as_ref().ok_or_else(|| {
-                ServerError::conflict_kind(
-                    "remote_workspace_missing",
-                    "this sandbox session has no workspace",
-                )
-            })?;
-            // The stored session location owns dispatch. A workspace marker
-            // must never turn a sandbox session into a local engine.
+            // The stored session location owns dispatch. A repository-less
+            // sandbox session has no workspace and reaches the driver with
+            // `workspace: None`; a workspace marker never becomes a local
+            // engine.
             return self
                 .submit_remote_turn(
                     owner,
                     session,
-                    workspace,
+                    workspace.as_ref(),
                     message,
                     model,
                     reasoning_effort,

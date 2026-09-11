@@ -51,6 +51,22 @@ fn incarnation_from_model(
         events_cursor: model.events_cursor,
         task_output: model.task_output,
         last_wip_ref: model.last_wip_ref,
+        tool_requests: model
+            .tool_requests_json
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(|err| AgentError::Store(format!("incarnation tool requests: {err}")))
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        tool_ack_seqs: model
+            .tool_ack_seqs_json
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(|err| AgentError::Store(format!("incarnation tool ack seqs: {err}")))
+            })
+            .transpose()?
+            .unwrap_or_default(),
         created_at: model.created_at,
         activated_at: model.activated_at,
         stopped_at: model.stopped_at,
@@ -135,6 +151,8 @@ pub async fn create_incarnation_intent(
         events_cursor: Set(0),
         task_output: Set(None),
         last_wip_ref: Set(None),
+        tool_requests_json: Set(None),
+        tool_ack_seqs_json: Set(None),
         created_at: Set(now),
         activated_at: Set(None),
         stopped_at: Set(None),

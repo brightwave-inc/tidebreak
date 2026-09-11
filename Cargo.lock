@@ -7259,6 +7259,7 @@ version = "0.0.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.23.1",
  "cap-fs-ext",
  "cap-std",
  "chrono",
@@ -7607,6 +7608,8 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "axum",
+ "cap-fs-ext",
+ "cap-std",
  "reqwest",
  "serde",
  "serde_json",
@@ -7615,6 +7618,7 @@ dependencies = [
  "tidebreak-core",
  "tidebreak-harness",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

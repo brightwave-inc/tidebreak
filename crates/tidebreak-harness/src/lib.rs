@@ -865,6 +865,13 @@ pub struct SessionSpec {
     /// Worktree the engine should use as its working directory.
     pub worktree: PathBuf,
     /// Absolute directory roots that engine tools may read outside the worktree.
+    ///
+    /// Claude honors these as `--add-dir`. Codex does not receive a grant for
+    /// them: its sandbox restricts writes and network, not reads, so the engine
+    /// can already read those paths, and they are never passed as
+    /// `writableRoots` (no write access). OpenCode and Grok have no extra-read
+    /// flag: adapters still require every root to be absolute and then launch
+    /// without extra read restriction, rather than dropping the field silently.
     pub allowed_read_roots: Vec<PathBuf>,
     /// Permission mode. Adapters refuse a mode they cannot honor.
     pub permission_mode: PermissionMode,
@@ -914,6 +921,22 @@ pub struct SessionSpec {
     /// Connected-apps channel wiring: the loopback MCP bridge over every
     /// server Tidebreak has mounted. `None` advertises no connected apps.
     pub apps: Option<AppsChannelSpec>,
+}
+
+/// Refuse a relative extra-read root.
+///
+/// Every adapter calls this before launch so a private path cannot slip
+/// through as cwd-relative, including engines that cannot otherwise scope
+/// reads to these roots.
+pub(crate) fn require_absolute_read_roots(roots: &[PathBuf]) -> Result<(), HarnessError> {
+    for root in roots {
+        if !root.is_absolute() {
+            return Err(HarnessError::AllowedReadRootNotAbsolute(
+                root.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Receives normalized events as the engine stream is parsed.

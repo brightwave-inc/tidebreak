@@ -126,6 +126,14 @@ where
     )))
 }
 
+/// Channel context captured from the same preference snapshot as the
+/// session's model and harness. The binding transaction freezes it once.
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalSessionChannelContext<'a> {
+    pub channel_id: Option<&'a str>,
+    pub instructions: &'a str,
+}
+
 /// Bind one conversation to a session, creating everything on first contact.
 ///
 /// A miss commits the caller-built workspace, session, and binding in one
@@ -151,6 +159,7 @@ pub async fn resolve_external_session(
         external_key,
         Some(workspace),
         session,
+        None,
     )
     .await
 }
@@ -173,10 +182,38 @@ pub async fn resolve_external_machine_session(
         external_key,
         None,
         session,
+        None,
     )
     .await
 }
 
+/// Commit a channel's context with its session and external binding. An
+/// idempotent replay returns the winner without replacing its preferences.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_external_session_with_channel_context(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_kind: &str,
+    external_key: &str,
+    workspace: Option<&CodeWorkspace>,
+    session: &Session,
+    context: Option<ExternalSessionChannelContext<'_>>,
+) -> Result<ExternalSessionResolution> {
+    resolve_external_session_inner(
+        store,
+        owner,
+        grant_id,
+        channel_kind,
+        external_key,
+        workspace,
+        session,
+        context,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn resolve_external_session_inner(
     store: &DbStore,
     owner: &OwnerId,
@@ -185,6 +222,7 @@ async fn resolve_external_session_inner(
     external_key: &str,
     workspace: Option<&CodeWorkspace>,
     session: &Session,
+    context: Option<ExternalSessionChannelContext<'_>>,
 ) -> Result<ExternalSessionResolution> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if let Some(hit) = entities::code_external_binding::Entity::find()
@@ -199,10 +237,46 @@ async fn resolve_external_session_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(resolution);
     }
+    if let Some(context) = context {
+        if context.instructions.len() > 8_192 || context.instructions.contains('\0') {
+            return Err(crate::AgentError::InvalidTarget(
+                "channel instructions exceed their limit".into(),
+            ));
+        }
+        if context.channel_id.is_some_and(|channel| {
+            channel.is_empty()
+                || channel.len() > 128
+                || !channel
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        }) {
+            return Err(crate::AgentError::InvalidTarget(
+                "invalid channel identity".into(),
+            ));
+        }
+    }
     if let Some(workspace) = workspace {
         super::workspace::insert_workspace_on(&transaction, workspace).await?;
     }
     super::session::insert_session_on(&transaction, session).await?;
+    if let Some(context) = context {
+        entities::setting::ActiveModel {
+            key: Set(format!("code.session.{}.channel_instructions", session.id)),
+            value_json: Set(serde_json::json!(context.instructions)),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+        entities::code_session_context::ActiveModel {
+            session_id: Set(session.id.0),
+            channel_id: Set(context.channel_id.map(str::to_owned)),
+            parent_session_id: Set(None),
+            request_key: Set(None),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+    }
     let now = database_now(&transaction).await?;
     let binding = CodeExternalBinding {
         id: CodeBindingId::new(),

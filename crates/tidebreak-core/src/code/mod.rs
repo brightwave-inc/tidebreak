@@ -6,6 +6,7 @@
 mod caps;
 mod event;
 mod remote_task;
+pub mod supervisor_tools;
 
 pub use remote_task::RemoteWorkspaceTask;
 
@@ -1722,6 +1723,23 @@ impl QueuedTurn {
     pub const MAX_PER_SESSION: usize = 32;
 }
 
+/// A protected native-tool request from a supervised sandbox, stored until
+/// the server result is delivered.
+///
+/// The sandbox never holds forge credentials or an authoritative registry;
+/// every request is validated and executed server-side against the same
+/// `SessionTools` contract the coordinator uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorToolRequest {
+    /// Stable request id, repeated on agent retries.
+    pub request_id: String,
+    /// Registered server-side tool name.
+    pub tool: String,
+    /// Tool arguments validated by the server's authoritative registry.
+    pub arguments: serde_json::Value,
+}
+
 /// Lifecycle of one sandbox lifetime within a remote session.
 ///
 /// Written in the order the protocol runs: the intent row commits before the
@@ -1798,6 +1816,15 @@ pub struct CodeSessionIncarnation {
     pub task_output: Option<String>,
     /// The last WIP checkpoint ref this incarnation pushed, for resume.
     pub last_wip_ref: Option<String>,
+    /// Typed native-tool requests awaiting server results, by request id.
+    ///
+    /// Kept on the incarnation so a server restart re-answers in-flight
+    /// requests instead of losing them; the sandbox redelivers text bodies
+    /// at-least-once, so retained results stay idempotent.
+    pub tool_requests: Vec<crate::code::SupervisorToolRequest>,
+    /// Highest inbox sequences whose tool results were delivered to the
+    /// sandbox. Results are never held longer than the request they answer.
+    pub tool_ack_seqs: Vec<i64>,
     /// Intent time.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Activation time, when the spawn returned.
@@ -1834,6 +1861,49 @@ pub struct CodeExternalBinding {
     /// Whether the adapter supplied channel opt-in for the first turn.
     #[serde(default)]
     pub context_opt_in: bool,
+}
+
+/// One durable conversation-tool request waiting for the channel adapter.
+///
+/// The engine writes the exact operation and arguments when a Slack tool
+/// call is issued; the adapter lists pending jobs for its live grant and
+/// posts back an untrusted JSON result. The row never trusts the result to
+/// name a channel, repository, or path: every read still authorizes through
+/// the stored `binding_id` and `call_key`, and content is bounded untrusted
+/// data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationRequest {
+    /// Stable request id the adapter completes by.
+    pub id: uuid::Uuid,
+    /// The bound conversation that owns this tool call.
+    pub binding_id: CodeBindingId,
+    /// Stable operation token: `read`, `export`, or `attachment`.
+    pub operation: String,
+    /// Exact JSON arguments the engine called the tool with.
+    pub arguments: serde_json::Value,
+    /// The adapter's posted result, when completed.
+    pub result: Option<serde_json::Value>,
+}
+
+impl ConversationRequest {
+    /// How long an unconsumed request stays listable.
+    pub const TTL: chrono::Duration = chrono::Duration::minutes(5);
+    /// Operations the adapter surface accepts.
+    pub const OPERATIONS: &'static [&'static str] = &["read", "export", "attachment"];
+    /// Maximum pending requests returned for one session.
+    pub const MAX_PENDING_PER_SESSION: u64 = 8;
+    /// Maximum JSON bytes for one request or result payload.
+    pub const MAX_JSON_BYTES: usize = 3 * 1024 * 1024;
+    /// Hard message cap for a `read` result.
+    pub const READ_MAX_MESSAGES: usize = 50;
+    /// Hard aggregate text byte cap for a `read` result.
+    pub const READ_MAX_BYTES: usize = 32_768;
+    /// Hard message cap for an `export` result.
+    pub const EXPORT_MAX_MESSAGES: usize = 1_000;
+    /// Hard aggregate text byte cap for an `export` result.
+    pub const EXPORT_MAX_BYTES: usize = 2 * 1024 * 1024;
+    /// Hard decoded byte cap for an attachment payload.
+    pub const ATTACHMENT_MAX_DECODED_BYTES: usize = 2 * 1024 * 1024;
 }
 
 /// The credential a channel adapter holds per linked user
