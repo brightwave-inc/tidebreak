@@ -289,6 +289,9 @@ impl CodeRuntime {
             })
         }))
         .await;
+        let Some(listed) = crate::code::scratch::list_private_roots(&self.data_dir) else {
+            return Ok(actions);
+        };
         match (
             list_workspaces_all_owners(&self.db).await,
             list_sessions_all_owners(&self.db).await,
@@ -296,6 +299,7 @@ impl CodeRuntime {
             (Ok(workspaces), Ok(sessions)) => {
                 crate::code::scratch::sweep_orphan_private_roots(
                     &self.data_dir,
+                    &listed,
                     &workspaces
                         .into_iter()
                         .map(|workspace| workspace.id)

@@ -230,10 +230,10 @@ pub struct WrittenTranscript {
 ///
 /// Every fork writes a fresh generation directory named by a UUID, so a
 /// child keeps reading a whole, immutable handoff no matter how many later
-/// forks the same session produces. The generation is kept; nothing removes
-/// it today. A failure before the transcript publishes removes the whole
-/// directory rather than leaving a partial handoff for the child to trip
-/// over.
+/// forks the same session produces. Generations stay until the owning
+/// workspace's private root is removed. A failure before the transcript
+/// publishes removes the whole directory rather than leaving a partial
+/// handoff for the child to trip over.
 pub(crate) async fn write_transcript(
     private_root: &super::scratch::ScratchRoot,
     blobs: &dyn BlobStore,
@@ -1968,6 +1968,71 @@ mod tests {
             std::fs::read_dir(session_dir).expect("session dir").count(),
             2
         );
+    }
+
+    /// Desktop `forkConversation` writes the transcript before any child
+    /// session exists, and `createCodeSession` does not bind `parent_session`.
+    /// Those generations must survive parent-session private-root removal and
+    /// only leave with the workspace private root.
+    #[tokio::test]
+    async fn fork_generations_stay_until_the_workspace_private_root_is_removed() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let blob_root = tempfile::tempdir().expect("blob tempdir");
+        let blobs = FsBlobStore::new(blob_root.path());
+        let workspace_id = WorkspaceId::new();
+        let private_root =
+            crate::code::scratch::workspace_root(data_dir.path(), workspace_id).expect("workspace");
+        let parent = session();
+        let turns = vec![turn(parent.id, 1, "hello")];
+        let complete = all_turn_ids(&turns);
+
+        // Draft: transcript on disk, no child session row yet.
+        let draft = write_transcript(
+            &private_root,
+            &blobs,
+            &parent,
+            ForkCut {
+                turns: &turns,
+                excluded: 0,
+            },
+            &[],
+            &complete,
+        )
+        .await
+        .expect("draft write");
+        // Unparented sibling: another generation the composer would attach
+        // without `parent_session_id`.
+        let unparented = write_transcript(
+            &private_root,
+            &blobs,
+            &parent,
+            ForkCut {
+                turns: &turns,
+                excluded: 0,
+            },
+            &[],
+            &complete,
+        )
+        .await
+        .expect("unparented write");
+
+        crate::code::scratch::remove_session_root(data_dir.path(), parent.id).expect("parent end");
+
+        assert!(
+            Path::new(&draft.dir).is_dir(),
+            "an open fork draft must survive parent session end"
+        );
+        assert!(
+            Path::new(&unparented.dir).is_dir(),
+            "an unparented fork session's generation must survive parent session end"
+        );
+
+        crate::code::scratch::remove_workspace_root(data_dir.path(), workspace_id)
+            .expect("workspace gone");
+
+        assert!(!Path::new(&draft.dir).exists());
+        assert!(!Path::new(&unparented.dir).exists());
+        assert!(!private_root.path().exists());
     }
 
     #[tokio::test]

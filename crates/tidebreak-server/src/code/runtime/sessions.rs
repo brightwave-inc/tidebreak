@@ -571,14 +571,7 @@ impl CodeRuntime {
         };
         if session.lifecycle == SessionLifecycle::Ended {
             self.bus.forget(session.id);
-            if let Err(error) =
-                crate::code::scratch::remove_session_root(&self.data_dir, session.id)
-            {
-                tracing::warn!(
-                    session = %session.id,
-                    "code-mode: could not delete the session private root: {error}"
-                );
-            }
+            self.prune_session_private_scratch(&session).await;
             return Ok(());
         }
         if let Ok(Some(workspace)) = self.session_workspace(&session).await {
@@ -650,13 +643,24 @@ impl CodeRuntime {
             );
         }
         self.bus.forget(current.id);
-        if let Err(error) = crate::code::scratch::remove_session_root(&self.data_dir, current.id) {
+        self.prune_session_private_scratch(&current).await;
+        Ok(())
+    }
+
+    /// Drop this session's private root. Fork generations stay under the
+    /// workspace private root until that workspace is archived or released.
+    ///
+    /// Desktop forks do not set `parent_session_id`, and `forkConversation`
+    /// writes the transcript before any child session exists, so pruning from
+    /// `child_sessions` at parent end would delete an open draft or a live
+    /// unparented sibling's handoff.
+    async fn prune_session_private_scratch(&self, session: &Session) {
+        if let Err(error) = crate::code::scratch::remove_session_root(&self.data_dir, session.id) {
             tracing::warn!(
-                session = %current.id,
+                session = %session.id,
                 "code-mode: could not delete the session private root: {error}"
             );
         }
-        Ok(())
     }
 
     pub async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {

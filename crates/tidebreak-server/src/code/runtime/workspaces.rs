@@ -521,14 +521,6 @@ impl CodeRuntime {
     ) -> Result<CodeWorkspace, ServerError> {
         let _ = prune_worktrees(std::path::Path::new(&repo.root_path)).await;
         if let Err(error) =
-            crate::code::scratch::remove_workspace_root(&self.data_dir, workspace.id)
-        {
-            tracing::warn!(
-                workspace = %workspace.id,
-                "code-mode: could not delete the workspace private root: {error}"
-            );
-        }
-        if let Err(error) =
             delete_workspace_refs(std::path::Path::new(&repo.root_path), workspace.id).await
         {
             tracing::warn!(
@@ -552,6 +544,7 @@ impl CodeRuntime {
                     "the workspace row changed before archive completed",
                 ));
             }
+            self.remove_workspace_private_root(workspace.id);
             crate::code::attention::emit_workspace_digests(
                 &self.db,
                 &self.bus,
@@ -586,6 +579,7 @@ impl CodeRuntime {
                 "the workspace row changed before release completed",
             ));
         }
+        self.remove_workspace_private_root(workspace.id);
         let repo_root = std::path::Path::new(&repo.root_path);
         if worktree::branch_exists(repo_root, &workspace.branch_name)
             .await
@@ -603,6 +597,17 @@ impl CodeRuntime {
         )
         .await;
         Ok(workspace)
+    }
+
+    fn remove_workspace_private_root(&self, workspace_id: WorkspaceId) {
+        if let Err(error) =
+            crate::code::scratch::remove_workspace_root(&self.data_dir, workspace_id)
+        {
+            tracing::warn!(
+                workspace = %workspace_id,
+                "code-mode: could not delete the workspace private root: {error}"
+            );
+        }
     }
 
     /// Bundle a local branch after archive removes its checkout.
