@@ -516,6 +516,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::external_steer_receipt),
         )
         .route(
+            "/external/code/sessions/{id}/messages/{event_id}/recovery",
+            post(routes::code::external_recover_steer),
+        )
+        .route(
             "/external/code/sessions/{id}/conversation-requests",
             get(routes::code::external_conversation_requests),
         )

@@ -103,6 +103,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260910_000026_native_tool_claim_time",
             "m20260910_000027_workspace_setup_error",
             "m20260911_000001_external_steer_admission",
+            "m20260911_000002_external_steer_recovery",
         ]
     );
     assert!(db
@@ -2155,4 +2156,28 @@ async fn the_condition_widening_keeps_trigger_and_fire_rows() {
         )
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn steer_recovery_migration_preserves_admission() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(
+        &db,
+        Some(steps_before("m20260911_000002_external_steer_recovery")),
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+        .await
+        .unwrap();
+    db.execute_unprepared("INSERT INTO code_external_event (id, owner, session_id, event_id, channel_ts, turn_id, created_at, steer_requested, outcome) VALUES ('00000000-0000-0000-0000-000000000001', 'local', '00000000-0000-0000-0000-000000000002', 'upgrade', '1.1', '00000000-0000-0000-0000-000000000003', '2026-09-11 00:00:00+00:00', 1, 'steered')").await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    let row = db.query_one_raw(Statement::from_string(DbBackend::Sqlite, "SELECT outcome, recovery_action, recovery_retry_turn_id, recovered_at FROM code_external_event WHERE event_id = 'upgrade'".to_owned())).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<String>("", "outcome").unwrap(), "steered");
+    for field in ["recovery_action", "recovery_retry_turn_id", "recovered_at"] {
+        assert!(row.try_get::<Option<String>>("", field).unwrap().is_none());
+    }
+    let fresh = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&fresh, None).await.unwrap();
+    assert_eq!(schema_of(&db).await, schema_of(&fresh).await);
 }

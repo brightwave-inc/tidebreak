@@ -1756,6 +1756,9 @@ pub mod code_external_event {
         pub outcome: Option<String>,
         pub outcome_reason: Option<String>,
         pub outcome_at: Option<DateTimeUtc>,
+        pub recovery_action: Option<String>,
+        pub recovery_retry_turn_id: Option<Uuid>,
+        pub recovered_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

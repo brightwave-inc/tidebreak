@@ -908,6 +908,8 @@ pub struct ExternalSteerReceiptResponse {
     pub expected_turn_id: tidebreak_core::TurnId,
     pub correlation_uuid: Option<uuid::Uuid>,
     pub reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<tidebreak_core::code::ExternalSteerRecovery>,
 }
 
 /// Read admission without submitting another message or contacting the harness.
@@ -950,7 +952,43 @@ pub async fn external_steer_receipt(
         expected_turn_id,
         correlation_uuid,
         reason,
+        recovery: tidebreak_core::db::code::external_steer_recovery(
+            &runtime.db,
+            &grant.owner,
+            id,
+            &event_id,
+        )
+        .await?,
     }))
+}
+
+/// An explicit decision about an instruction whose native delivery is unknown.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSteerRecoveryBody {
+    pub action: tidebreak_core::code::ExternalSteerRecoveryAction,
+    #[serde(default)]
+    pub accept_duplicate_risk: bool,
+}
+
+/// Record recovery once. Retrying uses a fresh ordinary queue row.
+pub async fn external_recover_steer(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, event_id)): Path<(SessionId, String)>,
+    Json(body): Json<ExternalSteerRecoveryBody>,
+) -> Result<Json<tidebreak_core::code::ExternalSteerRecovery>, ServerError> {
+    let runtime = require_bound(&state, &grant, id).await?;
+    let recovery = runtime
+        .recover_external_steer(
+            &grant.owner,
+            id,
+            &event_id,
+            body.action,
+            body.accept_duplicate_risk,
+        )
+        .await?;
+    Ok(Json(recovery))
 }
 
 #[derive(serde::Deserialize)]
