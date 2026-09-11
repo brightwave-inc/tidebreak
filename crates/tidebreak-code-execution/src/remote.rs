@@ -289,7 +289,7 @@ impl RemoteSessionPool {
                 );
                 Ok(BeginExecution::Started)
             }
-            Some(entry) => entry.receipt.replay(&fingerprint, ExecError::Unavailable),
+            Some(entry) => entry.receipt.replay(&fingerprint),
         }
     }
 

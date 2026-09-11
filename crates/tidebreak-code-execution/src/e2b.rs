@@ -62,6 +62,10 @@ const E2B_ENVD_PORT: &str = "49983";
 const E2B_SANDBOX_TTL_SECONDS: u64 = 300;
 const E2B_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const MAX_MANAGEMENT_RESPONSE_BYTES: usize = 64 * 1024;
+/// Directory listings are truncated to [`MAX_WORKSPACE_LIST_ENTRIES`], so the
+/// JSON body is allowed to exceed the management cap instead of failing the
+/// whole listing.
+const MAX_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONNECT_FRAME_BYTES: usize = 256 * 1024;
 const CONNECT_END_STREAM_FLAG: u8 = 0b0000_0010;
 const CONNECT_COMPRESSED_FLAG: u8 = 0b0000_0001;
@@ -571,10 +575,12 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
         if !response.status().is_success() {
             return Err(provider_status_error(response.status()).into());
         }
-        let body =
-            decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_MANAGEMENT_RESPONSE_BYTES)
+        let mut body =
+            decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_LIST_RESPONSE_BYTES)
                 .await
                 .map_err(RemoteSessionError::Provider)?;
+        let truncated = body.entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        body.entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         let mut entries = Vec::new();
         for entry in body.entries {
             if entry.name.is_empty() {
@@ -600,8 +606,6 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
             });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
-        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
-        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         Ok(WorkspaceListing { entries, truncated })
     }
 }
@@ -1569,6 +1573,19 @@ mod tests {
         assert_eq!(listing.entries[0].path, "data/report.bin");
         assert!(!listing.entries[0].directory);
         assert_eq!(listing.entries[0].size_bytes, Some(content.len() as u64));
+
+        {
+            let mut files = state.files.lock().unwrap();
+            for index in 0..MAX_WORKSPACE_LIST_ENTRIES + 1 {
+                files.insert(format!("/home/user/many-{index:03}"), vec![b'x']);
+            }
+        }
+        let listing = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.entries.len(), MAX_WORKSPACE_LIST_ENTRIES);
 
         provider.destroy_workspace(&workspace).await.unwrap();
         assert_eq!(state.deletes.load(Ordering::SeqCst), 1);

@@ -536,10 +536,7 @@ impl ExecProvider for LocalExecutionProvider {
                 Ok(response)
             }
             Err(error) => {
-                let receipt = ExecutionReceipt::Failed {
-                    fingerprint,
-                    message: error.to_string(),
-                };
+                let receipt = ExecutionReceipt::from_outcome(fingerprint, &Err(error.clone()));
                 finish_execution(&receipt_path, &receipt)?;
                 Err(error)
             }
@@ -801,7 +798,7 @@ fn begin_execution_with_persistence(
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let receipt = read_receipt(path)?;
-            receipt.replay(fingerprint, ExecError::Sandbox)
+            receipt.replay(fingerprint)
         }
         Err(_) => Err(ExecError::Sandbox(
             "could not create execution receipt".into(),

@@ -208,10 +208,14 @@ chat to private scratch and lets managed providers map the same chat identity to
 a reusable remote sandbox.
 
 Every provider returns the same bounded shape: provider kind, optional exit
-code, stdout, stderr, timeout and truncation flags, and duration. Provider-native
-responses, credentials, and unbounded logs do not cross the contract. Absolute
-folder paths are a host-only input to the local adapter: they are never tool
-arguments and are stripped from managed-provider requests.
+code, stdout, stderr, timeout and truncation flags, and duration. Each of
+stdout and stderr has its own capture budget, so a stdout-heavy command still
+returns stderr (and the reverse). Overflow is reported with `output_truncated`
+rather than failing the command or silently dropping the tail. A timeout keeps
+whatever was already captured. Provider-native responses, credentials, and
+unbounded logs do not cross the contract. Absolute folder paths are a host-only
+input to the local adapter: they are never tool arguments and are stripped from
+managed-provider requests.
 
 ## Container execution
 
@@ -229,11 +233,15 @@ and the image-publish workflow rewrites it there.
 One container serves one chat workspace, under a name derived from the
 workspace id so a restarted host adopts its containers rather than duplicating
 them. Commands cross as an argument vector through `docker exec` under an
-in-container `timeout`, so a command that exceeds its limit is stopped rather
-than left running behind an abandoned CLI. Workspace file transfers use the
-same channel. The container's only process is a bounded sleep and it is created
-with `--rm`, so an abandoned chat's container and its workspace volume remove
-themselves.
+in-container GNU coreutils `timeout --kill-after … -- command`. That `timeout`
+starts the command in a new process group and signals the group, so descendants
+that stay in the group stop with it; `--` keeps a command that starts with `-`
+from being parsed as a `timeout` option. `setsid` is not used, because a new
+session would move descendants out of the group `timeout` signals. A command
+that exceeds its limit is therefore stopped rather than left running behind an
+abandoned CLI. Workspace file transfers use the same channel. The container's
+only process is a bounded sleep and it is created with `--rm`, so an abandoned
+chat's container and its workspace volume remove themselves.
 
 Confinement is the container itself: the image's unprivileged uid forced from
 the host, every Linux capability dropped, privilege escalation refused, and
@@ -403,11 +411,14 @@ The executable receives its arguments directly. A model that truly needs a
 shell must invoke one explicitly, such as `/bin/sh` with `["-c", "..."]`.
 
 Before spawning, the adapter durably creates a private `running` receipt keyed
-by the stable execution ID and request fingerprint. It atomically replaces that
-marker with the bounded terminal response. An exact retry returns the cached
-response; a changed request is rejected; a surviving `running` marker is
-reported as ambiguous and is not replayed. Receipts live outside every
-model-visible chat scratch directory.
+by the stable execution ID and request fingerprint. The fingerprint covers only
+model-authored fields (command, arguments, workspace-relative cwd, staged
+files). Host-injected per-turn overlay paths are excluded, so a replay across
+turns is not an identity conflict. It atomically replaces that marker with the
+bounded terminal response. An exact retry returns the cached response, and a
+cached failure replays the original error kind. A changed request is rejected; a
+surviving `running` marker is reported as ambiguous and is not replayed.
+Receipts live outside every model-visible chat scratch directory.
 
 `exec` is still classified `Sensitive` and crosses the existing durable
 approval/standing-grant boundary. Native confinement limits what an approved
@@ -428,7 +439,13 @@ The provider adapters own only their control-plane and command transports:
 - Daytona's toolbox accepts shell text, so its adapter quotes every executable
   and argv element before dispatch and prefixes the result with `exec`. Shell
   metacharacters therefore remain argument data. A caller that deliberately
-  needs a shell must still name `/bin/sh` and `-c` explicitly.
+  needs a shell must still name `/bin/sh` and `-c` explicitly. The toolbox
+  execute API returns one merged output string (`result`) with no separate
+  stderr stream. That merged text is filed as stdout; stderr on the normalized
+  response stays empty unless a future toolbox payload includes distinct
+  `stdout` / `stderr` fields. Daytona delivers exit code and output in one JSON
+  body; a response over the decode cap cannot be parsed, so oversized Daytona
+  output fails the command rather than returning a truncated capture.
 
 ### File staging
 
