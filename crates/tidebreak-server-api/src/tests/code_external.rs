@@ -3647,7 +3647,7 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
         "PUT",
         &access_path,
         &grant_token,
-        Some(serde_json::json!({"contributors": [], "visibility": "deployment"})),
+        Some(serde_json::json!({"contributors": [{"external_identity": "U9"}], "visibility": "deployment"})),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
