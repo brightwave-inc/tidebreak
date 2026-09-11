@@ -93,7 +93,12 @@ function fakeClient(response: unknown): {
 describe("mobile Delivery API contracts", () => {
   it("parses renderer-safe repository and capability fields", async () => {
     expect(parseMobileDeliveryRepositoriesSnapshot(repositoriesSnapshot)).toEqual({
-      capability: { found: true, authenticated: true, remediation: "" },
+      capability: {
+        found: true,
+        authenticated: true,
+        viewer_login: "naingthet",
+        remediation: "",
+      },
       repositories: [
         {
           host: "github.com",
@@ -180,6 +185,7 @@ describe("mobile Delivery API contracts", () => {
       repositories: [
         { host: "github.com", owner: "brightwave-inc", name: "tidebreak" },
       ],
+      authors: ["naingthet"],
       refresh: true,
       signal: new AbortController().signal,
     });
@@ -188,6 +194,7 @@ describe("mobile Delivery API contracts", () => {
       expect.objectContaining({
         signal: expect.any(AbortSignal),
         body: expect.objectContaining({
+          authors: ["naingthet"],
           refresh: true,
           limit: 30,
         }),
@@ -212,7 +219,12 @@ describe("mobile Delivery API contracts", () => {
 
   it("rejects invalid pull-request fields without leaking unused fields", () => {
     expect(parseMobileDeliveryPullRequestsPage(pullRequestsPage)).toEqual({
-      capability: { found: true, authenticated: true, remediation: "" },
+      capability: {
+        found: true,
+        authenticated: true,
+        viewer_login: "naingthet",
+        remediation: "",
+      },
       items: [
         {
           id: "github.com/brightwave-inc/tidebreak#2852",

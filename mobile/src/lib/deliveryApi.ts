@@ -9,6 +9,7 @@ type MachineJsonClient = Pick<MachineClient, "getJson" | "requestJson">;
 export type MobileDeliveryCapability = {
   found: boolean;
   authenticated?: boolean;
+  viewer_login?: string;
   remediation: string;
 };
 
@@ -140,6 +141,7 @@ function parseCapability(value: unknown): MobileDeliveryCapability | null {
     typeof capability.found !== "boolean" ||
     (capability.authenticated !== undefined &&
       typeof capability.authenticated !== "boolean") ||
+    !optionalNonEmpty(capability.viewer_login) ||
     typeof capability.remediation !== "string"
   ) {
     return null;
@@ -148,6 +150,9 @@ function parseCapability(value: unknown): MobileDeliveryCapability | null {
     found: capability.found,
     ...(capability.authenticated !== undefined
       ? { authenticated: capability.authenticated }
+      : {}),
+    ...(capability.viewer_login !== undefined
+      ? { viewer_login: capability.viewer_login }
       : {}),
     remediation: capability.remediation,
   };
@@ -370,6 +375,7 @@ export async function queryMobileDeliveryPullRequests(
   client: MachineJsonClient,
   options: {
     repositories: MobileDeliveryRepositoryTarget[];
+    authors?: readonly string[];
     cursor?: string;
     refresh?: boolean;
     limit?: number;
@@ -390,7 +396,7 @@ export async function queryMobileDeliveryPullRequests(
           states: ["open"],
           review_states: [],
           check_states: [],
-          authors: [],
+          authors: options.authors ? [...options.authors] : [],
           attention_only: false,
           ready_only: false,
           ...(options.cursor ? { cursor: options.cursor } : {}),

@@ -154,17 +154,20 @@ export default function HomeScreen() {
     repositorySnapshot?.capability.found === true &&
     repositorySnapshot.capability.authenticated !== false &&
     repositoryTargets.length > 0;
+  const viewerLogin = repositorySnapshot?.capability.viewer_login;
 
   const deliveryQuery = useQuery({
     queryKey: [
       "mobile-delivery-attention",
       session?.machine?.baseUrl,
       repositoryKey,
+      viewerLogin ?? "",
     ],
     enabled: !!client && isFocused && repositoriesAvailable,
     queryFn: ({ signal }) =>
       queryMobileDeliveryPullRequests(client!, {
         repositories: repositoryTargets,
+        ...(viewerLogin ? { authors: [viewerLogin] } : {}),
         signal,
       }),
   });

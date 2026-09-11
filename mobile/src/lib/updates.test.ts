@@ -142,7 +142,7 @@ it("shows a recovery blocker without losing the manual pin", () => {
 });
 
 describe("attentionSessionCount", () => {
-  it("counts badge-worthy sessions and never ended ones", () => {
+  it("counts sessions blocked on a human, not done or ended ones", () => {
     const needsYou = digest({ session: "a", attention: need });
     const stalled = digest({
       session: "b",
@@ -152,16 +152,21 @@ describe("attentionSessionCount", () => {
       },
     });
     const quiet = digest({ session: "c", attention: working });
+    const doneIdle = digest({ session: "d", attention: done });
     const endedDone = digest({
-      session: "d",
+      session: "e",
       attention: done,
       lifecycle: "ended",
     });
     expect(sessionNeedsAttention(needsYou)).toBe(true);
+    expect(sessionNeedsAttention(stalled)).toBe(true);
     expect(sessionNeedsAttention(quiet)).toBe(false);
+    // Done-but-unreviewed is reviewable whenever; it must not pin the
+    // hub's "Needs you" count above zero for days.
+    expect(sessionNeedsAttention(doneIdle)).toBe(false);
     expect(sessionNeedsAttention(endedDone)).toBe(false);
     expect(
-      attentionSessionCount([needsYou, stalled, quiet, endedDone]),
+      attentionSessionCount([needsYou, stalled, quiet, doneIdle, endedDone]),
     ).toBe(2);
   });
 >>>>>>> ba4e156e (feat(mobile): replace the home launcher with an orienting hub)

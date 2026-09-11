@@ -160,14 +160,14 @@ export function attentionBadgeLabel(
 }
 
 /**
- * A session a human should look at now: any badge-worthy attention on a
- * session that has not ended.
+ * A session blocked on a human right now: waiting on an answer or approval,
+ * stalled, or fenced. Finished-but-unreviewed work is reviewable whenever
+ * and must not sit in a "needs you" count forever.
  */
 export function sessionNeedsAttention(digest: CodeSessionDigest): boolean {
-  return (
-    digest.lifecycle !== "ended" &&
-    attentionBadgeLabel(digest.attention) !== null
-  );
+  if (digest.lifecycle === "ended") return false;
+  const type = digest.attention.state.type;
+  return type === "needs_you" || type === "stalled" || type === "fenced";
 }
 
 export function attentionSessionCount(
