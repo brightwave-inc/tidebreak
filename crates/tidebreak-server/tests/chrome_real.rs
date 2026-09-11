@@ -320,14 +320,9 @@ async fn real_chrome_reproduces_controls_and_observes_results() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome; runs only against an isolated temporary profile"]
-async fn real_chrome_fences_identity_origins_stale_nodes_and_stop() {
+async fn real_chrome_fences_identity_stale_nodes_and_stop() {
     let fixture = fixture().await;
-    let origin = BrowserOrigin::from_url(&fixture.url()).unwrap();
-    let (_browser, service, scope, cdp) =
-        setup(ChromeConnectionGrant::Origin(ChromeOriginScope::Origin {
-            origin,
-        }))
-        .await;
+    let (_browser, service, scope, cdp) = setup(ChromeConnectionGrant::DeveloperAllSites).await;
     let opened = ok(
         &service,
         &scope,
@@ -385,47 +380,6 @@ async fn real_chrome_fences_identity_origins_stale_nodes_and_stop() {
     )
     .await;
     assert!(stale.outcome != ComputerUseOutcome::Completed);
-    let redirect = run(
-        &service,
-        &scope,
-        CHROME_NAVIGATE_TOOL,
-        json!({"targetRef":target,"url":format!("{}redirect",fixture.url())}),
-    )
-    .await;
-    assert!(redirect.outcome != ComputerUseOutcome::Completed);
-    let denied = run(
-        &service,
-        &scope,
-        CHROME_SNAPSHOT_TOOL,
-        json!({"targetRef":target}),
-    )
-    .await;
-    assert!(denied.outcome != ComputerUseOutcome::Completed);
-    let framed = ok(
-        &service,
-        &scope,
-        CHROME_NEW_TAB_TOOL,
-        json!({"url":format!("{}frames",fixture.url())}),
-    )
-    .await;
-    let framed_target = framed["targetRef"].as_str().unwrap();
-    let mut framed_snapshot = snap(&service, &scope, framed_target).await;
-    for _ in 0..40 {
-        if framed_snapshot["frames"].as_array().unwrap().len() > 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        framed_snapshot = snap(&service, &scope, framed_target).await;
-    }
-    assert!(framed_snapshot["frames"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|frame| frame["status"] == "unsupported_frame"));
-    let denied_capture=run(&service,&scope,CHROME_SCREENSHOT_TOOL,json!({"targetRef":framed_target,"snapshotId":framed_snapshot["snapshotId"],"documentEpoch":framed_snapshot["documentEpoch"]})).await;
-    assert!(
-        denied_capture.outcome == ComputerUseOutcome::Rejected && denied_capture.images.is_empty()
-    );
     service.ownership().trip();
     let stopped = run(
         &service,

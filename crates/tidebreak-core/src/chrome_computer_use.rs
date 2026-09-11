@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{BrowserElementBounds, BrowserLoadState, BrowserOrigin, ToolSpec};
+use crate::{BrowserElementBounds, BrowserLoadState, ToolSpec};
 
 /// List Chrome tabs visible to the caller's approved connection.
 pub const CHROME_LIST_TABS_TOOL: &str = "chrome_list_tabs";
@@ -110,80 +110,29 @@ impl ChromeGrantCapability {
     }
 }
 
-/// The origin reach a Chrome grant covers inside one workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ChromeOriginScope {
-    /// Exactly one normalized public or local origin.
-    Origin {
-        #[schemars(description = "Normalized origin, e.g. https://example.com.")]
-        #[schemars(with = "String")]
-        origin: BrowserOrigin,
-    },
-    /// Every loopback origin in the grant's workspace, across development
-    /// ports. This never covers a public host.
-    LoopbackWorkspace,
-}
-
-impl ChromeOriginScope {
-    #[must_use]
-    pub fn covers(&self, origin: &BrowserOrigin) -> bool {
-        match self {
-            Self::Origin {
-                origin: granted_origin,
-            } => granted_origin == origin,
-            Self::LoopbackWorkspace => origin.is_loopback(),
-        }
-    }
-}
-
 /// One host-approved Chrome connection scope. The native UI derives this from
 /// durable consent; call arguments never carry it.
+///
+/// Both managed and existing Chrome modes grant every web tab the approved
+/// connection exposes. Chrome's DevTools protocol cannot enforce selective
+/// domain safety once debugging access is approved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChromeConnectionGrant {
-    /// Narrow per-origin scope shared with the in-app browser vocabulary.
-    ///
-    /// When the page navigates to an origin this scope does not cover, the
-    /// adapter refuses the action and snapshot reads remain limited to the
-    /// granted origin's frames. No native fallback exists after a denial.
-    Origin(ChromeOriginScope),
     /// An explicit all-sites developer connection grant.
     ///
-    /// This is the honest initial boundary for a direct CDP session: Chrome's
-    /// DevTools protocol cannot enforce selective domain safety once broad
-    /// debugging access is approved. The native UI must disclose that the
-    /// agent can change pages, read content, and inspect developer traffic
-    /// across every site open in the selected profile, and the host binds access to the approved connection and session.
+    /// The native UI must disclose that the agent can change pages, read
+    /// content, and inspect developer traffic across every site open in the
+    /// selected profile. The host binds access to the approved connection
+    /// and session.
     DeveloperAllSites,
 }
 
 impl ChromeConnectionGrant {
-    /// Whether this grant covers `origin`.
-    #[must_use]
-    pub fn covers(&self, origin: &BrowserOrigin) -> bool {
-        match self {
-            Self::Origin(scope) => scope.covers(origin),
-            Self::DeveloperAllSites => true,
-        }
-    }
-
     /// Human-facing disclosure used by native setup UI and consent copy.
     #[must_use]
     pub fn disclosure(&self) -> &'static str {
         match self {
-            Self::Origin(scope) => match scope {
-                ChromeOriginScope::Origin { origin } => {
-                    if origin.is_loopback() {
-                        "Local development origin only; the agent can read and control pages on this origin and cannot use a denied public-site fallback."
-                    } else {
-                        "This origin only; the agent can read and control pages on this origin and cannot use a denied-site fallback."
-                    }
-                }
-                ChromeOriginScope::LoopbackWorkspace => {
-                    "Local development origins only; the agent can read and control pages on loopback addresses and cannot use a denied public-site fallback."
-                }
-            },
             Self::DeveloperAllSites => {
                 "Explicit wider developer grant. The agent can read content, capture screenshots, navigate, and control pages across every site open in the selected Chrome profile, and can inspect bounded console/network diagnostics. Chrome DevTools does not support selective domain isolation, so this grant cannot be narrowed per site."
             }
@@ -1106,25 +1055,10 @@ mod tests {
     }
 
     #[test]
-    fn grant_scope_covers_only_what_it_claims() {
-        let example = BrowserOrigin::parse("https://example.com").unwrap();
-        let local = BrowserOrigin::parse("http://127.0.0.1:5173").unwrap();
-        let local_scope = ChromeOriginScope::LoopbackWorkspace;
-        let origin_scope = ChromeOriginScope::Origin {
-            origin: BrowserOrigin::parse("https://example.com").unwrap(),
-        };
-
-        assert!(ChromeConnectionGrant::Origin(local_scope.clone()).covers(&local));
-        assert!(!ChromeConnectionGrant::Origin(local_scope.clone()).covers(&example));
-        assert!(ChromeConnectionGrant::Origin(origin_scope).covers(&example));
-        assert!(ChromeConnectionGrant::DeveloperAllSites.covers(&example));
-        assert!(ChromeConnectionGrant::DeveloperAllSites.covers(&local));
+    fn chrome_grant_discloses_all_sites_in_the_approved_connection() {
         assert!(ChromeConnectionGrant::DeveloperAllSites
             .disclosure()
-            .contains("Explicit wider developer grant"));
-        assert!(ChromeConnectionGrant::Origin(local_scope)
-            .disclosure()
-            .contains("Local development origins only"));
+            .contains("every site open in the selected Chrome profile"));
     }
 
     #[test]

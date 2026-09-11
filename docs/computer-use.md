@@ -75,6 +75,10 @@ The agent requests `chrome_connect` with one of two modes:
   the wider tab scope, and Chrome must allow remote debugging. The host discovers
   the endpoint; the agent cannot supply one.
 
+Both modes grant every web tab in that approved Chrome connection, including
+signed-in pages in an existing profile. Consent is still required for the
+connection; the agent cannot pick a debugger endpoint or another session.
+
 Chrome uses the debugging protocol for page input and screenshots. New tabs open
 in the background. During an action, page-level focus emulation lets hidden pages
 receive input. The page can observe focus and visibility changes, but Tidebreak

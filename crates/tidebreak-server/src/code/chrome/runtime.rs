@@ -168,7 +168,6 @@ pub struct ChromeComputerUseService {
 #[derive(Clone)]
 struct Access {
     cdp: CdpSession,
-    grant: ChromeConnectionGrant,
     connection: String,
     fence: Fence,
 }
@@ -543,7 +542,7 @@ impl Access {
             .ok_or_else(|| "Chrome evaluation returned no value".into())
     }
     fn permits(&self, url: &str) -> bool {
-        BrowserOrigin::from_url(url).is_some_and(|origin| self.grant.covers(&origin))
+        BrowserOrigin::from_url(url).is_some()
     }
     async fn frames(&self, session: &str) -> Result<Vec<Frame>, String> {
         fn walk(
@@ -760,7 +759,6 @@ impl ChromeComputerUseService {
             return Err("Chrome connection is closed; reconnect Chrome".into());
         }
         let cdp = c.cdp.clone();
-        let grant = c.spec.grant.clone();
         let connection_id = c.spec.connection_id.clone();
         let connection_cancel = c.cancel.clone();
         let session = inner
@@ -785,7 +783,6 @@ impl ChromeComputerUseService {
         fence.check()?;
         Ok(Access {
             cdp,
-            grant,
             connection: connection_id,
             fence,
         })
@@ -1702,10 +1699,6 @@ impl ChromeComputerUseService {
             .await?;
         let frames = access.frames(&tab.cdp_session).await?;
         self.refresh(&mut tab, &frames)?;
-        // A narrow page grant cannot attribute console messages from other frames.
-        if !matches!(access.grant, ChromeConnectionGrant::DeveloperAllSites) {
-            return Err("Chrome diagnostics require the explicit developer grant".into());
-        }
         let mut console = Vec::new();
         let mut network: HashMap<String, ChromeNetworkEntry> = HashMap::new();
         for event in access.cdp.recent_events_for_session(&tab.cdp_session) {
