@@ -210,42 +210,58 @@ describe("CodeSidebar", () => {
     );
   });
 
-  it("hides conversations that the server does not mark as openable", async () => {
-    useCodeUpdatesStore.setState({
-      conversationsWithoutWorkspace: {
-        shared: {
-          workspace: null,
-          session: "shared",
-          can_open_chat: false,
-          kind: "interactive",
-          lifecycle: "running",
-          attention: { state: { type: "working" }, source: "lifecycle" },
-          title: "Shared conversation",
-          turn_count: 1,
-        },
-        legacy: {
-          workspace: null,
-          session: "legacy",
-          kind: "interactive",
-          lifecycle: "running",
-          attention: { state: { type: "working" }, source: "lifecycle" },
-          title: "Legacy conversation",
-          turn_count: 1,
-        },
-      },
+  it("lists conversations the server does not mark as chat-openable and opens them on the session route", async () => {
+    client.openCodeUpdates.mockImplementationOnce((onNotice) => {
+      queueMicrotask(() =>
+        onNotice({
+          type: "snapshot",
+          sessions: [
+            {
+              workspace: null,
+              session: "shared",
+              can_open_chat: false,
+              kind: "interactive",
+              harness_kind: "claude_code",
+              lifecycle: "running",
+              attention: { state: { type: "working" }, source: "lifecycle" },
+              title: "Slack thread on a sandbox engine",
+              turn_count: 1,
+            },
+            {
+              workspace: null,
+              session: "legacy",
+              kind: "interactive",
+              lifecycle: "running",
+              attention: { state: { type: "working" }, source: "lifecycle" },
+              title: "Legacy conversation",
+              turn_count: 1,
+            },
+          ],
+        }),
+      );
+      return {
+        close() {},
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as WebSocket;
     });
-    await renderWithRouter(
+    const { router } = await renderWithRouter(
       <AppContextProvider value={app}>
         <CodeSidebar />
       </AppContextProvider>,
       { initialUrl: "/code" },
     );
     expect(
-      screen.queryByRole("button", { name: /Shared conversation/ }),
-    ).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: /Legacy conversation/ }),
-    ).toBeNull();
+      await screen.findByRole("button", { name: /Legacy conversation/ }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Slack thread on a sandbox engine/,
+      }),
+    );
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/s/shared"),
+    );
   });
 
   it("renders the code rail without chat stores initialized", async () => {
