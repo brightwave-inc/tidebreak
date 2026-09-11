@@ -3638,6 +3638,79 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     assert!(subjects.contains(&"external:slack:U9"));
     assert!(subjects.contains(&"external:slack:U8"));
 
+    let session_path = format!("/sessions/{session_id}");
+    let access_path = format!("/external/code/sessions/{session_id}/access");
+    let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &access_path,
+        &grant_token,
+        Some(serde_json::json!({"contributors": [], "visibility": "deployment"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, shared) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shared["access"], "view");
+    assert_eq!(shared["is_owner"], false);
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("{session_path}/turns"),
+        BOB_TOKEN,
+        Some(serde_json::json!({"message": "not a contributor"})),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "deployment visibility never grants writes"
+    );
+
+    // Old adapters preserve visibility; malformed replacements commit nothing.
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &access_path,
+        &grant_token,
+        Some(serde_json::json!({"contributors": [{"external_identity": "U9"}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(
+        &router, "PUT", &access_path, &grant_token,
+        Some(serde_json::json!({"contributors": [{"external_identity": "x".repeat(600)}], "visibility": "private"})),
+    ).await;
+    assert!(!status.is_success());
+    let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tidebreak_core::db::code::list_session_access(&runtime.db, &service, session_id)
+            .await
+            .unwrap()[0]
+            .subject,
+        "external:slack:U9"
+    );
+
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &access_path,
+        &grant_token,
+        Some(serde_json::json!({"contributors": [], "visibility": "private"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "public-to-private must revoke web reads"
+    );
+
     let (status, _) = call_json(
         &router,
         "POST",
@@ -3681,6 +3754,20 @@ async fn a_person_grant_refuses_a_body_actor() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let session_id = bound_session_id(&runtime, &owner, "T1/C-actor/1.1").await;
+    let (status, _) = call_json(
+        &router,
+        "PUT",
+        &format!("/external/code/sessions/{session_id}/access"),
+        &pair.token,
+        Some(serde_json::json!({"contributors": [], "visibility": "deployment"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "personal grants cannot publish a session"
+    );
+
     let (status, _) = call_json(
         &router,
         "POST",

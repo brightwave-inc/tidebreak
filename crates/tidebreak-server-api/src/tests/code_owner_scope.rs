@@ -1122,6 +1122,29 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await
         .unwrap();
     assert_eq!(shared["read_only"], true);
+    for list_path in [
+        "/code/workspaces".to_owned(),
+        format!(
+            "/code/workspaces?repo_id={}",
+            repo_body["id"].as_str().unwrap()
+        ),
+    ] {
+        let discovered: Vec<serde_json::Value> = client
+            .get(format!("http://{addr}{list_path}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0]["id"], workspace_id);
+        assert_eq!(discovered[0]["read_only"], true);
+    }
+
     let listed: Vec<serde_json::Value> = client
         .get(format!("http://{addr}{path}/sessions"))
         .bearer_auth(BOB_TOKEN)
@@ -1205,6 +1228,21 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await
         .unwrap();
     assert!(revoke.status().is_success(), "{}", revoke.status());
+    let discovered: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        discovered.is_empty(),
+        "revoked workspaces must disappear from discovery"
+    );
     for suffix in ["", "/sessions", "/tree"] {
         assert_eq!(
             get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,

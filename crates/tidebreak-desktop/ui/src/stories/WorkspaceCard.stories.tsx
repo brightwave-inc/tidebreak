@@ -1265,3 +1265,19 @@ function RecoverableWorktreeFailure() {
 export const WorktreeOpenFailure: Story = {
   render: () => <RecoverableWorktreeFailure />,
 };
+
+export const SharedReadOnly: Story = {
+  args: {
+    workspace: { ...codeWorkspace, read_only: true },
+    digest: readyToMergeDigest,
+    detailDefaultOpen: true,
+    onWorkflowAction: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(
+      body.queryByRole("button", { name: "Merge" }),
+    ).not.toBeInTheDocument();
+    await expect(args.onCommand).not.toHaveBeenCalled();
+  },
+};

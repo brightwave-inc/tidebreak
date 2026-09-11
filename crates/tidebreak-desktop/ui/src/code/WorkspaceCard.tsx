@@ -221,6 +221,12 @@ export function WorkspaceCard({
     pr?: PullRequestDigest,
   ) => void;
 }) {
+  if (workspace.read_only) {
+    commands = [];
+    onSelectPointer = undefined;
+    onMenuOpen = undefined;
+    onWorkflowAction = undefined;
+  }
   const title = digest?.title ?? workspace.title;
   const pr = prResource?.data
     ? prResource.data.pr

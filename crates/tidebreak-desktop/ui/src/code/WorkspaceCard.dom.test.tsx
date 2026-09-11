@@ -996,3 +996,22 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("opens a shared workspace without selection or mutation actions", async () => {
+  const { onOpen, onCommand, onSelectPointer } = renderCard({
+    workspace: { read_only: true },
+    detailDefaultOpen: true,
+  });
+  const card = screen.getByRole("button", { name: /Fix login.*app/ });
+  fireEvent.click(card, { metaKey: true });
+  expect(onOpen).toHaveBeenCalledOnce();
+  expect(onSelectPointer).not.toHaveBeenCalled();
+  fireEvent.contextMenu(card);
+  expect(
+    screen.queryByRole("menuitem", { name: /Archive/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Archive/ }),
+  ).not.toBeInTheDocument();
+  expect(onCommand).not.toHaveBeenCalled();
+});

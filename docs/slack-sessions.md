@@ -32,6 +32,24 @@ the same conversation, and the conversation can wait on those children
 and read their results. Grant-bound children follow the configured external
 placement. Remaining adapter and orchestration work is recorded below.
 
+## Opening channel sessions on the web
+
+The adapter sets session visibility through the workspace grant's bound
+`PUT /external/code/sessions/{id}/access` route. The optional `visibility`
+field accepts `deployment` or `private`. Contributor replacement and the
+visibility change commit together. Older adapters omit the field and preserve
+the session's visibility.
+
+Only channels that the adapter verifies as public and not externally shared
+may use deployment visibility. Private channels and unknown channel metadata
+stay private. Deployment visibility lets signed-in people read the session;
+it does not grant permission to send instructions or edit the workspace.
+
+The workspace list includes workspaces that contain a session the caller may
+read. Shared entries carry `read_only: true`. Their cards open the transcript
+without offering workspace commands or requesting owner-only Git status.
+Revoking the session's access removes the workspace from that reader's list.
+
 ## What is true today
 
 - Desktop, CLI, mobile, and `tidebreak agent-mcp` speak one attach

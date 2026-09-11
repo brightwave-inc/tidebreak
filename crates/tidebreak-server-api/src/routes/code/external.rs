@@ -995,6 +995,10 @@ pub async fn external_recover_steer(
 #[serde(deny_unknown_fields)]
 pub struct ExternalAccessBody {
     pub contributors: Vec<ExternalContributor>,
+    /// The adapter verifies the visibility of every channel bound to the session.
+    /// Older adapters omit this field and preserve the existing visibility.
+    #[serde(default)]
+    pub visibility: Option<tidebreak_core::SessionVisibility>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1025,6 +1029,7 @@ pub async fn external_session_access(
         id,
         &grant.channel_kind,
         &identities,
+        body.visibility,
         chrono::Utc::now(),
     )
     .await?
