@@ -3,6 +3,7 @@ import type { MachineClient } from "./machine";
 import {
   groupMobileDeliveryPullRequests,
   listMobileDeliveryRepositories,
+  mobileDeliveryNeedsYouCountLabel,
   mobileDeliveryCheckProgress,
   mobileDeliveryLaneCountLabel,
   mobileDeliveryLaneIsConfirmedEmpty,
@@ -92,7 +93,12 @@ function fakeClient(response: unknown): {
 describe("mobile Delivery API contracts", () => {
   it("parses renderer-safe repository and capability fields", async () => {
     expect(parseMobileDeliveryRepositoriesSnapshot(repositoriesSnapshot)).toEqual({
-      capability: { found: true, authenticated: true, remediation: "" },
+      capability: {
+        found: true,
+        authenticated: true,
+        viewer_login: "naingthet",
+        remediation: "",
+      },
       repositories: [
         {
           host: "github.com",
@@ -179,6 +185,7 @@ describe("mobile Delivery API contracts", () => {
       repositories: [
         { host: "github.com", owner: "brightwave-inc", name: "tidebreak" },
       ],
+      authors: ["naingthet"],
       refresh: true,
       signal: new AbortController().signal,
     });
@@ -187,6 +194,7 @@ describe("mobile Delivery API contracts", () => {
       expect.objectContaining({
         signal: expect.any(AbortSignal),
         body: expect.objectContaining({
+          authors: ["naingthet"],
           refresh: true,
           limit: 30,
         }),
@@ -211,7 +219,12 @@ describe("mobile Delivery API contracts", () => {
 
   it("rejects invalid pull-request fields without leaking unused fields", () => {
     expect(parseMobileDeliveryPullRequestsPage(pullRequestsPage)).toEqual({
-      capability: { found: true, authenticated: true, remediation: "" },
+      capability: {
+        found: true,
+        authenticated: true,
+        viewer_login: "naingthet",
+        remediation: "",
+      },
       items: [
         {
           id: "github.com/brightwave-inc/tidebreak#2852",
@@ -327,5 +340,41 @@ describe("mobile Delivery API contracts", () => {
     expect(
       mobileDeliveryLaneIsConfirmedEmpty(parsed!.items, false),
     ).toBe(false);
+  });
+
+  it("labels the hub's Delivery count from one page, marking overflow", () => {
+    const items = parseMobileDeliveryPullRequestsPage({
+      ...pullRequestsPage,
+      next_cursor: undefined,
+      items: [
+        {
+          ...pullRequest,
+          id: "attention",
+          attention_reasons: ["checks_failed"],
+          ready_to_merge: false,
+        },
+        {
+          ...pullRequest,
+          id: "ready",
+          attention_reasons: [],
+          ready_to_merge: true,
+        },
+        {
+          ...pullRequest,
+          id: "progress",
+          attention_reasons: [],
+          ready_to_merge: false,
+        },
+      ],
+    })!.items;
+    // Attention and ready-to-merge both wait on the viewer; only
+    // in-progress is excluded.
+    expect(
+      mobileDeliveryNeedsYouCountLabel({ items }),
+    ).toBe("2");
+    expect(
+      mobileDeliveryNeedsYouCountLabel({ items, next_cursor: "cursor-2" }),
+    ).toBe("2+");
+    expect(mobileDeliveryNeedsYouCountLabel({ items: [] })).toBe("0");
   });
 });

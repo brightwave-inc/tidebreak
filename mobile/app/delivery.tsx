@@ -120,10 +120,14 @@ export default function DeliveryScreen() {
     repositorySnapshot?.capability.found === true &&
     repositorySnapshot.capability.authenticated !== false &&
     repositoryTargets.length > 0;
+  // Match the desktop's settled default: the Delivery lanes chase the
+  // viewer's own pull requests, not the whole repository's.
+  const viewerLogin = repositorySnapshot?.capability.viewer_login;
   const pullRequestsQueryKey = [
     "mobile-delivery-pull-requests",
     machine?.baseUrl,
     repositoryKey,
+    viewerLogin ?? "",
   ] as const;
 
   const pullRequestsQuery = useInfiniteQuery({
@@ -134,6 +138,7 @@ export default function DeliveryScreen() {
       const refresh = pullRequestRefreshRef.current && pageParam === null;
       const page = await queryMobileDeliveryPullRequests(client!, {
         repositories: repositoryTargets,
+        ...(viewerLogin ? { authors: [viewerLogin] } : {}),
         ...(pageParam ? { cursor: pageParam } : {}),
         refresh,
         signal,

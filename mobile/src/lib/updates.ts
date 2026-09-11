@@ -159,6 +159,23 @@ export function attentionBadgeLabel(
   }
 }
 
+/**
+ * A session blocked on a human right now: waiting on an answer or approval,
+ * stalled, or fenced. Finished-but-unreviewed work is reviewable whenever
+ * and must not sit in a "needs you" count forever.
+ */
+export function sessionNeedsAttention(digest: CodeSessionDigest): boolean {
+  if (digest.lifecycle === "ended") return false;
+  const type = digest.attention.state.type;
+  return type === "needs_you" || type === "stalled" || type === "fenced";
+}
+
+export function attentionSessionCount(
+  sessions: readonly CodeSessionDigest[],
+): number {
+  return sessions.filter(sessionNeedsAttention).length;
+}
+
 export function lifecycleLabel(lifecycle: CodeSessionDigest["lifecycle"]): string {
   switch (lifecycle) {
     case "created":

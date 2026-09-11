@@ -44,7 +44,7 @@ export default function RootLayout() {
           <Stack.Screen name="index" options={{ headerShown: false, title: "Tidebreak" }} />
           <Stack.Screen name="pair" options={{ title: "Gateway" }} />
           <Stack.Screen name="attach" options={{ title: "Machine" }} />
-          <Stack.Screen name="home" options={{ title: "Attached" }} />
+          <Stack.Screen name="home" options={{ title: "Home" }} />
           <Stack.Screen
             name="workspace/[id]/start"
             options={{ title: "Start session" }}

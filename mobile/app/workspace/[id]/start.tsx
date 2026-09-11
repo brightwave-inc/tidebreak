@@ -223,9 +223,24 @@ export default function StartWorkspaceSessionScreen() {
           contentContainerClassName="gap-5 px-5 py-6"
           keyboardShouldPersistTaps="handled"
         >
-          <Text className="text-2xl font-semibold text-foreground">
-            Start session
-          </Text>
+          <View className="gap-1">
+            <Text className="text-2xl font-semibold text-foreground">
+              Start session
+            </Text>
+            {workspace ? (
+              <>
+                <Text className="text-base font-medium text-foreground">
+                  in {workspace.title || "Untitled workspace"}
+                </Text>
+                <Text
+                  className="font-mono text-xs text-muted-foreground"
+                  numberOfLines={1}
+                >
+                  {workspace.branch_name}
+                </Text>
+              </>
+            ) : null}
+          </View>
 
           {optionsLoading ? <LoadingState label="Loading launch options…" /> : null}
           {optionsError ? (
@@ -237,21 +252,6 @@ export default function StartWorkspaceSessionScreen() {
           ) : null}
           {!optionsLoading && !optionsError && !workspace ? (
             <ErrorText>This workspace is no longer active.</ErrorText>
-          ) : null}
-
-          {workspace ? (
-            <View className="gap-1 rounded-xl border border-border bg-background p-4">
-              <SectionLabel>Workspace</SectionLabel>
-              <Text className="text-base font-medium text-foreground">
-                {workspace.title || "Untitled workspace"}
-              </Text>
-              <Text
-                className="font-mono text-xs text-muted-foreground"
-                numberOfLines={1}
-              >
-                {workspace.branch_name}
-              </Text>
-            </View>
           ) : null}
 
           {!optionsLoading && harnesses.length > 0 ? (

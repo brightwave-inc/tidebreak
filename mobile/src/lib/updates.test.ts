@@ -6,10 +6,12 @@ import type {
 import {
   EMPTY_UPDATES,
   attentionBadgeLabel,
+  attentionSessionCount,
   sessionRecoveryPresentation,
   listedSessions,
   noticeToAction,
   reduceUpdates,
+  sessionNeedsAttention,
 } from "./updates";
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
@@ -137,4 +139,34 @@ it("shows a recovery blocker without losing the manual pin", () => {
   expect(sessionRecoveryPresentation(row)).toEqual({ recovering: false, prompt: "Automatic recovery failed" });
   expect(row.attention.state.type).toBe("manual");
   expect(noticeToAction({ type: "digest", ...row })).toMatchObject({ digest: { fence_reason: row.fence_reason } });
+});
+
+describe("attentionSessionCount", () => {
+  it("counts sessions blocked on a human, not done or ended ones", () => {
+    const needsYou = digest({ session: "a", attention: need });
+    const stalled = digest({
+      session: "b",
+      attention: {
+        state: { type: "stalled", idle_secs: 30 },
+        source: "lifecycle",
+      },
+    });
+    const quiet = digest({ session: "c", attention: working });
+    const doneIdle = digest({ session: "d", attention: done });
+    const endedDone = digest({
+      session: "e",
+      attention: done,
+      lifecycle: "ended",
+    });
+    expect(sessionNeedsAttention(needsYou)).toBe(true);
+    expect(sessionNeedsAttention(stalled)).toBe(true);
+    expect(sessionNeedsAttention(quiet)).toBe(false);
+    // Done-but-unreviewed is reviewable whenever; it must not pin the
+    // hub's "Needs you" count above zero for days.
+    expect(sessionNeedsAttention(doneIdle)).toBe(false);
+    expect(sessionNeedsAttention(endedDone)).toBe(false);
+    expect(
+      attentionSessionCount([needsYou, stalled, quiet, doneIdle, endedDone]),
+    ).toBe(2);
+  });
 });
