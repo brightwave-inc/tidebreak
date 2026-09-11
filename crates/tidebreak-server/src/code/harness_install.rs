@@ -32,51 +32,109 @@ const PHASE_INSTALLING: &str = "installing";
 /// The install failed; `error` says how.
 const PHASE_FAILED: &str = "failed";
 
-/// In-memory warm-install state for this process, one entry per engine. Not
-/// journaled: a restart drops it and the next dialog asks again.
+/// In-memory warm-install state for this process, one entry per engine and
+/// channel. Not journaled: a restart drops it and the next dialog asks again.
+#[derive(Debug, Default)]
+struct HarnessInstallJobsInner {
+    jobs: HashMap<(HarnessKind, HarnessUpdateChannel), HarnessInstallJob>,
+    next_generation: u64,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HarnessInstallJobs {
-    jobs: Mutex<HashMap<HarnessKind, HarnessInstallJob>>,
+    inner: Mutex<HarnessInstallJobsInner>,
 }
 
 #[derive(Debug, Clone)]
 struct HarnessInstallJob {
     kind: HarnessKind,
+    channel: HarnessUpdateChannel,
     version: Option<String>,
     phase: &'static str,
     done: bool,
     error: Option<String>,
+    generation: u64,
+}
+
+#[derive(Debug)]
+enum HarnessInstallClaim {
+    Started(HarnessInstallJob),
+    Running(HarnessInstallJob),
 }
 
 impl HarnessInstallJobs {
-    fn get(&self, kind: HarnessKind) -> Option<HarnessInstallJob> {
-        self.jobs
+    fn key(job: &HarnessInstallJob) -> (HarnessKind, HarnessUpdateChannel) {
+        (job.kind, job.channel)
+    }
+
+    fn get(&self, kind: HarnessKind, channel: HarnessUpdateChannel) -> Option<HarnessInstallJob> {
+        self.inner
             .lock()
             .expect("harness install jobs")
-            .get(&kind)
+            .jobs
+            .get(&(kind, channel))
             .cloned()
     }
 
-    fn insert(&self, job: HarnessInstallJob) {
-        self.jobs
-            .lock()
-            .expect("harness install jobs")
-            .insert(job.kind, job);
+    /// An installed binary does not complete a different install in progress.
+    fn observe_ready(&self, job: HarnessInstallJob) -> HarnessInstallJob {
+        let key = Self::key(&job);
+        let mut inner = self.inner.lock().expect("harness install jobs");
+        match inner.jobs.get(&key) {
+            Some(running) if !running.done => running.clone(),
+            _ => {
+                inner.jobs.insert(key, job.clone());
+                job
+            }
+        }
     }
 
-    /// Take the install slot for `job`'s engine, or report the install
-    /// already in it. One lock covers the check and the claim, so two
-    /// requests that arrive together produce one install.
-    fn claim(&self, job: HarnessInstallJob) -> Option<HarnessInstallJob> {
-        let mut jobs = self.jobs.lock().expect("harness install jobs");
-        match jobs.get(&job.kind) {
-            Some(running) if !running.done && running.version == job.version => {
-                Some(running.clone())
+    /// Two callers of the same engine and channel share one install. A cold
+    /// `latest` request (`version` unset) joins a later click that already
+    /// knows the version. A request whose target is known and different from
+    /// the running job is a distinct job and takes the slot.
+    ///
+    /// Return the claimed generation while holding the lock. A later request
+    /// may replace the slot before the caller starts its worker.
+    fn claim(&self, mut job: HarnessInstallJob) -> HarnessInstallClaim {
+        let mut inner = self.inner.lock().expect("harness install jobs");
+        let key = Self::key(&job);
+        match inner.jobs.get(&key) {
+            Some(running) if !running.done && Self::same_running_job(running, &job) => {
+                HarnessInstallClaim::Running(running.clone())
             }
             _ => {
-                jobs.insert(job.kind, job);
-                None
+                job.generation = inner.next_generation;
+                inner.next_generation += 1;
+                inner.jobs.insert(key, job.clone());
+                HarnessInstallClaim::Started(job)
             }
+        }
+    }
+
+    fn same_running_job(running: &HarnessInstallJob, job: &HarnessInstallJob) -> bool {
+        match (running.version.as_deref(), job.version.as_deref()) {
+            (None, _) | (_, None) => true,
+            (Some(running), Some(requested)) => running == requested,
+        }
+    }
+
+    /// Mark the slot done only if `generation` still owns it. A later claim
+    /// that replaced the slot is left running.
+    fn finish(
+        &self,
+        kind: HarnessKind,
+        channel: HarnessUpdateChannel,
+        generation: u64,
+        job: HarnessInstallJob,
+    ) -> bool {
+        let mut inner = self.inner.lock().expect("harness install jobs");
+        match inner.jobs.get(&(kind, channel)) {
+            Some(running) if running.generation == generation => {
+                inner.jobs.insert((kind, channel), job);
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -125,9 +183,9 @@ impl CodeRuntime {
     ///
     /// Answers immediately in every case: the release is already installed,
     /// an install this process started is still running, or a fresh one is
-    /// now detached. Callers that share the same resolved version share one
-    /// install; a cold `latest` install (`version` unset) does not dedupe
-    /// against a later click that already knows the version.
+    /// now detached. Callers for the same engine, channel, and target share
+    /// one install. A cold `latest` request with no known version also joins
+    /// a running install for that engine and channel.
     ///
     /// `deliberate` separates the two callers. A picker warms the engine
     /// because a surface opened, so a failed managed-Node install stays
@@ -165,38 +223,47 @@ impl CodeRuntime {
         if already {
             let job = HarnessInstallJob {
                 kind,
+                channel,
                 version: target,
                 phase: PHASE_READY,
                 done: true,
                 error: None,
+                generation: 0,
             };
-            self.harness_installs.insert(job.clone());
-            return Ok(job.to_snapshot());
+            return Ok(self.harness_installs.observe_ready(job).to_snapshot());
         }
         let job = HarnessInstallJob {
             kind,
+            channel,
             version: target,
             phase: PHASE_INSTALLING,
             done: false,
             error: None,
+            generation: 0,
         };
-        if let Some(running) = self.harness_installs.claim(job.clone()) {
-            return Ok(running.to_snapshot());
-        }
-        self.publish_harness_install(owner, &job);
+        let claimed = match self.harness_installs.claim(job) {
+            HarnessInstallClaim::Running(running) => return Ok(running.to_snapshot()),
+            HarnessInstallClaim::Started(claimed) => claimed,
+        };
+        self.publish_harness_install(owner, &claimed);
 
         let runtime = Arc::clone(self);
         let owner = owner.clone();
+        let generation = claimed.generation;
         tokio::spawn(async move {
-            runtime.run_harness_install(&owner, kind, deliberate).await;
+            runtime
+                .run_harness_install(&owner, kind, channel, generation, deliberate)
+                .await;
         });
-        Ok(job.to_snapshot())
+        Ok(claimed.to_snapshot())
     }
 
     async fn run_harness_install(
         self: Arc<Self>,
         owner: &OwnerId,
         kind: HarnessKind,
+        channel: HarnessUpdateChannel,
+        generation: u64,
         deliberate: bool,
     ) {
         match self.ensure_harness(kind, deliberate, deliberate).await {
@@ -213,11 +280,17 @@ impl CodeRuntime {
                 // worker at spawn; retrying its failed turn would hit the
                 // same version floor. Move every idle one onto this install.
                 self.resync_workers_to_selected_binaries(&[kind]).await;
-                self.finish_harness_install(owner, kind, Ok(installed.version));
+                self.finish_harness_install(
+                    owner,
+                    kind,
+                    channel,
+                    generation,
+                    Ok(installed.version),
+                );
             }
             Err(error) => {
                 self.record_pin_install(kind, Err(error.clone()));
-                self.finish_harness_install(owner, kind, Err(error));
+                self.finish_harness_install(owner, kind, channel, generation, Err(error));
             }
         }
     }
@@ -226,11 +299,20 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         kind: HarnessKind,
+        channel: HarnessUpdateChannel,
+        generation: u64,
         result: Result<String, String>,
     ) {
-        let previous = self.harness_installs.get(kind);
+        let previous = self.harness_installs.get(kind, channel);
+        if previous
+            .as_ref()
+            .is_some_and(|job| job.generation != generation)
+        {
+            return;
+        }
         let job = HarnessInstallJob {
             kind,
+            channel,
             version: match &result {
                 Ok(version) => Some(version.clone()),
                 Err(_) => previous.and_then(|job| job.version),
@@ -242,8 +324,14 @@ impl CodeRuntime {
             },
             done: true,
             error: result.err(),
+            generation,
         };
-        self.harness_installs.insert(job.clone());
+        if !self
+            .harness_installs
+            .finish(kind, channel, generation, job.clone())
+        {
+            return;
+        }
         self.publish_harness_install(owner, &job);
     }
 
@@ -304,5 +392,119 @@ mod install_target_tests {
             .as_deref(),
             Some(PIN)
         );
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    fn installing(channel: HarnessUpdateChannel, version: Option<&str>) -> HarnessInstallJob {
+        HarnessInstallJob {
+            kind: HarnessKind::ClaudeCode,
+            channel,
+            version: version.map(str::to_owned),
+            phase: PHASE_INSTALLING,
+            done: false,
+            error: None,
+            generation: 0,
+        }
+    }
+
+    fn started(claim: HarnessInstallClaim) -> HarnessInstallJob {
+        match claim {
+            HarnessInstallClaim::Started(job) => job,
+            HarnessInstallClaim::Running(_) => panic!("expected a distinct install"),
+        }
+    }
+
+    #[test]
+    fn cold_latest_none_then_resolved_version_joins_the_running_install() {
+        let jobs = HarnessInstallJobs::default();
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Latest, None)));
+        let HarnessInstallClaim::Running(running) =
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
+        else {
+            panic!("second claim must join the running install");
+        };
+        assert!(!running.done);
+        assert_eq!(running.version, None);
+        assert_eq!(running.channel, HarnessUpdateChannel::Latest);
+        assert_eq!(running.generation, first.generation);
+        assert!(matches!(
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))),
+            HarnessInstallClaim::Running(_)
+        ));
+    }
+
+    #[test]
+    fn latest_warmup_for_installed_does_not_join_deliberate_newer_target() {
+        let jobs = HarnessInstallJobs::default();
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259"))));
+        let running =
+            started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
+        assert!(!running.done);
+        assert_eq!(running.version.as_deref(), Some("2.1.300"));
+        assert_eq!(running.phase, PHASE_INSTALLING);
+        assert_ne!(running.generation, first.generation);
+    }
+
+    #[test]
+    fn pinned_jobs_for_different_versions_are_distinct() {
+        let jobs = HarnessInstallJobs::default();
+        let first = started(jobs.claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.259"))));
+        let running =
+            started(jobs.claim(installing(HarnessUpdateChannel::Pinned, Some("2.1.300"))));
+        assert_eq!(running.version.as_deref(), Some("2.1.300"));
+        assert_ne!(running.generation, first.generation);
+    }
+
+    #[test]
+    fn a_started_claim_keeps_its_generation_after_another_request_replaces_the_slot() {
+        let jobs = HarnessInstallJobs::default();
+        let first_claim = jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259")));
+        // Another request replaces the slot before the first caller starts
+        // its worker. The first claim must still carry its own generation.
+        let second = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
+        let first = started(first_claim);
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(first.version.as_deref(), Some("2.1.259"));
+        let finished = HarnessInstallJob {
+            done: true,
+            phase: PHASE_READY,
+            ..first.clone()
+        };
+        assert!(!jobs.finish(first.kind, first.channel, first.generation, finished));
+        let still = jobs
+            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Latest)
+            .expect("second still owns the slot");
+        assert_eq!(still.generation, second.generation);
+        assert!(!still.done);
+        assert_eq!(still.version.as_deref(), Some("2.1.300"));
+    }
+
+    #[test]
+    fn observing_an_installed_version_keeps_a_newer_install_running() {
+        let jobs = HarnessInstallJobs::default();
+        let old = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259"))));
+        let update = started(jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300"))));
+        let observed = jobs.observe_ready(HarnessInstallJob {
+            done: true,
+            phase: PHASE_READY,
+            generation: 0,
+            ..old
+        });
+        assert_eq!(observed.generation, update.generation);
+        assert_eq!(observed.version, update.version);
+        assert!(!observed.done);
+        let finished = HarnessInstallJob {
+            done: true,
+            phase: PHASE_READY,
+            ..update.clone()
+        };
+        assert!(jobs.finish(update.kind, update.channel, update.generation, finished));
+        let stored = jobs.get(update.kind, update.channel).unwrap();
+        assert!(stored.done);
+        assert_eq!(stored.version.as_deref(), Some("2.1.300"));
     }
 }
