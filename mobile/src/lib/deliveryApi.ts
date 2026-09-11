@@ -451,14 +451,16 @@ export function mobileDeliveryLaneCountLabel(
 }
 
 /**
- * Attention-lane count from the first fetched page, labeled honestly when
- * more pages exist ("2+"): the hub never fetches beyond page one.
+ * First-page count of pull requests waiting on the viewer — the attention
+ * lane plus ready-to-merge ("green and waiting for you"); only in-progress
+ * PRs are excluded. Labeled honestly when more pages exist ("2+"): the hub
+ * never fetches beyond page one.
  */
-export function mobileDeliveryAttentionCountLabel(
+export function mobileDeliveryNeedsYouCountLabel(
   page: Pick<MobileDeliveryPullRequestsPage, "items" | "next_cursor">,
 ): string {
   const count = page.items.filter(
-    (pullRequest) => mobileDeliveryLane(pullRequest) === "attention",
+    (pullRequest) => mobileDeliveryLane(pullRequest) !== "in_progress",
   ).length;
   return page.next_cursor !== undefined ? `${count}+` : String(count);
 }

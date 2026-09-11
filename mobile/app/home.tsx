@@ -15,7 +15,7 @@ import { listActiveCodeWorkspaces, listCodeApprovals } from "../src/lib/api";
 import { pendingApprovals } from "../src/lib/approvals";
 import {
   listMobileDeliveryRepositories,
-  mobileDeliveryAttentionCountLabel,
+  mobileDeliveryNeedsYouCountLabel,
   mobileDeliveryRepositoryTarget,
   queryMobileDeliveryPullRequests,
 } from "../src/lib/deliveryApi";
@@ -215,7 +215,7 @@ export default function HomeScreen() {
       : repositoryTargets.length === 0
         ? "0"
         : deliveryQuery.data
-          ? mobileDeliveryAttentionCountLabel(deliveryQuery.data)
+          ? mobileDeliveryNeedsYouCountLabel(deliveryQuery.data)
           : "…";
 
   const activeSessionCount = hasSnapshot

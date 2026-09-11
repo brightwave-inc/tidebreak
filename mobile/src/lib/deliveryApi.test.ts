@@ -3,7 +3,7 @@ import type { MachineClient } from "./machine";
 import {
   groupMobileDeliveryPullRequests,
   listMobileDeliveryRepositories,
-  mobileDeliveryAttentionCountLabel,
+  mobileDeliveryNeedsYouCountLabel,
   mobileDeliveryCheckProgress,
   mobileDeliveryLaneCountLabel,
   mobileDeliveryLaneIsConfirmedEmpty,
@@ -342,7 +342,7 @@ describe("mobile Delivery API contracts", () => {
     ).toBe(false);
   });
 
-  it("labels the hub's attention count from one page, marking overflow", () => {
+  it("labels the hub's Delivery count from one page, marking overflow", () => {
     const items = parseMobileDeliveryPullRequestsPage({
       ...pullRequestsPage,
       next_cursor: undefined,
@@ -359,14 +359,22 @@ describe("mobile Delivery API contracts", () => {
           attention_reasons: [],
           ready_to_merge: true,
         },
+        {
+          ...pullRequest,
+          id: "progress",
+          attention_reasons: [],
+          ready_to_merge: false,
+        },
       ],
     })!.items;
+    // Attention and ready-to-merge both wait on the viewer; only
+    // in-progress is excluded.
     expect(
-      mobileDeliveryAttentionCountLabel({ items }),
-    ).toBe("1");
+      mobileDeliveryNeedsYouCountLabel({ items }),
+    ).toBe("2");
     expect(
-      mobileDeliveryAttentionCountLabel({ items, next_cursor: "cursor-2" }),
-    ).toBe("1+");
-    expect(mobileDeliveryAttentionCountLabel({ items: [] })).toBe("0");
+      mobileDeliveryNeedsYouCountLabel({ items, next_cursor: "cursor-2" }),
+    ).toBe("2+");
+    expect(mobileDeliveryNeedsYouCountLabel({ items: [] })).toBe("0");
   });
 });
