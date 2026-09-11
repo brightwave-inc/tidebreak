@@ -5,29 +5,29 @@ record. Where a later record disagrees, the record wins. This revision
 follows an adversarial review pass; the largest changes are recorded in
 "Bets and exit criteria" and "Open questions".
 
-Since this revision, repository-less conversations are no longer deferred:
-`POST /external/code/sessions` accepts no repository selector and creates
-an internal-engine session on the machine, with a nullable workspace and
-the native self-drive tools registered in the foreground tool set. The
-adapter-side default that omits the selector, and the durable retry of
-`repository_preparing`, land with the gateway's Slack work
-(brightwave-inc/model-gateway#1980). Machine-side behavior here is the
-floor; Slack adapter wiring, live Slack acceptance, durable child wait/resume,
-and the thread/web tree remain follow-up. The machine contract is recorded in [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
+No repository is required to start. A repository-less Slack session with no
+explicit harness uses the channel's harness preference, then the configured
+runtime's admitted default engine. Without a runtime, or with a legacy runtime
+that declares no engines, it uses Internal on the machine. An explicit Internal
+choice also stays on the machine. Invalid runtime settings refuse admission
+instead of silently changing the execution location.
+See [Repository-less sessions](#repository-less-sessions) and the amendment to
+[decision 94](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
+Durable child wait/resume and the thread/web tree remain follow-up work.
 
 A person talks to Tidebreak in Slack — in the agent's own chat (Slack's
 primary and split view for AI agents) or in a channel thread. Tidebreak
 runs a session for that conversation on that person's hosted machine.
-The session's engine runs in a confined sandbox. Progress streams back
-into the conversation through Slack's agent surfaces. The same session
-appears in the desktop inbox.
+The session runs in a configured sandbox or on the machine, according to its
+selected harness and execution location. Progress returns to the conversation
+through Slack's agent surfaces. The same session appears in the desktop inbox.
 
 Version one ships both surfaces: the agent DM and channel threads.
 Getting the agent into a conversation uses Slack's own affordances —
 "Add agent", the channel's Agents & apps tab, @mention — and none of it
 is custom chrome. No repository is required to start. A conversation
-with no repository runs on the machine's internal engine; a task that
-names repositories starts child sessions in independent workspaces under
+with no repository can answer and discover repositories; a task that
+names repositories can start child sessions in independent workspaces under
 the same conversation, and the conversation can wait on those children
 and read their results. Grant-bound children follow the configured external
 placement. Remaining adapter and orchestration work is recorded below.
@@ -336,18 +336,18 @@ agent, teammates, and a native "working / needs your attention" status —
 are the fast follow, not v1: one code channel maps to one session and
 `AttentionState` feeds the channel status directly.
 
-The session uses the code-shaped journal and attention model, not a chat
-row. A repository-less ask through chat stays refused: chat is the
-internal engine on the machine, and Slack wants a confined sandbox.
+The session uses the code-shaped journal and attention model. Repository-less
+Slack conversations use this same code session surface, including when Internal
+runs on the machine; they do not create a separate chat row.
 
 | Slack | Tidebreak |
 | --- | --- |
 | First @mention in a thread | Get-or-create the external session; submit the message as the first turn |
-| Later owner reply | Submit to the messages endpoint; outcome is `new_turn` or `queued` (see Ingestion) |
-| Owner reply `stop` | Interrupt. The status message gets a terminal edit: "Stopped by you" |
+| Later eligible contributor reply | Submit to the messages endpoint when automatic replies are enabled and the thread is awake; outcome is `new_turn` or `queued` (see Ingestion) |
+| Eligible contributor reply `stop` | Interrupt the active turn |
 | Reply while `Fenced` | Owner sees the reason and an owner-only reap button; anyone else sees the fenced notice |
 | Reply while `Ended` | Refuse, with the context-correct next step: "send `new`" in a DM, "start a new thread and mention me" in a channel |
-| Non-owner reply | Reaction plus one ephemeral notice; dropped |
+| Reply from someone without contributor access | Refuse without submitting a turn |
 | Bare @mention with no task text | Prompt for the task; no sandbox spawns |
 | Channel @mention outside a thread | The adapter replies in a new thread; that thread is the session |
 
@@ -425,16 +425,16 @@ conflicting spec in the retry is reported, never applied.
 
 ## Choosing the repository
 
-Stage 1 requires a repository. Resolution at first contact, then pinned
-on the workspace:
+A repository selector is optional. On first contact, the adapter resolves it
+in this order:
 
 1. A `repo:owner/name` directive in the first message. A near-miss —
    wrong spacing, an inaccessible or misspelled name — refuses loudly
    before anything is created ("Did you mean `repo:owner/name`?"), never
    falls through.
 2. Else the channel default. A DM has no default.
-3. Else refuse, with the directive syntax and a pointer to
-   `/tidebreak help`. Nothing spawns.
+3. Otherwise start a repository-less code session. The agent can answer,
+   discover accessible repositories, and start repository work when needed.
 
 Bare GitHub URLs in prose are context, never clone intent.
 
@@ -447,12 +447,13 @@ visible notice naming who changed it. Engine action approvals remain separate.
 The GitHub App installation intersected with the person's access is the
 allowlist, refused with a human-readable rendering: outside the App
 installation → "ask an admin to add it to the Tidebreak GitHub App";
-no personal access → "you don't have access to `org/name`". No second
-Slack-only allowlist until someone needs stricter than the App.
+no personal access → "you don't have access to `org/name`". Shared channel
+sessions use the installation identity's access. There is no separate channel
+repository allowlist.
 
-Changing the repository means a new thread. The first status message
-carries the recovery inline: "Wrong repo? Reply `stop`, then start a new
-thread with `repo:owner/name`."
+An explicit selector pins the session's workspace; a retry cannot replace it.
+A repository-less conversation can create children in several repositories
+without changing threads. Each child workspace still belongs to one repository.
 
 ## Packaged sandbox runtime
 
@@ -496,7 +497,8 @@ to a dedicated Direct endpoint and grants only the
 `runtime:tidebreak` audience and resource with `runtime:execute`. Git and
 PR API requests use that app's existing identity and policy. A DM does not
 change installation-only credentials into a personal GitHub identity.
-Channel contribution remains owner-only until explicit sharing is enabled.
+Channel sessions use the shared service identity. The channel membership gate
+determines who can contribute; each submitted turn retains its actor.
 
 An ordinary custom harness keeps Gateway's generic client identity. A managed
 Tidebreak runtime can use an eligible subscription after the registered Tidebreak
@@ -506,10 +508,12 @@ admitted image and the live sandbox before inference starts. Subscription sharin
 provider compatibility, sandbox exclusions, and quota limits still apply. A
 missing or mismatched confirmation refuses the run.
 
-The default repositoryless Slack coordinator still uses Tidebreak's Internal
-engine. It does not acquire subscription eligibility from a child harness. The
-profile uses one pod incarnation because the image does not restore the harness
-conversation across pod replacement.
+A repository-less Slack session also uses the admitted runtime default when
+neither the request nor its channel selects a harness. The selected managed
+harness can use eligible subscriptions under Gateway policy. Explicit Internal
+sessions stay on the machine and do not inherit subscription eligibility from
+a child harness. The managed profile limits each sandbox to one pod incarnation;
+the image does not restore the harness conversation across pod replacement.
 
 The profile pins a supervised-agent digest; it does not track server releases.
 For an upgrade, publish both images from the same release, update the profile
@@ -519,8 +523,8 @@ its update or pin it until the matching supervised image is ready.
 
 ## Execution
 
-The session's engine runs in a per-session confined sandbox driven by
-`tidebreak-supervised-agent`
+For sandbox sessions, `tidebreak-supervised-agent` drives the selected engine
+inside a confined sandbox for that session
 ([`0079`](decisions/0079-supervised-agent-declines-the-sandbox-protocol.md)).
 Tidebreak calls the confining environment's runtime API. That contract
 is pinned in `crates/tidebreak-server/src/code/remote/`: spawn on
@@ -798,15 +802,20 @@ fenced reap button works and is refused for non-owners.
 The provenance banner, the thread link, and desktop-submitted-turn
 attribution in the thread.
 
-## Repository-less sessions on the machine's engine
+## Repository-less sessions
 
-No repository is required to start, and the scratch stage above is
-retired. `POST /external/code/sessions` accepts neither `repo_id` nor
-`repository` and creates a workspace-less internal-engine session on the
-machine, with no sandbox and no clone. An explicit selector preserves the
-existing repository-backed path exactly. The same conversation can then
-choose repositories with `code_repos`, start independent child sessions in
-new workspaces with `code_session_create` (each with a stable
+`POST /external/code/sessions` accepts a request that omits both `repo_id` and
+`repository`. It creates a code session without a workspace or an initial clone.
+An explicit request harness wins over the channel preference. When both are
+unset, a Slack session uses the configured runtime's admitted default engine.
+No runtime, or a legacy runtime without engine declarations, falls back to
+Internal on the machine. An explicit Internal selection stays on the machine.
+A configured but invalid default refuses admission; it does not fall back.
+An explicit repository selector preserves the repository-backed path.
+
+The same conversation can then choose repositories with `code_repos`, start
+independent child sessions in new workspaces with `code_session_create` (each
+with a stable
 `request_key`), send follow-ups with `code_run_turn`, list children with
 `code_sessions`, and poll for results with `code_wait`. Children inherit
 the parent's owner, grant, and forge identity. Machine children keep the parent's
@@ -830,7 +839,6 @@ keeps the current list of work that remains for self-drive child sessions.
   as specified in the preceding section.
 - Collaborator steer, and an owner relay affordance ("forward this to
   the session") as its cheaper predecessor.
-- A Slack-only allowlist narrower than the GitHub App.
 - Local-desktop Slack via a relay.
 - [`0048`](decisions/0048-one-interaction-model.md) step 5.
 
@@ -944,8 +952,10 @@ and model catalogs. A human administrator can read or change shared settings.
 A personal Slack connection does not prove membership in a private channel, so
 it does not grant access to that channel's instructions.
 
-A new session freezes its harness, model, and channel instructions. Later channel
-changes leave existing sessions intact. Session creation returns the stored
+A new session freezes its harness, model, and channel instructions. Changes to
+those defaults apply to new sessions. Automatic replies remain live for existing
+threads; a quiet thread resumes when an authorized person mentions the app.
+Quiet leaves already accepted work running. Session creation returns the stored
 `harness` and `model`; a null model means no model has been pinned, rather than
 an inferred default presented as observed execution. The adapter should render
 these values and link to Configure without adding another status message.

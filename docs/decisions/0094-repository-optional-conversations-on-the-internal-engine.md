@@ -76,3 +76,27 @@ frozen model selection, original-grant revocation, empty catalogs, binding retri
 and attached channels. Child-session tests cover two repositories, permission modes,
 request-key recovery, foreign-parent refusal, final output, and failures. Migration
 tests cover fresh databases and stepwise upgrades for `code_session_context`.
+
+## Amendment 2026-09-10: configured sandbox default and channel preferences
+
+The original machine-side Internal path remains available. For a repository-less
+Slack session, the request's harness wins, then the channel's harness preference.
+When neither is set, the server selects the configured runtime's admitted default
+engine. No runtime, or a legacy runtime without engine declarations, keeps the
+Internal fallback. Explicit Internal always stays on the machine. An invalid
+runtime default refuses admission instead of silently falling back.
+
+Tidebreak stores channel harness, model, automatic-reply, and instruction settings.
+Harness, model, and instructions are frozen when a session starts. Automatic
+replies remain live for established threads. Gateway continues to own execution
+credentials, subscription admission, resources, and spend limits.
+
+Managed supervised harnesses receive the authenticated native tool bridge,
+including conversation reads, export, attachments, and the session tools described
+here. This supplies the external-harness path without requiring a separate MCP
+server. Durable child wait/resume, research children, tree budgets, and tree UI
+remain the follow-up work named in this record.
+
+Decision 96 supersedes this record's per-channel repository scope. Shared channel
+sessions discover and use the instance's live GitHub App access. A channel default
+selects a repository; it never grants access or creates another allowlist.
