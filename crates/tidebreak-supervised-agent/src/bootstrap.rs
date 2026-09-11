@@ -456,6 +456,37 @@ mod tests {
     }
 
     #[test]
+    fn a_scratch_envelope_prepares_the_workspace_without_cloning() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let inputs = resolve(RawInputs {
+            task: Some(
+                tidebreak_core::code::RemoteWorkspaceTask::encode_scratch(
+                    "Read the channel and report.",
+                    "scratch/channel",
+                )
+                .unwrap(),
+            ),
+            workspace: Some(workspace.display().to_string()),
+            ..RawInputs::default()
+        })
+        .unwrap();
+        let bootstrap = run(&inputs, &trust_options(root.path()), None).unwrap();
+        assert_eq!(bootstrap.workdir, workspace);
+        assert!(bootstrap.workdir.is_dir());
+        assert!(bootstrap.clones.is_empty());
+        assert!(!bootstrap.workdir.join(".git").exists());
+        assert!(bootstrap
+            .events
+            .iter()
+            .any(|(kind, _)| kind == "workspace_prepared"));
+        assert!(!bootstrap
+            .events
+            .iter()
+            .any(|(kind, _)| kind == "repository_cloned"));
+    }
+
+    #[test]
     fn a_declared_repository_is_cloned_and_its_ref_checked_out() {
         let root = tempfile::tempdir().unwrap();
         let remote = fixture_remote(root.path());

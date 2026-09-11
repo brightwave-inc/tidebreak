@@ -211,7 +211,7 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
     let (task, workspace_branch, scratch_marker) = match envelope.as_ref() {
         Some(envelope) => (
             envelope.task.clone(),
-            Some(envelope.branch.clone()),
+            (!envelope.scratch).then(|| envelope.branch.clone()),
             envelope.scratch.then(|| envelope.branch.clone()),
         ),
         None => (raw_task, None, None),
@@ -450,6 +450,20 @@ mod tests {
         let inputs = resolve(raw).unwrap();
         assert_eq!(inputs.task, task);
         assert_eq!(inputs.workspace_branch.as_deref(), Some("thet/remote-work"));
+    }
+
+    #[test]
+    fn a_scratch_envelope_runs_without_a_repository_or_checkout_branch() {
+        let task = "Report both repositories.\nDo not change files.\n";
+        let mut raw = minimal();
+        raw.task = Some(
+            tidebreak_core::code::RemoteWorkspaceTask::encode_scratch(task, "scratch/one").unwrap(),
+        );
+        let inputs = resolve(raw).unwrap();
+        assert_eq!(inputs.task, task);
+        assert_eq!(inputs.workspace_branch, None);
+        assert_eq!(inputs.scratch_marker.as_deref(), Some("scratch/one"));
+        assert!(inputs.repositories.is_empty());
     }
 
     #[test]
