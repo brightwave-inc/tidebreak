@@ -523,10 +523,11 @@ pub struct CodeAnalyticsDay {
     pub pull_requests_merged: u64,
 }
 
-/// Metrics attributed to one registered repository.
+/// Metrics attributed to one registered repository, or to the unattributed
+/// "no repository" group when `repo_id` is null.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeAnalyticsRepository {
-    pub repo_id: RepoId,
+    pub repo_id: Option<RepoId>,
     pub name: String,
     pub sessions: u64,
     pub turns: u64,

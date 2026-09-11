@@ -346,6 +346,25 @@ describe("parseCodeAnalytics", () => {
       }),
     ).toBeNull();
   });
+
+  it("accepts a no-repository row with a null repo_id", () => {
+    const noRepo = {
+      ...snapshot,
+      repositories: [
+        {
+          repo_id: null,
+          name: "no repository",
+          sessions: 1,
+          turns: 1,
+          total_tokens: 120,
+          estimated_cost_microusd: 0,
+          pull_requests_opened: 0,
+          pull_requests_merged: 0,
+        },
+      ],
+    };
+    expect(parseCodeAnalytics(noRepo)).toEqual(noRepo);
+  });
 });
 
 /**

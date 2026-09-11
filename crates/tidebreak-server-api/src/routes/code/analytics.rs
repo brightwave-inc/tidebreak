@@ -47,13 +47,7 @@ pub(crate) async fn analytics(
         code.list_pull_request_attributions(),
     )?;
 
-    if let Some(repo_id) = query.repo_id {
-        if !repos.iter().any(|repo| repo.id == repo_id) {
-            return Err(ServerError::not_found(format!(
-                "code repository {repo_id} not found"
-            )));
-        }
-    }
+    require_known_repo(&repos, query.repo_id)?;
 
     Ok(Json(build_snapshot(
         range,
@@ -267,7 +261,7 @@ fn build_snapshot(
         .map(|repo| {
             let metrics = repo_metrics.remove(&Some(repo.id)).unwrap_or_default();
             CodeAnalyticsRepository {
-                repo_id: repo.id,
+                repo_id: Some(repo.id),
                 name: repo.display_name,
                 sessions: as_u64(metrics.sessions.len()),
                 turns: metrics.turns,
@@ -288,7 +282,7 @@ fn build_snapshot(
         if let Some(metrics) = repo_metrics.remove(&None) {
             if !metrics.sessions.is_empty() || metrics.turns > 0 {
                 repositories.push(CodeAnalyticsRepository {
-                    repo_id: RepoId::from(uuid::Uuid::nil()),
+                    repo_id: None,
                     name: NO_REPOSITORY_NAME.to_owned(),
                     sessions: as_u64(metrics.sessions.len()),
                     turns: metrics.turns,
@@ -757,6 +751,20 @@ fn as_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn require_known_repo(
+    repos: &[tidebreak_core::CodeRepo],
+    repo_id: Option<RepoId>,
+) -> Result<(), ServerError> {
+    if let Some(repo_id) = repo_id {
+        if !repos.iter().any(|repo| repo.id == repo_id) {
+            return Err(ServerError::not_found(format!(
+                "code repository {repo_id} not found"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,9 +976,13 @@ mod tests {
             .iter()
             .find(|row| row.name == NO_REPOSITORY_NAME)
             .expect("no repository group");
+        assert_eq!(no_repo.repo_id, None);
         assert_eq!(no_repo.sessions, 1);
         assert_eq!(no_repo.turns, 1);
         assert_eq!(no_repo.total_tokens, 120);
+        let err = require_known_repo(&[], Some(RepoId::from(uuid::Uuid::nil())))
+            .expect_err("nil UUID is not a selectable repository");
+        assert_eq!(err.kind(), "not_found");
     }
 
     fn sample_session(
