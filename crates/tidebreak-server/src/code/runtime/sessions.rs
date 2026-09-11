@@ -596,19 +596,26 @@ impl CodeRuntime {
     async fn prune_session_private_scratch(&self, session: &Session) {
         if let Some(workspace_id) = session.workspace_id {
             match crate::code::scratch::workspace_root(&self.data_dir, workspace_id) {
-                Ok(private_root) => {
-                    let keep = self.live_child_fork_generations(session).await;
-                    if let Err(error) = crate::code::fork::prune_session_fork_generations(
-                        &private_root,
-                        session.id,
-                        &keep,
-                    ) {
+                Ok(private_root) => match self.live_child_fork_generations(session).await {
+                    Some(keep) => {
+                        if let Err(error) = crate::code::fork::prune_session_fork_generations(
+                            &private_root,
+                            session.id,
+                            &keep,
+                        ) {
+                            tracing::warn!(
+                                session = %session.id,
+                                "code-mode: could not prune fork generations: {error}"
+                            );
+                        }
+                    }
+                    None => {
                         tracing::warn!(
                             session = %session.id,
-                            "code-mode: could not prune fork generations: {error}"
+                            "code-mode: skipping fork generation prune after a child read failed"
                         );
                     }
-                }
+                },
                 Err(error) => {
                     tracing::warn!(
                         session = %session.id,
@@ -625,7 +632,9 @@ impl CodeRuntime {
         }
     }
 
-    async fn live_child_fork_generations(&self, parent: &Session) -> HashSet<uuid::Uuid> {
+    /// Named generations to keep, or `None` to skip pruning so a failed read
+    /// cannot delete a handoff a live child still names.
+    async fn live_child_fork_generations(&self, parent: &Session) -> Option<HashSet<uuid::Uuid>> {
         let children = match tidebreak_core::db::code::child_sessions(
             &self.db,
             &parent.owner,
@@ -640,17 +649,17 @@ impl CodeRuntime {
                     error = %error,
                     "code-mode: could not list child sessions before pruning fork generations"
                 );
-                return HashSet::new();
+                return None;
             }
         };
-        let mut texts = Vec::new();
+        let mut reads = Vec::new();
         for child in children {
             if child.lifecycle == SessionLifecycle::Ended {
                 continue;
             }
             match list_turns(&self.db, &parent.owner, child.id).await {
                 Ok(turns) => {
-                    texts.extend(turns.into_iter().map(|turn| turn.user_input));
+                    reads.push(Ok(turns.into_iter().map(|turn| turn.user_input).collect()));
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -659,10 +668,11 @@ impl CodeRuntime {
                         error = %error,
                         "code-mode: could not read a child session before pruning fork generations"
                     );
+                    reads.push(Err(()));
                 }
             }
         }
-        crate::code::fork::generations_named_by_children(parent.id, &texts)
+        crate::code::fork::keep_fork_generations_from_reads(parent.id, Some(reads))
     }
 
     pub async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {

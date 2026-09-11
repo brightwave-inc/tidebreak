@@ -337,6 +337,23 @@ pub(crate) fn generations_named_by_children(
     named
 }
 
+/// Named generations to keep after reading live children.
+///
+/// `None` for the child list, or `Err` for any live child's turns, means skip
+/// pruning so a failed read cannot delete a handoff still in use. Successful
+/// reads still produce a keep-set, including an empty one when nothing is named.
+pub(crate) fn keep_fork_generations_from_reads(
+    parent: tidebreak_core::SessionId,
+    live_child_reads: Option<Vec<Result<Vec<String>, ()>>>,
+) -> Option<HashSet<uuid::Uuid>> {
+    let reads = live_child_reads?;
+    let mut texts = Vec::new();
+    for read in reads {
+        texts.extend(read.ok()?);
+    }
+    Some(generations_named_by_children(parent, texts))
+}
+
 /// Delete this session's fork generations that no live child still names.
 ///
 /// Unknown names stay. An empty keep-set removes every UUID generation.
@@ -2132,6 +2149,30 @@ mod tests {
             .join(FORKS_DIR)
             .join(session.id.to_string())
             .exists());
+    }
+
+    #[test]
+    fn a_failed_live_child_read_skips_prune_instead_of_dropping_named_generations() {
+        let parent = tidebreak_core::SessionId::new();
+        let named = uuid::Uuid::new_v4();
+        let unnamed = uuid::Uuid::new_v4();
+        let text = format!("Read `/{FORKS_DIR}/{parent}/{named}/transcript.md`");
+
+        let failed_list = keep_fork_generations_from_reads(parent, None);
+        assert!(failed_list.is_none());
+
+        let failed_turns =
+            keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![text.clone()]), Err(())]));
+        assert!(failed_turns.is_none());
+
+        let keep = keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![text])]))
+            .expect("successful reads still prune");
+        assert!(keep.contains(&named));
+        assert!(!keep.contains(&unnamed));
+
+        let empty = keep_fork_generations_from_reads(parent, Some(vec![Ok(vec![])]))
+            .expect("empty successful reads still prune");
+        assert!(empty.is_empty());
     }
 
     #[tokio::test]
