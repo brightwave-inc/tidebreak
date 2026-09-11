@@ -254,6 +254,7 @@ fn session(dir: &Path, mode: PermissionMode, duplicate: bool) -> (Arc<GrokSessio
         sink: sink.clone(),
         browser: None,
         native: None,
+        tool_bridge: None,
         apps: None,
     };
     (Arc::new(GrokSession::new(spec, "1.0.13".into())), sink)

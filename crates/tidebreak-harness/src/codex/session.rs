@@ -15,7 +15,6 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tokio::time::{timeout, Instant};
 use tracing::warn;
 
-use crate::browser_channel::apply_child_env_tokio;
 use crate::child::ChildPid;
 use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
@@ -964,14 +963,8 @@ impl CodexSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_child_env_tokio(
-            &mut command,
-            tidebreak_core::HarnessKind::Codex,
-            self.spec.env.iter().cloned(),
-            &plan.env,
-            self.spec.browser.as_ref(),
-            self.spec.native.as_ref(),
-        );
+        self.spec
+            .apply_child_env(&mut command, tidebreak_core::HarnessKind::Codex, &plan.env);
         let mut child = spawn_process_tree(&mut command)?;
         let stdin = child
             .take_stdin()

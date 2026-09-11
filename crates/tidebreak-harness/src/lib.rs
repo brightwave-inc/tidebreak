@@ -798,6 +798,23 @@ impl BrowserChannelSpec {
     }
 }
 
+/// Trusted executable and socket for supervised native tool calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolBridgeSpec {
+    /// Absolute path to the runtime executable that dispatches tool calls.
+    pub helper: std::path::PathBuf,
+    /// Session-private socket served by the supervised runtime.
+    pub socket: std::path::PathBuf,
+}
+
+impl ToolBridgeSpec {
+    /// Inject runtime-owned paths after ambient environment filtering.
+    pub fn inject_env_tokio(&self, command: &mut tokio::process::Command) {
+        command.env("TIDEBREAK_TOOL_HELPER", &self.helper);
+        command.env("TIDEBREAK_TOOL_SOCKET", &self.socket);
+    }
+}
+
 /// Session-private native computer-use capability-file path.
 ///
 /// The desktop native runtime writes a short-lived JSON capability file at
@@ -922,6 +939,8 @@ pub struct SessionSpec {
     /// has produced a session-private capability file. `None` preserves the
     /// existing behavior: no native tools are advertised or injected.
     pub native: Option<NativeChannelSpec>,
+    /// Native tool bridge created by the supervised runtime.
+    pub tool_bridge: Option<ToolBridgeSpec>,
     /// Connected-apps channel wiring: the loopback MCP bridge over every
     /// server Tidebreak has mounted. `None` advertises no connected apps.
     pub apps: Option<AppsChannelSpec>,
@@ -1299,6 +1318,28 @@ pub fn is_absolute_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+impl SessionSpec {
+    /// Compose the engine environment and then attach the trusted tool bridge.
+    pub fn apply_child_env(
+        &self,
+        command: &mut tokio::process::Command,
+        kind: HarnessKind,
+        plan_env: &[(String, String)],
+    ) {
+        browser_channel::apply_child_env_tokio(
+            command,
+            kind,
+            self.env.iter().cloned(),
+            plan_env,
+            self.browser.as_ref(),
+            self.native.as_ref(),
+        );
+        if let Some(bridge) = &self.tool_bridge {
+            bridge.inject_env_tokio(command);
+        }
     }
 }
 

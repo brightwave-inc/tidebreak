@@ -22,7 +22,6 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::time::{timeout, timeout_at, Instant};
 use tracing::warn;
 
-use crate::browser_channel::apply_child_env_tokio;
 use crate::child::{turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
@@ -625,13 +624,10 @@ impl ClaudeSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_child_env_tokio(
+        self.spec.apply_child_env(
             &mut command,
             tidebreak_core::HarnessKind::ClaudeCode,
-            self.spec.env.iter().cloned(),
             &plan.env,
-            self.spec.browser.as_ref(),
-            self.spec.native.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
         let stdin = child
@@ -1483,6 +1479,7 @@ mod tests {
             sink,
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         })
     }
@@ -1659,6 +1656,7 @@ done
             sink: Arc::new(Discard),
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
@@ -1807,6 +1805,39 @@ done
     /// the next launch composes it. Moving to `Allow` is refused whatever the
     /// child's state, because its flags are decided at launch.
     #[tokio::test]
+    async fn native_tool_bridge_paths_reach_shell_children_without_ambient_overrides() {
+        use tidebreak_core::HarnessKind;
+        let dir = tempfile::tempdir().unwrap();
+        let session = session_with("/bin/true".into(), dir.path(), Arc::new(Discard));
+        let mut spec = session.spec;
+        spec.env.extend([
+            ("TIDEBREAK_TOOL_HELPER".into(), "/untrusted/helper".into()),
+            ("TIDEBREAK_TOOL_SOCKET".into(), "/untrusted/socket".into()),
+            ("TIDEBREAK_UNRELATED_SECRET".into(), "private".into()),
+        ]);
+        for kind in [
+            HarnessKind::ClaudeCode,
+            HarnessKind::Codex,
+            HarnessKind::Opencode,
+            HarnessKind::Grok,
+        ] {
+            let mut absent = tokio::process::Command::new("/bin/sh");
+            absent.args(["-c", "test -z \"$TIDEBREAK_TOOL_HELPER$TIDEBREAK_TOOL_SOCKET$TIDEBREAK_UNRELATED_SECRET\""]);
+            spec.apply_child_env(&mut absent, kind, &[]);
+            assert!(absent.status().await.unwrap().success());
+            spec.tool_bridge = Some(crate::ToolBridgeSpec {
+                helper: "/trusted/helper".into(),
+                socket: "/trusted/socket".into(),
+            });
+            let mut present = tokio::process::Command::new("/bin/sh");
+            present.args(["-c", "test \"$TIDEBREAK_TOOL_HELPER\" = /trusted/helper && test \"$TIDEBREAK_TOOL_SOCKET\" = /trusted/socket && test -z \"$TIDEBREAK_UNRELATED_SECRET\""]);
+            spec.apply_child_env(&mut present, kind, &[]);
+            assert!(present.status().await.unwrap().success());
+            spec.tool_bridge = None;
+        }
+    }
+
+    #[tokio::test]
     async fn a_switch_without_a_child_is_recorded_for_the_next_launch() {
         let dir = tempfile::tempdir().unwrap();
         let session = session_with(
@@ -1866,6 +1897,7 @@ done
             sink: Arc::new(Discard),
             browser: Some(browser),
             native: None,
+            tool_bridge: None,
             apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
@@ -1925,6 +1957,7 @@ done
             sink: Arc::new(Discard),
             browser: None,
             native: None,
+            tool_bridge: None,
             apps: None,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
