@@ -1918,11 +1918,11 @@ pub enum UpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         fence_reason: Option<Box<tidebreak_core::FenceReason>>,
-        attention: Attention,
+        attention: Box<Attention>,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        external_origin: Option<SessionExternalOrigin>,
+        external_origin: Option<Box<SessionExternalOrigin>>,
         turn_count: i64,
         /// Timestamp trigger delivery uses to rank candidate sessions.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2060,9 +2060,9 @@ impl UpdateNotice {
             harness_kind: wire.harness_kind,
             lifecycle: wire.lifecycle,
             fence_reason: wire.fence_reason.map(Box::new),
-            attention: wire.attention,
+            attention: Box::new(wire.attention),
             title: wire.title,
-            external_origin: wire.external_origin,
+            external_origin: wire.external_origin.map(Box::new),
             turn_count: wire.turn_count,
             trigger_target_at: wire.trigger_target_at,
             activity: wire.activity,
