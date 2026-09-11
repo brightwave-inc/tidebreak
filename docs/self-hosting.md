@@ -351,7 +351,9 @@ DMs in your own Slack app to drive sessions on that machine. The public
 image is `ghcr.io/brightwave-inc/tidebreak-slack-adapter` (tags `v<version>`).
 It listens on 8080. It needs its own PostgreSQL (`DATABASE_URL`), a
 token-sealing key, Slack credentials, and a machine directory. It does not
-need Model Gateway variables.
+need Model Gateway variables. One adapter instance uses one Slack workspace's
+bot token. Create and install a custom Slack app in that workspace; a distributed
+OAuth app is not required for this setup.
 
 A Compose example that starts the machine, PostgreSQL, the adapter, and the
 adapter's database lives in
@@ -363,12 +365,13 @@ store.
 
 Create a Slack app from a manifest. Give the bot scopes that let it read
 mentions and DMs, post in threads, add and read reactions, and read channel
-membership. Point the Events API request URL and the slash-command request
-URL at the adapter's public origin — not at the machine. Fill the exact
-paths from the adapter image you pin; they are not defined in this
-repository.
+membership. Channel history scopes let the agent read thread context; `files:read`
+lets it retrieve supported attachments. Point event subscriptions, slash commands,
+and interactivity at `https://<your adapter host>/webhooks/slack`. The adapter
+handles all three payload types on that route. Reinstall the app after changing
+its scopes.
 
-A sketch (replace the host and the request paths):
+A sketch (replace the host):
 
 ```yaml
 display_information:
@@ -379,13 +382,20 @@ features:
     always_online: true
   slash_commands:
     - command: /tidebreak
-      url: https://<your adapter host>/<slash-command path>
+      url: https://<your adapter host>/webhooks/slack
       description: Help, repository defaults, and session commands
       should_escape: false
 oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - assistant:write
+      - commands
+      - channels:history
+      - groups:history
+      - mpim:history
+      - files:read
+      - users:read
       - im:history
       - im:read
       - im:write
@@ -396,12 +406,22 @@ oauth_config:
       - groups:read
       - mpim:read
 settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://<your adapter host>/webhooks/slack
   event_subscriptions:
-    request_url: https://<your adapter host>/<events path>
+    request_url: https://<your adapter host>/webhooks/slack
     bot_events:
       - app_mention
+      - message.channels
+      - message.groups
+      - message.mpim
       - message.im
-      - member_joined_channel
+      - app_home_opened
+      - team_join
+      - user_change
+      - app_uninstalled
+      - tokens_revoked
   org_deploy_enabled: false
   socket_mode_enabled: false
 ```
@@ -482,11 +502,37 @@ administrator, and approve the Slack workspace grant on that page. The
 approval names the workspace being linked. Until you approve it, channel
 sessions do not run.
 
-`/tidebreak help` lists the command surface once the grant is live. Set a
-channel default with `/tidebreak repo set owner/name` so a mention can
-choose a repository without a `repo:` directive. See
-[Slack sessions](slack-sessions.md) for identity, repository choice, and
-commands.
+Once the grant is live, invite the app into a channel and mention it with a task.
+No repository is required. A channel default set with
+`/tidebreak repo set owner/name` is optional; it selects where work starts.
+The configured GitHub App controls repository access across the instance.
+Connected channels need no separate repository approval.
+
+To set a channel's harness, model, automatic replies, or instructions, open its
+Configure link in Tidebreak. New sessions use its harness, model, and instructions;
+automatic replies apply to existing threads too. `/tidebreak help` lists commands.
+See [Slack sessions](slack-sessions.md) for identity and repository choice.
+
+### When Gateway hosts the machine
+
+Use Gateway's Slack setup page to create the custom app manifest, supply the bot
+token and signing secret, connect the GitHub identities, and pair the adapter
+with Tidebreak. Use its runtime provisioning action to configure a sandbox
+profile and the matching supervised-agent image. This path still installs a
+custom app in one Slack workspace; it does not require distributing an OAuth app.
+
+Tidebreak stores channel behavior preferences. Gateway controls credentials,
+GitHub App access, model and subscription admission, sandbox resources, and spend
+limits. Configure shared repository access once through the GitHub App
+installation; changing channel preferences never expands that access.
+
+For a repository-less Slack session with no chosen harness, Tidebreak uses the
+configured runtime's admitted default engine. Without a runtime, or with a legacy
+runtime that declares no engines, it uses Internal on the machine. Explicit
+Internal also stays on the machine. Invalid declared runtime settings refuse
+the session instead of silently moving
+it. Pin the supervised-agent image and coordinate its version with the server;
+[the runtime guide](slack-sessions.md#packaged-sandbox-runtime) describes upgrades.
 
 ## What the image provides
 

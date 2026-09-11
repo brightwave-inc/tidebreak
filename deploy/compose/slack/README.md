@@ -29,7 +29,10 @@ for how the adapter behaves once it is up.
 - `adapter-postgres`: the adapter's own store. The adapter is a shared,
   stateful service; do not point it at the machine's database.
 
-The adapter needs no Model Gateway variables.
+The adapter needs no Model Gateway variables. Create a custom Slack app and
+install it in your workspace; this setup uses one workspace's bot token and
+requires no distributed OAuth app. Enable event subscriptions, slash commands,
+and interactivity using the manifest in the self-hosting guide.
 
 ## Files you create
 
@@ -88,3 +91,13 @@ everything `missing` names before you invite the app into a workspace.
 Point Slack event and slash-command request URLs at the adapter's public
 origin, not at the machine. Point browsers at the machine's public origin for
 the workspace grant approval.
+
+After the workspace grant is approved, invite Tidebreak into a channel and
+mention it with a task. A repository default is optional. Use the Configure link
+to set channel behavior in Tidebreak. Shared GitHub App repository access applies
+across connected channels, so you do not approve repositories per channel.
+
+This Compose example does not provision a sandbox runtime. Repository-less
+sessions therefore use Internal on the machine unless you add a runtime and
+select its admitted harness. Gateway-hosted installations can provision that
+runtime through Gateway's Slack setup page.
