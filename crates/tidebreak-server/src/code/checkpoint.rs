@@ -423,6 +423,7 @@ pub async fn record_checkpoint(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)] // mirrors record_checkpoint plus a test-only output budget
 async fn record_checkpoint_with_output_budget(
     worktree: &Path,
     workspace_id: WorkspaceId,
