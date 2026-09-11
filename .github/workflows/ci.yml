@@ -619,11 +619,16 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      - name: Set up self-contained Python for offline package tests
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12.11"
       - name: Verify native sandbox prerequisites
         run: |
           test -x /usr/bin/sandbox-exec
           /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
           /usr/bin/python3 -c 'import sys; print(sys.version)'
+          python3 -I -c 'import pathlib, pip, sys; assert pathlib.Path(pip.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()); print(sys.version, pip.__file__)'
       - name: Seatbelt local sandbox tests
         run: cargo test -p tidebreak-code-execution --locked --lib local::tests
       - name: Egress broker tests

@@ -1757,14 +1757,23 @@ fn canonicalize_grant_directory(path: &Path) -> Result<PathBuf, ExecError> {
 #[cfg(target_os = "macos")]
 fn macos_developer_dir() -> Option<PathBuf> {
     let selected = fs::read_link("/var/select/developer_dir").ok()?;
+    canonical_developer_dir(
+        &selected,
+        &[
+            Path::new("/Applications/Xcode.app/Contents/Developer"),
+            Path::new("/Library/Developer/CommandLineTools"),
+        ],
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn canonical_developer_dir(selected: &Path, trusted_roots: &[&Path]) -> Option<PathBuf> {
     let selected = fs::canonicalize(selected).ok()?;
-    [
-        Path::new("/Applications/Xcode.app/Contents/Developer"),
-        Path::new("/Library/Developer/CommandLineTools"),
-    ]
-    .iter()
-    .any(|allowed| selected.starts_with(allowed))
-    .then_some(selected)
+    trusted_roots
+        .iter()
+        .filter_map(|allowed| fs::canonicalize(allowed).ok())
+        .any(|allowed| selected.starts_with(allowed))
+        .then_some(selected)
 }
 
 #[cfg(target_os = "macos")]

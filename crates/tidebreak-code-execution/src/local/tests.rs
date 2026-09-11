@@ -55,6 +55,34 @@ fn sandbox_path_denied_message_teaches_attach_or_connect_folder_recovery() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn selected_developer_directory_resolves_trusted_xcode_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let versioned = root.path().join("Xcode_26.app/Contents/Developer");
+    let unrelated = root.path().join("Other.app/Contents/Developer");
+    fs::create_dir_all(&versioned).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("Xcode_26.app"),
+        root.path().join("Xcode.app"),
+    )
+    .unwrap();
+    let trusted = root.path().join("Xcode.app/Contents/Developer");
+    assert_eq!(
+        canonical_developer_dir(&versioned, &[trusted.as_path()]),
+        Some(fs::canonicalize(&versioned).unwrap())
+    );
+    assert_eq!(
+        canonical_developer_dir(&unrelated, &[trusted.as_path()]),
+        None
+    );
+    assert_eq!(
+        canonical_developer_dir(&versioned, &[root.path().join("Missing.app").as_path()]),
+        None
+    );
+}
+
+#[cfg(target_os = "macos")]
 fn request(workspace: &str, execution: &str, script: &str) -> ExecRequest {
     ExecRequest::new(
         ExecutionId::parse(execution).unwrap(),
