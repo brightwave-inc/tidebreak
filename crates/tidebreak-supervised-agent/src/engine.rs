@@ -62,6 +62,8 @@ pub enum SteerOutcome {
     Delivered,
     /// The engine accepts input only between turns.
     Refused,
+    /// Delivery may have reached the engine, but no acknowledgment arrived.
+    Unacknowledged,
     /// The turn ended before the message reached it.
     Ended(TurnEnd),
 }
@@ -79,9 +81,28 @@ pub trait TurnHandle: Send {
     /// Delivers a message into the running turn.
     ///
     /// Completion must win when it races delivery. Returning
-    /// [`SteerOutcome::Ended`] keeps the message unacknowledged so the next
-    /// turn receives it.
-    async fn steer(&mut self, body: String) -> SteerOutcome;
+    /// [`SteerOutcome::Ended`] keeps ordinary input queued for the next turn.
+    /// Reserved steering frames use the server's durable queue instead.
+    async fn steer(&mut self, body: String) -> SteerOutcome {
+        let _ = body;
+        SteerOutcome::Refused
+    }
+
+    /// Delivers a message with the caller's admission correlation id.
+    ///
+    /// The default refuses correlated delivery. An adapter must return
+    /// `Delivered` only after the harness acknowledges the same correlation.
+    async fn steer_with_correlation(
+        &mut self,
+        body: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> SteerOutcome {
+        if correlation_uuid.is_some() {
+            SteerOutcome::Refused
+        } else {
+            self.steer(body).await
+        }
+    }
 
     /// Stops the turn. The next [`TurnHandle::wait`] reports how it ended —
     /// usually [`TurnEnd::Interrupted`], but a turn that finished first keeps

@@ -572,7 +572,7 @@ pub async fn external_get_or_create(
         | ExternalSessionResolution::Existing(binding) => binding.session_id,
         ExternalSessionResolution::Ended { session_id } => *session_id,
         ExternalSessionResolution::GrantMismatch => {
-            return Err(ServerError::not_found("code session not found"))
+            return Err(ServerError::not_found("code session not found"));
         }
     };
     let actual = runtime
@@ -732,6 +732,17 @@ pub struct ExternalMessageBody {
     /// The binding whose channel opted in.
     #[serde(default)]
     pub context_binding_id: Option<tidebreak_core::CodeBindingId>,
+    /// Ask to steer into the active native turn. Old clients omit it and
+    /// keep the queue-default contract.
+    #[serde(default)]
+    pub steer: bool,
+    /// The native turn the instruction targets; required when steering.
+    #[serde(default)]
+    pub expected_turn_id: Option<tidebreak_core::TurnId>,
+    /// Caller correlation id; echoed in the admission response and carried
+    /// through the supervised sandbox.
+    #[serde(default)]
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 #[derive(serde::Deserialize)]
@@ -743,12 +754,28 @@ pub struct ExternalActor {
 
 #[derive(serde::Serialize)]
 pub struct ExternalMessageResponse {
-    /// `new_turn`, `queued`, or `dropped`.
+    /// `new_turn`, `queued`, `dropped`, or `steered`.
     pub outcome: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<tidebreak_core::TurnId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued: Option<QueuedTurn>,
+    /// Present exactly when the engine acknowledged steering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steered: Option<SteeredAdmission>,
+    /// Machine-readable reason when a queued answer is the honest substitute
+    /// for a steering the machine could not prove.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// One acknowledged steering admission.
+#[derive(serde::Serialize)]
+pub struct SteeredAdmission {
+    /// The native turn that acknowledged the instruction.
+    pub expected_turn_id: tidebreak_core::TurnId,
+    /// Caller correlation id, echoed verbatim.
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 /// `POST /external/code/sessions/{id}/messages` — deliver one message.
@@ -818,6 +845,9 @@ pub async fn external_messages(
                     channel_kind: Some(grant.channel_kind.clone()),
                     external_identity,
                 },
+                steer: body.steer,
+                expected_turn_id: body.expected_turn_id,
+                correlation_uuid: body.correlation_uuid,
             },
         )
         .await?;
@@ -826,19 +856,101 @@ pub async fn external_messages(
             outcome: "new_turn",
             turn_id: Some(turn.id),
             queued: None,
+            steered: None,
+            reason: None,
         },
         ExternalMessageOutcome::Queued(row) => ExternalMessageResponse {
             outcome: "queued",
             turn_id: Some(row.id),
             queued: Some(QueuedTurn::from(*row)),
+            steered: None,
+            // Routine queue-default delivery stays quiet in the channel;
+            // this reason is protocol state, not a client message.
+            reason: None,
+        },
+        ExternalMessageOutcome::SteerQueued { turn_id, reason } => ExternalMessageResponse {
+            outcome: "queued",
+            turn_id: Some(turn_id),
+            queued: None,
+            steered: None,
+            reason: Some(reason.as_str()),
+        },
+        ExternalMessageOutcome::Steered {
+            turn_id,
+            expected_turn_id,
+            correlation_uuid,
+        } => ExternalMessageResponse {
+            outcome: "steered",
+            turn_id: Some(turn_id),
+            queued: None,
+            steered: Some(SteeredAdmission {
+                expected_turn_id,
+                correlation_uuid,
+            }),
+            reason: None,
         },
         ExternalMessageOutcome::Dropped => ExternalMessageResponse {
             outcome: "dropped",
             turn_id: None,
             queued: None,
+            steered: None,
+            reason: None,
         },
     };
     Ok(Json(response))
+}
+
+/// The durable result of one external steering request.
+#[derive(serde::Serialize)]
+pub struct ExternalSteerReceiptResponse {
+    pub outcome: &'static str,
+    pub turn_id: tidebreak_core::TurnId,
+    pub expected_turn_id: tidebreak_core::TurnId,
+    pub correlation_uuid: Option<uuid::Uuid>,
+    pub reason: Option<&'static str>,
+}
+
+/// Read admission without submitting another message or contacting the harness.
+pub async fn external_steer_receipt(
+    State(state): State<AppState>,
+    ExternalGrantAuth(grant): ExternalGrantAuth,
+    Path((id, event_id)): Path<(SessionId, String)>,
+) -> Result<Json<ExternalSteerReceiptResponse>, ServerError> {
+    use tidebreak_core::code::ExternalSteerAdmission;
+    let runtime = require_bound(&state, &grant, id).await?;
+    let receipt = tidebreak_core::db::code::external_steer_admission(
+        &runtime.db,
+        &grant.owner,
+        id,
+        &event_id,
+    )
+    .await?;
+    let Some(tidebreak_core::ExternalMessageRecord::Replay {
+        turn_id,
+        steer_requested: Some(true),
+        expected_turn_id: Some(expected_turn_id),
+        correlation_uuid,
+        admission,
+        queued_reason,
+        ..
+    }) = receipt
+    else {
+        return Err(ServerError::not_found("steering admission not found"));
+    };
+    let (outcome, reason) = match admission {
+        Some(ExternalSteerAdmission::Steered) => ("steered", None),
+        Some(ExternalSteerAdmission::Queued) => {
+            ("queued", queued_reason.map(|reason| reason.as_str()))
+        }
+        None => ("pending", Some("unacknowledged")),
+    };
+    Ok(Json(ExternalSteerReceiptResponse {
+        outcome,
+        turn_id,
+        expected_turn_id,
+        correlation_uuid,
+        reason,
+    }))
 }
 
 #[derive(serde::Deserialize)]

@@ -28,6 +28,7 @@ use crate::wip::{self, CheckpointPoint, WipContext};
 use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 use tidebreak_core::code::supervisor_tools::is_result_frame;
+use tidebreak_core::code::supervisor_tools::{decode_steer_frame, is_steer_frame};
 
 /// Consecutive retryable poll failures before the agent gives up.
 ///
@@ -98,6 +99,16 @@ pub struct Driver<E> {
     /// The installed engine to register on every poll, when the environment
     /// admitted an identity for this run.
     embedded_engine: Option<EmbeddedEngineRegistration>,
+    /// Sandbox identifier the environment assigned this incarnation; a
+    /// steering frame from any other sandbox is stale and never applied.
+    sandbox_id: Option<String>,
+    /// A fresh process identity fences inbox redelivery after a pod restart.
+    runtime_id: uuid::Uuid,
+}
+
+enum SteerFrameStep {
+    Continue,
+    End(TurnEnd),
 }
 
 impl<E: Engine> Driver<E> {
@@ -131,6 +142,8 @@ impl<E: Engine> Driver<E> {
             push_denied: inputs.forge_push_denied,
             wip: None,
             embedded_engine: None,
+            sandbox_id: inputs.sandbox_id.clone(),
+            runtime_id: uuid::Uuid::new_v4(),
         }
     }
 
@@ -199,6 +212,8 @@ impl<E: Engine> Driver<E> {
             serde_json::json!({
                 "harness": "custom",
                 "agent": "tidebreak-supervised-agent",
+                "steering_protocol": 1,
+                "runtime_id": self.runtime_id.to_string(),
             }),
         );
         if self.push_denied && !self.research {
@@ -236,8 +251,37 @@ impl<E: Engine> Driver<E> {
         self.max_turns.is_none_or(|max| turn <= max)
     }
 
+    /// An idle frame may be a replay whose native acknowledgment was lost.
+    /// Consume its transport entry without releasing the server's queue row.
+    fn consume_idle_steer_frames(&mut self) {
+        for message in &self.inbox {
+            if self.processed_frames.contains(&message.seq) || !is_steer_frame(&message.body) {
+                continue;
+            }
+            let payload = match decode_steer_frame(&message.body) {
+                Some(frame) => serde_json::json!({
+                    "seq": message.seq,
+                    "expected_turn_id": frame.expected_turn_id,
+                    "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                    "native_turn": frame.native_turn,
+                    "correlation_uuid": frame.correlation_uuid,
+                    "reason": "turn_not_running",
+                }),
+                None => serde_json::json!({
+                    "seq": message.seq,
+                    "reason": "malformed_steer_frame",
+                }),
+            };
+            self.outbox.push("steer_unacknowledged", payload);
+            self.processed_frames.insert(message.seq);
+        }
+        self.advance_acknowledged_frames();
+    }
+
     /// Picks the next turn, or nothing.
-    fn decide(&self) -> NextAction {
+    fn decide(&mut self) -> NextAction {
+        self.consume_idle_steer_frames();
         if !self.budget_allows(self.turn) {
             // The budget is spent: park idle and keep polling, matching the
             // spawn contract. The endpoint decides what happens next.
@@ -254,7 +298,7 @@ impl<E: Engine> Driver<E> {
             .inbox
             .iter()
             .filter(|message| !self.processed_frames.contains(&message.seq))
-            .map(|message| message.body.as_str())
+            .map(|message| message.body.clone())
             .collect::<Vec<_>>();
         if !input.is_empty() {
             return NextAction::Run(TurnRequest {
@@ -408,9 +452,16 @@ impl<E: Engine> Driver<E> {
     /// Delivers pending inbox messages into a running turn, in order.
     async fn steer_pending(&mut self, handle: &mut dyn TurnHandle) -> Option<TurnEnd> {
         while let Some(message) = self.inbox.front() {
+            if is_steer_frame(&message.body) {
+                let message = message.clone();
+                match self.steer_frame(handle, &message).await {
+                    SteerFrameStep::Continue => {}
+                    SteerFrameStep::End(end) => return Some(end),
+                }
+                continue;
+            }
             if message.interrupt {
-                // The body is not delivered into this turn; it stays queued
-                // and opens the next one.
+                // Ordinary interrupt input opens the next turn.
                 handle.interrupt().await;
                 return None;
             }
@@ -420,11 +471,139 @@ impl<E: Engine> Driver<E> {
                     self.delivered_through = Some(message.seq);
                     self.advance_acknowledged_frames();
                 }
-                SteerOutcome::Refused => return None,
+                SteerOutcome::Refused | SteerOutcome::Unacknowledged => return None,
                 SteerOutcome::Ended(end) => return Some(end),
             }
         }
         None
+    }
+
+    /// Delivers exactly one framed steering admission.
+    async fn steer_frame(
+        &mut self,
+        handle: &mut dyn TurnHandle,
+        message: &SupervisorMessage,
+    ) -> SteerFrameStep {
+        let Some(frame) = decode_steer_frame(&message.body) else {
+            // A malformed reserved frame must not become engine text: dropping
+            // it is safer than letting an unvalidated payload steer the agent.
+            let message = self.inbox.pop_front().expect("front was just observed");
+            self.delivered_through = Some(message.seq);
+            self.advance_acknowledged_frames();
+            self.outbox.push(
+                "steer_refused",
+                serde_json::json!({
+                    "seq": message.seq,
+                    "reason": "malformed_steer_frame",
+                }),
+            );
+            return SteerFrameStep::Continue;
+        };
+        let correlation_uuid = uuid::Uuid::parse_str(&frame.correlation_uuid).ok();
+        let stale = self.sandbox_id.as_deref() != Some(frame.sandbox_id.as_str())
+            || uuid::Uuid::parse_str(&frame.runtime_id).ok() != Some(self.runtime_id)
+            || frame.native_turn != self.turn
+            || correlation_uuid.is_none()
+            || uuid::Uuid::parse_str(&frame.expected_turn_id).is_err();
+        if stale {
+            // Gateway retains the inbox across pod replacements. This frame
+            // may have reached its old turn before that pod lost its receipt.
+            // A stale target proves nothing about its original admission.
+            let message = self.inbox.pop_front().expect("front was just observed");
+            self.delivered_through = Some(message.seq);
+            self.advance_acknowledged_frames();
+            self.outbox.push(
+                "steer_unacknowledged",
+                serde_json::json!({
+                    "seq": message.seq,
+                    "expected_turn_id": frame.expected_turn_id,
+                    "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                    "native_turn": frame.native_turn,
+                    "correlation_uuid": frame.correlation_uuid,
+                    "reason": "stale_turn",
+                }),
+            );
+            return SteerFrameStep::Continue;
+        }
+        match handle
+            .steer_with_correlation(frame.body.clone(), correlation_uuid)
+            .await
+        {
+            SteerOutcome::Delivered => {
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_ack",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                    "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                    "native_turn": frame.native_turn,
+                        "correlation_uuid": frame.correlation_uuid,
+                    }),
+                );
+                SteerFrameStep::Continue
+            }
+            SteerOutcome::Unacknowledged => {
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_unacknowledged",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                        "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                        "native_turn": frame.native_turn,
+                        "correlation_uuid": frame.correlation_uuid,
+                    }),
+                );
+                SteerFrameStep::Continue
+            }
+            SteerOutcome::Refused => {
+                // The engine refused; consume the frame so it can never run as
+                // an ordinary text turn beside the server's durable row. The
+                // server owns queue fallback through the original queue id.
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_refused",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                    "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                    "native_turn": frame.native_turn,
+                        "correlation_uuid": frame.correlation_uuid,
+                        "reason": "engine_refused",
+                    }),
+                );
+                SteerFrameStep::Continue
+            }
+            SteerOutcome::Ended(end) => {
+                let message = self.inbox.pop_front().expect("front was just observed");
+                self.delivered_through = Some(message.seq);
+                self.advance_acknowledged_frames();
+                self.outbox.push(
+                    "steer_refused",
+                    serde_json::json!({
+                        "seq": message.seq,
+                        "expected_turn_id": frame.expected_turn_id,
+                    "sandbox_id": frame.sandbox_id,
+                    "runtime_id": frame.runtime_id,
+                    "native_turn": frame.native_turn,
+                        "correlation_uuid": frame.correlation_uuid,
+                        "reason": "turn_ended",
+                    }),
+                );
+                SteerFrameStep::End(end)
+            }
+        }
     }
 
     /// Posts one poll, classifies the outcome, and absorbs instructions.
@@ -672,7 +851,7 @@ impl<E: Engine> Driver<E> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -796,6 +975,8 @@ mod tests {
         turns: Mutex<Vec<TurnRequest>>,
         steers: Mutex<Vec<String>>,
         refuse_steer: AtomicBool,
+        correlated_outcome: Mutex<Option<SteerOutcome>>,
+        correlated_calls: AtomicUsize,
         ends: tokio::sync::Mutex<mpsc::UnboundedReceiver<TurnEnd>>,
         end_sender: mpsc::UnboundedSender<TurnEnd>,
         records: Mutex<VecDeque<Option<AssistantRecord>>>,
@@ -814,6 +995,8 @@ mod tests {
                     turns: Mutex::new(Vec::new()),
                     steers: Mutex::new(Vec::new()),
                     refuse_steer: AtomicBool::new(false),
+                    correlated_outcome: Mutex::new(None),
+                    correlated_calls: AtomicUsize::new(0),
                     ends: tokio::sync::Mutex::new(ends),
                     end_sender,
                     records: Mutex::new(VecDeque::new()),
@@ -867,6 +1050,20 @@ mod tests {
             SteerOutcome::Delivered
         }
 
+        async fn steer_with_correlation(
+            &mut self,
+            _body: String,
+            _correlation: Option<uuid::Uuid>,
+        ) -> SteerOutcome {
+            self.state.correlated_calls.fetch_add(1, Ordering::SeqCst);
+            self.state
+                .correlated_outcome
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(SteerOutcome::Refused)
+        }
+
         async fn interrupt(&mut self) {
             self.state.end_sender.send(TurnEnd::Interrupted).unwrap();
         }
@@ -887,6 +1084,175 @@ mod tests {
                 state: Arc::clone(&self.state),
             }))
         }
+    }
+
+    fn steering_message(seq: i64, native_turn: u32, runtime_id: uuid::Uuid) -> SupervisorMessage {
+        SupervisorMessage {
+            seq,
+            body: tidebreak_core::code::supervisor_tools::encode_steer_frame(
+                &tidebreak_core::code::supervisor_tools::SupervisorSteerFrame {
+                    expected_turn_id: uuid::Uuid::new_v4().to_string(),
+                    sandbox_id: "018f0000-0000-7000-8000-000000000000".into(),
+                    native_turn,
+                    runtime_id: runtime_id.to_string(),
+                    correlation_uuid: uuid::Uuid::new_v4().to_string(),
+                    body: "change the approach".into(),
+                },
+            ),
+            interrupt: false,
+        }
+    }
+
+    #[test]
+    fn idle_redelivery_stays_unresolved_without_starting_a_turn() {
+        let mut driver = driver(MockEngine::new(), "http://unused", &inputs("turn", None));
+        driver.ran_spawn_task = true;
+        driver
+            .inbox
+            .push_back(steering_message(1, 1, driver.runtime_id));
+        let mut malformed = steering_message(2, 1, driver.runtime_id);
+        malformed.body = format!(
+            "{}invalid",
+            tidebreak_core::code::supervisor_tools::STEER_PREFIX
+        );
+        driver.inbox.push_back(malformed);
+        assert!(matches!(driver.decide(), NextAction::Wait));
+        assert!(driver.inbox.is_empty());
+        assert_eq!(driver.delivered_through, Some(2));
+        let events = driver.outbox.take_batch();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.kind == "steer_unacknowledged"));
+    }
+
+    #[test]
+    fn idle_steering_behind_ordinary_input_does_not_enter_next_turn() {
+        let mut driver = driver(MockEngine::new(), "http://unused", &inputs("turn", None));
+        driver.ran_spawn_task = true;
+        let mut ordinary = steering_message(1, 1, driver.runtime_id);
+        ordinary.body = "ordinary message".into();
+        driver
+            .inbox
+            .extend([ordinary, steering_message(2, 1, driver.runtime_id)]);
+        let NextAction::Run(request) = driver.decide() else {
+            panic!("ordinary input must run")
+        };
+        assert_eq!(request.input, "ordinary message");
+        assert_eq!(driver.delivered_through, None);
+        assert!(driver.processed_frames.contains(&2));
+    }
+
+    #[tokio::test]
+    async fn stale_and_refused_steering_never_reappears_as_input() {
+        let engine = MockEngine::new();
+        let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        driver.ran_spawn_task = true;
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        let mut handle = MockTurnHandle {
+            state: Arc::clone(&engine.state),
+        };
+        driver
+            .inbox
+            .push_back(steering_message(1, 99, driver.runtime_id));
+        assert!(driver.steer_pending(&mut handle).await.is_none());
+        driver
+            .inbox
+            .push_back(steering_message(2, 1, driver.runtime_id));
+        // The mock has no correlated acknowledgment configured.
+        assert!(driver.steer_pending(&mut handle).await.is_none());
+        assert!(engine.state.steers.lock().unwrap().is_empty());
+        assert!(matches!(driver.decide(), NextAction::Wait));
+        assert_eq!(driver.delivered_through, Some(2));
+        let events = driver.outbox.take_batch();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "steer_unacknowledged");
+        assert_eq!(events[1].kind, "steer_refused");
+        assert_eq!(events[1].payload["native_turn"], 1);
+        assert_eq!(
+            events[1].payload["sandbox_id"],
+            "018f0000-0000-7000-8000-000000000000"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_confirmed_steering_emits_ack_and_unknown_delivery_is_not_replayed() {
+        for (outcome, event_kind) in [
+            (SteerOutcome::Delivered, "steer_ack"),
+            (SteerOutcome::Unacknowledged, "steer_unacknowledged"),
+        ] {
+            let engine = MockEngine::new();
+            *engine.state.correlated_outcome.lock().unwrap() = Some(outcome);
+            let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+            driver.ran_spawn_task = true;
+            driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+            let mut handle = MockTurnHandle {
+                state: Arc::clone(&engine.state),
+            };
+            let message = steering_message(1, 1, driver.runtime_id);
+            let frame = decode_steer_frame(&message.body).unwrap();
+            driver.inbox.push_back(message);
+            assert!(driver.steer_pending(&mut handle).await.is_none());
+            assert!(matches!(driver.decide(), NextAction::Wait));
+            assert_eq!(driver.delivered_through, Some(1));
+            let events = driver.outbox.take_batch();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, event_kind);
+            assert_eq!(
+                events[0].payload["correlation_uuid"],
+                frame.correlation_uuid
+            );
+            assert_eq!(
+                events[0].payload["expected_turn_id"],
+                frame.expected_turn_id
+            );
+            assert_eq!(events[0].payload["sandbox_id"], frame.sandbox_id);
+            assert_eq!(events[0].payload["native_turn"], frame.native_turn);
+            assert_eq!(events[0].payload["runtime_id"], frame.runtime_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn redelivery_after_lost_ack_does_not_release_the_original_instruction() {
+        let engine = MockEngine::new();
+        *engine.state.correlated_outcome.lock().unwrap() = Some(SteerOutcome::Delivered);
+        let mut first = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        first.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        let message = steering_message(1, 1, first.runtime_id);
+        let mut handle = MockTurnHandle {
+            state: Arc::clone(&engine.state),
+        };
+        first.inbox.push_back(message.clone());
+        assert!(first.steer_pending(&mut handle).await.is_none());
+        assert_eq!(first.outbox.take_batch()[0].kind, "steer_ack");
+        // The pod dies before posting that acknowledgment and transport cursor.
+        // Gateway has not observed turn_started either, so it restarts at the same turn.
+        drop(first);
+        let mut replacement = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        replacement.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        assert_eq!(replacement.turn, 1);
+        assert_ne!(
+            replacement.runtime_id,
+            decode_steer_frame(&message.body)
+                .unwrap()
+                .runtime_id
+                .parse::<uuid::Uuid>()
+                .unwrap()
+        );
+        replacement.ran_spawn_task = true;
+        replacement.inbox.push_back(message);
+        assert!(replacement.steer_pending(&mut handle).await.is_none());
+        assert_eq!(
+            replacement.outbox.take_batch()[0].kind,
+            "steer_unacknowledged"
+        );
+        assert!(matches!(replacement.decide(), NextAction::Wait));
+        assert_eq!(replacement.delivered_through, Some(1));
+        assert_eq!(
+            engine.state.correlated_calls.load(Ordering::SeqCst),
+            1,
+            "a replacement process must not repeat native delivery"
+        );
     }
 
     fn inputs(mode: &str, max_turns: Option<&str>) -> Inputs {
@@ -1155,6 +1521,13 @@ mod tests {
         run.await.unwrap().unwrap();
         let kinds = event_kinds(&state);
         assert_eq!(kinds[0], "supervisor_started");
+        let started = event_payload(&state, "supervisor_started", 0);
+        assert_eq!(started["steering_protocol"], 1);
+        assert!(
+            !uuid::Uuid::parse_str(started["runtime_id"].as_str().unwrap())
+                .unwrap()
+                .is_nil()
+        );
         assert_eq!(kinds.last().map(String::as_str), Some("supervisor_stopped"));
         assert_eq!(
             event_payload(&state, "supervisor_stopped", 0)["reason"],

@@ -92,13 +92,13 @@ pub async fn sessions_with_queued_turns_all_owners(
         .collect()
 }
 
-/// The FIFO head, or `None` when the queue is empty.
+/// The FIFO head, or `None` when the queue is empty or steering owns its head.
 pub async fn queued_turn_head(
     store: &DbStore,
     owner: &OwnerId,
     session_id: SessionId,
 ) -> Result<Option<QueuedTurn>> {
-    entities::code_queued_turn::Entity::find()
+    let Some(head) = entities::code_queued_turn::Entity::find()
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
         .order_by_asc(entities::code_queued_turn::Column::Position)
@@ -106,8 +106,36 @@ pub async fn queued_turn_head(
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(queued_turn_from_model)
-        .transpose()
+    else {
+        return Ok(None);
+    };
+    if steer_owns_queued_turn(&store.conn, owner, session_id, TurnId(head.id)).await? {
+        // Do not skip the held head: later messages retain their FIFO order.
+        return Ok(None);
+    }
+    queued_turn_from_model(head).map(Some)
+}
+
+/// A steering admission owns its queue row until a proven fallback releases it.
+async fn steer_owns_queued_turn<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+    id: TurnId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let receipt = entities::code_external_event::Entity::find()
+        .filter(entities::code_external_event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_event::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_external_event::Column::TurnId.eq(id.0))
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(receipt.is_some_and(|receipt| {
+        receipt.steer_requested && receipt.outcome.as_deref() != Some("queued")
+    }))
 }
 
 /// Park one message at the queue tail. The caller supplies the row id, which
@@ -185,6 +213,9 @@ pub async fn promote_queued_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(false);
     }
+    if steer_owns_queued_turn(&transaction, owner, expected.session_id, expected.id).await? {
+        return Ok(false);
+    }
     let deleted = entities::code_queued_turn::Entity::delete_many()
         .filter(entities::code_queued_turn::Column::Id.eq(expected.id.0))
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
@@ -222,6 +253,9 @@ pub async fn promote_moved_queued_turn(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, expected.session_id).await? {
         transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    if steer_owns_queued_turn(&transaction, owner, expected.session_id, expected.id).await? {
         return Ok(false);
     }
     let deleted = entities::code_queued_turn::Entity::delete_many()
@@ -295,6 +329,11 @@ pub async fn update_queued_turn(
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    if message.is_some() && steer_owns_queued_turn(&transaction, owner, session_id, id).await? {
+        return Err(AgentError::Store(
+            "a steering message cannot be edited until its admission resolves".into(),
+        ));
     }
     let now = database_now(&transaction).await?;
     let mut rows = entities::code_queued_turn::Entity::find()

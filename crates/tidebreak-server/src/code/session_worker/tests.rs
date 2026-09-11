@@ -2062,3 +2062,735 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
         1
     );
 }
+
+#[derive(Clone, Copy)]
+enum SteerControlAnswer {
+    Ack,
+    Unsupported,
+    Rejected,
+    Unknown,
+    Timeout,
+}
+
+/// A native control channel whose acknowledgment can be held independently
+/// of the worker reply and database commit.
+struct SteerControlHarness {
+    answer: SteerControlAnswer,
+    entered: Notify,
+    acknowledge: Notify,
+    acknowledged: Notify,
+    requests: std::sync::Mutex<Vec<(String, Option<uuid::Uuid>)>>,
+    events: std::sync::Mutex<Vec<HarnessEvent>>,
+}
+
+impl SteerControlHarness {
+    fn new(answer: SteerControlAnswer) -> Self {
+        Self {
+            answer,
+            entered: Notify::new(),
+            acknowledge: Notify::new(),
+            acknowledged: Notify::new(),
+            requests: std::sync::Mutex::new(Vec::new()),
+            events: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl HarnessSession for SteerControlHarness {
+    async fn run_turn(&self, _: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        panic!("a steering control must not start another native turn");
+    }
+
+    async fn decide(&self, _: HarnessApprovalRef, _: ApprovalDecision) -> Result<(), HarnessError> {
+        panic!("a steering control must not decide an approval");
+    }
+
+    async fn interrupt(&self) -> Result<(), HarnessError> {
+        panic!("a steering control must not interrupt the native turn");
+    }
+
+    async fn steer_with_correlation(
+        &self,
+        text: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((text.clone(), correlation_uuid));
+        self.entered.notify_one();
+        match self.answer {
+            SteerControlAnswer::Ack => {
+                self.acknowledge.notified().await;
+                self.events.lock().unwrap().push(HarnessEvent::UserSteered {
+                    text,
+                    correlation_uuid,
+                });
+                self.acknowledged.notify_one();
+                Ok(())
+            }
+            SteerControlAnswer::Unsupported => Err(HarnessError::SteeringUnsupported),
+            SteerControlAnswer::Rejected => Err(HarnessError::SteeringRejected(
+                "native turn rejected the request".into(),
+            )),
+            SteerControlAnswer::Unknown => Err(HarnessError::Other(
+                "the request was written but its acknowledgment was lost".into(),
+            )),
+            SteerControlAnswer::Timeout => std::future::pending().await,
+        }
+    }
+
+    fn resume_ref(&self) -> Option<String> {
+        None
+    }
+    fn unrecognized_events(&self) -> u64 {
+        0
+    }
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        Ok(())
+    }
+}
+
+async fn pending_worker_steer(
+    db: &Arc<DbStore>,
+    session_id: SessionId,
+) -> (SteerAdmission, QueuedTurn) {
+    let expected_turn_id = TurnId::new();
+    let correlation_uuid = Some(uuid::Uuid::new_v4());
+    let owner = OwnerId::local();
+    let record = tidebreak_core::db::code::record_external_message_with_steer(
+        db,
+        &owner,
+        session_id,
+        "EvWorkerSteer",
+        "1700000001.000100",
+        "use the corrected fixture",
+        &tidebreak_core::TurnActor::default(),
+        None,
+        tidebreak_core::db::code::ExternalSteerAdmissionInput {
+            request_steer: true,
+            expected_turn_id: Some(expected_turn_id),
+            correlation_uuid,
+        },
+    )
+    .await
+    .unwrap();
+    let tidebreak_core::ExternalMessageRecord::Recorded(row) = record else {
+        panic!("first worker steer must create its receipt");
+    };
+    (
+        SteerAdmission {
+            db: Arc::clone(db),
+            owner,
+            session_id,
+            spawn_epoch: 1,
+            event_id: "EvWorkerSteer".into(),
+            expected_turn_id,
+            correlation_uuid,
+        },
+        *row,
+    )
+}
+
+async fn worker_steer_receipt(admission: &SteerAdmission) -> tidebreak_core::ExternalMessageRecord {
+    tidebreak_core::db::code::external_steer_admission(
+        &admission.db,
+        &admission.owner,
+        admission.session_id,
+        &admission.event_id,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn durable_steer_ack_commits_before_the_worker_replies() {
+    use sea_orm::{ConnectionTrait, TransactionTrait};
+    use tidebreak_core::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    let (directory, db, _, session_id) = seeded_session(HarnessKind::Codex, None).await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    insert_running_steer_target(&db, &admission).await;
+    let engine = Arc::new(SteerControlHarness::new(SteerControlAnswer::Ack));
+    // Hold SQLite's writer lock so the native ACK cannot immediately become
+    // a durable receipt. A premature worker reply is observable in this gap.
+    let writer = sea_orm::Database::connect(format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("t.db").display()
+    ))
+    .await
+    .unwrap();
+    let transaction = writer.begin().await.unwrap();
+    transaction
+        .execute_unprepared(
+            "UPDATE session SET unrecognized_event_count = unrecognized_event_count",
+        )
+        .await
+        .unwrap();
+    let (reply, mut response) = oneshot::channel();
+    let worker = {
+        let engine = Arc::clone(&engine);
+        let admission = admission.clone();
+        tokio::spawn(async move {
+            apply_control(
+                engine.as_ref(),
+                WorkerCommand::Steer {
+                    expected_turn_id: admission.expected_turn_id,
+                    message: row.message,
+                    admission: Some(admission.clone()),
+                    reply,
+                },
+                Some(admission.expected_turn_id),
+                None,
+            )
+            .await;
+        })
+    };
+    engine.entered.notified().await;
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    engine.acknowledge.notify_one();
+    engine.acknowledged.notified().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut response)
+            .await
+            .is_err(),
+        "native ACK alone must not complete the worker reply before persistence"
+    );
+    transaction.rollback().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), response)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    worker.await.unwrap();
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: Some(ExternalSteerAdmission::Steered),
+            ..
+        }
+    ));
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&db, &admission.owner, session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine.requests.lock().unwrap().as_slice(),
+        &[(
+            "use the corrected fixture".into(),
+            admission.correlation_uuid
+        )]
+    );
+    assert_eq!(engine.events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn durable_steer_ack_survives_a_dropped_worker_reply() {
+    use tidebreak_core::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    let (directory, db, _, session_id) = seeded_session(HarnessKind::Codex, None).await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    insert_running_steer_target(&db, &admission).await;
+    let engine = SteerControlHarness::new(SteerControlAnswer::Ack);
+    engine.acknowledge.notify_one();
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    apply_control(
+        &engine,
+        WorkerCommand::Steer {
+            expected_turn_id: admission.expected_turn_id,
+            message: row.message,
+            admission: Some(admission.clone()),
+            reply,
+        },
+        Some(admission.expected_turn_id),
+        None,
+    )
+    .await;
+    assert_eq!(engine.events.lock().unwrap().len(), 1);
+    // A reconnecting HTTP delivery reads the stored admission, even when its
+    // original request no longer waits for the worker's response.
+    let reopened = DbStore::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("t.db").display()
+    ))
+    .await
+    .unwrap();
+    let replay = tidebreak_core::db::code::record_external_message_with_steer(
+        &reopened,
+        &admission.owner,
+        session_id,
+        &admission.event_id,
+        "1700000001.000100",
+        "use the corrected fixture",
+        &tidebreak_core::TurnActor::default(),
+        None,
+        tidebreak_core::db::code::ExternalSteerAdmissionInput::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        replay,
+        ExternalMessageRecord::Replay {
+            turn_id: row.id,
+            steer_requested: Some(true),
+            expected_turn_id: Some(admission.expected_turn_id),
+            correlation_uuid: admission.correlation_uuid,
+            admission: Some(ExternalSteerAdmission::Steered),
+            queued_reason: None,
+        }
+    );
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&reopened, &admission.owner, session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn durable_steer_only_proven_rejection_releases_the_queue() {
+    use tidebreak_core::code::{
+        ExternalMessageRecord, ExternalSteerAdmission, ExternalSteerQueuedReason,
+    };
+    for (answer, released) in [
+        (SteerControlAnswer::Unsupported, true),
+        (SteerControlAnswer::Rejected, true),
+        (SteerControlAnswer::Unknown, false),
+        (SteerControlAnswer::Timeout, false),
+    ] {
+        let (_directory, db, _, session_id) = seeded_session(HarnessKind::Codex, None).await;
+        let (admission, row) = pending_worker_steer(&db, session_id).await;
+        let engine = SteerControlHarness::new(answer);
+        let (reply, response) = oneshot::channel();
+        apply_control(
+            &engine,
+            WorkerCommand::Steer {
+                expected_turn_id: admission.expected_turn_id,
+                message: row.message,
+                admission: Some(admission.clone()),
+                reply,
+            },
+            Some(admission.expected_turn_id),
+            None,
+        )
+        .await;
+        let error = response.await.unwrap().unwrap_err();
+        if released {
+            assert!(matches!(
+                error,
+                WorkerError::SteeringUnavailable(_) | WorkerError::SteeringRejected(_)
+            ));
+            assert!(matches!(
+                worker_steer_receipt(&admission).await,
+                ExternalMessageRecord::Replay {
+                    admission: Some(ExternalSteerAdmission::Queued),
+                    queued_reason: Some(ExternalSteerQueuedReason::SteerUnsupported),
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(error, WorkerError::Failed(_)));
+            assert!(matches!(
+                worker_steer_receipt(&admission).await,
+                ExternalMessageRecord::Replay {
+                    admission: None,
+                    queued_reason: None,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            queued_turn_head(&db, &admission.owner, session_id)
+                .await
+                .unwrap()
+                .is_some(),
+            released
+        );
+        assert_eq!(
+            tidebreak_core::db::code::list_queued_turns(&db, &admission.owner, session_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(engine.events.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn durable_steer_stale_target_falls_back_without_native_delivery() {
+    use tidebreak_core::code::{
+        ExternalMessageRecord, ExternalSteerAdmission, ExternalSteerQueuedReason,
+    };
+    let (_directory, db, _, session_id) = seeded_session(HarnessKind::Codex, None).await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    let engine = SteerControlHarness::new(SteerControlAnswer::Ack);
+    let (reply, response) = oneshot::channel();
+    apply_control(
+        &engine,
+        WorkerCommand::Steer {
+            expected_turn_id: admission.expected_turn_id,
+            message: row.message,
+            admission: Some(admission.clone()),
+            reply,
+        },
+        Some(TurnId::new()),
+        None,
+    )
+    .await;
+    assert!(matches!(
+        response.await.unwrap(),
+        Err(WorkerError::StaleTurn(_))
+    ));
+    assert!(engine.requests.lock().unwrap().is_empty());
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: Some(ExternalSteerAdmission::Queued),
+            queued_reason: Some(ExternalSteerQueuedReason::StaleTurn),
+            ..
+        }
+    ));
+    assert_eq!(
+        queued_turn_head(&db, &admission.owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        row.id
+    );
+}
+
+async fn insert_running_steer_target(db: &DbStore, admission: &SteerAdmission) -> Turn {
+    let turn = Turn {
+        actor: None,
+        id: admission.expected_turn_id,
+        session_id: admission.session_id,
+        ordinal: 1,
+        status: TurnStatus::Running,
+        model: None,
+        fast_mode: false,
+        user_input: "original work".into(),
+        user_input_blob_id: None,
+        attachments: Vec::new(),
+        checkpoint_ref: None,
+        diffstat: None,
+        usage: None,
+        narrative: None,
+        rewrite: None,
+        started_at: Utc::now(),
+        ended_at: None,
+        park_ref: None,
+        park_wait: None,
+    };
+    insert_turn(db, &admission.owner, &turn).await.unwrap();
+    turn
+}
+
+#[tokio::test]
+async fn durable_steer_late_stream_ack_consumes_the_original_queue_row() {
+    use tidebreak_core::code::{ExternalMessageRecord, ExternalSteerAdmission};
+    let (_directory, db, sink, session_id) = seeded_sink().await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    insert_running_steer_target(&db, &admission).await;
+    sink.set_turn(admission.expected_turn_id);
+    let (reply, response) = oneshot::channel();
+    apply_control(
+        &SteerControlHarness::new(SteerControlAnswer::Timeout),
+        WorkerCommand::Steer {
+            expected_turn_id: admission.expected_turn_id,
+            message: row.message.clone(),
+            admission: Some(admission.clone()),
+            reply,
+        },
+        Some(admission.expected_turn_id),
+        None,
+    )
+    .await;
+    assert!(matches!(
+        response.await.unwrap(),
+        Err(WorkerError::Failed(_))
+    ));
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: None,
+            ..
+        }
+    ));
+
+    sink.emit(HarnessEvent::UserSteered {
+        text: row.message.clone(),
+        correlation_uuid: admission.correlation_uuid,
+    })
+    .await;
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: Some(ExternalSteerAdmission::Steered),
+            ..
+        }
+    ));
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&db, &admission.owner, session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = list_events(&db, &admission.owner, session_id, 0, MAX_REPLAY_EVENTS)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|item| matches!(&item.event,
+        Event::UserSteered { text, .. } if text == &row.message))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_steer_stream_ack_rejects_stale_or_foreign_targets() {
+    use tidebreak_core::code::{
+        ExternalMessageRecord, ExternalSteerAdmission, ExternalSteerQueuedReason,
+    };
+    for invalid in [
+        "epoch",
+        "turn",
+        "terminal",
+        "location",
+        "remote_claim",
+        "correlation",
+        "owner",
+        "session",
+        "queued",
+    ] {
+        let location = if invalid == "location" {
+            tidebreak_core::ExecutionLocation::Sandbox
+        } else {
+            tidebreak_core::ExecutionLocation::Machine
+        };
+        let (_directory, db, mut sink, session_id) = seeded_sink_at(location).await;
+        let (admission, row) = pending_worker_steer(&db, session_id).await;
+        let mut turn = insert_running_steer_target(&db, &admission).await;
+        sink.set_turn(admission.expected_turn_id);
+        let mut correlation_uuid = admission.correlation_uuid;
+        match invalid {
+            "epoch" => {
+                tidebreak_core::db::code::bump_spawn_epoch(&db, session_id, None)
+                    .await
+                    .unwrap();
+            }
+            "turn" => {
+                turn.id = TurnId::new();
+                turn.ordinal = 2;
+                insert_turn(&db, &admission.owner, &turn).await.unwrap();
+                sink.set_turn(turn.id);
+            }
+            "terminal" => {
+                turn.status = TurnStatus::Completed;
+                turn.ended_at = Some(Utc::now());
+                tidebreak_core::db::code::save_turn(&db, &admission.owner, &turn)
+                    .await
+                    .unwrap();
+            }
+            "remote_claim" => assert!(tidebreak_core::db::code::claim_external_steer_target(
+                &db,
+                &admission.owner,
+                session_id,
+                &admission.event_id,
+                admission.expected_turn_id,
+                correlation_uuid.unwrap(),
+                "remote-sandbox",
+                2,
+                uuid::Uuid::new_v4(),
+            )
+            .await
+            .unwrap()),
+            "correlation" => correlation_uuid = Some(uuid::Uuid::new_v4()),
+            "owner" => {
+                Arc::get_mut(&mut sink).unwrap().owner = OwnerId::new("foreign-owner").unwrap()
+            }
+            "session" => Arc::get_mut(&mut sink).unwrap().session_id = SessionId::new(),
+            "queued" => assert!(tidebreak_core::db::code::settle_external_steer_admission(
+                &db,
+                &admission.owner,
+                session_id,
+                &admission.event_id,
+                admission.expected_turn_id,
+                ExternalSteerAdmission::Queued,
+                Some(ExternalSteerQueuedReason::SteerUnsupported),
+            )
+            .await
+            .unwrap()),
+            "location" => {}
+            _ => unreachable!(),
+        }
+        sink.emit(HarnessEvent::UserSteered {
+            text: row.message,
+            correlation_uuid,
+        })
+        .await;
+        let expected = (invalid == "queued").then_some(ExternalSteerAdmission::Queued);
+        assert!(
+            matches!(worker_steer_receipt(&admission).await,
+            ExternalMessageRecord::Replay { admission, .. } if admission == expected),
+            "{invalid}"
+        );
+        assert_eq!(
+            tidebreak_core::db::code::list_queued_turns(&db, &admission.owner, session_id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{invalid}"
+        );
+        let events = list_events(&db, &admission.owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events;
+        assert!(
+            !events
+                .iter()
+                .any(|item| matches!(item.event, Event::UserSteered { .. })),
+            "{invalid}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn durable_steer_stream_ack_waits_for_receipt_commit_before_publishing() {
+    use sea_orm::{ConnectionTrait, TransactionTrait};
+    let (directory, db, sink, session_id) = seeded_sink().await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    insert_running_steer_target(&db, &admission).await;
+    sink.set_turn(admission.expected_turn_id);
+    let writer = sea_orm::Database::connect(format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("t.db").display(),
+    ))
+    .await
+    .unwrap();
+    let transaction = writer.begin().await.unwrap();
+    transaction
+        .execute_unprepared(
+            "UPDATE session SET unrecognized_event_count = unrecognized_event_count",
+        )
+        .await
+        .unwrap();
+    let (mut live, _) = sink.bus.attach(session_id);
+    let mut emitting = tokio::spawn(async move {
+        sink.emit(HarnessEvent::UserSteered {
+            text: row.message,
+            correlation_uuid: admission.correlation_uuid,
+        })
+        .await;
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut emitting)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        live.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    transaction.rollback().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), emitting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&db, &OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = list_events(&db, &OwnerId::local(), session_id, 0, MAX_REPLAY_EVENTS)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|item| matches!(item.event, Event::UserSteered { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_steer_native_ack_after_handoff_cannot_settle_the_receipt() {
+    use tidebreak_core::code::ExternalMessageRecord;
+    let (_directory, db, _, session_id) = seeded_session(HarnessKind::Codex, None).await;
+    let (admission, row) = pending_worker_steer(&db, session_id).await;
+    insert_running_steer_target(&db, &admission).await;
+    let engine = Arc::new(SteerControlHarness::new(SteerControlAnswer::Ack));
+    let (reply, response) = oneshot::channel();
+    let control = {
+        let engine = Arc::clone(&engine);
+        let admission = admission.clone();
+        tokio::spawn(async move {
+            apply_control(
+                engine.as_ref(),
+                WorkerCommand::Steer {
+                    expected_turn_id: admission.expected_turn_id,
+                    message: row.message,
+                    admission: Some(admission.clone()),
+                    reply,
+                },
+                Some(admission.expected_turn_id),
+                None,
+            )
+            .await;
+        })
+    };
+    engine.entered.notified().await;
+    tidebreak_core::db::code::bump_spawn_epoch(&db, session_id, None)
+        .await
+        .unwrap();
+    engine.acknowledge.notify_one();
+    assert!(matches!(
+        response.await.unwrap(),
+        Err(WorkerError::Failed(_))
+    ));
+    control.await.unwrap();
+    assert_eq!(
+        engine.events.lock().unwrap().len(),
+        1,
+        "native ACK was delivered"
+    );
+    assert!(matches!(
+        worker_steer_receipt(&admission).await,
+        ExternalMessageRecord::Replay {
+            admission: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        tidebreak_core::db::code::list_queued_turns(&db, &admission.owner, session_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(queued_turn_head(&db, &admission.owner, session_id)
+        .await
+        .unwrap()
+        .is_none());
+}

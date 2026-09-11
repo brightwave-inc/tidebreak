@@ -79,9 +79,29 @@ pub(crate) enum WorkerCommand {
     Steer {
         expected_turn_id: TurnId,
         message: String,
+        /// Durable external admission to settle, when this steer came from
+        /// the Slack messages endpoint.
+        admission: Option<SteerAdmission>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Shutdown,
+}
+
+/// One durable external steering admission the worker owes a settlement for.
+#[derive(Clone)]
+pub(crate) struct SteerAdmission {
+    pub db: Arc<DbStore>,
+    /// Owner of the external event row.
+    pub owner: OwnerId,
+    /// Session the event row belongs to.
+    pub session_id: SessionId,
+    pub spawn_epoch: i64,
+    /// Channel event id, the idempotency key of the admission.
+    pub event_id: String,
+    /// The active Tidebreak turn the instruction targets.
+    pub expected_turn_id: TurnId,
+    /// Caller correlation id.
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 /// The durable outcome that releases a worker after native mode acceptance.
@@ -545,7 +565,7 @@ impl LiveSink {
                     return Err(WorkerError::Failed(format!(
                         "session {} has no open turn for approval {approval_id}",
                         self.session_id
-                    )))
+                    )));
                 }
                 Err(err) => return Err(WorkerError::Failed(err.to_string())),
             },
@@ -691,6 +711,37 @@ impl HarnessEventSink for LiveSink {
             return;
         }
         let turn_id = *self.turn_id.lock().unwrap();
+        if let HarnessEvent::UserSteered {
+            correlation_uuid: Some(correlation_uuid),
+            ..
+        } = &event
+        {
+            let Some(expected_turn_id) = turn_id else {
+                return;
+            };
+            match tidebreak_core::db::code::settle_machine_external_steer_ack(
+                &self.db,
+                &self.owner,
+                self.session_id,
+                self.spawn_epoch,
+                expected_turn_id,
+                *correlation_uuid,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    warn!(
+                        session = %self.session_id,
+                        %correlation_uuid,
+                        %error,
+                        "could not persist a correlated machine steering acknowledgment"
+                    );
+                    return;
+                }
+            }
+        }
         let Some(session_event) = map_event(event, turn_id) else {
             return;
         };
@@ -1792,9 +1843,11 @@ async fn apply_control(
         WorkerCommand::Steer {
             expected_turn_id,
             message,
+            admission,
             reply,
         } => {
-            let result = match active_turn_id {
+            let admission = admission.as_ref();
+            let mut result = match active_turn_id {
                 None => Err(WorkerError::NoActiveTurn(
                     "there is no active turn to steer; the message was not queued".into(),
                 )),
@@ -1805,7 +1858,7 @@ async fn apply_control(
                 )),
                 Some(_) => match tokio::time::timeout(
                     STEER_CONTROL_TIMEOUT,
-                    engine.steer(message),
+                    engine.steer_with_correlation(message, admission.and_then(|a| a.correlation_uuid)),
                 )
                 .await
                 {
@@ -1819,12 +1872,64 @@ async fn apply_control(
                         }
                         other => WorkerError::Failed(other.to_string()),
                     }),
-                    Err(_) => Err(WorkerError::SteeringRejected(
-                        "the engine did not acknowledge steering before the control timeout; the message was not queued"
-                            .into(),
-                    )),
+                    Err(_) => {
+                        let detail = "the engine did not acknowledge steering before the control timeout".to_owned();
+                        Err(if admission.is_some() {
+                            WorkerError::Failed(detail)
+                        } else {
+                            WorkerError::SteeringRejected(detail)
+                        })
+                    },
                 },
             };
+            if let Some(admission) = admission {
+                use tidebreak_core::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+                let settlement = match &result {
+                    Ok(()) => Some((ExternalSteerAdmission::Steered, None)),
+                    Err(WorkerError::NoActiveTurn(_) | WorkerError::StaleTurn(_)) => Some((
+                        ExternalSteerAdmission::Queued,
+                        Some(ExternalSteerQueuedReason::StaleTurn),
+                    )),
+                    Err(WorkerError::SteeringUnavailable(_) | WorkerError::SteeringRejected(_)) => {
+                        Some((
+                            ExternalSteerAdmission::Queued,
+                            Some(ExternalSteerQueuedReason::SteerUnsupported),
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((outcome, reason)) = settlement {
+                    let settled = if let Some(correlation_uuid) = admission.correlation_uuid {
+                        tidebreak_core::db::code::settle_machine_external_steer_admission(
+                            &admission.db,
+                            &admission.owner,
+                            admission.session_id,
+                            admission.spawn_epoch,
+                            admission.expected_turn_id,
+                            correlation_uuid,
+                            outcome,
+                            reason,
+                        )
+                        .await
+                    } else {
+                        Ok(false)
+                    };
+                    match settled {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                session = %admission.session_id,
+                                event_id = %admission.event_id,
+                                "dropping a steering settlement from a mismatched worker, turn, or outcome"
+                            );
+                            result = Err(WorkerError::Failed(
+                                "The steering receipt no longer matches this worker, turn, or outcome.".into(),
+                            ));
+                        }
+                        Err(error) => result = Err(WorkerError::Failed(error.to_string())),
+                    }
+                }
+            }
             let _ = reply.send(result);
             ControlFlow::Continue
         }
@@ -2604,7 +2709,7 @@ async fn drive_turn_inner(
                 WorktreeWait::Shutdown => {
                     return Err(WorkerError::Conflict(
                         "the session worker is shutting down".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -4148,7 +4253,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
             decision: decision.into(),
             actor: None,
         },
-        HarnessEvent::UserSteered { text } => Event::UserSteered {
+        HarnessEvent::UserSteered { text, .. } => Event::UserSteered {
             text,
             message_id: None,
         },

@@ -601,10 +601,11 @@ impl CodeRuntime {
         expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
-        self.steer_inner(owner, id, expected_turn_id, message, None)
+        self.steer_inner(owner, id, expected_turn_id, message, None, None)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn steer_inner(
         &self,
         owner: &OwnerId,
@@ -612,6 +613,7 @@ impl CodeRuntime {
         expected_turn_id: TurnId,
         message: String,
         trigger_delivery: Option<TriggerDeliveryClaim>,
+        admission: Option<SteerAdmission>,
     ) -> Result<(), ServerError> {
         if let Some(claim) = trigger_delivery {
             if tidebreak_core::db::code::trigger_delivery_accepted(
@@ -685,6 +687,7 @@ impl CodeRuntime {
                 .send(WorkerCommand::Steer {
                     expected_turn_id,
                     message,
+                    admission,
                     reply,
                 })
                 .await
@@ -732,6 +735,7 @@ impl CodeRuntime {
                 delivery_id,
                 lease_token,
             }),
+            None,
         )
         .await
     }
@@ -787,5 +791,132 @@ impl CodeRuntime {
                 other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
             })?;
         self.attach_and_spawn_worker(session).await
+    }
+}
+
+impl CodeRuntime {
+    /// Ask the local worker to settle an external steering receipt before replying.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn steer_external(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        event_id: String,
+        text: String,
+        expected_turn_id: TurnId,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> Result<Option<tidebreak_core::code::ExternalSteerQueuedReason>, ServerError> {
+        use tidebreak_core::code::ExternalSteerQueuedReason;
+        let session = self.get_session(owner, session_id).await?;
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let reason = if adapter.capabilities(&probe).mid_turn_steering != CapLevel::Supported {
+            Some(ExternalSteerQueuedReason::SteerUnsupported)
+        } else if get_open_turn(&self.db, owner, session_id)
+            .await?
+            .is_none_or(|turn| turn.id != expected_turn_id)
+        {
+            Some(ExternalSteerQueuedReason::StaleTurn)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.settle_external_queued(owner, session_id, &event_id, expected_turn_id, reason)
+                .await?;
+            return Ok(Some(reason));
+        }
+        let handle = match self.require_worker(session_id) {
+            Ok(handle) => handle,
+            Err(_) => {
+                self.settle_external_queued(
+                    owner,
+                    session_id,
+                    &event_id,
+                    expected_turn_id,
+                    ExternalSteerQueuedReason::StaleTurn,
+                )
+                .await?;
+                return Ok(Some(ExternalSteerQueuedReason::StaleTurn));
+            }
+        };
+        if handle.spawn_epoch != session.spawn_epoch {
+            self.settle_external_queued(
+                owner,
+                session_id,
+                &event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::StaleTurn,
+            )
+            .await?;
+            return Ok(Some(ExternalSteerQueuedReason::StaleTurn));
+        }
+        let (reply, rx) = oneshot::channel();
+        if handle
+            .commands
+            .send(WorkerCommand::Steer {
+                expected_turn_id,
+                message: text,
+                admission: Some(SteerAdmission {
+                    spawn_epoch: session.spawn_epoch,
+                    db: self.db.clone(),
+                    owner: owner.clone(),
+                    session_id,
+                    event_id: event_id.clone(),
+                    expected_turn_id,
+                    correlation_uuid,
+                }),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            self.settle_external_queued(
+                owner,
+                session_id,
+                &event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::StaleTurn,
+            )
+            .await?;
+            return Ok(Some(ExternalSteerQueuedReason::StaleTurn));
+        }
+        Ok(match rx.await {
+            Ok(Ok(())) => None,
+            Ok(Err(WorkerError::NoActiveTurn(_) | WorkerError::StaleTurn(_))) => {
+                Some(ExternalSteerQueuedReason::StaleTurn)
+            }
+            Ok(Err(WorkerError::SteeringUnavailable(_) | WorkerError::SteeringRejected(_))) => {
+                Some(ExternalSteerQueuedReason::SteerUnsupported)
+            }
+            // A lost reply or timeout cannot prove refusal. Retain the held receipt.
+            _ => Some(ExternalSteerQueuedReason::Unacknowledged),
+        })
+    }
+
+    pub(super) async fn settle_external_queued(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        event_id: &str,
+        expected_turn_id: TurnId,
+        reason: tidebreak_core::code::ExternalSteerQueuedReason,
+    ) -> Result<(), ServerError> {
+        let settled = tidebreak_core::db::code::settle_external_steer_admission(
+            &self.db,
+            owner,
+            session_id,
+            event_id,
+            expected_turn_id,
+            tidebreak_core::code::ExternalSteerAdmission::Queued,
+            Some(reason),
+        )
+        .await?;
+        if !settled {
+            return Err(ServerError::conflict_kind(
+                "steer_settlement_conflict",
+                "The steering receipt already has a different outcome.",
+            ));
+        }
+        Ok(())
     }
 }

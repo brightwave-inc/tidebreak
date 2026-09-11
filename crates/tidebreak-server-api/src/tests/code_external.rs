@@ -4976,3 +4976,120 @@ async fn repositoryless_slack_refuses_invalid_sandbox_defaults_without_machine_f
         assert!(fake.spawns.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn steering_receipt_reads_are_scoped_and_never_resend() {
+    let (router, fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (_, foreign) = runtime
+        .mint_adapter_grant(&owner, "slack", "U2", "T1")
+        .await
+        .unwrap();
+    client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({"external_key":"T1/C1/receipt", "repo_id":repo_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/receipt").await;
+    let target = tidebreak_core::TurnId::new();
+    let correlation = uuid::Uuid::new_v4();
+    tidebreak_core::db::code::record_external_message_with_steer(
+        &runtime.db,
+        &owner,
+        session_id,
+        "Ev-receipt",
+        "1.1",
+        "follow up",
+        &Default::default(),
+        None,
+        tidebreak_core::db::code::ExternalSteerAdmissionInput {
+            request_steer: true,
+            expected_turn_id: Some(target),
+            correlation_uuid: Some(correlation),
+        },
+    )
+    .await
+    .unwrap();
+    let url =
+        format!("http://{addr}/external/code/sessions/{session_id}/messages/Ev-receipt/admission");
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&foreign.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let pending: serde_json::Value = client
+        .get(&url)
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["outcome"], "pending");
+    assert_eq!(pending["expected_turn_id"], target.to_string());
+    assert_eq!(pending["correlation_uuid"], correlation.to_string());
+    assert_eq!(pending["reason"], "unacknowledged");
+    assert!(tidebreak_core::db::code::settle_external_steer_admission(
+        &runtime.db,
+        &owner,
+        session_id,
+        "Ev-receipt",
+        target,
+        tidebreak_core::code::ExternalSteerAdmission::Steered,
+        None
+    )
+    .await
+    .unwrap());
+    let settled: serde_json::Value = client
+        .get(&url)
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(settled["outcome"], "steered");
+    assert_eq!(settled["turn_id"], pending["turn_id"]);
+    assert!(settled["reason"].is_null());
+    assert!(fake.spawns.lock().unwrap().is_empty());
+    assert!(fake.sends.lock().unwrap().is_empty());
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "test revocation")
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&pair.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}

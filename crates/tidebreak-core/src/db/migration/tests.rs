@@ -102,6 +102,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260910_000025_native_tool_receipts",
             "m20260910_000026_native_tool_claim_time",
             "m20260910_000027_workspace_setup_error",
+            "m20260911_000001_external_steer_admission",
         ]
     );
     assert!(db

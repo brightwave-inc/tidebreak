@@ -90,8 +90,8 @@ impl RemoteSpawnSettings {
                 })
         {
             return Err(format!(
-                "this sandbox profile does not admit {}; select an engine declared by the operator (default {engine})", session.harness_kind
-
+                "this sandbox profile does not admit {}; select an engine declared by the operator (default {engine})",
+                session.harness_kind
             ));
         }
         if session.permission_mode != tidebreak_core::PermissionMode::Allow {
@@ -438,7 +438,126 @@ async fn settle_turn_rows(
     Ok(false)
 }
 
+/// Settle durable steering admissions from supervised sandbox lifecycle
+/// events. The agent emits `steer_ack` only when the native engine
+/// acknowledged the instruction; `steer_refused` keeps the queue row intact
+/// and records the explicit fallback.
+fn steer_ack_matches_target(
+    payload: &serde_json::Value,
+    source_sandbox: &str,
+    target: &tidebreak_core::db::code::ExternalSteerTarget,
+) -> bool {
+    target.sandbox_id == source_sandbox
+        && payload
+            .get("runtime_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            == Some(target.runtime_id)
+        && payload
+            .get("sandbox_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(target.sandbox_id.as_str())
+        && payload
+            .get("native_turn")
+            .and_then(serde_json::Value::as_u64)
+            == Some(u64::from(target.native_turn))
+        && payload
+            .get("expected_turn_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(target.expected_turn_id.to_string().as_str())
+        && payload
+            .get("correlation_uuid")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            == Some(target.correlation_uuid)
+}
+
+async fn settle_sandbox_steer_admissions(
+    db: &Arc<DbStore>,
+    owner: &OwnerId,
+    session_id: SessionId,
+    source_sandbox: &str,
+    events: &[super::wire::SandboxEvent],
+) -> Result<(), tidebreak_core::AgentError> {
+    use tidebreak_core::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
+    for event in events {
+        if !matches!(event.kind.as_str(), "steer_ack" | "steer_refused") {
+            continue;
+        }
+        let Some(correlation) = event
+            .payload
+            .get("correlation_uuid")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        else {
+            continue;
+        };
+        let Some(target) = tidebreak_core::db::code::external_steer_target_by_correlation(
+            db,
+            owner,
+            session_id,
+            correlation,
+        )
+        .await?
+        else {
+            continue;
+        };
+        if !steer_ack_matches_target(&event.payload, source_sandbox, &target) {
+            continue;
+        }
+        let (outcome, reason) = if event.kind == "steer_ack" {
+            (ExternalSteerAdmission::Steered, None)
+        } else {
+            (
+                ExternalSteerAdmission::Queued,
+                Some(ExternalSteerQueuedReason::SteerUnsupported),
+            )
+        };
+        tidebreak_core::db::code::settle_external_steer_admission(
+            db,
+            owner,
+            session_id,
+            &target.event_id,
+            target.expected_turn_id,
+            outcome,
+            reason,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 impl RemoteDriver<'_> {
+    /// Return the process that advertises the steering protocol in this incarnation.
+    pub async fn steering_runtime(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+    ) -> Result<Option<uuid::Uuid>, tidebreak_core::AgentError> {
+        use tidebreak_core::storage::Store;
+        let Some(row) = latest_incarnation(self.db, owner, session_id).await? else {
+            return Ok(None);
+        };
+        if row.state != IncarnationState::Active {
+            return Ok(None);
+        }
+        let key = format!("code.incarnations.{}.steering_protocol", row.id);
+        let Some(value) = self.db.get_setting(&key).await? else {
+            return Ok(None);
+        };
+        if value.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+            || value.get("sandbox_id").and_then(serde_json::Value::as_str)
+                != row.sandbox_id.as_deref()
+        {
+            return Ok(None);
+        }
+        Ok(value
+            .get("runtime_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .filter(|id| !id.is_nil()))
+    }
+
     /// Submit one user turn to a remote session.
     ///
     /// The session row is updated (lifecycle, attention) on success; the caller
@@ -843,6 +962,69 @@ impl RemoteDriver<'_> {
         }
     }
 
+    /// Send one durable steering frame into the live sandbox's inbox.
+    ///
+    /// This is transport-only: no turn row is created, and the caller owns
+    /// the durable admission row. The supervised agent acknowledges only
+    /// after the native engine accepts the instruction.
+    pub async fn send_steer_frame(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        body: String,
+    ) -> Result<(), tidebreak_core::AgentError> {
+        let Some(row) = latest_incarnation(self.db, owner, session_id).await? else {
+            return Err(tidebreak_core::AgentError::Store(
+                "cannot steer a sandbox with no incarnation".into(),
+            ));
+        };
+        if row.state != IncarnationState::Active {
+            return Err(tidebreak_core::AgentError::Store(
+                "the sandbox is not active; steering is unavailable".into(),
+            ));
+        }
+        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+            return Err(tidebreak_core::AgentError::Store(
+                "active incarnation has no sandbox id".into(),
+            ));
+        };
+        let frame = tidebreak_core::code::supervisor_tools::decode_steer_frame(&body)
+            .ok_or_else(|| tidebreak_core::AgentError::Store("invalid steering frame".into()))?;
+        let frame_runtime = uuid::Uuid::parse_str(&frame.runtime_id).ok();
+        if frame_runtime.is_none()
+            || frame_runtime != self.steering_runtime(owner, session_id).await?
+        {
+            return Err(tidebreak_core::AgentError::Store(
+                "the target runtime changed before steering dispatch".into(),
+            ));
+        }
+        if frame.sandbox_id != sandbox_id {
+            return Err(tidebreak_core::AgentError::Store(
+                "the target sandbox changed before steering dispatch".into(),
+            ));
+        }
+        let message = SandboxMessage {
+            body: SupervisorMessageBody::Input(body),
+            interrupt: false,
+        };
+        message
+            .validate()
+            .map_err(tidebreak_core::AgentError::Store)?;
+        match self
+            .provisioner
+            .send(owner, session_id, sandbox_id, &message)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(RemoteSandboxError::SignInRequired(detail)) => {
+                Err(tidebreak_core::AgentError::Store(format!(
+                    "sandbox steering needs a sign-in: {detail}"
+                )))
+            }
+            Err(error) => Err(tidebreak_core::AgentError::Store(error.to_string())),
+        }
+    }
+
     /// Read and apply everything new from the session's live sandbox.
     ///
     /// Idle when no incarnation is active. The caller schedules pumps; this
@@ -991,6 +1173,40 @@ impl RemoteDriver<'_> {
             }
             read.events.truncate(accepted_prefix);
         }
+        for event in &read.events {
+            if event.kind == "supervisor_started" {
+                use tidebreak_core::storage::Store;
+                let runtime_id = event
+                    .payload
+                    .get("runtime_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    .filter(|id| !id.is_nil());
+                let compatible = event
+                    .payload
+                    .get("agent")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("tidebreak-supervised-agent")
+                    && event
+                        .payload
+                        .get("steering_protocol")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(1)
+                    && runtime_id.is_some();
+                db.set_setting(
+                    &format!("code.incarnations.{}.steering_protocol", row.id),
+                    &serde_json::json!({
+                        "version": if compatible {1} else {0},
+                        "sandbox_id": sandbox_id,
+                        "runtime_id": runtime_id,
+                    }),
+                )
+                .await?;
+            }
+        }
+        // Commit native admission before advancing the event cursor. A failed
+        // ingest can replay this idempotently; the inverse order loses ACKs.
+        settle_sandbox_steer_admissions(db, &owner, session.id, &sandbox_id, &read.events).await?;
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
 
@@ -1271,6 +1487,48 @@ mod tests {
     };
     use super::*;
 
+    #[test]
+    fn steering_ack_requires_the_persisted_target_and_source() {
+        let target = tidebreak_core::db::code::ExternalSteerTarget {
+            event_id: "delivery-1".into(),
+            turn_id: TurnId::new(),
+            expected_turn_id: TurnId::new(),
+            correlation_uuid: uuid::Uuid::new_v4(),
+            sandbox_id: "sandbox-1".into(),
+            runtime_id: uuid::Uuid::new_v4(),
+            native_turn: 2,
+        };
+        let payload = json!({
+            "sandbox_id": target.sandbox_id,
+            "runtime_id": target.runtime_id.to_string(),
+            "native_turn": target.native_turn,
+            "expected_turn_id": target.expected_turn_id.to_string(),
+            "correlation_uuid": target.correlation_uuid.to_string(),
+        });
+        assert!(steer_ack_matches_target(&payload, "sandbox-1", &target));
+        assert!(!steer_ack_matches_target(&payload, "sandbox-2", &target));
+        for (key, wrong) in [
+            ("sandbox_id", json!("sandbox-2")),
+            ("runtime_id", json!(uuid::Uuid::new_v4().to_string())),
+            ("native_turn", json!(1)),
+            ("expected_turn_id", json!(TurnId::new().to_string())),
+            ("correlation_uuid", json!(uuid::Uuid::new_v4().to_string())),
+        ] {
+            let mut mismatch = payload.clone();
+            mismatch[key] = wrong;
+            assert!(
+                !steer_ack_matches_target(&mismatch, "sandbox-1", &target),
+                "{key}"
+            );
+            let mut missing = payload.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                !steer_ack_matches_target(&missing, "sandbox-1", &target),
+                "missing {key}"
+            );
+        }
+    }
+
     type SpawnHook = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
     #[derive(Default)]
@@ -1415,6 +1673,7 @@ mod tests {
         accepted: Mutex<Vec<String>>,
         queued: Mutex<usize>,
         serviced: Mutex<usize>,
+        fail_service: bool,
     }
 
     #[async_trait]
@@ -1458,6 +1717,11 @@ mod tests {
             Vec<tidebreak_core::code::supervisor_tools::SupervisorToolResult>,
             tidebreak_core::AgentError,
         > {
+            if self.fail_service {
+                return Err(tidebreak_core::AgentError::Store(
+                    "injected host service failure".into(),
+                ));
+            }
             *self.queued.lock().unwrap() = 0;
             *self.serviced.lock().unwrap() += 1;
             Ok(Vec::new())
@@ -1479,6 +1743,195 @@ mod tests {
             "host_tool_request",
             json!({"request_id": request_id, "tool":"code_repos", "arguments":{}}),
         )
+    }
+
+    #[tokio::test]
+    async fn steering_runtime_rotates_on_restart_and_refuses_old_process_frames() {
+        use tidebreak_core::code::supervisor_tools::{encode_steer_frame, SupervisorSteerFrame};
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, _, _) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = RemoteDriver {
+            db: &db,
+            bus: &bus,
+            provisioner: &fake,
+            settings: &settings,
+            host_tool: None,
+        };
+        assert_eq!(
+            driver
+                .steering_runtime(&session.owner, session.id)
+                .await
+                .unwrap(),
+            None
+        );
+        let first_runtime = uuid::Uuid::new_v4();
+        let second_runtime = uuid::Uuid::new_v4();
+        for (seq, runtime_id) in [(1, first_runtime), (2, second_runtime)] {
+            fake.event_reads.lock().unwrap().push_back(read(
+                SandboxState::Running,
+                seq,
+                vec![event(
+                    seq,
+                    "supervisor_started",
+                    json!({
+                        "agent": "tidebreak-supervised-agent",
+                        "steering_protocol": 1,
+                        "runtime_id": runtime_id.to_string(),
+                    }),
+                )],
+            ));
+            driver.pump(&mut session, 0).await.unwrap();
+            assert_eq!(
+                driver
+                    .steering_runtime(&session.owner, session.id)
+                    .await
+                    .unwrap(),
+                Some(runtime_id)
+            );
+        }
+        let mut frame = SupervisorSteerFrame {
+            expected_turn_id: TurnId::new().to_string(),
+            sandbox_id: "sb-1".into(),
+            runtime_id: first_runtime.to_string(),
+            native_turn: 1,
+            correlation_uuid: uuid::Uuid::new_v4().to_string(),
+            body: "guidance".into(),
+        };
+        assert!(driver
+            .send_steer_frame(&session.owner, session.id, encode_steer_frame(&frame))
+            .await
+            .is_err());
+        assert!(fake.sends.lock().unwrap().is_empty());
+        frame.runtime_id = second_runtime.to_string();
+        driver
+            .send_steer_frame(&session.owner, session.id, encode_steer_frame(&frame))
+            .await
+            .unwrap();
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+
+        // Every unsupported startup clears the old process capability.
+        for (offset, payload) in [
+            json!({"agent":"tidebreak-supervised-agent","steering_protocol":1}),
+            json!({"agent":"tidebreak-supervised-agent","steering_protocol":1,"runtime_id":"invalid"}),
+            json!({"agent":"tidebreak-supervised-agent","steering_protocol":1,"runtime_id":uuid::Uuid::nil().to_string()}),
+            json!({"agent":"tidebreak-supervised-agent","steering_protocol":2,"runtime_id":second_runtime.to_string()}),
+            json!({"agent":"custom","steering_protocol":1,"runtime_id":second_runtime.to_string()}),
+        ].into_iter().enumerate() {
+            let seq = i64::try_from(offset).unwrap() + 3;
+            fake.event_reads.lock().unwrap().push_back(read(SandboxState::Running, seq, vec![event(seq, "supervisor_started", payload)]));
+            driver.pump(&mut session, 0).await.unwrap();
+            assert_eq!(driver.steering_runtime(&session.owner, session.id).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_ack_survives_failure_after_event_cursor_advances() {
+        use tidebreak_core::db::code::{
+            claim_external_steer_target, external_steer_admission, list_queued_turns,
+            record_external_message_with_steer, ExternalSteerAdmissionInput,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, _, _) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let target = TurnId::new();
+        let correlation = uuid::Uuid::new_v4();
+        let runtime_id = uuid::Uuid::new_v4();
+        record_external_message_with_steer(
+            &db,
+            &session.owner,
+            session.id,
+            "ev-steer",
+            "1.1",
+            "follow up",
+            &Default::default(),
+            None,
+            ExternalSteerAdmissionInput {
+                request_steer: true,
+                expected_turn_id: Some(target),
+                correlation_uuid: Some(correlation),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(claim_external_steer_target(
+            &db,
+            &session.owner,
+            session.id,
+            "ev-steer",
+            target,
+            correlation,
+            "sb-1",
+            1,
+            runtime_id
+        )
+        .await
+        .unwrap());
+        let fake = FakeProvisioner::default();
+        let host = BoundedHost {
+            fail_service: true,
+            ..Default::default()
+        };
+        let settings = settings();
+        let driver = RemoteDriver {
+            db: &db,
+            bus: &bus,
+            provisioner: &fake,
+            settings: &settings,
+            host_tool: Some(&host),
+        };
+        fake.event_reads.lock().unwrap().push_back(read(SandboxState::Running,1,vec![event(1,"steer_ack",json!({
+            "sandbox_id":"sb-1","runtime_id":runtime_id.to_string(),"native_turn":1,"expected_turn_id":target.to_string(),"correlation_uuid":correlation.to_string()
+        }))]));
+        assert!(driver.pump(&mut session, 0).await.is_err());
+        assert_eq!(
+            latest_incarnation(&db, &session.owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .events_cursor,
+            1
+        );
+        let receipt = external_steer_admission(&db, &session.owner, session.id, "ev-steer")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            receipt,
+            tidebreak_core::ExternalMessageRecord::Replay {
+                admission: Some(tidebreak_core::code::ExternalSteerAdmission::Steered),
+                ..
+            }
+        ));
+        assert!(list_queued_turns(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .is_empty());
+        // A restarted pump reads beyond the acknowledged event and keeps its result.
+        let driver = RemoteDriver {
+            db: &db,
+            bus: &bus,
+            provisioner: &fake,
+            settings: &settings,
+            host_tool: None,
+        };
+        fake.event_reads
+            .lock()
+            .unwrap()
+            .push_back(read(SandboxState::Running, 1, vec![]));
+        driver.pump(&mut session, 0).await.unwrap();
+        assert!(matches!(
+            external_steer_admission(&db, &session.owner, session.id, "ev-steer")
+                .await
+                .unwrap()
+                .unwrap(),
+            tidebreak_core::ExternalMessageRecord::Replay {
+                admission: Some(tidebreak_core::code::ExternalSteerAdmission::Steered),
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

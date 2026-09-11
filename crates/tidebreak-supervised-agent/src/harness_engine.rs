@@ -495,7 +495,7 @@ impl HarnessTurn {
             Err(error) => {
                 return TurnEnd::Fatal {
                     message: format!("the engine turn task failed: {error}"),
-                }
+                };
             }
             // Every launch or turn error is fatal here, `ResumeLost`
             // included: the engine's own session store is the only
@@ -504,7 +504,7 @@ impl HarnessTurn {
             Ok(Err(error)) => {
                 return TurnEnd::Fatal {
                     message: error.to_string(),
-                }
+                };
             }
             Ok(Ok(outcome)) => outcome,
         };
@@ -549,6 +549,14 @@ impl TurnHandle for HarnessTurn {
     }
 
     async fn steer(&mut self, body: String) -> SteerOutcome {
+        self.steer_with_correlation(body, None).await
+    }
+
+    async fn steer_with_correlation(
+        &mut self,
+        body: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> SteerOutcome {
         if let Some(ended) = &self.ended {
             return SteerOutcome::Ended(ended.clone());
         }
@@ -556,20 +564,28 @@ impl TurnHandle for HarnessTurn {
         let joined = tokio::select! {
             biased;
             joined = &mut self.run => joined,
-            result = session.steer(body) => {
-                // Any refusal — an engine with no mid-turn channel, or one
-                // that rejected this steer — keeps the message queued for the
-                // next turn.
-                return if result.is_ok() {
-                    SteerOutcome::Delivered
-                } else {
-                    SteerOutcome::Refused
+            result = session.steer_with_correlation(body, correlation_uuid) => {
+                // Only an explicit refusal permits durable queue fallback.
+                // Other errors may follow a write whose acknowledgment was lost.
+                return match result {
+                    Ok(()) => SteerOutcome::Delivered,
+                    Err(HarnessError::SteeringUnsupported | HarnessError::SteeringRejected(_)) => {
+                        SteerOutcome::Refused
+                    }
+                    Err(_) if correlation_uuid.is_some() => SteerOutcome::Unacknowledged,
+                    Err(_) => SteerOutcome::Refused,
                 };
             }
         };
         let ended = self.conclude(joined);
         self.ended = Some(ended.clone());
-        SteerOutcome::Ended(ended)
+        if correlation_uuid.is_some() {
+            // The request may already be written when native completion wins.
+            // Keep its admission unresolved rather than replay its body.
+            SteerOutcome::Unacknowledged
+        } else {
+            SteerOutcome::Ended(ended)
+        }
     }
 
     async fn interrupt(&mut self) {
@@ -1023,6 +1039,24 @@ mod tests {
         assert_eq!(
             turn.steer("too late".to_owned()).await,
             SteerOutcome::Ended(TurnEnd::Completed { success: true })
+        );
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+    }
+
+    #[tokio::test]
+    async fn native_completion_during_correlated_delivery_does_not_prove_refusal() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![completed_event()],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            turn.steer_with_correlation("guidance".into(), Some(uuid::Uuid::new_v4()))
+                .await,
+            SteerOutcome::Unacknowledged,
         );
         assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
     }

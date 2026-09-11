@@ -7251,6 +7251,7 @@ dependencies = [
  "tidebreak-core",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

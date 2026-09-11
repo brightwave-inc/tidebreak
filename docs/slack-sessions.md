@@ -827,12 +827,53 @@ access before admitting a repository, including a cached checkout.
 Decision [0094](decisions/0094-repository-optional-conversations-on-the-internal-engine.md)
 keeps the current list of work that remains for self-drive child sessions.
 
+## Explicit steering admission
+
+The messages endpoint accepts optional `steer`, `expected_turn_id`, and
+`correlation_uuid` fields. Existing clients keep queue-default behavior. To ask
+for mid-turn delivery, set `steer: true` and name the active Tidebreak turn in
+`expected_turn_id`. The server assigns a correlation UUID when you omit it.
+The native turn number stays an internal sandbox detail.
+
+To read a result without submitting again, call
+`GET /external/code/sessions/{id}/messages/{event_id}/admission` with the adapter
+token. The response returns `outcome` (`pending`, `steered`, or `queued`), the
+original `turn_id`, `expected_turn_id`, `correlation_uuid`, and `reason`. An
+unknown event or a session outside the grant returns 404.
+
+Each channel `event_id` owns one durable admission. A retry returns the first
+admission's target, correlation, and outcome. It never sends another steering
+request. Reusing a correlation UUID for a different event fails.
+
+An acknowledged native instruction returns `outcome: "steered"` with its
+original turn and correlation. Proven unsupported or stale requests return
+`outcome: "queued"` with `reason: "steer_unsupported"` or `"stale_turn"`; the
+original message can run at a later turn boundary. Successful steering consumes
+that original queue row atomically, so it cannot run a second time.
+
+`reason: "unacknowledged"` means that delivery has not been confirmed. It does
+not promise another execution. The admission remains held until native evidence
+settles it. A sandbox inbox receipt proves only transport storage. A completed
+write, timeout, idle sandbox, or restarted sandbox does not prove that the native
+engine rejected the instruction. Clients must not resend with a new event ID or
+show confirmed delivery from those signals.
+
+Codex supplies native acknowledgments. Harnesses without acknowledged steering
+fall back before dispatch. The sandbox must first advertise `steering_protocol: 1` in its
+`supervisor_started` event with a fresh `runtime_id` UUID for each process;
+older runtimes keep ordinary queue behavior. Sandbox acknowledgments must match
+the stored sandbox, runtime UUID, native turn, Tidebreak turn, and correlation.
+A replacement process cannot consume a frame addressed to its predecessor. A late local acknowledgment can
+settle the original receipt while its worker still owns the turn.
+
+Keep automatic adapter steering disabled until the adapter exposes pending
+admissions and their recovery controls. Native acceptance followed by process
+loss can remain unknown; transport idempotency cannot settle that case.
+
 ## Later
 
-- Steer as an upgrade to the messages endpoint (`steered` as a third
-  outcome), capability-gated per harness, honest rendering ("queued
-  behind the running turn" where mid-turn steer is unsupported) — gated
-  on the reply-during-run signal.
+- Automatic Slack steering, pending-admission recovery, and confirmed delivery
+  rendering, gated on the reply-during-run signal.
 - Slack Code channels as a session surface: one code channel per
   session, `AttentionState` feeding the native status.
 - Durable child wait/resume, the broader sandbox-child tools, and the thread/web tree,
