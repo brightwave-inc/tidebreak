@@ -104,6 +104,26 @@ fn fixture(timeout: Duration) -> (tempfile::TempDir, LocalExecutionProvider, Str
 }
 
 #[cfg(target_os = "macos")]
+async fn python_fixture(
+    timeout: Duration,
+) -> (tempfile::TempDir, LocalExecutionProvider, String, String) {
+    let runtime = crate::package_cache::SharedPackageCache::python_runtime(Path::new("python3"))
+        .await
+        .expect("Python sandbox tests require a supported python3 runtime on PATH");
+    let (root, provider, workspace) = fixture(timeout);
+    let provider = provider.with_python_runtime(
+        Some(runtime.prefix().to_owned()),
+        runtime.read_only_paths().to_vec(),
+    );
+    (
+        root,
+        provider,
+        workspace,
+        runtime.executable().to_str().unwrap().to_owned(),
+    )
+}
+
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn direct_host_path_denial_is_actionable_and_distinct_from_workspace_enoent() {
     let (root, provider, workspace) = fixture(Duration::from_secs(3));
@@ -197,7 +217,7 @@ async fn failed_shell_access_to_denied_host_path_gets_the_stable_result_code() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn dynamically_constructed_host_path_denial_does_not_leak_process_diagnostics() {
-    let (root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let connected = root
         .path()
         .join("sentinel-dynamic-connected-folder-do-not-leak");
@@ -206,7 +226,7 @@ async fn dynamically_constructed_host_path_denial_does_not_leak_process_diagnost
     let request = ExecRequest::new(
         ExecutionId::parse("call-dynamic-python-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec![
             "-c".into(),
             "open('/' + 'tmp' + '/sentinel-dynamic-denied-path-do-not-leak').read()".into(),
@@ -268,13 +288,13 @@ async fn redirected_shell_path_denial_does_not_leak_through_stdout() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn caught_python_path_denial_does_not_leak_through_stdout() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let denied_path = "/tmp/sentinel-caught-python-denied-path-do-not-leak";
     let script = "try:\n    open('/' + 'tmp' + '/sentinel-caught-python-denied-path-do-not-leak').read()\nexcept PermissionError as error:\n    print(error)\n    raise SystemExit(19)";
     let request = ExecRequest::new(
         ExecutionId::parse("call-caught-python-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -293,13 +313,13 @@ async fn caught_python_path_denial_does_not_leak_through_stdout() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn caught_python_path_denial_does_not_leak_after_successful_exit() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let denied_path = "/tmp/sentinel-caught-success-denied-path-do-not-leak";
     let script = "path = '/' + 'tmp' + '/sentinel-caught-success-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print(f'Operation not permitted: x{path}')";
     let request = ExecRequest::new(
         ExecutionId::parse("call-caught-success-python-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -318,7 +338,7 @@ async fn caught_python_path_denial_does_not_leak_after_successful_exit() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn malformed_url_shaped_denied_path_is_normalized_after_successful_exit() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let denied_path = "/tmp/sentinel-malformed-url-denied-path-do-not-leak";
     let script = r#"path = "/" + "tmp" + "/sentinel-malformed-url-denied-path-do-not-leak"
 try:
@@ -328,7 +348,7 @@ except PermissionError as error:
     let request = ExecRequest::new(
         ExecutionId::parse("call-malformed-url-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -347,7 +367,7 @@ except PermissionError as error:
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn escaped_denied_paths_are_normalized_across_output_channels() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let cases = [
         (
             "call-escaped-slash-denied-path",
@@ -375,7 +395,7 @@ except PermissionError as error:
         let request = ExecRequest::new(
             ExecutionId::parse(execution_id).unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
-            "/usr/bin/python3",
+            python.as_str(),
             vec!["-c".into(), script.into()],
             ".",
         )
@@ -401,7 +421,7 @@ except PermissionError as error:
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn file_url_denied_path_is_normalized_after_successful_exit() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let denied_path = "/tmp/sentinel-file-url-denied-path-do-not-leak";
     let script = r#"import sys
 path = "/" + "tmp" + "/sentinel-file-url-denied-path-do-not-leak"
@@ -412,7 +432,7 @@ except PermissionError as error:
     let request = ExecRequest::new(
         ExecutionId::parse("call-file-url-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -431,13 +451,13 @@ except PermissionError as error:
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn prefixed_denied_path_across_output_channels_is_normalized_on_failure() {
-    let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (_root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let denied_path = "/tmp/sentinel-cross-channel-denied-path-do-not-leak";
     let script = "import sys\npath = '/' + 'tmp' + '/sentinel-cross-channel-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print('Operation not permitted')\n    print(f'x{path}', file=sys.stderr)\n    raise SystemExit(29)";
     let request = ExecRequest::new(
         ExecutionId::parse("call-cross-channel-python-denied-path").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -546,7 +566,7 @@ async fn permission_denial_phrase_without_a_denied_path_is_preserved() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn successful_output_with_allowed_path_and_url_diagnostics_is_preserved() {
-    let (root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let allowed_path = fs::canonicalize(root.path().join(&workspace))
         .unwrap()
         .join("allowed.txt");
@@ -559,7 +579,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
     let request = ExecRequest::new(
         ExecutionId::parse("call-successful-allowed-path-diagnostic").unwrap(),
         ExecutionWorkspaceId::parse(&workspace).unwrap(),
-        "/usr/bin/python3",
+        python.as_str(),
         vec!["-c".into(), script.into()],
         ".",
     )
@@ -654,7 +674,7 @@ async fn resolved_workspace_paths_keep_enoent_and_symlink_escapes_are_denied() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn local_sandbox_confines_writes_and_network_and_caches_exact_retry() {
-    let (root, provider, workspace) = fixture(Duration::from_secs(3));
+    let (root, provider, workspace, python) = python_fixture(Duration::from_secs(3)).await;
     let outside = root.path().join("outside");
     let script = format!(
         "printf ok > result; \
@@ -691,21 +711,8 @@ async fn local_sandbox_confines_writes_and_network_and_caches_exact_retry() {
 
     for (execution, command) in [
         ("call-python-path", "python3"),
-        ("call-python-system-path", "/usr/bin/python3"),
+        ("call-python-selected-path", python.as_str()),
     ] {
-        // The sandbox can only be as healthy as the host interpreter: on
-        // macOS installs with a broken Xcode python shim, python cannot
-        // run outside any sandbox either, so asserting here would fail on
-        // an environment defect while proving nothing about confinement.
-        let host_python_works = std::process::Command::new(command)
-            .args(["-c", "print(6 * 7)"])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        if !host_python_works {
-            eprintln!("skipping {command}: host interpreter unusable in this environment");
-            continue;
-        }
         let python = ExecRequest::new(
             ExecutionId::parse(execution).unwrap(),
             ExecutionWorkspaceId::parse("chat-1").unwrap(),
@@ -715,15 +722,6 @@ async fn local_sandbox_confines_writes_and_network_and_caches_exact_retry() {
         )
         .unwrap();
         let python = provider.execute(python).await.unwrap();
-        // macOS ships /usr/bin/python3 as an Xcode shim that stats Xcode's
-        // frameworks before running; under the sandbox (or with a broken
-        // Xcode install) the shim dies before python exists. That failure
-        // is an environment defect, not a confinement finding — skip it
-        // loudly instead of failing the suite.
-        if python.exit_code != Some(0) && python.stderr.contains("unable to locate xcodebuild") {
-            eprintln!("skipping {command}: Xcode python shim cannot start on this host");
-            continue;
-        }
         assert_eq!(
             python.exit_code,
             Some(0),
@@ -732,6 +730,22 @@ async fn local_sandbox_confines_writes_and_network_and_caches_exact_retry() {
         );
         assert_eq!(python.stdout.trim(), "42");
     }
+    let shell_python = ExecRequest::new(
+        ExecutionId::parse("call-python-shell-path").unwrap(),
+        ExecutionWorkspaceId::parse(&workspace).unwrap(),
+        "/bin/sh",
+        vec!["-c".into(), "python3 -c 'print(6 * 7)'".into()],
+        ".",
+    )
+    .unwrap();
+    let shell_python = provider.execute(shell_python).await.unwrap();
+    assert_eq!(
+        shell_python.exit_code,
+        Some(0),
+        "shell Python stderr: {}",
+        shell_python.stderr
+    );
+    assert_eq!(shell_python.stdout.trim(), "42");
 }
 
 /// The production regression this pins: a sandboxed interpreter writing
