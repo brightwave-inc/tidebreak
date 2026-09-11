@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -60,6 +61,12 @@ type SubagentScenario =
   | "subagent-recovered"
   | "subagent-empty";
 
+type SetupFailedScenario =
+  | "setup-failed"
+  | "setup-failed-no-output"
+  | "setup-failed-long-output"
+  | "setup-retry-pending";
+
 type WorkspaceScenario =
   | "active"
   | "shared"
@@ -74,7 +81,7 @@ type WorkspaceScenario =
   | "settings-pending"
   | "loading"
   | "failure"
-  | "setup-failed"
+  | SetupFailedScenario
   | SubagentScenario;
 
 type SubagentStorySpec = {
@@ -133,6 +140,28 @@ function subagentStorySpec(
   scenario: WorkspaceScenario,
 ): SubagentStorySpec | null {
   return isSubagentScenario(scenario) ? SUBAGENT_STORIES[scenario] : null;
+}
+
+const setupFailureOutput: Record<SetupFailedScenario, string | undefined> = {
+  "setup-failed": "[truncated]\nerror: pnpm: command not found\n    at install",
+  "setup-failed-no-output": undefined,
+  "setup-failed-long-output": [
+    "[truncated]",
+    ...Array.from(
+      { length: 40 },
+      (_, index) =>
+        `install: resolving workspace dependency ${index + 1}/40 in crates/tidebreak-desktop/ui/node_modules`,
+    ),
+    "error: dependency installation failed after three attempts",
+    "    at scripts/setup-workspace.sh:18",
+  ].join("\n"),
+  "setup-retry-pending": "error: pnpm: command not found\n    at install",
+};
+
+function isSetupFailedScenario(
+  scenario: WorkspaceScenario,
+): scenario is SetupFailedScenario {
+  return Object.prototype.hasOwnProperty.call(setupFailureOutput, scenario);
 }
 
 function isWorkspaceStartupScenario(scenario: WorkspaceScenario): boolean {
@@ -597,13 +626,12 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     ? startupWorkspace
     : scenario === "shared"
       ? { ...workspace, read_only: true }
-      : scenario === "setup-failed"
+      : isSetupFailedScenario(scenario)
         ? {
             ...workspace,
             status: "setup_failed" as const,
             pr: undefined,
-            setup_error:
-              "[truncated]\nerror: pnpm: command not found\n    at install",
+            setup_error: setupFailureOutput[scenario],
           }
         : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
@@ -616,7 +644,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     scenario === "first-turn-failure" ||
     scenario === "loading" ||
     scenario === "failure" ||
-    scenario === "setup-failed"
+    isSetupFailedScenario(scenario)
       ? []
       : [
           scenario === "shared"
@@ -861,11 +889,14 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     }),
     patchCodeWorkspace: async () => workspace,
     archiveCodeWorkspace: async () => ({ ...workspace, status: "archived" }),
-    retryCodeWorkspaceSetup: async () => ({
-      ...currentWorkspace,
-      status: "active" as const,
-      setup_error: undefined,
-    }),
+    retryCodeWorkspaceSetup: async () =>
+      scenario === "setup-retry-pending"
+        ? pending<CodeWorkspaceSnapshot>()
+        : {
+            ...currentWorkspace,
+            status: "active" as const,
+            setup_error: undefined,
+          },
   } as unknown as ApiClient;
 }
 
@@ -1338,6 +1369,27 @@ export const Failure: Story = {
 /** A failed setup script keeps its output in the pane with a retry. */
 export const SetupFailed: Story = {
   args: { scenario: "setup-failed", reviewOpen: false },
+};
+
+/** A setup failure without captured output still offers recovery. */
+export const SetupFailedNoOutput: Story = {
+  args: { scenario: "setup-failed-no-output", reviewOpen: false },
+};
+
+/** Long setup output stays within a scrollable region. */
+export const SetupFailedLongOutput: Story = {
+  args: { scenario: "setup-failed-long-output", reviewOpen: false },
+};
+
+/** Retry stays disabled while the setup request is pending. */
+export const SetupRetryPending: Story = {
+  args: { scenario: "setup-retry-pending", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const retry = await canvas.findByRole("button", { name: "Retry setup" });
+    await userEvent.click(retry);
+    await expect(retry).toBeDisabled();
+  },
 };
 
 /** The minimum supported window keeps identity, status, and utilities distinct. */
