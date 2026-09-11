@@ -1224,9 +1224,9 @@ impl CodeRuntime {
             return;
         }
         let mut live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
-        // REST never derives a review decision (`None` or the unknown
-        // sentinel): keep the row's value the same way an unloaded check
-        // rollup keeps the checks.
+        // REST never derives a review decision: the unknown sentinel keeps
+        // the row's value the same way an unloaded check rollup keeps the
+        // checks. Authoritative `None` (loaded reviews, no objection) clears.
         if crate::code::forge_rest::review_decision_is_unknown(live.review_decision.as_deref()) {
             live.review_decision = match tidebreak_core::db::code::get_pull_request_fact(
                 &self.db,
@@ -1947,8 +1947,8 @@ mod remote_pr_tests {
 
     /// Issue 3339: a REST list never derives a review decision, so the
     /// reconcile write keeps `changes_requested`. The list restatement is
-    /// `fact_value` (no reviews endpoint); `None` on the digest is the
-    /// keep-the-row marker.
+    /// `fact_value` (no reviews endpoint); the unknown sentinel on the
+    /// digest is the keep-the-row marker.
     #[tokio::test]
     async fn a_rest_list_reconcile_keeps_changes_requested_without_reading_reviews() {
         use crate::code::forge_rest;
@@ -2024,8 +2024,113 @@ mod remote_pr_tests {
         });
         let listed = forge_rest::fact_value(&rest);
         assert!(listed["reviewDecision"].is_null());
-        assert!(forge_rest::review_decision_is_unknown(None));
+        assert!(!forge_rest::review_decision_is_unknown(None));
+        assert!(forge_rest::review_decision_is_unknown(Some(
+            forge_rest::REVIEW_DECISION_UNKNOWN
+        )));
 
+        runtime
+            .record_pull_request_live_state(
+                &owner,
+                None,
+                &PullRequestDigest {
+                    number: 17,
+                    url: Some("https://github.com/acme/tools/pull/17".into()),
+                    state: "open".into(),
+                    title: Some("Stored title".into()),
+                    checks_summary: None,
+                    check_counts: None,
+                    checks: None,
+                    draft: Some(false),
+                    merged: Some(false),
+                    review_decision: Some(forge_rest::REVIEW_DECISION_UNKNOWN.into()),
+                    mergeable: None,
+                    merge_state_status: None,
+                    head_branch: Some("feat".into()),
+                    base_branch: Some("main".into()),
+                    head_sha: Some("abc".into()),
+                    auto_merge_enabled: None,
+                    in_merge_queue: None,
+                },
+            )
+            .await;
+        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.live.unwrap().review_decision.as_deref(),
+            Some("changes_requested")
+        );
+    }
+
+    /// A conditional refresh that fully loaded reviews and derived no
+    /// decision must clear a stored `changes_requested`. Unloaded REST
+    /// still keeps the row via the unknown sentinel (tested above).
+    #[tokio::test]
+    async fn a_loaded_empty_review_decision_clears_changes_requested() {
+        use crate::code::forge_rest;
+        use tidebreak_core::db::code::{
+            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
+        };
+        use tidebreak_core::{
+            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
+            PullRequestDigest,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, _) = fixture(dir.path()).await;
+        let now = Utc::now();
+        save_pull_request_fact(
+            &runtime.db,
+            &CodePullRequestFact {
+                id: CodePullRequestId::new(),
+                owner: owner.clone(),
+                host: "github.com".into(),
+                repo_owner: "acme".into(),
+                repo_name: "tools".into(),
+                number: 17,
+                url: "https://github.com/acme/tools/pull/17".into(),
+                title: "Stored title".into(),
+                state: CodePullRequestState::Open,
+                draft: false,
+                author: None,
+                head_branch: "feat".into(),
+                base_branch: "main".into(),
+                head_sha: Some("abc".into()),
+                created_at: now,
+                updated_at: now,
+                merged_at: None,
+                closed_at: None,
+                first_seen_at: now,
+                last_seen_at: now,
+                live: None,
+            },
+        )
+        .await
+        .unwrap();
+        set_pull_request_live_state(
+            &runtime.db,
+            &owner,
+            "github.com",
+            "acme",
+            "tools",
+            17,
+            &CodePullRequestLiveState {
+                checks_summary: None,
+                checks: None,
+                review_decision: Some("changes_requested".into()),
+                mergeable: None,
+                merge_state_status: None,
+                auto_merge_enabled: None,
+                in_merge_queue: None,
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!forge_rest::review_decision_is_unknown(None));
         runtime
             .record_pull_request_live_state(
                 &owner,
@@ -2055,10 +2160,7 @@ mod remote_pr_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            stored.live.unwrap().review_decision.as_deref(),
-            Some("changes_requested")
-        );
+        assert_eq!(stored.live.unwrap().review_decision, None);
     }
 
     /// A merged REST digest must not derive a review decision, so a stale
