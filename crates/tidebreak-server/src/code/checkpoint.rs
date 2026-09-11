@@ -1307,11 +1307,7 @@ fn truncate_bytes(raw: &[u8], max: usize) -> (String, bool) {
     if text.len() <= max {
         return (text.into_owned(), false);
     }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_owned(), true)
+    tidebreak_core::truncate_utf8(&text, max)
 }
 
 async fn delete_ref(repo_root: &Path, r#ref: &str) -> Result<(), CheckpointError> {
@@ -1596,6 +1592,16 @@ mod tests {
         PermissionMode, RepoId, SessionKind, SessionLifecycle, TurnId,
     };
     use tokio::sync::Notify;
+
+    #[test]
+    fn byte_truncation_bounds_the_lossy_decoded_text() {
+        let raw = b"a\xffb";
+        assert_eq!(truncate_bytes(raw, 0), (String::new(), true));
+        assert_eq!(truncate_bytes(raw, 3), ("a".to_owned(), true));
+        assert_eq!(truncate_bytes(raw, 4), ("a�".to_owned(), true));
+        assert_eq!(truncate_bytes(raw, 5), ("a�b".to_owned(), false));
+        assert_eq!(truncate_bytes(b"", 0), (String::new(), false));
+    }
 
     #[derive(Debug)]
     enum SnapshotStep {

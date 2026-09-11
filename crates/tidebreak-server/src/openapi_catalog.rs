@@ -673,14 +673,7 @@ fn well_formed_operation_id(operation_id: &str) -> bool {
 /// Truncate free text to a UTF-8-clean display prefix of at most
 /// [`MAX_INVENTORY_SUMMARY_BYTES`].
 fn truncate_to_display_prefix(text: &str) -> String {
-    if text.len() <= MAX_INVENTORY_SUMMARY_BYTES {
-        return text.to_string();
-    }
-    let mut end = MAX_INVENTORY_SUMMARY_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    tidebreak_core::truncate_utf8(text, MAX_INVENTORY_SUMMARY_BYTES).0
 }
 
 /// Lowercase-hex SHA-256 of the raw document bytes.

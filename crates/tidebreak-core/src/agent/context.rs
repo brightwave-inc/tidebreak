@@ -169,6 +169,21 @@ impl Agent {
             .filter(|message| message.role == Role::User)
             .map(|message| (message.id, message.content_for_model().to_owned()))
             .collect();
+        // A request's date belongs beside its input, not in the shared system
+        // prompt. Derive it from the saved timestamp so retries and later
+        // turns keep the same cached history, including across UTC midnight.
+        // Mid-turn steers inherit the opening request's date. Their live path
+        // sends plain text, so leave that text unchanged on replay too.
+        let mut dated_turns = HashSet::new();
+        for message in &mut messages {
+            if message.role == Role::User && dated_turns.insert(message.turn_id) {
+                message.append_model_context(&format!(
+                    "\n\n[Submission date: {} (UTC). Use this date for relative dates unless \
+                     the user specifies otherwise. Local dates may differ.]",
+                    message.created_at.date_naive(),
+                ));
+            }
+        }
         let (provider_messages, checkpoint_boundary, source_boundaries) =
             rebuild_transcript_with_boundary(
                 &messages,

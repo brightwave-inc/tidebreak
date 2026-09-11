@@ -236,11 +236,8 @@ fn truncate_item(item: &str) -> String {
     if trimmed.len() <= MAX_CONTEXT_CHECKPOINT_ITEM_BYTES {
         return trimmed.to_owned();
     }
-    let mut end = MAX_CONTEXT_CHECKPOINT_ITEM_BYTES;
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    trimmed[..end].trim().to_owned()
+    let (bounded, _) = crate::truncate_utf8(trimmed, MAX_CONTEXT_CHECKPOINT_ITEM_BYTES);
+    bounded.trim().to_owned()
 }
 
 /// Extract `original_requests` from a stored checkpoint payload.
@@ -342,6 +339,14 @@ pub enum SaveContextCheckpointOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_item_trims_whitespace_left_before_a_split_character() {
+        let retained = "a".repeat(MAX_CONTEXT_CHECKPOINT_ITEM_BYTES - 2);
+        let item = format!("  {retained} €  ");
+        assert_eq!(truncate_item(&item), retained);
+        assert_eq!(truncate_item("  é  "), "é");
+    }
 
     #[test]
     fn structured_payload_v2_is_canonical_bounded_and_nonempty() {

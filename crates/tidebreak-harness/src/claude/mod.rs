@@ -316,7 +316,7 @@ fn auth_status_from_json(stdout: &[u8]) -> Option<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::claude::parse::ClaudeStreamParser;
     use crate::HarnessEvent;
@@ -506,6 +506,74 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
+    }
+
+    #[test]
+    fn fixture_replay_image_input() {
+        assert_image_input_replay();
+    }
+
+    /// Shared with the capability gate so Supported requires this replay.
+    pub(crate) fn assert_image_input_replay() {
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(fixture_dir().join("manifest.toml")).unwrap())
+                .unwrap();
+        assert!(manifest["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scenario| scenario.as_str() == Some("image-input")));
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(fixture_dir().join("image-input.request.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(input["type"], "user");
+        assert_eq!(input["message"]["content"][1]["source"]["data"], "REDACTED");
+
+        let bytes = b"fixture image bytes";
+        let encoded = session::encode_turn_stdin(&crate::TurnInput {
+            turn_id: None,
+            text: "what is in this image".into(),
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            images: vec![crate::TurnImage {
+                media_type: "image/png".into(),
+                bytes: bytes.to_vec(),
+            }],
+        });
+        let mut encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let source = &mut encoded["message"]["content"][1]["source"];
+        assert_eq!(
+            source["data"],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        );
+        source["data"] = "REDACTED".into();
+        assert_eq!(encoded["message"], input["message"]);
+
+        let (events, unrecognized) = replay("image-input");
+        assert_eq!(unrecognized, 0);
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::SessionStarted { harness_version, resume_ref: Some(resume_ref), .. }
+                if harness_version == "2.1.233" && resume_ref == input["session_id"].as_str().unwrap()
+        )));
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::AssistantDelta { text } if text == "a red square"
+        )));
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::AssistantMessage { text, .. } if text == "a red square"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

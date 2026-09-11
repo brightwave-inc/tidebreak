@@ -1,130 +1,108 @@
 # Harness fixtures
 
-Adapter parsers may only be written or modified against captured streams from
-a real engine invocation. Each capture lives under
-`<harness>/<version>/` with:
+CI replays checked-in protocol streams without starting an engine. These tests
+prove how the adapter encodes or parses the recorded shapes. They do not prove
+that every installed pin still emits those shapes, or that a live model behaves
+as a recorded response suggests.
 
-- `<scenario>.ndjson` — the raw protocol stream, one JSON object per line
-- `<scenario>.expected.json` — the normalized `HarnessEvent` sequence the
-  parser must produce
-- `manifest.toml` — exact argv, observed version, date, and redaction notes
+## Version coverage
 
-CI replays fixtures. It cannot capture them.
+`src/pin.rs` chooses exact install versions. Fixture directories record the
+versions used for each protocol baseline; a pin bump does not rename or refresh
+a capture.
 
-## Capture
+| Engine | Install pin | Checked-in coverage |
+| --- | --- | --- |
+| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. No complete 2.1.259 capture. |
+| Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. No complete 0.153.4 capture. |
+| opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. No complete 1.18.27 capture. |
+| Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume plus tool-image transport. The 1.0.13 capture uses a scripted local provider, not a live model. |
 
-The engine must be installed and signed in on the capturing machine. From the
-workspace root:
+Keep this table and the pin comments accurate when changing an install version.
+Capture a changed protocol at its observed version. Do not copy an older stream
+into a new version directory or describe a partial capture as complete coverage.
 
-```text
-cargo run -p tidebreak-harness --features capture --bin tidebreak-harness-capture -- \
-  --harness claude-code \
-  --scenario plain-text \
-  --prompt "reply with exactly: hello from fixture"
-```
+## Fixture contents
 
-The binary creates a throwaway git repo, runs the engine in print mode, tees
-stdout to `fixtures/<harness>/<version>/<scenario>.ndjson`, and writes
-`manifest.toml`.
+Each scenario lives under `<harness>/<version>/` with:
 
-Use the cheapest model the engine accepts, tiny prompts, and the smallest
-tool allowlist that still produces the scenario (for example a single `Read`
-for a tool-use turn). Check `claude --help` for current flags; the capture
-bin defaults to `-p --output-format stream-json --verbose --include-partial-messages`.
+- `<scenario>.ndjson`: recorded protocol frames, one JSON object per line.
+- `<scenario>.expected.json`: the normalized `HarnessEvent` sequence for parser replays.
+- `manifest.toml`: observed version, scenarios, available capture details, redactions, and limits.
 
-### Codex CLI
+Request payloads can have separate JSON files. ACP tests assert their request,
+permission, and completion contracts directly rather than using normalized
+expected files. Manifests identify reconstructed or synthetic scenarios; those
+prove adapter regressions, not an additional engine observation.
 
-`--harness codex` drives the long-lived `codex app-server --stdio` JSON-RPC
-child (0.147.0). Fixtures are framed both-direction exchanges, one object
-per line:
+The Claude `image-input` stream predates its replay test. It reports 2.1.233, but
+its original command, capture date, and image bytes were not recorded. Its
+manifest preserves that limit. The user frame lives in `image-input.request.json`
+so the response parser does not treat an outgoing prompt as a received steer.
+`fixture_replay_image_input` compares the real
+request encoder with the redacted input shape and checks the full normalized
+response, visible answer, session handle, and successful completion.
+`no_adapter_declares_image_input_without_a_replayed_contract` runs that proof
+for the supported image capability at the install pin. A matching filename alone
+cannot qualify image input. This proves transport compatibility with the fixture;
+it does not certify image interpretation or a fresh run of the install pin.
 
-```text
-{"dir":"out","msg":{"id":1,"method":"initialize","params":{…}}}
-{"dir":"in","msg":{"id":1,"result":{…}}}
-```
+## Record a protocol change
 
-That path was chosen over `codex exec --json` because app-server is the
-richer approval channel (`item/commandExecution/requestApproval`). Probe
-`codex app-server --help` and `codex exec --help` before recapturing a new
-version; if app-server is gone or unstable, recapture via exec JSONL and
-update the version manifest.
+There is no general capture binary. The removed helper resolved engines through
+the login shell and did not support ACP or MCP elicitation. Use a targeted
+protocol driver for the scenario and record how you invoked it in the manifest.
 
-The capture bin writes initialize → thread/start → turn/start and tees
-until `turn/completed`. Approval request/response pairs for
-`approval-approve` / `approval-deny` were captured with a helper that
-completes `item/commandExecution/requestApproval` with `{decision: accept}`
-or `{decision: decline}`.
+1. Resolve the exact managed engine through `pin::managed_binary` or
+   `pin::managed_binary_version`. Record its absolute executable, version output,
+   argv, protocol, model or scripted provider, and capture date. Do not substitute
+   an engine found on the login-shell PATH.
+2. Use an isolated home and throwaway workspace. A scripted local provider can
+   prove protocol behavior without paid inference; label that scope explicitly.
+3. Record both directions where the protocol needs request/response matching.
+   Preserve approval replies, cancellation, resumption, and terminal outcomes for
+   the scenario you are testing.
+4. Redact the stream, register it in the manifest, and add a replay with assertions
+   that fail when the behavior you depend on changes.
 
-Re-capture the whole version directory when the engine version moves.
+The existing integration shapes are:
 
-### opencode
+- Claude: `--input-format stream-json --output-format stream-json --verbose
+  --include-partial-messages`. The 2.1.233 prompt-tool approval captures include
+  the MCP `tools/call` request and allow/deny responses. That hidden
+  `--permission-prompt-tool` flag is not listed in the captured `--help`.
+- Codex: `app-server --stdio`, framed as `{"dir":"in"|"out","msg":{…}}`.
+  The 0.147.0 baseline includes command approvals; 0.153.0 adds
+  `mcpServer/elicitation/request` for MCP tools.
+- opencode: `serve --hostname 127.0.0.1 --port N`, framed HTTP and SSE records.
+  The baseline includes `/session`, `/prompt_async`, `/event`, and
+  `/permission/{id}/reply`.
+- Grok: 1.0.4 print-mode `--output-format streaming-json`; 1.0.13 also records
+  `agent --no-leader stdio` ACP. The image probe proves a `read_file` tool image
+  reaches the next model request, not direct user-image attachments.
 
-`--harness opencode` drives a long-lived `opencode serve --hostname 127.0.0.1 --port N` child (1.18.18). Fixtures are framed both-direction HTTP + SSE exchanges, one object per line:
+Read each version's manifest before changing its parser. Check the managed
+engine's help and behavior before recording a different version.
 
-```text
-{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session","body":{…}}}
-{"dir":"in","msg":{"kind":"http","status":200,"path":"/session","body":{…}}}
-{"dir":"in","msg":{"kind":"sse","event":{"type":"session.created",…}}}
-```
+## Redaction and replay
 
-That path was chosen over `opencode run --format json` because serve is the richer channel: sessions, `prompt_async`, directory-scoped `/event`, and `POST /permission/{id}/reply`. Probe `opencode serve --help` and `opencode run --help` before recapturing a new version.
+Before committing a stream:
 
-The capture bin writes POST `/session` → POST `/session/{id}/prompt_async` and tees `/event?directory=…` until `session.idle` or `session.error`. Approval request/response pairs for `approval-approve` / `approval-deny` were captured with a helper that completes `POST /permission/{id}/reply` with `{reply: once}` or `{reply: reject, message: …}`.
+1. Replace home and workspace paths with `/workspace` where only a cwd matters.
+2. Remove API keys, bearer tokens, cookies, and thinking signatures.
+3. Replace host-local sockets and temporary paths with `/tmp/redacted.sock`.
+4. Preserve event types, tool names, argument shapes, and identifiers needed to
+   match requests, approvals, turns, or resumed sessions.
+5. Record every redaction in the manifest. Keep hook and status events so parsers
+   must tolerate them.
 
-Re-capture the whole version directory when the engine version moves.
-
-### Grok CLI
-
-`--harness grok` drives print mode (`--prompt-file` + `--output-format streaming-json`).
-That path was chosen over `grok agent stdio` ACP because 1.0.4's print stream
-is a real NDJSON surface and no ACP permission request/response pair was
-captured. Probe `grok --help` and `grok agent stdio --help` before recapturing
-a new version.
-
-The capture bin writes the prompt to a file in the throwaway repo and tees
-stdout until the child exits. SIGINT on a live child produces a truncated
-stream with no `end` event (exit 130). `--yolo` and
-`--permission-mode bypassPermissions` are denylisted on Plan / Ask / Auto.
-Allow composes `--always-approve`.
-
-Re-capture the whole version directory when the engine version moves.
-
-## Redaction
-
-Before committing a capture:
-
-1. Strip absolute home paths (`/Users/…`, `/home/…`). Replace the worktree
-   with `/workspace` when the path is only a cwd.
-2. Strip anything token-like: API keys, bearer tokens, `sk-…` strings,
-   cookie headers, thinking signatures.
-3. Replace host-local sockets and paths (`/var/folders/…`,
-   `$TMPDIR/…/*.sock`) with `/tmp/redacted.sock`.
-4. Keep structural fidelity: event `type`s, tool names, session ids that the
-   resume fixture needs, and argument *shapes*.
-5. Record every redaction in `manifest.toml` under `redaction_notes`.
-
-Real streams include user-hook `system` events (`hook_started`,
-`hook_response`). Leave them in. The parser must tolerate them.
-
-After redaction, regenerate expected sequences:
+To generate an expected sequence, run the affected replay with:
 
 ```text
-UPDATE_HARNESS_FIXTURES=1 cargo test -p tidebreak-harness --locked
+UPDATE_HARNESS_FIXTURES=1 cargo test -p tidebreak-harness --locked fixture_replay_image_input
 ```
 
-Do not invent parser branches for shapes that are not in a fixture.
-
-## Approval channel (Claude Code 2.1.233)
-
-`--permission-prompt-tool` is a hidden flag: it is not listed in `--help`,
-but an unknown flag errors and this one does not. Print-mode approvals ride
-an MCP tool registered via `--mcp-config`. HTTP transport with a Bearer
-token was captured; that is the loopback the server serves.
-
-`approval-request.mcp.json` is the CLI→MCP `tools/call` payload. The
-matching `approval-request.ndjson` is the print-mode stream parked at the
-Write tool-use, before a decision. `approval-allow` and
-`approval-deny-with-feedback` are the full streams after the captured
-responses `{"behavior":"allow"}` and
-`{"behavior":"deny","message":"no — use the fixtures directory instead"}`.
-The deny message is what the model reads as the tool_result.
+Replace the test filter for another scenario. Inspect the expected diff, then
+run the same test without `UPDATE_HARNESS_FIXTURES`. Add protocol branches only
+when a recorded stream or an explicitly labelled regression fixture supports
+the shape.

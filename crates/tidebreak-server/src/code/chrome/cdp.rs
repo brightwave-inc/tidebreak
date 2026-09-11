@@ -198,15 +198,11 @@ impl CdpEvent {
 }
 
 fn truncated(value: &str, max: usize) -> String {
-    if value.len() <= max {
-        value.to_owned()
-    } else {
-        let mut end = max;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &value[..end])
+    let (mut text, was_truncated) = tidebreak_core::truncate_utf8(value, max);
+    if was_truncated {
+        text.push('…');
     }
+    text
 }
 
 /// Parse one protocol event. Unknown methods are ignored by design; Chrome
@@ -734,6 +730,15 @@ async fn reader_loop(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn truncation_suffix_marks_omitted_bytes_even_when_no_character_fits() {
+        assert_eq!(super::truncated("é", 0), "…");
+        assert_eq!(super::truncated("é", 1), "…");
+        assert_eq!(super::truncated("é", 2), "é");
+        assert_eq!(super::truncated("a€z", 3), "a…");
+        assert_eq!(super::truncated("", 0), "");
+    }
 
     #[test]
     fn runtime_timestamps_are_milliseconds_and_network_timestamps_are_seconds() {

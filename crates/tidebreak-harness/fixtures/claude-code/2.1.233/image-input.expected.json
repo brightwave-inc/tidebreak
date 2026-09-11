@@ -1,0 +1,26 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "f89fe270-751c-4956-8113-2c940d84a79b"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "a red square"
+  },
+  {
+    "type": "assistant_message",
+    "text": "a red square"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 4,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 12
+    }
+  }
+]

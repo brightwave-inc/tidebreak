@@ -13,6 +13,7 @@ observed_version = "2.1.233 (Claude Code)"
 
 scenarios = [
   "plain-text",
+  "image-input",
   "tool-use",
   "permission-denied",
   "resume",
@@ -91,3 +92,15 @@ not_verified = [
   "reasoning-level control flags",
   "live Auto (acceptEdits) turn with the prompt tool — flag is documented; not recaptured",
 ]
+
+[image_input_provenance]
+added_by_commit = "67f6e37656ad058dbcc02202712534eb7a3303be"
+notes = """
+The pre-existing image-input stream reports 2.1.233. Its original invocation,
+capture date, and image bytes were not recorded; data is REDACTED. It is a
+protocol regression fixture, not evidence of a fresh live capture or visual
+accuracy. The first user frame is preserved separately as image-input.request.json;
+image-input.ndjson contains only the response frames. The replay compares the
+adapter user-message shape after applying the same byte redaction, then checks
+the normalized response and completion.
+"""
