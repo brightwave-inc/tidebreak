@@ -516,6 +516,14 @@ impl CodeRuntime {
         };
         if session.lifecycle == SessionLifecycle::Ended {
             self.bus.forget(session.id);
+            if let Err(error) =
+                crate::code::scratch::remove_session_root(&self.data_dir, session.id)
+            {
+                tracing::warn!(
+                    session = %session.id,
+                    "code-mode: could not delete the session private root: {error}"
+                );
+            }
             return Ok(());
         }
         if let Ok(Some(workspace)) = self.session_workspace(&session).await {
@@ -587,6 +595,12 @@ impl CodeRuntime {
             );
         }
         self.bus.forget(current.id);
+        if let Err(error) = crate::code::scratch::remove_session_root(&self.data_dir, current.id) {
+            tracing::warn!(
+                session = %current.id,
+                "code-mode: could not delete the session private root: {error}"
+            );
+        }
         Ok(())
     }
 

@@ -4,6 +4,7 @@
 //! directory and final file refuses symlinks, so repository content cannot
 //! redirect private bytes into a path that Git can index.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -193,6 +194,208 @@ pub(crate) fn session_root(
     })
 }
 
+/// Remove `{data_dir}/code/private/{workspace_id}` if it exists.
+///
+/// Missing parents or the root itself are success. Symlinks are unlinked,
+/// never followed.
+pub(crate) fn remove_workspace_root(data_dir: &Path, workspace_id: WorkspaceId) -> io::Result<()> {
+    remove_private_named_child(
+        data_dir,
+        &[CODE_DIR, PRIVATE_DIR],
+        &workspace_id.to_string(),
+    )
+}
+
+/// Remove `{data_dir}/code/private/sessions/{session_id}` if it exists.
+pub(crate) fn remove_session_root(
+    data_dir: &Path,
+    session_id: tidebreak_core::SessionId,
+) -> io::Result<()> {
+    remove_private_named_child(
+        data_dir,
+        &[CODE_DIR, PRIVATE_DIR, SESSIONS_DIR],
+        &session_id.to_string(),
+    )
+}
+
+/// Delete private roots whose workspace or session row is gone.
+///
+/// Unknown names stay untouched. Per-entry failures are logged; this never
+/// fails the caller, so boot cannot get stuck on one undeletable leftover.
+pub(crate) fn sweep_orphan_private_roots(
+    data_dir: &Path,
+    live_workspaces: &HashSet<WorkspaceId>,
+    live_sessions: &HashSet<tidebreak_core::SessionId>,
+) {
+    let data_dir = match absolute_path(data_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "code-mode: could not resolve the data directory for a private-root sweep"
+            );
+            return;
+        }
+    };
+    let root = match open_root_if_exists(&data_dir) {
+        Ok(Some(root)) => root,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                path = %data_dir.display(),
+                %error,
+                "code-mode: could not open the data directory for a private-root sweep"
+            );
+            return;
+        }
+    };
+    let private = match open_existing_child(&root, OsStr::new(CODE_DIR)).and_then(|code| match code
+    {
+        Some(code) => open_existing_child(&code, OsStr::new(PRIVATE_DIR)),
+        None => Ok(None),
+    }) {
+        Ok(Some(private)) => private,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "code-mode: could not open code/private for a private-root sweep"
+            );
+            return;
+        }
+    };
+    if let Err(error) = sweep_named_orphans(&private, |name| {
+        if name == SESSIONS_DIR {
+            return SweepDecision::Skip;
+        }
+        match name
+            .to_str()
+            .and_then(|name| name.parse::<WorkspaceId>().ok())
+        {
+            Some(id) if live_workspaces.contains(&id) => SweepDecision::Keep,
+            Some(_) => SweepDecision::Remove,
+            None => SweepDecision::Skip,
+        }
+    }) {
+        tracing::warn!(
+            %error,
+            "code-mode: could not list workspace private roots"
+        );
+    }
+    let sessions = match open_existing_child(&private, OsStr::new(SESSIONS_DIR)) {
+        Ok(Some(sessions)) => sessions,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "code-mode: could not open code/private/sessions for a private-root sweep"
+            );
+            return;
+        }
+    };
+    if let Err(error) = sweep_named_orphans(&sessions, |name| {
+        match name
+            .to_str()
+            .and_then(|name| name.parse::<tidebreak_core::SessionId>().ok())
+        {
+            Some(id) if live_sessions.contains(&id) => SweepDecision::Keep,
+            Some(_) => SweepDecision::Remove,
+            None => SweepDecision::Skip,
+        }
+    }) {
+        tracing::warn!(
+            %error,
+            "code-mode: could not list session private roots"
+        );
+    }
+}
+
+enum SweepDecision {
+    Keep,
+    Remove,
+    Skip,
+}
+
+fn sweep_named_orphans(parent: &Dir, decide: impl Fn(&OsStr) -> SweepDecision) -> io::Result<()> {
+    for entry in parent.read_dir(".")? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "code-mode: could not read a private-root directory entry"
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        match decide(&name) {
+            SweepDecision::Keep | SweepDecision::Skip => continue,
+            SweepDecision::Remove => {}
+        }
+        if let Err(error) = remove_named_entry(parent, &name) {
+            tracing::warn!(
+                name = %name.to_string_lossy(),
+                %error,
+                "code-mode: could not delete an orphaned private root"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn remove_private_named_child(data_dir: &Path, parents: &[&str], name: &str) -> io::Result<()> {
+    let data_dir = absolute_path(data_dir)?;
+    let mut current = match open_root_if_exists(&data_dir)? {
+        Some(root) => root,
+        None => return Ok(()),
+    };
+    for component in parents {
+        current = match open_existing_child(&current, OsStr::new(component))? {
+            Some(child) => child,
+            None => return Ok(()),
+        };
+    }
+    remove_named_entry(&current, OsStr::new(name))
+}
+
+fn open_root_if_exists(path: &Path) -> io::Result<Option<Dir>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => open_root(path).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_existing_child(parent: &Dir, name: &OsStr) -> io::Result<Option<Dir>> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            parent.open_dir_nofollow(name).map(Some)
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "scratch path component is not a regular directory",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_named_entry(parent: &Dir, name: &OsStr) -> io::Result<()> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            parent.remove_file(name)
+        }
+        Ok(metadata) if metadata.is_dir() => parent.remove_dir_all(name),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private root is not a regular directory",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -286,23 +489,49 @@ pub(crate) fn sweep_scopes(root: &ScratchRoot, relative: &str) -> io::Result<()>
     let Some(root) = scratch_dir_if_exists(root, relative)? else {
         return Ok(());
     };
+    let mut failures = Vec::new();
     for entry in root.read_dir()? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let metadata = root.symlink_metadata(&name)?;
-        if metadata.file_type().is_symlink() {
-            if is_scope_name(&name) || is_legacy_attachment_name(&name) {
-                root.remove_file(&name)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                failures.push(error.to_string());
+                continue;
             }
-            continue;
-        }
-        if metadata.is_dir() && is_scope_name(&name) {
-            root.remove_dir_all(&name)?;
+        };
+        let name = entry.file_name();
+        let metadata = match root.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                failures.push(format!("{}: {error}", name.to_string_lossy()));
+                continue;
+            }
+        };
+        let result = if metadata.file_type().is_symlink() {
+            if is_scope_name(&name) || is_legacy_attachment_name(&name) {
+                root.remove_file(&name)
+            } else {
+                Ok(())
+            }
+        } else if metadata.is_dir() && is_scope_name(&name) {
+            root.remove_dir_all(&name)
         } else if metadata.is_file() && is_legacy_attachment_name(&name) {
-            root.remove_file(&name)?;
+            root.remove_file(&name)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            failures.push(format!("{}: {error}", name.to_string_lossy()));
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "could not sweep every scratch scope: {}",
+            failures.join("; ")
+        )))
+    }
 }
 
 fn scratch_components(relative: &str) -> io::Result<Vec<OsString>> {
@@ -843,5 +1072,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\nexit 1\n");
+    }
+
+    #[test]
+    fn removing_a_workspace_deletes_its_private_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace_id = WorkspaceId::new();
+        let private_root = workspace_root(data_dir.path(), workspace_id).unwrap();
+        std::fs::write(private_root.path().join("leftover.txt"), b"leak").unwrap();
+        assert!(private_root.path().is_dir());
+
+        remove_workspace_root(data_dir.path(), workspace_id).unwrap();
+
+        assert!(!private_root.path().exists());
+        assert!(data_dir.path().join(CODE_DIR).join(PRIVATE_DIR).is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_scopes_deletes_siblings_when_one_entry_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let private = tempfile::tempdir().unwrap();
+        let private_root = test_root(private.path());
+        let attachments = private.path().join("attachments");
+        std::fs::create_dir_all(&attachments).unwrap();
+        let keep = uuid::Uuid::new_v4();
+        let stuck = uuid::Uuid::new_v4();
+        let sibling = attachments.join(keep.to_string());
+        let blocked = attachments.join(stuck.to_string());
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("gone.txt"), b"ok").unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("held.txt"), b"held").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let error = sweep_scopes(&private_root, "attachments").unwrap_err();
+        assert!(
+            error.to_string().contains(&stuck.to_string()),
+            "sweep error should name the stuck entry: {error}"
+        );
+        assert!(!sibling.exists());
+        assert!(blocked.exists());
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
