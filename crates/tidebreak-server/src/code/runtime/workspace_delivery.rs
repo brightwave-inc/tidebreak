@@ -1224,25 +1224,21 @@ impl CodeRuntime {
             return;
         }
         let mut live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
-        // REST never derives a review decision: the unknown sentinel keeps
-        // the row's value the same way an unloaded check rollup keeps the
-        // checks. Authoritative `None` (loaded reviews, no objection) clears.
-        if crate::code::forge_rest::review_decision_is_unknown(live.review_decision.as_deref()) {
-            live.review_decision = match tidebreak_core::db::code::get_pull_request_fact(
-                &self.db,
-                owner,
-                &host,
-                &repo_owner,
-                &repo_name,
-                number,
-            )
-            .await
+        // REST never derives a review decision: the unknown sentinel omits
+        // the column on the live-tier write the same way an unloaded check
+        // rollup keeps the checks. Authoritative `None` (loaded reviews, no
+        // objection) still replaces and clears. Do not pre-read the row;
+        // a concurrent authoritative write would be overwritten by a stale
+        // copy, and a failed read would stamp `None`.
+        let review_decision_write =
+            if crate::code::forge_rest::review_decision_is_unknown(live.review_decision.as_deref())
             {
-                Ok(Some(fact)) => fact.live.and_then(|live| live.review_decision),
-                _ => None,
+                live.review_decision = None;
+                tidebreak_core::db::code::PullRequestReviewDecisionWrite::Preserve
+            } else {
+                tidebreak_core::db::code::PullRequestReviewDecisionWrite::Replace
             };
-        }
-        let (changed, stored) = match tidebreak_core::db::code::set_pull_request_live_state(
+        let (changed, stored) = match tidebreak_core::db::code::set_pull_request_live_state_with(
             &self.db,
             owner,
             &host,
@@ -1250,6 +1246,7 @@ impl CodeRuntime {
             &repo_name,
             number,
             &live,
+            review_decision_write,
         )
         .await
         {
@@ -2155,6 +2152,99 @@ mod remote_pr_tests {
                     in_merge_queue: None,
                 },
             )
+            .await;
+        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.live.unwrap().review_decision, None);
+    }
+
+    /// Seeded `changes_requested`, then an authoritative `approved`, then a
+    /// REST unknown write must leave `approved`. A later authoritative
+    /// `None` still clears. No pre-read: preserve is the column omit.
+    #[tokio::test]
+    async fn an_unknown_rest_write_does_not_overwrite_a_fresher_authoritative_decision() {
+        use crate::code::forge_rest;
+        use tidebreak_core::db::code::{get_pull_request_fact, save_pull_request_fact};
+        use tidebreak_core::{
+            CodePullRequestFact, CodePullRequestId, CodePullRequestState, PullRequestDigest,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, _) = fixture(dir.path()).await;
+        let now = Utc::now();
+        save_pull_request_fact(
+            &runtime.db,
+            &CodePullRequestFact {
+                id: CodePullRequestId::new(),
+                owner: owner.clone(),
+                host: "github.com".into(),
+                repo_owner: "acme".into(),
+                repo_name: "tools".into(),
+                number: 17,
+                url: "https://github.com/acme/tools/pull/17".into(),
+                title: "Stored title".into(),
+                state: CodePullRequestState::Open,
+                draft: false,
+                author: None,
+                head_branch: "feat".into(),
+                base_branch: "main".into(),
+                head_sha: Some("abc".into()),
+                created_at: now,
+                updated_at: now,
+                merged_at: None,
+                closed_at: None,
+                first_seen_at: now,
+                last_seen_at: now,
+                live: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let digest = |review_decision: Option<&str>| PullRequestDigest {
+            number: 17,
+            url: Some("https://github.com/acme/tools/pull/17".into()),
+            state: "open".into(),
+            title: Some("Stored title".into()),
+            checks_summary: None,
+            check_counts: None,
+            checks: None,
+            draft: Some(false),
+            merged: Some(false),
+            review_decision: review_decision.map(str::to_owned),
+            mergeable: None,
+            merge_state_status: None,
+            head_branch: Some("feat".into()),
+            base_branch: Some("main".into()),
+            head_sha: Some("abc".into()),
+            auto_merge_enabled: None,
+            in_merge_queue: None,
+        };
+        runtime
+            .record_pull_request_live_state(&owner, None, &digest(Some("changes_requested")))
+            .await;
+        runtime
+            .record_pull_request_live_state(&owner, None, &digest(Some("approved")))
+            .await;
+        runtime
+            .record_pull_request_live_state(
+                &owner,
+                None,
+                &digest(Some(forge_rest::REVIEW_DECISION_UNKNOWN)),
+            )
+            .await;
+        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.live.unwrap().review_decision.as_deref(),
+            Some("approved")
+        );
+        runtime
+            .record_pull_request_live_state(&owner, None, &digest(None))
             .await;
         let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
             .await
