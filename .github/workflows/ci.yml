@@ -622,7 +622,7 @@ jobs:
       - name: Set up self-contained Python for offline package tests
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12.11"
+          python-version: "3.12.10"
       - name: Verify native sandbox prerequisites
         run: |
           test -x /usr/bin/sandbox-exec

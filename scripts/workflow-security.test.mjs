@@ -782,7 +782,7 @@ test("macOS CI exercises Seatbelt and the egress broker without signing setup", 
   assert.match(sandbox, /\/usr\/bin\/sandbox-exec -p/);
   assert.match(sandbox, /\/usr\/bin\/python3 -c/);
   assert.match(sandbox, /uses: actions\/setup-python@[a-f0-9]{40} # v6/);
-  assert.match(sandbox, /python-version: "3\.12\.11"/);
+  assert.match(sandbox, /python-version: "3\.12\.10"/);
   assert.match(sandbox, /python3 -I -c .*pip.*is_relative_to.*sys\.prefix/);
   for (const suite of ["local", "network", "sbpl"]) {
     assert.ok(
