@@ -8824,3 +8824,69 @@ async fn steer_recovery_late_machine_ack_preserves_edited_retry() {
     assert_eq!(rows[0].id, retry);
     assert_eq!(rows[0].message, "edited machine retry");
 }
+
+#[tokio::test]
+async fn steer_recovery_delete_failure_rolls_back_without_poisoning_receipt() {
+    use crate::code::ExternalSteerRecoveryAction as Action;
+    use crate::db::code::{external_steer_recovery, recover_external_steer};
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "recovery-delete-rollback").await;
+    let (original, _, _) = record_pending_steer(&store, &owner, session, "delete-rollback").await;
+    store.conn.execute_unprepared("CREATE TRIGGER fail_recovery_delete BEFORE DELETE ON code_queued_turn BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;").await.unwrap();
+    assert!(recover_external_steer(
+        &store,
+        &owner,
+        session,
+        "delete-rollback",
+        Action::Retry,
+        true
+    )
+    .await
+    .is_err());
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the replacement insert rolls back with the failed delete"
+    );
+    assert_eq!(rows[0].id, original.id);
+    assert!(
+        external_steer_recovery(&store, &owner, session, "delete-rollback")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_recovery_delete")
+        .await
+        .unwrap();
+    let decision = recover_external_steer(
+        &store,
+        &owner,
+        session,
+        "delete-rollback",
+        Action::Retry,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        recover_external_steer(
+            &store,
+            &owner,
+            session,
+            "delete-rollback",
+            Action::Retry,
+            true
+        )
+        .await
+        .unwrap(),
+        decision
+    );
+    let rows = list_queued_turns(&store, &owner, session).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(Some(rows[0].id), decision.retry_turn_id);
+    assert_ne!(rows[0].id, original.id);
+}
