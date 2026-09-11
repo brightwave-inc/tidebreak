@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -218,10 +220,10 @@ pub struct WorktreeOperation {
     repo_root: PathBuf,
     worktree_path: PathBuf,
     marker_path: PathBuf,
-    /// Exclusive lock on the path marker. Dropping it without removing the
-    /// file is how a crash looks to the next reserve: the file remains, the
-    /// lock does not.
-    _marker_lock: File,
+    /// Exclusive lock on a separate, permanent reservation file. Its inode
+    /// stays stable while marker records are removed or recovered. A crash
+    /// releases the lock without requiring another process to unlink it.
+    _marker_lock: WorktreeMarkerLock,
     marker: WorktreeOperationMarker,
     branch_created: bool,
 }
@@ -1192,7 +1194,7 @@ async fn reserve_worktree_target(
 }
 
 async fn repository_identity(repo_root: &Path) -> Result<String, WorktreeError> {
-    let git_dir = git_stdout(
+    let git_dir = git_fs_stdout(
         Some(repo_root),
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         GIT_TIMEOUT,
@@ -1201,15 +1203,37 @@ async fn repository_identity(repo_root: &Path) -> Result<String, WorktreeError> 
     .map_err(|error| {
         WorktreeError::internal(format!("could not resolve repository identity: {error}"))
     })?;
-    Path::new(git_dir.trim())
-        .canonicalize()
-        .map(|path| path.display().to_string())
-        .map_err(|error| {
-            WorktreeError::internal(format!(
-                "could not canonicalize repository identity {}: {error}",
-                git_dir.trim()
-            ))
-        })
+    let path = git_dir.canonicalize().map_err(|error| {
+        WorktreeError::internal(format!(
+            "could not canonicalize repository identity {}: {error}",
+            git_dir.display()
+        ))
+    })?;
+    Ok(repository_path_identity(&path))
+}
+
+fn repository_path_identity(path: &Path) -> String {
+    let mut digest = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        digest.update(path.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            digest.update(unit.to_le_bytes());
+        }
+    }
+    // Existing marker records remain readable. Recovery removes an abandoned
+    // record rather than reconstructing a live operation from its identity.
+    let hash = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("path-sha256:{hash}")
 }
 
 async fn marker_matches(
@@ -1228,6 +1252,19 @@ async fn marker_matches(
     }
 }
 
+#[derive(Debug)]
+struct WorktreeMarkerLock(File);
+
+impl Drop for WorktreeMarkerLock {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit this descriptor until exec closes it.
+        // Unlock explicitly so an inherited copy cannot extend our reservation.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not unlock worktree operation reservation");
+        }
+    }
+}
+
 /// Git argv entry for a filesystem path. Never UTF-8-lossy.
 fn git_fs_arg(path: &Path) -> OsString {
     path.as_os_str().to_os_string()
@@ -1237,7 +1274,41 @@ fn claim_worktree_operation_marker(
     marker_path: &Path,
     bytes: &[u8],
     worktree_path: &Path,
-) -> Result<File, WorktreeError> {
+) -> Result<WorktreeMarkerLock, WorktreeError> {
+    let lock_path = worktree_operation_lock_path(marker_path);
+    let lock = StdOpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not open worktree operation lock {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(WorktreeError::conflict(
+                "worktree_path_busy",
+                format!(
+                    "another worktree operation owns {}",
+                    worktree_path.display()
+                ),
+            ))
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(WorktreeError::internal(format!(
+                "could not lock worktree operation {}: {error}",
+                lock_path.display()
+            )))
+        }
+    }
+    let lock = WorktreeMarkerLock(lock);
+    // Every contender takes this stable lock before opening the marker record.
+    // Never unlink it: another contender may already hold an open descriptor.
     loop {
         match StdOpenOptions::new()
             .create_new(true)
@@ -1245,13 +1316,6 @@ fn claim_worktree_operation_marker(
             .open(marker_path)
         {
             Ok(mut file) => {
-                if let Err(error) = file.try_lock() {
-                    let _ = std::fs::remove_file(marker_path);
-                    return Err(WorktreeError::internal(format!(
-                        "could not lock worktree operation marker {}: {error}",
-                        marker_path.display()
-                    )));
-                }
                 if let Err(error) = std::io::Write::write_all(&mut file, bytes) {
                     let _ = std::fs::remove_file(marker_path);
                     return Err(WorktreeError::internal(format!(
@@ -1266,10 +1330,10 @@ fn claim_worktree_operation_marker(
                         marker_path.display()
                     )));
                 }
-                return Ok(file);
+                return Ok(lock);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                recover_abandoned_worktree_marker(marker_path, worktree_path)?;
+                recover_abandoned_worktree_marker(&lock, marker_path, worktree_path)?;
             }
             Err(error) => {
                 return Err(WorktreeError::internal(format!(
@@ -1281,7 +1345,14 @@ fn claim_worktree_operation_marker(
     }
 }
 
+fn worktree_operation_lock_path(marker_path: &Path) -> PathBuf {
+    let mut path = marker_path.as_os_str().to_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
 fn recover_abandoned_worktree_marker(
+    _reservation: &WorktreeMarkerLock,
     marker_path: &Path,
     worktree_path: &Path,
 ) -> Result<(), WorktreeError> {
@@ -1301,6 +1372,15 @@ fn recover_abandoned_worktree_marker(
     };
     match file.try_lock() {
         Ok(()) => {
+            // This probe preserves reservations held by older builds that
+            // lock the record itself. The separate reservation stays locked
+            // while the old record closes and its pathname is removed.
+            file.unlock().map_err(|error| {
+                WorktreeError::internal(format!(
+                    "could not unlock abandoned worktree marker {}: {error}",
+                    marker_path.display()
+                ))
+            })?;
             drop(file);
             match std::fs::remove_file(marker_path) {
                 Ok(()) => Ok(()),
@@ -2431,7 +2511,31 @@ async fn remote_branch_is_present(worktree_path: &Path) -> Result<Option<bool>, 
     )
     .await
     {
-        Ok(output) => Ok(Some(!output.stdout.is_empty())),
+        Ok(output) => {
+            let Some(remote_tip) = output.stdout.lines().find_map(|line| {
+                let (tip, reference) = line.split_once('\t')?;
+                (reference == merge).then_some(tip)
+            }) else {
+                return Ok(Some(false));
+            };
+            let tracking_tip = git_stdout(
+                Some(worktree_path),
+                &["rev-parse", "--verify", "@{u}"],
+                GIT_TIMEOUT,
+            )
+            .await
+            .map_err(|error| {
+                WorktreeError::archive_uncertain(format!(
+                    "could not resolve local tracking for remote branch {merge}: {error}"
+                ))
+            })?;
+            if remote_tip != tracking_tip {
+                return Err(WorktreeError::archive_uncertain(format!(
+                    "remote branch {merge} on {remote} changed; fetch before archiving"
+                )));
+            }
+            Ok(Some(true))
+        }
         Err(error) => Err(WorktreeError::archive_uncertain(format!(
             "could not observe remote branch {merge} on {remote}: {error}"
         ))),
@@ -2531,7 +2635,8 @@ fn trim_git_stdout(bytes: &[u8]) -> &[u8] {
 }
 
 fn path_from_git_stdout(bytes: &[u8]) -> PathBuf {
-    let trimmed = trim_git_stdout(bytes);
+    // Git appends one line terminator; whitespace in the pathname is data.
+    let trimmed = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
@@ -3710,6 +3815,64 @@ mod tests {
         live.rollback().await;
     }
 
+    #[test]
+    fn marker_creation_already_holds_the_persistent_reservation() {
+        let data = TempDir::new().unwrap();
+        let target = data.path().join("creating");
+        let marker = worktree_operation_marker_path(&target).unwrap();
+        let first = claim_worktree_operation_marker(&marker, b"first", &target).unwrap();
+        // Removing the record models the interval before a new record exists,
+        // including completion and recovery. The reservation must still hold.
+        std::fs::remove_file(&marker).unwrap();
+        assert!(matches!(
+            claim_worktree_operation_marker(&marker, b"competitor", &target),
+            Err(WorktreeError::Conflict {
+                kind: "worktree_path_busy",
+                ..
+            })
+        ));
+        assert!(worktree_operation_lock_path(&marker).is_file());
+        drop(first);
+        let next = claim_worktree_operation_marker(&marker, b"next", &target).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), b"next");
+        drop(next);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_record_descriptor_cannot_replace_a_live_reservation() {
+        let data = TempDir::new().unwrap();
+        let target = data.path().join("stale");
+        let marker = worktree_operation_marker_path(&target).unwrap();
+        std::fs::write(&marker, b"abandoned").unwrap();
+        let stale = StdOpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&marker)
+            .unwrap();
+        let live = claim_worktree_operation_marker(&marker, b"live", &target).unwrap();
+        // A contender that opened the retired record can still lock that
+        // descriptor on Unix. That lock must not authorize another reservation.
+        stale.try_lock().unwrap();
+        drop(stale);
+        // This is the late unlink performed by the former recovery algorithm.
+        // Even after it removes the live record, the stable lock excludes a
+        // second owner until the first operation actually releases ownership.
+        std::fs::remove_file(&marker).unwrap();
+        assert!(matches!(
+            claim_worktree_operation_marker(&marker, b"competitor", &target),
+            Err(WorktreeError::Conflict {
+                kind: "worktree_path_busy",
+                ..
+            })
+        ));
+        assert!(!marker.exists());
+        drop(live);
+        let next = claim_worktree_operation_marker(&marker, b"next", &target).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), b"next");
+        drop(next);
+    }
+
     #[tokio::test]
     async fn archive_treats_a_deleted_remote_branch_as_unpushed() {
         let (dir, origin_checkout) = init_repo();
@@ -3766,6 +3929,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archive_fails_closed_when_the_remote_branch_was_rewound() {
+        let (dir, repo) = init_repo();
+        let bare = dir.path().join("origin.git");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                "--bare",
+                repo.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        run(
+            &repo,
+            &["git", "remote", "add", "origin", bare.to_str().unwrap()],
+        );
+        run(&repo, &["git", "checkout", "-b", "tidebreak/rewound"]);
+        std::fs::write(repo.join("unique.txt"), "local work\n").unwrap();
+        run(&repo, &["git", "add", "unique.txt"]);
+        run(&repo, &["git", "commit", "-m", "local work"]);
+        run(&repo, &["git", "push", "-u", "origin", "tidebreak/rewound"]);
+        let base = branch_tip(&repo, "main").await.unwrap();
+        run(
+            &bare,
+            &["git", "update-ref", "refs/heads/tidebreak/rewound", &base],
+        );
+        assert_eq!(
+            git_stdout(
+                Some(&repo),
+                &["rev-list", "--count", "@{u}..HEAD"],
+                GIT_TIMEOUT
+            )
+            .await
+            .unwrap(),
+            "0"
+        );
+        let error = archive_blockers(&repo, "main").await.unwrap_err();
+        assert!(
+            matches!(error, WorktreeError::ArchiveUncertain(_)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn archive_fails_closed_when_the_remote_cannot_be_observed() {
         let (dir, origin_checkout) = init_repo();
         let bare = dir.path().join("origin.git");
@@ -3808,6 +4016,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn repository_identity_distinguishes_lossy_path_collisions() {
+        use std::os::unix::ffi::OsStringExt;
+        let first = PathBuf::from(OsString::from_vec(b"/repo-\x80".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"/repo-\x81".to_vec()));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        assert_ne!(
+            repository_path_identity(&first),
+            repository_path_identity(&second)
+        );
+        assert_eq!(
+            path_from_git_stdout(b"/repo/.git/trailing space \n"),
+            PathBuf::from("/repo/.git/trailing space ")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_non_utf8_repository_root_keeps_its_native_identity() {
+        use std::os::unix::ffi::OsStringExt;
+        let (dir, repo) = init_repo();
+        let native = dir.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        std::fs::rename(&repo, &native).unwrap();
+        let path = scratch_worktree(dir.path(), "native-root");
+        let operation = create_worktree(&native, &path, "tidebreak/native-root", "main")
+            .await
+            .unwrap();
+        operation.require_repository_identity().await.unwrap();
+        operation.complete().await;
+        assert!(path.join("README.md").is_file());
+        remove_worktree(&native, &path).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn git_fs_arg_preserves_non_utf8_bytes() {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
@@ -3817,7 +4059,9 @@ mod tests {
         assert_ne!(path.to_string_lossy().as_bytes(), raw);
     }
 
-    #[cfg(unix)]
+    // macOS filesystems reject these byte names with EILSEQ; Linux exercises
+    // the filesystem round trip, while the byte-only tests run on all Unix.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn worktree_add_remove_and_bundle_preserve_non_utf8_paths() {
         use std::os::unix::ffi::OsStringExt;
