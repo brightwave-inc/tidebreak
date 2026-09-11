@@ -407,6 +407,40 @@ pub async fn queue_paused(store: &DbStore, owner: &OwnerId, session_id: SessionI
     )
 }
 
+/// Release a recovery pause only when no queued message needs review.
+/// Serialize with intake so a message accepted during recovery stays paused.
+/// Call only when recovery introduced the pause; preserve an existing pause.
+pub async fn resume_empty_recovered_queue(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} not found"
+        )));
+    }
+    let session = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    if session.is_none() {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} not found"
+        )));
+    }
+    if list_on(&transaction, owner, session_id).await?.is_empty() {
+        entities::setting::Entity::delete_by_id(queue_paused_setting(session_id))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
 /// Pause or release promotion for this session; queued rows stay put while
 /// paused. Refuses a session the owner does not hold, for the same reason
 /// [`queue_paused`] anchors on the session row.

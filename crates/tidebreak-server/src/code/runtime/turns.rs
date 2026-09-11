@@ -847,8 +847,12 @@ impl CodeRuntime {
             .lock()
             .expect("recovery attempts")
             .remove(&id);
+        let already_paused = tidebreak_core::db::code::queue_paused(&self.db, owner, id).await?;
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, true).await?;
         let result = self.reap_inner(owner, id).await;
+        if result.is_ok() && !already_paused {
+            tidebreak_core::db::code::resume_empty_recovered_queue(&self.db, owner, id).await?;
+        }
         if let Err(error) = &result {
             self.retain_failed_recovery(&session, error.message())
                 .await?;

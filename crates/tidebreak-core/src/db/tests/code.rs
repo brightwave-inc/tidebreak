@@ -4829,6 +4829,35 @@ async fn code_queue_reorders_stay_dense_and_the_cap_holds() {
 }
 
 #[tokio::test]
+async fn recovery_resumes_only_an_empty_queue_owned_by_the_caller() {
+    use crate::db::code::resume_empty_recovered_queue;
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    set_queue_paused(&store, &owner, session_id, true)
+        .await
+        .unwrap();
+    let other = OwnerId::new("intruder").unwrap();
+    assert!(resume_empty_recovered_queue(&store, &other, session_id)
+        .await
+        .is_err());
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+    let row = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "review first"))
+        .await
+        .unwrap();
+    resume_empty_recovered_queue(&store, &owner, session_id)
+        .await
+        .unwrap();
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+    delete_queued_turn(&store, &owner, session_id, row.id)
+        .await
+        .unwrap();
+    resume_empty_recovered_queue(&store, &owner, session_id)
+        .await
+        .unwrap();
+    assert!(!queue_paused(&store, &owner, session_id).await.unwrap());
+}
+
+#[tokio::test]
 async fn code_queue_pause_round_trips_and_an_ended_session_clears_its_rows() {
     let (_dir, store, session_id, _turn) = seeded_session().await;
     let owner = OwnerId::local();
