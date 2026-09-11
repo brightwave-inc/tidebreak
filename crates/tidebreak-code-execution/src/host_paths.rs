@@ -175,7 +175,7 @@ fn resolve_blocking(root: &Path, relative: &str, create: bool) -> Result<Dir, Sc
             // refusal to report, and it too is relative to the pinned parent.
             Err(_) => match directory.symlink_metadata(component) {
                 Ok(metadata) if metadata.is_symlink() => {
-                    return Err(ScratchRefusal::SymlinkedComponent)
+                    return Err(ScratchRefusal::SymlinkedComponent);
                 }
                 Ok(metadata) if !metadata.is_dir() => return Err(ScratchRefusal::NotADirectory),
                 Ok(_) => return Err(ScratchRefusal::Unavailable),
@@ -338,28 +338,11 @@ impl ScratchDir {
     /// The entries directly inside this directory, classified without following
     /// a symlink. Names that are not valid UTF-8 are dropped: every path this
     /// crate carries is UTF-8, and a name that cannot be represented is a name
-    /// no later operation could address.
+    /// no later operation could address. If an entry cannot be classified,
+    /// return an error so a partial listing cannot imply that files are absent.
     pub async fn entries(&self) -> io::Result<Vec<ScratchEntry>> {
-        self.blocking(|directory| {
-            let mut entries = Vec::new();
-            for entry in directory.entries()? {
-                let entry = entry?;
-                let Ok(name) = entry.file_name().into_string() else {
-                    continue;
-                };
-                let kind = match directory.symlink_metadata(&name) {
-                    Ok(metadata) if metadata.is_symlink() => ScratchEntryKind::Other,
-                    Ok(metadata) if metadata.is_dir() => ScratchEntryKind::Directory,
-                    Ok(metadata) if metadata.is_file() => ScratchEntryKind::File,
-                    Ok(_) => ScratchEntryKind::Other,
-                    Err(_) => continue,
-                };
-                entries.push(ScratchEntry { name, kind });
-            }
-            entries.sort_by(|left, right| left.name.cmp(&right.name));
-            Ok(entries)
-        })
-        .await
+        self.blocking(|directory| classify_entries(directory, directory.entries()?))
+            .await
     }
 
     /// The length and modification time of `name`, judged without following a
@@ -444,6 +427,32 @@ impl ScratchDir {
             .await
             .map_err(|_| io::Error::other("scratch operation did not complete"))?
     }
+}
+
+fn classify_entries(
+    directory: &Dir,
+    entries: impl IntoIterator<Item = io::Result<cap_std::fs::DirEntry>>,
+) -> io::Result<Vec<ScratchEntry>> {
+    let mut classified = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let metadata = directory.symlink_metadata(&name)?;
+        let kind = if metadata.is_symlink() {
+            ScratchEntryKind::Other
+        } else if metadata.is_dir() {
+            ScratchEntryKind::Directory
+        } else if metadata.is_file() {
+            ScratchEntryKind::File
+        } else {
+            ScratchEntryKind::Other
+        };
+        classified.push(ScratchEntry { name, kind });
+    }
+    classified.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(classified)
 }
 
 fn write_blocking(
@@ -581,6 +590,37 @@ fn single_component(name: &str) -> io::Result<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_that_loses_search_permission_does_not_become_an_absent_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("keep.txt"), b"original").unwrap();
+        let directory = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        let entries = directory.entries().unwrap();
+        let mut observed = 0;
+        // Change permissions after enumeration succeeds, at the boundary where
+        // another process can make an existing entry impossible to classify.
+        let raced = entries.inspect(|entry| {
+            assert!(entry.is_ok());
+            observed += 1;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o400)).unwrap();
+        });
+        let result = classify_entries(&directory, raced);
+        let search_denied = directory.symlink_metadata("keep.txt").is_err();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(observed, 1);
+        if !search_denied {
+            // Elevated privileges can bypass the directory search restriction.
+            return;
+        }
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(root.path().join("keep.txt")).unwrap(),
+            b"original"
+        );
+    }
 
     #[tokio::test]
     async fn a_symlinked_component_refuses_instead_of_being_followed() {
