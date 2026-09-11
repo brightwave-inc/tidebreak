@@ -1035,7 +1035,15 @@ async fn collect_changes(
     to: &str,
     bounds: DiffBounds,
 ) -> Result<BoundedFiles, CheckpointError> {
-    collect_changes_inner(worktree, from, to, bounds, None).await
+    collect_changes_inner(
+        worktree,
+        from,
+        to,
+        bounds,
+        None,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+    )
+    .await
 }
 
 async fn collect_changes_for_paths(
@@ -1053,6 +1061,7 @@ async fn collect_changes_for_paths(
             max_files: usize::MAX,
         },
         Some(paths),
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
     )
     .await
 }
@@ -1063,6 +1072,7 @@ async fn collect_changes_inner(
     to: &str,
     bounds: DiffBounds,
     paths: Option<&[GitPath]>,
+    output_budget: OutputBudget,
 ) -> Result<BoundedFiles, CheckpointError> {
     let name_status_args = [
         "diff",
@@ -1074,29 +1084,45 @@ async fn collect_changes_inner(
         "--",
     ];
     let numstat_args = ["diff", "--numstat", "-z", "--find-renames", from, to, "--"];
-    let name_status = match paths {
+    let (name_status, name_truncated) = match paths {
         Some(paths) => {
-            git_bytes_with_literal_paths(worktree, &name_status_args, paths, GIT_TIMEOUT).await
+            git_bytes_with_literal_paths_bounded(
+                worktree,
+                &name_status_args,
+                paths,
+                GIT_TIMEOUT,
+                output_budget,
+            )
+            .await
         }
         None => {
-            git_bytes(
+            git_bytes_bounded(
                 worktree,
                 &name_status_args[..name_status_args.len() - 1],
                 GIT_TIMEOUT,
+                output_budget,
             )
             .await
         }
     }
     .map_err(CheckpointError::internal)?;
-    let numstat = match paths {
+    let (numstat, numstat_truncated) = match paths {
         Some(paths) => {
-            git_bytes_with_literal_paths(worktree, &numstat_args, paths, GIT_TIMEOUT).await
+            git_bytes_with_literal_paths_bounded(
+                worktree,
+                &numstat_args,
+                paths,
+                GIT_TIMEOUT,
+                output_budget,
+            )
+            .await
         }
         None => {
-            git_bytes(
+            git_bytes_bounded(
                 worktree,
                 &numstat_args[..numstat_args.len() - 1],
                 GIT_TIMEOUT,
+                output_budget,
             )
             .await
         }
@@ -1122,8 +1148,8 @@ async fn collect_changes_inner(
         .iter()
         .map(|file| file.deletions)
         .fold(0u32, u32::saturating_add);
-    let truncated = total_files > bounds.max_files;
-    if truncated {
+    let truncated = total_files > bounds.max_files || name_truncated || numstat_truncated;
+    if total_files > bounds.max_files {
         files.truncate(bounds.max_files);
     }
     Ok(BoundedFiles {
@@ -1289,8 +1315,15 @@ async fn git_text_env_before(
     Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
-async fn git_bytes(cwd: &Path, args: &[&str], limit: Duration) -> Result<Vec<u8>, String> {
-    git_bytes_env(cwd, args, &[], limit).await
+async fn git_bytes_bounded(
+    cwd: &Path,
+    args: &[&str],
+    limit: Duration,
+    stdout_budget: OutputBudget,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut command = git_command(cwd);
+    command.args(args);
+    run_git_command_bounded(command, args.join(" "), limit, stdout_budget, true).await
 }
 
 async fn git_bytes_env(
@@ -1338,29 +1371,6 @@ async fn git_bytes_env_before(
     } else {
         Ok(stdout)
     }
-}
-
-async fn git_bytes_with_literal_paths(
-    cwd: &Path,
-    args: &[&str],
-    paths: &[GitPath],
-    limit: Duration,
-) -> Result<Vec<u8>, String> {
-    let mut command = git_command(cwd);
-    command.arg("--literal-pathspecs").args(args);
-    for path in paths {
-        command.arg(path.to_os_string()?);
-    }
-    run_git_command(
-        command,
-        format!(
-            "--literal-pathspecs {} <{} paths>",
-            args.join(" "),
-            paths.len()
-        ),
-        limit,
-    )
-    .await
 }
 
 async fn git_bytes_with_literal_paths_bounded(
@@ -2022,6 +2032,33 @@ mod tests {
             (1, 2, 0)
         );
         assert!(!diff.stat.truncated);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_name_status_truncates_instead_of_failing_the_checkpoint() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "huge-name-status");
+        for index in 0..80 {
+            std::fs::write(tree.join(format!("file-{index:02}.txt")), "changed\n").unwrap();
+        }
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
+        let from = merge_base(&tree, "main").await.unwrap();
+        let listed = collect_changes_inner(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            DiffBounds::default(),
+            None,
+            OutputBudget::head(64, 4),
+        )
+        .await
+        .expect("truncated name-status must still record");
+        assert!(listed.truncated);
+        assert!(listed.stat.truncated);
+        assert!(!listed.files.is_empty());
     }
 
     #[tokio::test]

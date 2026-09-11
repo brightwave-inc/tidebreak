@@ -370,3 +370,126 @@ async fn postgres_repository_paths_are_unique_per_owner() {
         .unwrap();
     assert_eq!(found.id, replacement.id);
 }
+
+#[tokio::test]
+async fn postgres_native_tool_receipts_claim_once_and_replay() {
+    use tidebreak_core::db::code::*;
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Ok(url) = std::env::var("TIDEBREAK_POSTGRES_TEST_URL") else {
+        assert!(
+            std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_none(),
+            "TIDEBREAK_POSTGRES_TEST_URL is required"
+        );
+        return;
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let label = format!("receipt-{}", uuid::Uuid::new_v4());
+    let owner = OwnerId::new(&label).unwrap();
+    let (_, _, session, _) = seed_owner(&store, &owner, &label).await;
+    let grant = mint_external_grant(
+        &store,
+        &owner,
+        MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: &label,
+            workspace_identity: "receipts-test",
+            kind: tidebreak_core::code::CodeGrantKind::Person,
+        },
+        &"a".repeat(64),
+        &"b".repeat(64),
+    )
+    .await
+    .unwrap();
+    bind_external_session(&store, &owner, grant.id, "slack", &label, session)
+        .await
+        .unwrap();
+    let tidebreak_core::code::IncarnationAdmission::Admitted(inc) =
+        create_incarnation_intent(&store, &owner, session, 1, 10)
+            .await
+            .unwrap()
+    else {
+        panic!("expected admission")
+    };
+    activate_incarnation(&store, &owner, inc.id, "test-receipts")
+        .await
+        .unwrap();
+    let arguments = serde_json::json!({"task":"inspect", "repo":"one"});
+    let receipt = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        inc.id,
+        "one",
+        "code_run_turn",
+        &arguments,
+    )
+    .await
+    .unwrap();
+    let same = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        inc.id,
+        "one",
+        "code_run_turn",
+        &serde_json::json!({"repo":"one", "task":"inspect"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(same.call_id, receipt.call_id);
+    assert!(enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        inc.id,
+        "one",
+        "code_run_turn",
+        &serde_json::json!({})
+    )
+    .await
+    .is_err());
+    let (a, b) = tokio::join!(
+        claim_native_tool_request(&store, &owner, &receipt),
+        claim_native_tool_request(&store, &owner, &same)
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|v| matches!(v, NativeToolClaim::Claimed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|v| matches!(v, NativeToolClaim::Running(_)))
+            .count(),
+        1
+    );
+    let result = serde_json::json!({"request_id":"one", "output":{"ok":true}, "artifacts":[]});
+    let completed = complete_native_tool_request(&store, &owner, &receipt, &result)
+        .await
+        .unwrap();
+    let NativeToolClaim::Completed(cached) = claim_native_tool_request(&store, &owner, &receipt)
+        .await
+        .unwrap()
+    else {
+        panic!("expected cached result")
+    };
+    assert_eq!(cached.result, Some(result));
+    assert_eq!(cached.call_id, receipt.call_id);
+    mark_native_tool_request_delivered(&store, &owner, &completed)
+        .await
+        .unwrap();
+    assert!(list_native_tool_requests(&store, &owner, session, inc.id)
+        .await
+        .unwrap()
+        .is_empty());
+    revoke_external_grant(&store, &owner, grant.id, "test revoked")
+        .await
+        .unwrap();
+    assert!(claim_native_tool_request(&store, &owner, &receipt)
+        .await
+        .is_err());
+}

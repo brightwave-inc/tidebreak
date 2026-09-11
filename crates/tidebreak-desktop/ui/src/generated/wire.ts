@@ -977,9 +977,10 @@ export type CodeAnalyticsPricingCoverage = { priced_turns: number, unpriced_turn
 export type CodeAnalyticsRange = "7d" | "30d" | "90d" | "all";
 
 /**
- * Metrics attributed to one registered repository.
+ * Metrics attributed to one registered repository, or to the unattributed
+ * "no repository" group when `repo_id` is null.
  */
-export type CodeAnalyticsRepository = { repo_id: RepoId, name: string, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
+export type CodeAnalyticsRepository = { repo_id: RepoId | null, name: string, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
 
 /**
  * Owner-scoped code activity and local cost estimates.

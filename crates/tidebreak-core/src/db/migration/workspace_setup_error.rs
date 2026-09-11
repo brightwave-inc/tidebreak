@@ -7,7 +7,7 @@ pub(super) struct WorkspaceSetupError;
 
 impl MigrationName for WorkspaceSetupError {
     fn name(&self) -> &str {
-        "m20260910_000001_workspace_setup_error"
+        "m20260910_000027_workspace_setup_error"
     }
 }
 

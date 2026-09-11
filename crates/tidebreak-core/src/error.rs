@@ -100,6 +100,11 @@ pub enum AgentError {
         output_id: OutputId,
     },
 
+    /// A completed conversation-tool request already holds a different
+    /// result from the retry, so one tool call cannot mix adapter outcomes.
+    #[error("conversation request conflict: {0}")]
+    ConversationRequestConflict(String),
+
     /// A write against an output lost the race for its current revision:
     /// something published a newer one after the caller read the one it edited.
     /// The revision that is actually current is carried so the caller can
@@ -181,7 +186,9 @@ impl AgentError {
             Self::InvalidTarget(_) => "invalid_target",
             Self::Store(_) => "store",
             Self::ProjectNotFound(_) => "not_found",
-            Self::OutputFilenameTaken { .. } | Self::OutputRevisionConflict { .. } => "conflict",
+            Self::OutputFilenameTaken { .. }
+            | Self::OutputRevisionConflict { .. }
+            | Self::ConversationRequestConflict(_) => "conflict",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
             Self::Authentication(_) => "authentication",

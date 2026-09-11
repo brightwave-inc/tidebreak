@@ -1589,7 +1589,7 @@ function parseCodeAnalyticsRepository(
       "pull_requests_opened",
       "pull_requests_merged",
     ]) ||
-    !wireId(value.repo_id) ||
+    !nullableWireId(value.repo_id) ||
     !nonEmptyLine(value.name) ||
     !isNonNegativeInteger(value.sessions) ||
     !isNonNegativeInteger(value.turns) ||

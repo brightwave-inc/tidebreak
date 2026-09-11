@@ -5794,11 +5794,25 @@ async fn seed_external_session(
     .await
     .unwrap()
     .unwrap();
+    let grant = crate::db::code::mint_external_grant(
+        store,
+        owner,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: label,
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
+        &fake_hash(&format!("token-{label}")),
+        &fake_hash(&format!("refresh-{label}")),
+    )
+    .await
+    .unwrap();
     let (external_workspace, external_session) = external_pair(owner, workspace.repo_id, label);
     match crate::db::code::resolve_external_session(
         store,
         owner,
-        crate::code::CodeGrantId::new(),
+        grant.id,
         "slack",
         label,
         &external_workspace,
@@ -6555,4 +6569,992 @@ async fn external_context_cannot_follow_a_message_that_was_retracted() {
             ..
         })
     ));
+}
+
+/// Conversation-tool requests are durable, idempotent per call key, and
+/// scoped to the exact live owner/session/grant/binding that created them.
+#[tokio::test]
+async fn conversation_requests_are_durable_idempotent_and_scoped() {
+    use crate::code::{CodeGrantId, ConversationRequest, SessionId};
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request, get_conversation_request,
+        list_pending_conversation_requests,
+    };
+    use crate::error::AgentError;
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "conversation-requests").await;
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-requests")
+            .await
+            .unwrap()
+            .unwrap();
+    let grant = binding.grant_id;
+
+    let request = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 20, "channel": "C1"}),
+        "call-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(request.binding_id, binding.id);
+    assert_eq!(request.operation, "read");
+    assert_eq!(
+        request.arguments,
+        serde_json::json!({"count": 20, "channel": "C1"})
+    );
+    assert_eq!(request.result, None);
+
+    let duplicate = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 20, "channel": "C1"}),
+        "call-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate.id, request.id, "the call key must be idempotent");
+
+    for (operation, arguments) in [
+        ("export", serde_json::json!({"count": 20, "channel": "C1"})),
+        ("read", serde_json::json!({"count": 1, "channel": "C1"})),
+    ] {
+        let error = create_conversation_request(
+            &store, &owner, session_id, grant, binding.id, operation, &arguments, "call-1",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, AgentError::InvalidTarget(_)),
+            "a mismatched replay must refuse: {error}"
+        );
+    }
+
+    assert_eq!(
+        get_conversation_request(&store, &owner, session_id, grant, request.id)
+            .await
+            .unwrap()
+            .expect("the stored request reads back"),
+        duplicate
+    );
+    let other_grant = CodeGrantId::new();
+    assert!(
+        get_conversation_request(&store, &owner, session_id, other_grant, request.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_conversation_request(&store, &owner, SessionId::new(), grant, request.id,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let pending = list_pending_conversation_requests(&store, &owner, session_id, grant)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, request.id);
+
+    let result = serde_json::json!({
+        "messages": [
+            {
+                "id": "m1",
+                "timestamp": "1700000001.000100",
+                "author": {"id": "U1", "name": "Mira", "kind": "user"},
+                "text": "hello",
+                "attachments": []
+            }
+        ],
+        "has_more": true,
+        "truncated": true,
+        "source": "slack"
+    });
+    let completed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("the pending request completes");
+    assert_eq!(completed.result.as_ref(), Some(&result));
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let replayed =
+        complete_conversation_request(&store, &owner, session_id, grant, request.id, &result)
+            .await
+            .unwrap()
+            .expect("an equal replay is idempotent");
+    assert_eq!(replayed.result.as_ref(), Some(&result));
+
+    let conflict = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &serde_json::json!({"error": {"code": "not_found", "message": "gone"}}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(conflict, AgentError::ConversationRequestConflict(_)),
+        "a different result must conflict: {conflict}"
+    );
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        uuid::Uuid::new_v4(),
+        &serde_json::json!({"error": {"code": "unknown", "message": "no"}}),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let oversized =
+        serde_json::json!({"blob": "x".repeat(ConversationRequest::MAX_JSON_BYTES + 1)});
+    let error = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "attachment",
+        &oversized,
+        "call-too-large",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::InvalidTarget(_)));
+}
+
+/// Expired jobs disappear from the poll and cannot be completed; revoked or
+/// fenced/ended scope refuses every read and completion.
+#[tokio::test]
+async fn conversation_request_ttl_and_live_scope_refuse_stale_access() {
+    use crate::code::{ConversationRequest, SessionLifecycle};
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request,
+        list_pending_conversation_requests,
+    };
+    use crate::error::AgentError;
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "conversation-ttl").await;
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl")
+            .await
+            .unwrap()
+            .unwrap();
+    let grant = binding.grant_id;
+    let request = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "ttl-call",
+    )
+    .await
+    .unwrap();
+
+    let expired = chrono::Utc::now() - ConversationRequest::TTL - chrono::Duration::seconds(1);
+    entities::code_conversation_request::Entity::update_many()
+        .col_expr(
+            entities::code_conversation_request::Column::CreatedAt,
+            sea_orm::sea_query::Expr::value(expired),
+        )
+        .col_expr(
+            entities::code_conversation_request::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(expired),
+        )
+        .filter(entities::code_conversation_request::Column::Id.eq(request.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(crate::db::code::get_conversation_request(
+        &store, &owner, session_id, grant, request.id
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let expired_replay = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count":1}),
+        "ttl-call",
+    )
+    .await
+    .unwrap_err();
+    assert!(expired_replay.to_string().contains("expired"));
+    let error = complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        request.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::InvalidTarget(_)));
+
+    // A different live request proves scope failure is tied to the row.
+    let live = create_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        binding.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "live-call",
+    )
+    .await
+    .unwrap();
+
+    crate::db::code::revoke_external_grant(&store, &owner, grant, "revoked for test")
+        .await
+        .unwrap();
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_id, grant)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("grant")
+    );
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_id,
+        grant,
+        live.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("grant"));
+
+    // Ending a session must refuse even under a grant that is still live.
+    let session_two = seed_external_session(&store, &owner, "conversation-ttl-ended").await;
+    let binding_two =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-ttl-ended")
+            .await
+            .unwrap()
+            .unwrap();
+    let live_two = create_conversation_request(
+        &store,
+        &owner,
+        session_two,
+        binding_two.grant_id,
+        binding_two.id,
+        "read",
+        &serde_json::json!({"count": 1}),
+        "live-call-ended",
+    )
+    .await
+    .unwrap();
+    let mut stored = crate::db::code::get_session(&store, &owner, session_two)
+        .await
+        .unwrap()
+        .unwrap();
+    stored.lifecycle = SessionLifecycle::Ended;
+    crate::db::code::save_session(&store, &stored)
+        .await
+        .unwrap();
+    assert!(
+        list_pending_conversation_requests(&store, &owner, session_two, binding_two.grant_id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session")
+    );
+    assert!(complete_conversation_request(
+        &store,
+        &owner,
+        session_two,
+        binding_two.grant_id,
+        live_two.id,
+        &serde_json::json!({"messages": [], "has_more": true, "truncated": true, "source": "slack"}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("session"));
+}
+
+#[tokio::test]
+async fn conversation_requests_concurrent_calls_and_completion_preserve_first_result() {
+    use crate::db::code::{
+        complete_conversation_request, create_conversation_request, get_conversation_request,
+    };
+    let (_dir, store) = super::temp_store_with_max_connections(4).await;
+    let owner = OwnerId::local();
+    let session = seed_external_session(&store, &owner, "conversation-concurrent").await;
+    let binding =
+        crate::db::code::get_external_binding(&store, &owner, "slack", "conversation-concurrent")
+            .await
+            .unwrap()
+            .unwrap();
+    let args = serde_json::json!({"limit":1,"max_bytes":1024});
+    let (left, right) = tokio::join!(
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "same-call"
+        ),
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "same-call"
+        )
+    );
+    let request = left.unwrap();
+    assert_eq!(request.id, right.unwrap().id);
+    let first = serde_json::json!({"error":{"code":"first","message":"first result"}});
+    let second = serde_json::json!({"error":{"code":"second","message":"second result"}});
+    let (left, right) = tokio::join!(
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &first
+        ),
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &second
+        )
+    );
+    let winner = match (left, right) {
+        (Ok(Some(row)), Err(crate::AgentError::ConversationRequestConflict(_)))
+        | (Err(crate::AgentError::ConversationRequestConflict(_)), Ok(Some(row))) => row,
+        unexpected => panic!("exactly one completion must win: {unexpected:?}"),
+    };
+    assert_eq!(
+        get_conversation_request(&store, &owner, session, binding.grant_id, request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .result,
+        winner.result
+    );
+    let result = winner.result.unwrap();
+    let (left, right) = tokio::join!(
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &result
+        ),
+        complete_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            request.id,
+            &result
+        )
+    );
+    assert_eq!(left.unwrap(), right.unwrap());
+    let other_args = serde_json::json!({"limit":2,"max_bytes":1024});
+    let (left, right) = tokio::join!(
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &args,
+            "different-call"
+        ),
+        create_conversation_request(
+            &store,
+            &owner,
+            session,
+            binding.grant_id,
+            binding.id,
+            "read",
+            &other_args,
+            "different-call"
+        )
+    );
+    assert!(matches!(
+        (left, right),
+        (Ok(_), Err(crate::AgentError::InvalidTarget(_)))
+            | (Err(crate::AgentError::InvalidTarget(_)), Ok(_))
+    ));
+}
+
+#[tokio::test]
+async fn external_channel_snapshot_commits_with_session_and_survives_replay() {
+    use crate::db::code::{
+        resolve_external_session_with_channel_context, ExternalSessionChannelContext,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "channel-snapshot").await;
+    let repo = crate::db::code::list_repos(&store, &owner)
+        .await
+        .unwrap()
+        .remove(0);
+    let grant = crate::CodeGrantId::new();
+    for repositoryless in [false, true] {
+        let key = format!("T1/C1/snapshot-{repositoryless}");
+        let (workspace, mut session) = external_pair(&owner, repo.id, &key);
+        session.model = Some("original-model".into());
+        if repositoryless {
+            session.workspace_id = None;
+            session.harness_kind = HarnessKind::Internal;
+        }
+        let context = ExternalSessionChannelContext {
+            channel_id: Some("C1"),
+            instructions: "Original channel instructions.",
+        };
+        let result = resolve_external_session_with_channel_context(
+            &store,
+            &owner,
+            grant,
+            "slack",
+            &key,
+            (!repositoryless).then_some(&workspace),
+            &session,
+            Some(context),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            crate::ExternalSessionResolution::Created(_)
+        ));
+        let stored = crate::db::code::get_session(&store, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.as_deref(), Some("original-model"));
+        let settings_key = format!("code.session.{}.channel_instructions", session.id);
+        assert_eq!(
+            store.get_setting(&settings_key).await.unwrap(),
+            Some(serde_json::json!("Original channel instructions."))
+        );
+        assert_eq!(
+            crate::db::code::session_context(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("C1")
+        );
+        let (next_workspace, mut next_session) = external_pair(&owner, repo.id, "channel-replay");
+        next_session.model = Some("changed-model".into());
+        next_session.harness_kind = HarnessKind::Codex;
+        if repositoryless {
+            next_session.workspace_id = None;
+        }
+        let changed = ExternalSessionChannelContext {
+            channel_id: Some("C2"),
+            instructions: "Changed instructions.",
+        };
+        let replay = resolve_external_session_with_channel_context(
+            &store,
+            &owner,
+            grant,
+            "slack",
+            &key,
+            (!repositoryless).then_some(&next_workspace),
+            &next_session,
+            Some(changed),
+        )
+        .await
+        .unwrap();
+        let crate::ExternalSessionResolution::Existing(binding) = replay else {
+            panic!("expected existing session");
+        };
+        assert_eq!(binding.session_id, session.id);
+        let unchanged = crate::db::code::get_session(&store, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.model.as_deref(), Some("original-model"));
+        assert_eq!(
+            crate::db::code::session_context(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("C1")
+        );
+        assert_eq!(
+            crate::db::code::get_session(&store, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_kind,
+            session.harness_kind
+        );
+        assert_eq!(
+            store.get_setting(&settings_key).await.unwrap(),
+            Some(serde_json::json!("Original channel instructions."))
+        );
+        assert!(
+            crate::db::code::get_session(&store, &owner, next_session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store
+            .get_setting(&format!(
+                "code.session.{}.channel_instructions",
+                next_session.id
+            ))
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn external_channel_snapshot_failure_rolls_back_session_and_binding() {
+    use crate::db::code::{
+        resolve_external_session_with_channel_context, ExternalSessionChannelContext,
+    };
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "channel-rollback").await;
+    let repo = crate::db::code::list_repos(&store, &owner)
+        .await
+        .unwrap()
+        .remove(0);
+    let (workspace, session) = external_pair(&owner, repo.id, "channel-rollback-candidate");
+    // Force the snapshot insert to fail after the session insert. The same
+    // transaction must roll back the session, workspace, and binding.
+    let key = format!("code.session.{}.channel_instructions", session.id);
+    store
+        .set_setting(&key, &serde_json::json!("existing value"))
+        .await
+        .unwrap();
+    let result = resolve_external_session_with_channel_context(
+        &store,
+        &owner,
+        crate::CodeGrantId::new(),
+        "slack",
+        "T1/C1/rollback",
+        Some(&workspace),
+        &session,
+        Some(ExternalSessionChannelContext {
+            channel_id: Some("C1"),
+            instructions: "Do not expose a partial session.",
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(crate::db::code::get_session(&store, &owner, session.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(crate::db::code::get_workspace(&store, &owner, workspace.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        crate::db::code::get_external_binding(&store, &owner, "slack", "T1/C1/rollback")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.get_setting(&key).await.unwrap(),
+        Some(serde_json::json!("existing value"))
+    );
+}
+
+async fn native_receipt_fixture(
+    store: &crate::DbStore,
+    label: &str,
+) -> (SessionId, crate::CodeIncarnationId) {
+    let owner = OwnerId::local();
+    let session = seed_external_session(store, &owner, label).await;
+    let incarnation = admitted(
+        crate::db::code::create_incarnation_intent(store, &owner, session, 1, 10)
+            .await
+            .unwrap(),
+    );
+    crate::db::code::activate_incarnation(store, &owner, incarnation.id, "native-tool-test")
+        .await
+        .unwrap();
+    (session, incarnation.id)
+}
+
+#[tokio::test]
+async fn native_tool_receipts_claim_once_and_replay_exact_results() {
+    let (_dir, store) = temp_store().await;
+    native_receipt_replay_contract(&store, "native-replay").await;
+}
+
+async fn native_receipt_replay_contract(store: &crate::DbStore, label: &str) {
+    use crate::db::code::*;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(store, label).await;
+    let args = serde_json::json!({"repo":"one", "task":"inspect"});
+    let row = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &args,
+    )
+    .await
+    .unwrap();
+    let replay = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &serde_json::json!({"task":"inspect", "repo":"one"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.call_id, replay.call_id);
+    assert_eq!(row.status, NativeToolStatus::Pending);
+    assert!(row.claimed_at.is_none());
+    let binding = get_external_binding(store, &owner, "slack", label)
+        .await
+        .unwrap()
+        .unwrap();
+    attach_external_binding(
+        store,
+        &owner,
+        binding.grant_id,
+        "slack",
+        &format!("{label}-attached"),
+        session,
+    )
+    .await
+    .unwrap();
+
+    assert!(enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &serde_json::json!({"task":"mutate"})
+    )
+    .await
+    .is_err());
+    let (first, second) = tokio::join!(
+        claim_native_tool_request(store, &owner, &row),
+        claim_native_tool_request(store, &owner, &replay)
+    );
+    let outcomes = [first.unwrap(), second.unwrap()];
+    let times: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            NativeToolClaim::Claimed(receipt)
+            | NativeToolClaim::Running(receipt)
+            | NativeToolClaim::Completed(receipt) => receipt.claimed_at,
+        })
+        .collect();
+    assert!(times[0].is_some());
+    assert_eq!(times[0], times[1]);
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, NativeToolClaim::Claimed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, NativeToolClaim::Running(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &row)
+            .await
+            .unwrap(),
+        NativeToolClaim::Running(_)
+    ));
+    let result =
+        serde_json::json!({"request_id":"request-1", "output":{"ok":true}, "artifacts":[]});
+    let finished = complete_native_tool_request(store, &owner, &row, &result)
+        .await
+        .unwrap();
+    assert_eq!(finished.call_id, row.call_id);
+    assert_eq!(finished.result, Some(result.clone()));
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &row)
+            .await
+            .unwrap(),
+        NativeToolClaim::Completed(_)
+    ));
+    complete_native_tool_request(store, &owner, &row, &result)
+        .await
+        .unwrap();
+    assert!(complete_native_tool_request(
+        store,
+        &owner,
+        &row,
+        &serde_json::json!({"changed":true})
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        list_native_tool_requests(store, &owner, session, incarnation)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    mark_native_tool_request_delivered(store, &owner, &finished)
+        .await
+        .unwrap();
+    assert!(
+        list_native_tool_requests(store, &owner, session, incarnation)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replay = enqueue_native_tool_request(
+        store,
+        &owner,
+        session,
+        incarnation,
+        "request-1",
+        "code_run_turn",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert!(!replay.delivered);
+    assert_eq!(replay.status, NativeToolStatus::Completed);
+    assert_eq!(replay.call_id, row.call_id);
+    assert_eq!(replay.result, Some(result));
+    let resend = list_native_tool_requests(store, &owner, session, incarnation)
+        .await
+        .unwrap();
+    assert_eq!(resend.len(), 1);
+    assert_eq!(resend[0].call_id, row.call_id);
+    assert!(matches!(
+        claim_native_tool_request(store, &owner, &replay)
+            .await
+            .unwrap(),
+        NativeToolClaim::Completed(_)
+    ));
+}
+
+#[tokio::test]
+async fn native_tool_receipts_fence_authority_and_bound_payloads() {
+    use crate::db::code::*;
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(&store, "native-authority").await;
+    let args = serde_json::json!({});
+    let row = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "one",
+        "code_repos",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert!(enqueue_native_tool_request(
+        &store,
+        &OwnerId::new("other").unwrap(),
+        session,
+        incarnation,
+        "one",
+        "code_repos",
+        &args
+    )
+    .await
+    .is_err());
+    assert!(enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        crate::CodeIncarnationId::new(),
+        "one",
+        "code_repos",
+        &args
+    )
+    .await
+    .is_err());
+    assert!(enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "large",
+        "code_repos",
+        &serde_json::json!("x".repeat(65_536))
+    )
+    .await
+    .is_err());
+    assert!(complete_native_tool_request(&store, &owner, &row, &args)
+        .await
+        .is_err());
+    assert!(mark_native_tool_request_delivered(&store, &owner, &row)
+        .await
+        .is_err());
+    claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap();
+    assert!(complete_native_tool_request(
+        &store,
+        &owner,
+        &row,
+        &serde_json::json!("x".repeat(3 * 1024 * 1024))
+    )
+    .await
+    .is_err());
+    let binding = get_external_binding(&store, &owner, "slack", "native-authority")
+        .await
+        .unwrap()
+        .unwrap();
+    revoke_external_grant(&store, &owner, binding.grant_id, "test")
+        .await
+        .unwrap();
+    assert!(claim_native_tool_request(&store, &owner, &row)
+        .await
+        .is_err());
+    assert!(complete_native_tool_request(&store, &owner, &row, &args)
+        .await
+        .is_err());
+    assert!(
+        list_native_tool_requests(&store, &owner, session, incarnation)
+            .await
+            .is_err()
+    );
+    let (session2, incarnation2) = native_receipt_fixture(&store, "native-stopped").await;
+    let row2 = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session2,
+        incarnation2,
+        "one",
+        "code_repos",
+        &args,
+    )
+    .await
+    .unwrap();
+    stop_incarnation(&store, &owner, incarnation2, Some("test"))
+        .await
+        .unwrap();
+    assert!(claim_native_tool_request(&store, &owner, &row2)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn native_tool_receipts_survive_restart_without_reexecuting_running_work() {
+    use crate::db::code::*;
+    let (dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, incarnation) = native_receipt_fixture(&store, "native-restart").await;
+    let row = enqueue_native_tool_request(
+        &store,
+        &owner,
+        session,
+        incarnation,
+        "restart",
+        "code_run_turn",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
+    let store = crate::DbStore::connect(&url).await.unwrap();
+    let outstanding = list_native_tool_requests(&store, &owner, session, incarnation)
+        .await
+        .unwrap();
+    assert_eq!(outstanding.len(), 1);
+    assert_eq!(outstanding[0].call_id, row.call_id);
+    assert!(matches!(
+        claim_native_tool_request(&store, &owner, &outstanding[0])
+            .await
+            .unwrap(),
+        NativeToolClaim::Running(_)
+    ));
+    let result =
+        serde_json::json!({"request_id":"restart", "output":{"uncertain":true}, "artifacts":[]});
+    complete_native_tool_request(&store, &owner, &outstanding[0], &result)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let store = crate::DbStore::connect(&url).await.unwrap();
+    let NativeToolClaim::Completed(restored) = claim_native_tool_request(&store, &owner, &row)
+        .await
+        .unwrap()
+    else {
+        panic!("result must survive restart")
+    };
+    assert_eq!(restored.result, Some(result));
+    assert_eq!(restored.call_id, row.call_id);
 }

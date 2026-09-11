@@ -1696,6 +1696,8 @@ pub mod code_session_incarnation {
         pub events_cursor: i64,
         pub task_output: Option<String>,
         pub last_wip_ref: Option<String>,
+        pub tool_requests_json: Option<Json>,
+        pub tool_ack_seqs_json: Option<Json>,
         pub created_at: DateTimeUtc,
         pub activated_at: Option<DateTimeUtc>,
         pub stopped_at: Option<DateTimeUtc>,
@@ -1790,6 +1792,34 @@ pub mod code_external_grant_retired_refresh {
         pub hash: String,
         pub grant_id: Uuid,
         pub retired_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_conversation_request {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_conversation_request")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub grant_id: Uuid,
+        pub binding_id: Uuid,
+        pub call_key: String,
+        pub operation: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result: Option<Json>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -2314,6 +2344,34 @@ pub mod code_session_context {
         pub channel_id: Option<String>,
         pub parent_session_id: Option<Uuid>,
         pub request_key: Option<String>,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Durable receipts for native tools requested by a sandbox incarnation.
+pub mod code_native_tool_receipt {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_native_tool_receipt")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub incarnation_id: Uuid,
+        pub grant_id: Uuid,
+        pub request_id: String,
+        pub call_id: Uuid,
+        pub tool: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result: Option<Json>,
+        pub status: String,
+        pub claimed_at: Option<DateTimeUtc>,
+        pub delivered: bool,
     }
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}

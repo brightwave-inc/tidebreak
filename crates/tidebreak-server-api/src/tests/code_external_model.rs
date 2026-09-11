@@ -85,13 +85,27 @@ async fn model_gateway(empty_catalog: bool) -> (String, GatewayCalls) {
                 };
                 Json(serde_json::json!({
                     "models": models.into_iter().map(|id| serde_json::json!({
-                        "id": id, "name": id, "protocols": ["anthropic_messages"],
+                        "id": id, "name": format!("Display {id}"), "protocols": ["anthropic_messages"],
                         "aliases": [], "supports_tools": true, "supports_vision": false,
                         "context_window": 200_000, "max_output_tokens": 8_000,
                         "provider_name": "Anthropic",
                     })).collect::<Vec<_>>(),
                     "apps": [],
                 }))
+            }),
+        )
+        .route(
+            "/compat/anthropic/v1/models",
+            get(|headers: HeaderMap| async move {
+                assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
+                Json(serde_json::json!({"data": [{"id":"compat-anthropic-alias"}]}))
+            }),
+        )
+        .route(
+            "/compat/openai/v1/models",
+            get(|headers: HeaderMap| async move {
+                assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
+                Json(serde_json::json!({"data": [{"id":"compat-openai-alias"}]}))
             }),
         )
         .route(
@@ -201,6 +215,10 @@ impl Drop for Fixture {
 }
 
 async fn fixture(empty_catalog: bool) -> Fixture {
+    fixture_with_channel_runtime(empty_catalog, false).await
+}
+
+async fn fixture_with_channel_runtime(empty_catalog: bool, sandbox: bool) -> Fixture {
     let (directory, db) = temp_db_store("external-model.db").await;
     let db = Arc::new(db);
     let store: Arc<dyn Store> = db.clone();
@@ -269,6 +287,34 @@ async fn fixture(empty_catalog: bool) -> Fixture {
         runtime.db.clone(),
         tidebreak_core::AgentRunExecutionLocation::InProcess,
     )));
+    if sandbox {
+        runtime = runtime.with_remote_sessions(crate::code::remote::service::RemoteSessions::new(
+            Arc::new(super::code_external::FakeProvisioner::default()),
+            crate::code::remote::driver::RemoteSpawnSettings {
+                profile: "channel-test".into(),
+                engine: Some(tidebreak_core::HarnessKind::Codex),
+                engines: Some(vec![tidebreak_core::HarnessKind::Codex]),
+                embedded_engine_registration: true,
+                incarnation_cap: 1,
+                spend_ceiling_microusd: None,
+                session_spend_ceiling_microusd: None,
+            },
+        ));
+    } else {
+        for kind in [
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+            tidebreak_core::HarnessKind::Opencode,
+        ] {
+            runtime.adapters.register(Arc::new(
+                crate::scripted_harness::ScriptedAdapter::new(
+                    crate::scripted_harness::plain_text_script(),
+                )
+                .with_kind(kind)
+                .with_approvals(tidebreak_core::CapLevel::Supported),
+            ));
+        }
+    }
     state.events.mirror_into(runtime.bus.clone());
     let runtime = Arc::new(runtime);
     state.code = Some(runtime.clone());
@@ -534,4 +580,174 @@ async fn repository_free_external_creation_refuses_an_empty_grant_catalog() {
         sessions.is_empty(),
         "refused model admission must not create a conversation"
     );
+}
+
+#[tokio::test]
+async fn external_channel_harness_models_use_grant_compat_catalog_without_chat_rewriting() {
+    let fixture = fixture(false).await;
+    let address = super::code::serve(fixture.router.clone()).await;
+    fixture
+        .runtime
+        .start(format!("http://{address}"))
+        .await
+        .unwrap();
+    for (harness, model) in [
+        (
+            tidebreak_core::HarnessKind::ClaudeCode,
+            "compat-anthropic-alias",
+        ),
+        (tidebreak_core::HarnessKind::Codex, "compat-openai-alias"),
+        (
+            tidebreak_core::HarnessKind::Opencode,
+            "model-gateway/compat-openai-alias",
+        ),
+    ] {
+        crate::code::channel_preferences::write(
+            &fixture.runtime.db,
+            &fixture.grant,
+            "C1",
+            &crate::code::channel_preferences::ChannelPreferences {
+                harness: Some(harness),
+                model: Some(model.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, created) = post_external(
+            &fixture,
+            "/external/code/sessions",
+            serde_json::json!({
+                "external_key":format!("T1/C1/{harness}"), "channel_id":"C1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["model"], model);
+    }
+    crate::code::channel_preferences::write(
+        &fixture.runtime.db,
+        &fixture.grant,
+        "C1",
+        &crate::code::channel_preferences::ChannelPreferences {
+            harness: Some(tidebreak_core::HarnessKind::Codex),
+            model: Some("compat-anthropic-alias".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (status, rejected) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/wrong-protocol", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+}
+
+#[tokio::test]
+async fn external_snapshot_labels_the_saved_model_after_channel_default_changes() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let fixture = fixture(false).await;
+    let (status, created) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/display", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id = created["session_id"].as_str().unwrap();
+    assert!(created["model"]
+        .as_str()
+        .unwrap()
+        .contains("__tidebreak_gateway_v1."));
+    crate::code::channel_preferences::write(
+        &fixture.runtime.db,
+        &fixture.grant,
+        "C1",
+        &crate::code::channel_preferences::ChannelPreferences {
+            harness: Some(tidebreak_core::HarnessKind::Internal),
+            model: Some("model_gateway::grant-selected".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    crate::model_roles::write_selection(
+        &*fixture.state.store,
+        crate::model_roles::ModelRole::Chat,
+        Some("model_gateway::grant-selected"),
+    )
+    .await
+    .unwrap();
+    let address = super::code::serve(fixture.router.clone()).await;
+    let mut request = format!("ws://{address}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", fixture.bearer).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(
+        frame["snapshot"]["model_display_name"],
+        "Display grant-default"
+    );
+    assert_eq!(frame["snapshot"]["model"], created["model"]);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_sandbox_catalog_uses_grant_without_local_cli_and_rejects_other_engines() {
+    use axum::extract::FromRequestParts;
+    let fixture = fixture_with_channel_runtime(false, true).await;
+    assert!(fixture
+        .runtime
+        .adapters
+        .get(tidebreak_core::HarnessKind::Codex)
+        .is_none());
+    let (mut parts, _) = Request::builder().body(()).unwrap().into_parts();
+    parts.extensions.insert(crate::principal::AuthContext {
+        principal: crate::principal::Principal::User {
+            id: crate::principal::UserId::new(USER).unwrap(),
+            kind: crate::principal::PrincipalKind::Person,
+            role: crate::principal::Role::Admin,
+        },
+        client_executor: false,
+    });
+    let code = crate::code::ScopedCode::from_request_parts(&mut parts, &fixture.state)
+        .await
+        .unwrap();
+    let result = crate::routes::code::get_channel_harness_catalog(
+        code.clone(),
+        crate::extract::Path((fixture.grant.id, "C1".into())),
+        axum::extract::Query(serde_json::from_value(serde_json::json!({"kind":"codex"})).unwrap()),
+    )
+    .await
+    .unwrap();
+    let catalog = serde_json::to_value(result.0).unwrap();
+    assert_eq!(catalog["harnesses"], serde_json::json!(["codex"]));
+    assert_eq!(catalog["models"][0]["id"], "compat-openai-alias");
+    assert_eq!(catalog["use_chat_catalog"], false);
+    assert!(crate::routes::code::get_channel_harness_catalog(
+        code,
+        crate::extract::Path((fixture.grant.id, "C1".into())),
+        axum::extract::Query(
+            serde_json::from_value(serde_json::json!({"kind":"claude_code"})).unwrap()
+        ),
+    )
+    .await
+    .is_err());
 }

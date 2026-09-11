@@ -573,6 +573,14 @@ impl CodeRuntime {
     ) -> Result<CodeWorkspace, ServerError> {
         let _ = prune_worktrees(std::path::Path::new(&repo.root_path)).await;
         if let Err(error) =
+            crate::code::scratch::remove_workspace_root(&self.data_dir, workspace.id)
+        {
+            tracing::warn!(
+                workspace = %workspace.id,
+                "code-mode: could not delete the workspace private root: {error}"
+            );
+        }
+        if let Err(error) =
             delete_workspace_refs(std::path::Path::new(&repo.root_path), workspace.id).await
         {
             tracing::warn!(

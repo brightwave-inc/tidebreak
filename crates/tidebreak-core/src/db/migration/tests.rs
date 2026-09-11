@@ -97,7 +97,11 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260908_000016_code_channel_repository_confirm",
             "m20260908_000017_external_thread_context",
             "m20260909_000001_session_context",
-            "m20260910_000001_workspace_setup_error",
+            "m20260910_000001_code_conversation_requests",
+            "m20260910_000024_incarnation_tool_bridge",
+            "m20260910_000025_native_tool_receipts",
+            "m20260910_000026_native_tool_claim_time",
+            "m20260910_000027_workspace_setup_error",
         ]
     );
     assert!(db

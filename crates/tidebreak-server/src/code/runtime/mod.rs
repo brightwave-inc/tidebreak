@@ -37,11 +37,11 @@ use tidebreak_core::db::code::{
     insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_fork_events,
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
-    list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
-    replace_sandbox_permission_mode, replace_session_execution_settings, save_repo, save_workspace,
-    set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
-    ClaimedApprovalSettlement, PermissionModeChangeIntent, SessionExecutionSettings,
-    MAX_REPLAY_EVENTS,
+    list_workspaces_all_owners, list_workspaces_by_status_all_owners, mark_repo_removed,
+    queued_turn_head, replace_sandbox_permission_mode, replace_session_execution_settings,
+    save_repo, save_workspace, set_active_workspace_pull_request, settle_approval_claim,
+    update_trigger_enabled, ClaimedApprovalSettlement, PermissionModeChangeIntent,
+    SessionExecutionSettings, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     Approval, ApprovalDecisionKind, ApprovalId, ApprovalState, Attention, AttentionSource,
@@ -227,6 +227,9 @@ pub struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
+    /// Process tool registry for the protected sandbox bridge. `None` in
+    /// hosts that never installed the session coordinator tools.
+    pub tools: Option<Arc<tidebreak_core::ToolRegistry>>,
     /// The mode a channel-bound session takes on this machine's engine when
     /// the channel names none, and the most permissive mode a channel may
     /// name (decision 88). Both default to `ask`.
@@ -509,6 +512,7 @@ impl CodeRuntime {
             harness_llm,
             gateway_runtime: None,
             remote: None,
+            tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -681,6 +685,7 @@ impl CodeRuntime {
             harness_llm: None,
             gateway_runtime: None,
             remote: None,
+            tools: None,
             external_permission: ExternalPermissionPolicy::default(),
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -769,6 +774,13 @@ impl CodeRuntime {
         self
     }
 
+    /// Attach the process tool registry for the protected sandbox bridge.
+    #[must_use]
+    pub fn with_tool_registry(mut self, tools: Arc<tidebreak_core::ToolRegistry>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
     /// The operator's permission policy for channel-bound sessions on this
     /// machine's engine: the default mode and the ceiling a channel may ask
     /// for. Config validated the pair at boot, so the ceiling is never below
@@ -790,6 +802,70 @@ impl CodeRuntime {
     #[must_use]
     pub fn external_permission_policy(&self) -> ExternalPermissionPolicy {
         self.external_permission
+    }
+
+    /// An omitted Slack harness uses the declared runtime engine after admission.
+    /// Legacy runtimes without engine declarations keep the machine default.
+    pub fn default_channel_sandbox_harness(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Option<HarnessKind>, ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Ok(None);
+        };
+        let Some(engine) = remote.settings.engine else {
+            if remote.settings.engines.is_some() || remote.settings.embedded_engine_registration {
+                return Err(ServerError::unprocessable_kind(
+                    "sandbox_settings_unavailable",
+                    "this sandbox profile must declare a default engine",
+                ));
+            }
+            return Ok(None);
+        };
+        if engine.is_in_process() {
+            return Err(ServerError::unprocessable_kind("sandbox_settings_unavailable", "this sandbox profile must select an external harness as its default; choose Internal explicitly to run on the machine"));
+        }
+        let session = Self::remote_session_value(
+            owner,
+            None,
+            WorkspaceId::new(),
+            engine,
+            NewSessionSettings {
+                permission_mode: PermissionMode::Allow,
+                ..Default::default()
+            },
+        );
+        remote
+            .settings
+            .validate_execution(&session)
+            .map_err(|message| {
+                ServerError::unprocessable_kind("sandbox_settings_unavailable", message)
+            })?;
+        Ok(Some(engine))
+    }
+
+    /// Channel choices use the same admission rule as a sandbox session.
+    pub(crate) fn channel_sandbox_harnesses(&self, owner: &OwnerId) -> Option<Vec<HarnessKind>> {
+        let remote = self.remote_sessions()?;
+        Some(
+            HarnessKind::ALL
+                .iter()
+                .copied()
+                .filter(|kind| {
+                    let session = Self::remote_session_value(
+                        owner,
+                        None,
+                        WorkspaceId::new(),
+                        *kind,
+                        NewSessionSettings {
+                            permission_mode: PermissionMode::Allow,
+                            ..Default::default()
+                        },
+                    );
+                    remote.settings.validate_execution(&session).is_ok()
+                })
+                .collect(),
+        )
     }
 
     /// The remote-session context, when this deployment configured one.

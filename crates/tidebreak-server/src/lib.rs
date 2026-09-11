@@ -148,6 +148,21 @@ pub mod workspace_config;
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
+    /// The child is handed a destination, never the bind address: an
+    /// unspecified bind becomes the loopback of the same family on the
+    /// bound port, and anything else passes through.
+    #[test]
+    fn loopback_base_never_names_the_unspecified_address() {
+        let base = |addr: &str| super::loopback_base(addr.parse::<SocketAddr>().unwrap());
+        assert_eq!(base("0.0.0.0:8080"), "http://127.0.0.1:8080");
+        assert_eq!(base("[::]:8080"), "http://[::1]:8080");
+        assert_eq!(base("127.0.0.1:4321"), "http://127.0.0.1:4321");
+        assert_eq!(base("[::1]:4321"), "http://[::1]:4321");
+        assert_eq!(base("10.0.0.5:8080"), "http://10.0.0.5:8080");
+    }
+
     pub(crate) fn dispatchable(
         call: &tidebreak_core::SandboxToolCallRequest,
     ) -> tidebreak_core::SandboxToolCallParkEntry {
@@ -332,6 +347,29 @@ impl RouteRuntime {
     }
 }
 
+/// The base URL an engine child on this machine dials for the inference
+/// relay and the git credential route.
+///
+/// A self-host image binds the unspecified address so the container is
+/// reachable on a published port, but the child runs beside the server and
+/// must dial loopback: the relay routes refuse any other peer
+/// ([`auth::require_loopback_peer`]), and a URL naming `0.0.0.0` is a
+/// bind address, not a destination. A loopback or interface-specific bind
+/// is handed through unchanged.
+#[must_use]
+pub fn loopback_base(local_addr: SocketAddr) -> String {
+    let ip = local_addr.ip();
+    let ip = if ip.is_unspecified() {
+        match ip {
+            std::net::IpAddr::V4(_) => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            std::net::IpAddr::V6(_) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        }
+    } else {
+        ip
+    };
+    format!("http://{}", SocketAddr::new(ip, local_addr.port()))
+}
+
 /// A bound server: the loopback address and per-launch token are known, so the
 /// spawning client can be told where to connect before the accept loop starts.
 pub struct Server {
@@ -501,12 +539,21 @@ impl Server {
             .take()
             .expect("a bound server keeps its router until serve");
         let result = match &mut self._store_ownership {
-            store_ownership::StoreOwnership::Local => axum::serve(listener, router)
-                .await
-                .map_err(|error| AgentError::msg(format!("server error: {error}"))),
+            store_ownership::StoreOwnership::Local => axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(|error| AgentError::msg(format!("server error: {error}"))),
             #[cfg(feature = "postgres")]
             store_ownership::StoreOwnership::Postgres(ownership) => {
-                let server = async move { axum::serve(listener, router).await };
+                let server = async move {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                };
                 tokio::pin!(server);
                 tokio::select! {
                     result = &mut server => {
@@ -1328,9 +1375,12 @@ async fn bind_inner(
         cancellation_acceleration,
     );
     let session_tools = Arc::new(code::session_tools::SessionTools::default());
+    let conversation_tools = Arc::new(code::conversation_tools::ConversationTools::default());
     let mut tools = tools;
     session_tools.register(&mut tools);
+    conversation_tools.register(&mut tools);
     let tools = Arc::new(tools);
+    let process_tools = tools.clone();
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
     // runtime, so it is injected at assembly rather than patched in after:
     // attestation contexts live in a per-instance registry (a second
@@ -1485,8 +1535,16 @@ async fn bind_inner(
         }
         _ => runtime,
     };
-    let code = Arc::new(runtime);
+    let code = Arc::new(runtime.with_tool_registry(process_tools));
     session_tools.attach(&code);
+    conversation_tools.attach(&code);
+    // The protected tool bridge is served by the code runtime through the
+    // sandbox's event/inbox transport once pumps start.
+    if let Some(remote) = code.remote_sessions() {
+        remote.with_host_tool(Arc::new(code::sandbox_tools::SandboxToolExecutor::new(
+            Arc::downgrade(&code),
+        )));
+    }
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
@@ -1716,7 +1774,7 @@ async fn bind_inner(
     // restored session is listed but its worker is not attached yet, and a
     // turn submitted into it is refused with `session_worker_missing`; before,
     // the same wait was spent with the port closed and the app unusable.
-    let code_recovery = code.start(format!("http://{local_addr}"));
+    let code_recovery = code.start(loopback_base(local_addr));
     let code_recovery = tokio::spawn(async move {
         if let Err(error) = code_recovery.await {
             tracing::warn!("code-mode recovery: {}", error.message());

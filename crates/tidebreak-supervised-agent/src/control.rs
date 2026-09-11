@@ -118,9 +118,10 @@ impl Control {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
+        let base = control_url.trim_end_matches('/');
         Self {
             client,
-            poll_url: format!("{}/supervisor/poll", control_url.trim_end_matches('/')),
+            poll_url: format!("{base}/supervisor/poll"),
             embedded_engine: None,
         }
     }

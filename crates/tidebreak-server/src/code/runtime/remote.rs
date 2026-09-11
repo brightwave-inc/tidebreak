@@ -205,6 +205,47 @@ impl CodeRuntime {
         ),
         ServerError,
     > {
+        self.external_get_or_create_with_channel_context(
+            owner,
+            owner_kind,
+            grant_id,
+            channel_kind,
+            external_key,
+            repo_id,
+            title,
+            harness,
+            settings,
+            requested_mode,
+            requested_acts_as,
+            None,
+        )
+        .await
+    }
+
+    /// Capture channel instructions and provenance before a session or worker
+    /// becomes visible to an adapter retry.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn external_get_or_create_with_channel_context(
+        &self,
+        owner: &OwnerId,
+        owner_kind: Option<&str>,
+        grant_id: tidebreak_core::CodeGrantId,
+        channel_kind: &str,
+        external_key: &str,
+        repo_id: impl Into<Option<RepoId>>,
+        title: Option<String>,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+        requested_mode: Option<tidebreak_core::PermissionMode>,
+        requested_acts_as: Option<tidebreak_core::ActsAs>,
+        channel_context: Option<tidebreak_core::db::code::ExternalSessionChannelContext<'_>>,
+    ) -> Result<
+        (
+            tidebreak_core::ExternalSessionResolution,
+            ExternalActsAsView,
+        ),
+        ServerError,
+    > {
         if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
             return Err(ServerError::conflict_kind(
                 "binding_key_invalid",
@@ -212,7 +253,12 @@ impl CodeRuntime {
             ));
         }
         let repo_id = repo_id.into();
-        let location = if repo_id.is_none() {
+        // The internal coordinator is a machine-side surface that owns the
+        // native tools; a configured runtime never silently moves it into a
+        // sandbox. Explicit external harnesses (and future conversation
+        // harnesses) take the deployment placement. Repository-backed
+        // sessions keep their existing rule unchanged.
+        let location = if repo_id.is_none() && harness == HarnessKind::Internal {
             ExecutionLocation::Machine
         } else {
             self.external_execution_location()
@@ -274,17 +320,6 @@ impl CodeRuntime {
                 identity,
             ));
         }
-        if repo_id.is_none()
-            && harness != HarnessKind::Internal
-            && self.external_execution_location() == ExecutionLocation::Sandbox
-        {
-            return Err(ServerError::conflict_kind(
-                "repositoryless_harness_requires_machine",
-                "This deployment requires sandbox execution for the selected harness. \
-                 Sessions without a repository cannot use that harness in a sandbox yet. \
-                 Choose a repository or use the internal engine.",
-            ));
-        }
         let workspace_grant =
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?
@@ -316,44 +351,88 @@ impl CodeRuntime {
                 .await?
         };
         let Some(repo_id) = repo_id else {
-            let policy = self.external_permission;
-            let mode = requested_mode.unwrap_or(policy.default_mode);
-            if mode > policy.ceiling {
-                return Err(ServerError::conflict_kind(
-                    "permission_mode_above_ceiling",
-                    format!("This deployment allows channel sessions up to {}. To allow {mode}, raise TIDEBREAK_EXTERNAL_PERMISSION_CEILING.", policy.ceiling),
-                ));
-            }
-            let session = self
-                .build_repositoryless_session(
-                    owner,
-                    owner_kind,
-                    harness,
-                    NewSessionSettings {
-                        permission_mode: mode,
-                        permission_mode_ceiling: Some(policy.ceiling),
-                        acts_as: Some(identity.acts_as),
-                        ..settings
-                    },
-                    Some(grant_id),
-                )
-                .await?;
-            let resolution = tidebreak_core::db::code::resolve_external_machine_session(
-                &self.db,
-                owner,
-                grant_id,
-                channel_kind,
-                external_key,
-                &session,
-            )
-            .await?;
-            if matches!(
-                resolution,
-                tidebreak_core::ExternalSessionResolution::Created(_)
-            ) {
-                self.attach_and_spawn_worker(session).await?;
-            }
-            return Ok((resolution, identity));
+            return match location {
+                ExecutionLocation::Sandbox => {
+                    if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow)
+                    {
+                        return Err(ServerError::conflict_kind(
+                            "permission_mode_unsupported",
+                            format!(
+                                "this deployment runs channel sessions in a sandbox, which is \
+                                 always allow; {mode} is not available here"
+                            ),
+                        ));
+                    }
+                    let session = self
+                        .build_repositoryless_remote_session(
+                            owner,
+                            owner_kind,
+                            harness,
+                            NewSessionSettings {
+                                permission_mode: PermissionMode::Allow,
+                                acts_as: Some(identity.acts_as),
+                                ..settings
+                            },
+                        )
+                        .await?;
+                    let resolution =
+                        tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                            &self.db,
+                            owner,
+                            grant_id,
+                            channel_kind,
+                            external_key,
+                            None,
+                            &session,
+                            channel_context,
+                        )
+                        .await?;
+                    Ok((resolution, identity))
+                }
+                ExecutionLocation::Machine => {
+                    let policy = self.external_permission;
+                    let mode = requested_mode.unwrap_or(policy.default_mode);
+                    if mode > policy.ceiling {
+                        return Err(ServerError::conflict_kind(
+                            "permission_mode_above_ceiling",
+                            format!("This deployment allows channel sessions up to {}. To allow {mode}, raise TIDEBREAK_EXTERNAL_PERMISSION_CEILING.", policy.ceiling),
+                        ));
+                    }
+                    let session = self
+                        .build_repositoryless_session(
+                            owner,
+                            owner_kind,
+                            harness,
+                            NewSessionSettings {
+                                permission_mode: mode,
+                                permission_mode_ceiling: Some(policy.ceiling),
+                                acts_as: Some(identity.acts_as),
+                                ..settings
+                            },
+                            Some(grant_id),
+                        )
+                        .await?;
+                    let resolution =
+                        tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                            &self.db,
+                            owner,
+                            grant_id,
+                            channel_kind,
+                            external_key,
+                            None,
+                            &session,
+                            channel_context,
+                        )
+                        .await?;
+                    if matches!(
+                        resolution,
+                        tidebreak_core::ExternalSessionResolution::Created(_)
+                    ) {
+                        self.attach_and_spawn_worker(session).await?;
+                    }
+                    Ok((resolution, identity))
+                }
+            };
         };
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
@@ -390,16 +469,18 @@ impl CodeRuntime {
                 let session =
                     Self::remote_session_value(owner, owner_kind, workspace.id, harness, settings);
                 self.validate_remote_execution(&session)?;
-                let resolution = tidebreak_core::db::code::resolve_external_session(
-                    &self.db,
-                    owner,
-                    grant_id,
-                    channel_kind,
-                    external_key,
-                    &workspace,
-                    &session,
-                )
-                .await?;
+                let resolution =
+                    tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                        &self.db,
+                        owner,
+                        grant_id,
+                        channel_kind,
+                        external_key,
+                        Some(&workspace),
+                        &session,
+                        channel_context,
+                    )
+                    .await?;
                 Ok((resolution, identity))
             }
             ExecutionLocation::Machine => {
@@ -450,15 +531,18 @@ impl CodeRuntime {
                         Some(grant_id),
                     )
                     .await?;
-                let resolution = tidebreak_core::db::code::resolve_external_machine_session(
-                    &self.db,
-                    owner,
-                    grant_id,
-                    channel_kind,
-                    external_key,
-                    &session,
-                )
-                .await?;
+                let resolution =
+                    tidebreak_core::db::code::resolve_external_session_with_channel_context(
+                        &self.db,
+                        owner,
+                        grant_id,
+                        channel_kind,
+                        external_key,
+                        None,
+                        &session,
+                        channel_context,
+                    )
+                    .await?;
                 if matches!(
                     resolution,
                     tidebreak_core::ExternalSessionResolution::Created(_)
@@ -623,7 +707,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         mut session: Session,
-        workspace: &CodeWorkspace,
+        workspace: Option<&CodeWorkspace>,
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -695,10 +779,22 @@ impl CodeRuntime {
                 .park_remote_follow_up(owner, &session, message, actor)
                 .await;
         }
-        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let repo = match workspace {
+            Some(workspace) => Some(self.get_repo(owner, workspace.repo_id).await?),
+            None => None,
+        };
+        let scratch_branch = workspace
+            .is_none()
+            .then(|| format!("scratch-{}", session.id));
         let driver = remote.driver(&self.db, self.bus.as_ref());
         let outcome = driver
-            .submit_turn(&mut session, workspace, &repo, &message)
+            .submit_turn(
+                &mut session,
+                workspace,
+                repo.as_ref(),
+                scratch_branch.as_deref(),
+                &message,
+            )
             .await?;
         // A provisioned or delivered turn has events to drain and a parked
         // one has a head to promote; either way the sweep should look now,
@@ -749,6 +845,9 @@ impl CodeRuntime {
                     "this session has spent {spent_microusd} of its {ceiling_microusd} micro-USD ceiling and takes no more turns"
                 ),
             )),
+            Outcome::RecoveryBlocked { code, message } => {
+                Err(ServerError::conflict_kind(code, message))
+            }
             Outcome::SignInRequired => Err(ServerError::conflict_kind(
                 "sign_in_required",
                 "sign in to the sandbox environment, then retry",
@@ -870,9 +969,7 @@ impl CodeRuntime {
         {
             return Ok(());
         }
-        let Ok(Some(workspace)) = self.session_workspace(&session).await else {
-            return Ok(());
-        };
+        let workspace = self.session_workspace(&session).await?;
         if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
             return Ok(());
         }
@@ -882,14 +979,30 @@ impl CodeRuntime {
         let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
             return Ok(());
         };
-        let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
-            return Ok(());
+        let repo = match workspace.as_ref() {
+            Some(workspace) => {
+                let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
+                    return Ok(());
+                };
+                Some(repo)
+            }
+            None => None,
         };
+        let scratch_branch = workspace
+            .is_none()
+            .then(|| format!("scratch-{}", session.id));
         let driver = remote.driver(&self.db, self.bus.as_ref());
         let message = head.message.clone();
         use crate::code::remote::driver::RemoteTurnOutcome as Outcome;
         match driver
-            .submit_turn_from(&mut session, &workspace, &repo, &message, Some(&head))
+            .submit_turn_from(
+                &mut session,
+                workspace.as_ref(),
+                repo.as_ref(),
+                scratch_branch.as_deref(),
+                &message,
+                Some(&head),
+            )
             .await
         {
             // The claim was the atomic promotion; nothing to delete. A
@@ -903,7 +1016,7 @@ impl CodeRuntime {
             // the ceiling, and every retry would re-journal the refusal
             // and re-cancel the sandbox. Pause the queue so the tray
             // shows why nothing moves; unpausing retries deliberately.
-            Ok(Outcome::SpendExhausted { .. }) => {
+            Ok(Outcome::SpendExhausted { .. } | Outcome::RecoveryBlocked { .. }) => {
                 let _ = tidebreak_core::db::code::set_queue_paused(
                     &self.db,
                     &session.owner,
@@ -1066,7 +1179,7 @@ impl CodeRuntime {
             ));
         };
         let message = crate::code::remote::wire::SandboxMessage {
-            body: "stop".to_owned(),
+            body: crate::code::remote::wire::SupervisorMessageBody::Input("stop".to_owned()),
             interrupt: true,
         };
         match remote
