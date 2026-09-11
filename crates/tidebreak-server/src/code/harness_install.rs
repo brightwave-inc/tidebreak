@@ -81,8 +81,8 @@ impl HarnessInstallJobs {
 
     /// Two callers of the same engine and channel share one install. A cold
     /// `latest` request (`version` unset) joins a later click that already
-    /// knows the version. A pinned request for a different version is a
-    /// distinct job and takes the slot.
+    /// knows the version. A request whose target is known and different from
+    /// the running job is a distinct job and takes the slot.
     ///
     /// One lock covers the check and the claim, so two requests that arrive
     /// together produce one install.
@@ -103,9 +103,9 @@ impl HarnessInstallJobs {
     }
 
     fn same_running_job(running: &HarnessInstallJob, job: &HarnessInstallJob) -> bool {
-        match job.channel {
-            HarnessUpdateChannel::Latest => true,
-            HarnessUpdateChannel::Pinned => running.version == job.version,
+        match (running.version.as_deref(), job.version.as_deref()) {
+            (None, _) | (_, None) => true,
+            (Some(running), Some(requested)) => running == requested,
         }
     }
 
@@ -424,6 +424,27 @@ mod claim_tests {
                 .is_some(),
             "exactly one install owns the latest slot"
         );
+    }
+
+    #[test]
+    fn latest_warmup_for_installed_does_not_join_deliberate_newer_target() {
+        let jobs = HarnessInstallJobs::default();
+        assert!(
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.259")))
+                .is_none(),
+            "non-deliberate warm-up starts an install of the installed version"
+        );
+        assert!(
+            jobs.claim(installing(HarnessUpdateChannel::Latest, Some("2.1.300")))
+                .is_none(),
+            "a deliberate latest whose resolved target differs starts its own install"
+        );
+        let running = jobs
+            .get(HarnessKind::ClaudeCode, HarnessUpdateChannel::Latest)
+            .expect("slot occupied");
+        assert!(!running.done);
+        assert_eq!(running.version.as_deref(), Some("2.1.300"));
+        assert_eq!(running.phase, PHASE_INSTALLING);
     }
 
     #[test]
