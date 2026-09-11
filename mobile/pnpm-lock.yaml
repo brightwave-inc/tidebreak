@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      '@expo/vector-icons':
+        specifier: 15.1.1
+        version: 15.1.1(expo-font@55.0.8)(react-native@0.83.1(@babel/core@7.29.7)(@react-native/metro-config@0.87.0(@babel/core@7.29.7))(@types/react@19.2.7)(react@19.2.8))(react@19.2.8)
       '@tanstack/react-query':
         specifier: 5.90.21
         version: 5.90.21(react@19.2.8)

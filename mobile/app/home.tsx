@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import Feather from "@expo/vector-icons/Feather";
 import { useIsFocused, useRouter } from "expo-router";
 import { useMemo, useState } from "react";
 import {
@@ -260,7 +261,7 @@ export default function HomeScreen() {
               {machineHost} · {live ? "Live" : "Reconnecting…"}
             </Text>
           </View>
-          <Text className="text-sm text-muted-foreground">Settings ›</Text>
+          <Feather name="settings" size={18} color="#697386" />
         </Pressable>
 
         <View className="flex-row gap-3">
