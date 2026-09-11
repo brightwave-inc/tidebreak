@@ -512,7 +512,10 @@ pub struct CodeDeliveryRunQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub limit: Option<u16>,
-    /// Skip the short list cache and reread GitHub. See the pull-request query.
+    /// Skip the short list cache and reread GitHub.
+    ///
+    /// Set only by an explicit user refresh. Paging never sets it, so
+    /// following a cursor stays on the aggregate the first page came from.
     #[serde(default)]
     pub refresh: bool,
 }

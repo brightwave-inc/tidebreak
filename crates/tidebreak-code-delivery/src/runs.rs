@@ -80,6 +80,10 @@ pub async fn query_runs(
         &targets,
     );
     let request_started = Instant::now();
+    // A user refresh must reach GitHub. Paging may re-read after the short
+    // list cache lapses: the cursor is the last seen sort key, so a longer
+    // or shorter aggregate resumes after that key instead of renumbering
+    // offsets.
     let cached = if force_refresh {
         None
     } else {
@@ -167,7 +171,10 @@ pub(super) fn run_page(
         .into_iter()
         .filter(|item| run_matches(item, query))
         .collect::<Vec<_>>();
-    let (items, next_cursor) = paginate(filtered, query.cursor.as_deref(), query.limit)?;
+    let (items, next_cursor) =
+        paginate_by_updated_at_id(filtered, query.cursor.as_deref(), query.limit, |item| {
+            (item.updated_at, item.id.as_str())
+        })?;
     Ok(CodeDeliveryRunsPage {
         capability,
         items,
