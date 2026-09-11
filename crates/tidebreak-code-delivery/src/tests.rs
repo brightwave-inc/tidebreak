@@ -1,9 +1,12 @@
 //! Delivery unit tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Barrier;
 
 use super::*;
 use crate::stack::StackRepositoryIdentity;
+use crate::wire::CodePrMergeMethod;
+use tidebreak_core::db::DbStore;
 
 #[test]
 fn repository_inputs_cover_https_ssh_and_short_forms() {
@@ -744,7 +747,7 @@ fn pull_request_files_drop_the_shapes_the_panel_cannot_draw() {
 }
 
 #[test]
-fn deployment_lists_do_not_claim_an_unknown_status_is_pending() {
+fn deployment_lists_use_the_fetched_latest_status() {
     let value: Value = serde_json::from_str(
         r#"{
             "id": 88,
@@ -756,7 +759,434 @@ fn deployment_lists_do_not_claim_an_unknown_status_is_pending() {
         }"#,
     )
     .unwrap();
-    let deployment = parse_deployment(&repository_ref(), &value, None, &[]).unwrap();
+    let status_value: Value = serde_json::from_str(
+        r#"{
+            "id": 1,
+            "state": "success",
+            "description": "deployed",
+            "environment_url": "https://staging.example",
+            "log_url": "https://github.com/acme/tools/deployments/88",
+            "created_at": "2026-08-22T12:02:00Z"
+        }"#,
+    )
+    .unwrap();
+    let latest = parse_deployment_status(&status_value).unwrap();
+    let deployment = parse_deployment(&repository_ref(), &value, Some(&latest), &[]).unwrap();
+    assert_eq!(deployment.status, "success");
+    assert_eq!(deployment.conclusion.as_deref(), Some("success"));
+    assert!(deployment.attention_reasons.is_empty());
+    assert_eq!(deployment.url, "https://staging.example");
+}
+
+fn canned_deployment_value() -> Value {
+    serde_json::from_str(
+        r#"{
+            "id": 88,
+            "ref": "main",
+            "sha": "abcdef",
+            "environment": "staging",
+            "created_at": "2026-08-22T12:00:00Z",
+            "updated_at": "2026-08-22T12:01:00Z"
+        }"#,
+    )
+    .unwrap()
+}
+
+fn canned_success_status_array() -> Value {
+    serde_json::from_str(
+        r#"[{
+            "id": 1,
+            "state": "success",
+            "description": "deployed",
+            "environment_url": "https://staging.example",
+            "log_url": "https://github.com/acme/tools/deployments/88",
+            "created_at": "2026-08-22T12:02:00Z"
+        }]"#,
+    )
+    .unwrap()
+}
+
+fn canned_repository_value() -> Value {
+    serde_json::json!({
+        "id": 1,
+        "name": "tidebreak",
+        "owner": { "login": "brightwave-inc" },
+        "html_url": "https://github.com/brightwave-inc/tidebreak",
+        "default_branch": "main"
+    })
+}
+
+struct FakeDeliveryApi {
+    deployments: Value,
+    statuses: Result<Value, String>,
+    repository: Value,
+    deployments_reads: AtomicUsize,
+    get_reads: AtomicUsize,
+}
+
+impl FakeDeliveryApi {
+    fn with_statuses(statuses: Result<Value, String>) -> Arc<Self> {
+        Arc::new(Self {
+            deployments: serde_json::json!([canned_deployment_value()]),
+            statuses,
+            repository: canned_repository_value(),
+            deployments_reads: AtomicUsize::new(0),
+            get_reads: AtomicUsize::new(0),
+        })
+    }
+}
+
+struct FakeDeliveryReader {
+    api: DeliveryApiHandle,
+}
+
+struct FakeDeliveryRuntime {
+    cache: DeliveryCache,
+    reader: DeliveryReaderHandle,
+}
+
+fn unused_api() -> Result<Value, String> {
+    Err("unused in this test".into())
+}
+
+#[async_trait::async_trait]
+impl DeliveryApi for FakeDeliveryApi {
+    fn can_mark_pull_request_ready(&self) -> bool {
+        false
+    }
+
+    async fn get(&self, endpoint: &str) -> Result<Value, String> {
+        self.get_reads.fetch_add(1, Ordering::SeqCst);
+        if endpoint.contains("/statuses") {
+            return self.statuses.clone();
+        }
+        unused_api()
+    }
+
+    async fn repository(&self, _target: &CodeGitHubRepositoryTarget) -> Result<Value, String> {
+        Ok(self.repository.clone())
+    }
+
+    async fn pull_requests(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _state: &str,
+        _fields: &str,
+        _checks_loaded: bool,
+        _author: Option<&str>,
+    ) -> Result<Vec<Value>, String> {
+        Err("unused in this test".into())
+    }
+
+    async fn deployments(&self, _target: &CodeGitHubRepositoryTarget) -> Result<Value, String> {
+        self.deployments_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.deployments.clone())
+    }
+
+    async fn workflow_runs(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _etag: Option<&str>,
+    ) -> Result<EndpointRead<Vec<Value>>, HostReadError> {
+        Err(HostReadError::Failed("unused in this test".into()))
+    }
+
+    async fn merge_queue_membership(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _number: u64,
+    ) -> Option<bool> {
+        None
+    }
+
+    async fn pull_request(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _repository: &CodeGitHubRepositoryRef,
+        _number: u64,
+    ) -> Result<Value, String> {
+        unused_api()
+    }
+
+    async fn mark_pull_request_ready(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _number: u64,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn merge_pull_request(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _number: u64,
+        _method: CodePrMergeMethod,
+        _auto: bool,
+        _admin: bool,
+        _expected_head_sha: &str,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn create_stack(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _numbers: &[u64],
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn update_pull_request_state(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _number: u64,
+        _state: &str,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn comment_on_pull_request(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _number: u64,
+        _body: &str,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn rerun_failed_jobs(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _run_id: u64,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+
+    async fn rerun_workflow(
+        &self,
+        _target: &CodeGitHubRepositoryTarget,
+        _run_id: u64,
+    ) -> Result<(), DeliveryError> {
+        Err(DeliveryError::internal("unused in this test"))
+    }
+}
+
+#[async_trait::async_trait]
+impl DeliveryReader for FakeDeliveryReader {
+    fn cache_scope(&self) -> &'static str {
+        "test"
+    }
+
+    async fn api(&self, _target: &CodeGitHubRepositoryTarget) -> Result<DeliveryApiHandle, String> {
+        Ok(self.api.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl DeliveryRuntime for FakeDeliveryRuntime {
+    fn store(&self) -> &DbStore {
+        panic!("store unused in deployment list tests")
+    }
+
+    fn delivery_cache(&self) -> &DeliveryCache {
+        &self.cache
+    }
+
+    async fn delivery_access(&self, _owner: &OwnerId, _force_refresh: bool) -> DeliveryAccess {
+        DeliveryAccess {
+            capability: CodeGitHubCapability {
+                found: true,
+                authenticated: Some(true),
+                viewer_login: Some("octocat".into()),
+                remediation: String::new(),
+            },
+            reader: Some(self.reader.clone()),
+            unavailable_kind: "github",
+        }
+    }
+
+    async fn list_repos(&self, _owner: &OwnerId) -> Result<Vec<CodeRepo>, DeliveryError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_workspaces(
+        &self,
+        _owner: &OwnerId,
+        _repo_id: Option<RepoId>,
+    ) -> Result<Vec<CodeWorkspace>, DeliveryError> {
+        Ok(Vec::new())
+    }
+
+    async fn emit_workspace_digests(&self, _owner: &OwnerId, _workspace_id: WorkspaceId) {}
+
+    async fn record_pull_request_live_state(
+        &self,
+        _owner: &OwnerId,
+        _source: Option<WorkspaceId>,
+        _digest: &PullRequestDigest,
+    ) {
+    }
+
+    fn refresh_workspaces_for_pull_request(&self, _owner: &OwnerId, _pull_request_url: &str) {}
+
+    fn nudge_delivery_update(&self, _owner: &OwnerId) {}
+}
+
+fn fake_runtime(api: Arc<FakeDeliveryApi>) -> FakeDeliveryRuntime {
+    let handle: DeliveryApiHandle = api;
+    FakeDeliveryRuntime {
+        cache: DeliveryCache::default(),
+        reader: Arc::new(FakeDeliveryReader { api: handle }),
+    }
+}
+
+fn deployment_list_query() -> CodeDeliveryRunQuery {
+    CodeDeliveryRunQuery {
+        repositories: vec![repository_target("tidebreak")],
+        search: None,
+        kinds: vec![CodeDeliveryRunKind::Deployment],
+        statuses: Vec::new(),
+        conclusions: Vec::new(),
+        workflows: Vec::new(),
+        environments: Vec::new(),
+        branches: Vec::new(),
+        events: Vec::new(),
+        actors: Vec::new(),
+        attention_only: false,
+        tidebreak_linked: None,
+        created_after: None,
+        cursor: None,
+        limit: None,
+        refresh: false,
+    }
+}
+
+fn test_capability() -> CodeGitHubCapability {
+    CodeGitHubCapability {
+        found: true,
+        authenticated: Some(true),
+        viewer_login: Some("octocat".into()),
+        remediation: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn fetch_runs_applies_latest_deployment_status_before_filtering() {
+    let api = FakeDeliveryApi::with_statuses(Ok(canned_success_status_array()));
+    let runtime = fake_runtime(Arc::clone(&api));
+    let owner = OwnerId::local();
+    let target = repository_target("tidebreak");
+    let fetched = fetch_runs(
+        &runtime,
+        &owner,
+        &runtime.reader,
+        &target,
+        &[],
+        RunFetchOptions {
+            fetch_workflows: false,
+            fetch_deployments: true,
+            force_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched.items.len(), 1);
+    assert_eq!(fetched.items[0].status, "success");
+    assert_eq!(fetched.items[0].conclusion.as_deref(), Some("success"));
+    assert_eq!(fetched.items[0].url, "https://staging.example");
+    assert_eq!(api.deployments_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(api.get_reads.load(Ordering::SeqCst), 1);
+
+    let mut query = deployment_list_query();
+    query.statuses = vec!["success".into()];
+    let page = run_page(
+        test_capability(),
+        CachedAggregate {
+            fetched_at: Instant::now(),
+            items: fetched.items,
+            errors: fetched.errors,
+        },
+        &query,
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+}
+
+#[tokio::test]
+async fn fetch_runs_records_a_source_error_when_deployment_statuses_fail() {
+    let api = FakeDeliveryApi::with_statuses(Err("HTTP 403: API rate limit exceeded".into()));
+    let runtime = fake_runtime(Arc::clone(&api));
+    let owner = OwnerId::local();
+    let target = repository_target("tidebreak");
+    let fetched = fetch_runs(
+        &runtime,
+        &owner,
+        &runtime.reader,
+        &target,
+        &[],
+        RunFetchOptions {
+            fetch_workflows: false,
+            fetch_deployments: true,
+            force_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched.items.len(), 1);
+    assert_eq!(fetched.items[0].status, "unknown");
+    assert_eq!(fetched.items[0].conclusion, None);
+    assert_eq!(fetched.errors.len(), 1);
+    assert_eq!(fetched.errors[0].kind, "rate_limited");
+    assert!(fetched.errors[0]
+        .message
+        .contains("Could not load deployment statuses"));
+}
+
+#[tokio::test]
+async fn query_runs_cache_hit_does_not_read_github() {
+    let api = FakeDeliveryApi::with_statuses(Ok(canned_success_status_array()));
+    let runtime = fake_runtime(Arc::clone(&api));
+    let owner = OwnerId::local();
+    let query = deployment_list_query();
+    let (remote_scope, _, _) = run_remote_scope(&query);
+    let cache_key = aggregate_cache_key(
+        &owner,
+        &format!("runs:test:{remote_scope}"),
+        &query.repositories,
+    );
+    let item = parse_deployment(
+        &repository_ref(),
+        &canned_deployment_value(),
+        parse_deployment_status(&canned_success_status_array()[0]).as_ref(),
+        &[],
+    )
+    .unwrap();
+    runtime
+        .delivery_cache()
+        .put_runs(cache_key, vec![item], Vec::new());
+
+    let page = query_runs(&runtime, &owner, true, query).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].status, "success");
+    assert_eq!(api.deployments_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(api.get_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn deployment_status_stays_unknown_when_the_host_gate_is_closed() {
+    let value: Value = serde_json::from_str(
+        r#"{
+            "id": 88,
+            "ref": "main",
+            "sha": "abcdef",
+            "environment": "staging",
+            "created_at": "2026-08-22T12:00:00Z",
+            "updated_at": "2026-08-22T12:01:00Z"
+        }"#,
+    )
+    .unwrap();
+    let latest = latest_deployment_status_from_get(Err("the host is parked for 30s".into()));
+    let deployment = parse_deployment(&repository_ref(), &value, latest.as_ref(), &[]).unwrap();
     assert_eq!(deployment.status, "unknown");
     assert_eq!(deployment.conclusion, None);
     assert!(deployment.attention_reasons.is_empty());

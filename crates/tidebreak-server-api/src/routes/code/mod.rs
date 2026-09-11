@@ -16,6 +16,12 @@ mod access;
 mod analytics;
 mod approvals;
 mod browser;
+mod channel_preferences;
+pub(crate) use channel_preferences::{
+    external_channel_preferences, get_channel_harness_catalog, get_channel_preferences,
+    put_channel_preferences,
+};
+mod conversation;
 mod delivery;
 mod external;
 #[cfg(test)]
@@ -47,6 +53,9 @@ pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{
     browser_act, browser_activate, browser_close, browser_diagnostics, browser_list,
     browser_navigate, browser_open, browser_screenshot, browser_snapshot, browser_wait,
+};
+pub(crate) use conversation::{
+    external_conversation_request_result, external_conversation_requests,
 };
 pub(crate) use delivery::{
     act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,

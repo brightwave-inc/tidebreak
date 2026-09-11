@@ -546,11 +546,11 @@ function RepositoryCard({ report }: { report: CodeAnalyticsSnapshot }) {
           <tbody>
             {report.repositories.map((repo) => (
               <tr
-                key={repo.repo_id}
+                key={repo.repo_id ?? "no-repository"}
                 className="border-b border-border-subtle last:border-0"
               >
                 <td className="max-w-64 truncate px-4 py-3 font-medium">
-                  {repo.name}
+                  {repo.repo_id ? repo.name : "no repository"}
                 </td>
                 <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">
                   {formatNumber(repo.sessions)}

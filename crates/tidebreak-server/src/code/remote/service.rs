@@ -79,6 +79,8 @@ pub struct RemoteSessions {
     pub(crate) provisioner: Arc<dyn SandboxProvisioner>,
     /// Spawn-time settings.
     pub(crate) settings: RemoteSpawnSettings,
+    /// Protected-tool executor for supervised sandboxes, when wired.
+    host_tool: std::sync::OnceLock<Arc<dyn tidebreak_code_remote::driver::HostToolExecutor>>,
     /// Live pump tasks by session. The sweep prunes finished entries and
     /// spawns missing ones; a pump task removes its own entry on the way out
     /// so the pass it wakes sees the slot free.
@@ -100,10 +102,21 @@ impl RemoteSessions {
         Arc::new(Self {
             provisioner,
             settings,
+            host_tool: std::sync::OnceLock::new(),
             pumps: Mutex::new(HashMap::new()),
             promotion_holds: Mutex::new(HashMap::new()),
             sweep_wake: Notify::new(),
         })
+    }
+
+    /// Attach the protected-tool executor this deployment serves.
+    pub fn with_host_tool(
+        self: &Arc<Self>,
+        host: Arc<dyn tidebreak_code_remote::driver::HostToolExecutor>,
+    ) {
+        // May only be set before pumps start; recovery happens after boot
+        // wiring, so this is safe.
+        let _ = self.host_tool.set(host);
     }
 
     /// Ask the sweep for a pass now instead of at its next floor.
@@ -122,6 +135,7 @@ impl RemoteSessions {
             bus,
             provisioner: self.provisioner.as_ref(),
             settings: &self.settings,
+            host_tool: self.host_tool.get().map(AsRef::as_ref),
         }
     }
 
@@ -264,10 +278,14 @@ async fn pump_session(
 }
 
 /// Holds the remote sweep alive; aborts it on drop.
-pub(crate) struct RemoteSweepGuard(Option<tokio::task::JoinHandle<()>>);
+pub(crate) struct RemoteSweepGuard {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    runtime: Weak<CodeRuntime>,
+}
 
 impl RemoteSweepGuard {
     pub(crate) fn spawn(runtime: Weak<CodeRuntime>) -> Self {
+        let guard_runtime = runtime.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Some(runtime) = runtime.upgrade() else {
@@ -290,14 +308,24 @@ impl RemoteSweepGuard {
                 }
             }
         });
-        Self(Some(handle))
+        Self {
+            handle: Some(handle),
+            runtime: guard_runtime,
+        }
     }
 }
 
 impl Drop for RemoteSweepGuard {
     fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
+        if let Some(handle) = self.handle.take() {
             handle.abort();
+        }
+        if let Some(runtime) = self.runtime.upgrade() {
+            if let Some(remote) = runtime.remote_sessions() {
+                if let Some(host) = remote.host_tool.get() {
+                    host.shutdown();
+                }
+            }
         }
     }
 }
@@ -452,7 +480,8 @@ mod tests {
             _sandbox_id: &str,
             message: &SandboxMessage,
         ) -> Result<MessageReceipt, RemoteSandboxError> {
-            self.sends.lock().unwrap().push(message.body.clone());
+            let super::super::wire::SupervisorMessageBody::Input(body) = &message.body;
+            self.sends.lock().unwrap().push(body.clone());
             Ok(MessageReceipt {
                 seq: 1,
                 interrupt: false,
@@ -979,7 +1008,14 @@ mod tests {
         // Deliver against the stale snapshot, as a sweep that raced the edit
         // would.
         driver
-            .submit_turn_from(&mut live, &workspace, &repo, &stale.message, Some(&stale))
+            .submit_turn_from(
+                &mut live,
+                Some(&workspace),
+                Some(&repo),
+                None,
+                &stale.message,
+                Some(&stale),
+            )
             .await
             .unwrap();
         let delivered = latest_turn(&runtime.db, &owner, session.id)
@@ -1935,8 +1971,9 @@ mod tests {
         let outcome = driver
             .submit_turn_from(
                 &mut promoting,
-                &workspace,
-                &stored_repo,
+                Some(&workspace),
+                Some(&stored_repo),
+                None,
                 &stale.message,
                 Some(&stale),
             )

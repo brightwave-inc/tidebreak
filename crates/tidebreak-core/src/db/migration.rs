@@ -25,9 +25,11 @@
 
 mod baseline;
 mod channel_repository_confirm;
+mod code_conversation_request;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
+mod native_tool_receipt;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
@@ -101,7 +103,65 @@ impl MigratorTrait for Migrator {
             Box::new(channel_repository_confirm::ChannelRepositoryConfirm),
             Box::new(external_thread_context::ExternalThreadContext),
             Box::new(session_context::SessionContext),
+            Box::new(code_conversation_request::CodeConversationRequests),
+            Box::new(IncarnationToolBridge),
+            Box::new(native_tool_receipt::NativeToolReceipts),
+            Box::new(native_tool_receipt::NativeToolClaimTime),
         ]
+    }
+}
+
+/// Keep typed native-tool requests and results flowing through a sandbox
+/// incarnation while preserving the ingest cursor and durability exactly as
+/// text events already do.
+struct IncarnationToolBridge;
+
+impl MigrationName for IncarnationToolBridge {
+    fn name(&self) -> &str {
+        "m20260910_000024_incarnation_tool_bridge"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for IncarnationToolBridge {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager
+            .has_column("code_session_incarnation", "tool_requests_json")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSessionIncarnation::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeSessionIncarnation::ToolRequestsJson)
+                                .json_binary(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        if !manager
+            .has_column("code_session_incarnation", "tool_ack_seqs_json")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSessionIncarnation::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeSessionIncarnation::ToolAckSeqsJson)
+                                .json_binary(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }
 

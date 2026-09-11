@@ -5,6 +5,11 @@
 //! over `opencode run --format json` because the installed version's serve
 //! API is real — sessions, messages, `/event`, and a permission reply
 //! surface — and the prompt stays off argv.
+//!
+//! OpenCode serve has no extra-read-root flag. `allowed_read_roots` are still
+//! required to be absolute so a relative private path cannot slip through; the
+//! engine then runs without additional read scoping rather than dropping the
+//! field silently.
 
 pub mod parse;
 pub mod session;

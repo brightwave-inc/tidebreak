@@ -99,14 +99,20 @@ impl CodeRuntime {
         let previous = {
             let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
             prune_completed_jobs(&mut jobs, Instant::now());
-            jobs.values()
-                .find(|job| &job.owner == owner && job.external_origin.as_deref() == Some(&origin))
+            let matching = jobs
+                .values()
+                .filter(|job| {
+                    &job.owner == owner && job.external_origin.as_deref() == Some(&origin)
+                })
                 .cloned()
+                .collect::<Vec<_>>();
+            matching
+                .iter()
+                .find(|job| !job.done)
+                .cloned()
+                .or_else(|| matching.into_iter().find(|job| job.error.is_none()))
         };
         if let Some(job) = previous {
-            if let Some(error) = job.error {
-                return Err(ServerError::conflict_kind("repository_clone_failed", error));
-            }
             if job.done {
                 return Err(ServerError::conflict_kind("repo_removed", "This repository registration was removed. Register it again before starting a session."));
             }
@@ -181,18 +187,18 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(first.kind(), "repository_preparing");
+        let job_id = {
+            let jobs = runtime.clone_jobs.jobs.lock().expect("clone jobs");
+            jobs.values()
+                .find(|job| job.owner == owner)
+                .map(|job| job.id)
+                .expect("clone job")
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let error = runtime
-                .prepare_external_repository(
-                    &owner,
-                    grant,
-                    "ACME/Tools",
-                    GitForgeAttributionRequest::Installation,
-                )
-                .await
-                .unwrap_err();
-            if error.kind() == "repository_clone_failed" {
+            let snapshot = runtime.get_clone_job(&owner, job_id).unwrap();
+            if snapshot.done {
+                assert!(snapshot.error.is_some());
                 break;
             }
             assert!(Instant::now() < deadline, "clone did not finish");
@@ -220,5 +226,67 @@ mod tests {
             "one owner's failed job must not be reused by another owner"
         );
         assert_eq!(runtime.clone_jobs.jobs.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_external_clone_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            tidebreak_core::DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let lender = Arc::new(FakeLender::refusing(GitForgeError::RepositoryNotInstalled));
+        let runtime = Arc::new(
+            CodeRuntime::new(db, dir.path().into(), None, None, None, None, None, None)
+                .with_git_credentials(lender)
+                .with_clone_parent_default(dir.path().into()),
+        );
+        let owner = OwnerId::new("user:slack-service").unwrap();
+        let grant = tidebreak_core::CodeGrantId::new();
+        let first = runtime
+            .prepare_external_repository(
+                &owner,
+                grant,
+                "acme/tools",
+                GitForgeAttributionRequest::Installation,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(first.kind(), "repository_preparing");
+        let job_id = {
+            let jobs = runtime.clone_jobs.jobs.lock().expect("clone jobs");
+            jobs.values()
+                .find(|job| job.owner == owner)
+                .map(|job| job.id)
+                .expect("clone job")
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = runtime.get_clone_job(&owner, job_id).unwrap();
+            if snapshot.done {
+                assert!(snapshot.error.is_some());
+                break;
+            }
+            assert!(Instant::now() < deadline, "clone did not finish");
+            tokio::task::yield_now().await;
+        }
+        let after_failure = runtime
+            .prepare_external_repository(
+                &owner,
+                grant,
+                "acme/tools",
+                GitForgeAttributionRequest::Installation,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            after_failure.kind(),
+            "repository_preparing",
+            "a failed job must not block a later clone of the same origin"
+        );
     }
 }

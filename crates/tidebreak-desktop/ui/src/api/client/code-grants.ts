@@ -1,4 +1,13 @@
-import type { CodeConnectPage, CodeGrantSnapshot } from "../types";
+import type {
+  ChannelPreferences,
+  ChannelPreferencesSnapshot,
+  ChannelHarnessCatalog,
+} from "../../settings/channelPreferences";
+import {
+  parseChannelPreferences,
+  parseChannelHarnessCatalog,
+} from "../../settings/channelPreferences";
+import type { CodeConnectPage, CodeGrantSnapshot, HarnessKind } from "../types";
 import {
   parseCodeConnectPage,
   parseCodeGrant,
@@ -11,6 +20,58 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
   Base: TBase,
 ) {
   return class extends Base {
+    async getChannelHarnessCatalog(
+      grant: string,
+      channel: string,
+      kind?: HarnessKind,
+    ): Promise<ChannelHarnessCatalog> {
+      const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+      return requireParsed(
+        parseChannelHarnessCatalog(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/harnesses${query}`,
+            { headers: this.headers() },
+          ),
+        ),
+        "channel harness catalog",
+      );
+    }
+
+    async getChannelPreferences(
+      grant: string,
+      channel: string,
+    ): Promise<ChannelPreferencesSnapshot> {
+      return requireParsed(
+        parseChannelPreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/preferences`,
+            { headers: this.headers() },
+          ),
+        ),
+        "channel preferences",
+      );
+    }
+
+    async setChannelPreferences(
+      grant: string,
+      channel: string,
+      preferences: ChannelPreferences,
+    ): Promise<ChannelPreferencesSnapshot> {
+      return requireParsed(
+        parseChannelPreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/channels/${encodeURIComponent(channel)}/preferences`,
+            {
+              method: "PUT",
+              headers: this.headers(true),
+              body: JSON.stringify(preferences),
+            },
+          ),
+        ),
+        "channel preferences",
+      );
+    }
+
     /** Every adapter grant the owner holds, revoked rows included. */
     async listCodeGrants(): Promise<CodeGrantSnapshot[]> {
       return requireParsed(

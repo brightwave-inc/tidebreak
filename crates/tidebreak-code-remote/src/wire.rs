@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use tidebreak_core::code::SupervisorToolRequest;
+
 /// Longest `events` wait the environment honors, in seconds. A larger
 /// request is clamped server-side; staying at or under it keeps the clamp
 /// out of the picture.
@@ -257,24 +259,36 @@ pub struct SandboxEvent {
 #[derive(Clone, Debug, Serialize)]
 pub struct SandboxMessage {
     /// Ordinary input for the sandbox's next turn. The environment attaches
-    /// no meaning to it.
-    pub body: String,
+    /// no meaning to it; a typed tool result rides the same field as a
+    /// prefixed JSON envelope.
+    pub body: SupervisorMessageBody,
     /// Whether to preempt the turn in flight rather than wait for it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupt: bool,
 }
 
+/// A typed message body over the text transport.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SupervisorMessageBody {
+    /// Ordinary user or queued turn text.
+    Input(String),
+}
+
+pub use tidebreak_core::code::supervisor_tools::{SupervisorArtifact, SupervisorToolResult};
+
 impl SandboxMessage {
     /// Refuses a body the environment would refuse, before the request.
     pub fn validate(&self) -> Result<(), String> {
-        if self.body.trim().is_empty() {
-            return Err("sandbox message body is empty".to_owned());
-        }
-        if self.body.len() > MESSAGE_MAX_BODY_BYTES {
+        let SupervisorMessageBody::Input(body) = &self.body;
+        if body.len() > MESSAGE_MAX_BODY_BYTES {
             return Err(format!(
                 "sandbox message body is {} bytes; the ceiling is {MESSAGE_MAX_BODY_BYTES}",
-                self.body.len()
+                body.len()
             ));
+        }
+        if body.trim().is_empty() {
+            return Err("sandbox message body is empty".to_owned());
         }
         Ok(())
     }
@@ -359,7 +373,7 @@ mod tests {
     #[test]
     fn a_default_interrupt_is_omitted_from_the_message_body() {
         let message = SandboxMessage {
-            body: "steer left".to_owned(),
+            body: SupervisorMessageBody::Input("steer left".to_owned()),
             interrupt: false,
         };
         let value = serde_json::to_value(&message).unwrap();
@@ -401,12 +415,12 @@ mod tests {
     #[test]
     fn message_validation_names_the_fault() {
         let empty = SandboxMessage {
-            body: "   ".to_owned(),
+            body: SupervisorMessageBody::Input("   ".to_owned()),
             interrupt: false,
         };
         assert!(empty.validate().unwrap_err().contains("empty"));
         let oversized = SandboxMessage {
-            body: "x".repeat(MESSAGE_MAX_BODY_BYTES + 1),
+            body: SupervisorMessageBody::Input("x".repeat(MESSAGE_MAX_BODY_BYTES + 1)),
             interrupt: false,
         };
         assert!(oversized.validate().unwrap_err().contains("ceiling"));

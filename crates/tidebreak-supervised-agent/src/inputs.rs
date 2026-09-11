@@ -91,6 +91,10 @@ pub struct Inputs {
     pub task: String,
     /// Branch assigned by Tidebreak for the primary repository.
     pub workspace_branch: Option<String>,
+    /// Private-scratch marker for a repository-less run, when the envelope
+    /// declared one. The environment provisions no clone; the workspace is
+    /// the scratch directory.
+    pub scratch_marker: Option<String>,
     /// Absolute URL of the control endpoint's poll route base.
     pub control_url: String,
     /// Directory the engine runs in.
@@ -204,9 +208,13 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
     let raw_task = optional(raw.task).ok_or_else(|| InputError::missing(TASK_VARIABLE))?;
     let envelope = tidebreak_core::code::RemoteWorkspaceTask::parse(&raw_task)
         .map_err(|message| InputError::unusable(TASK_VARIABLE, &message))?;
-    let (task, workspace_branch) = match envelope {
-        Some(envelope) => (envelope.task, Some(envelope.branch)),
-        None => (raw_task, None),
+    let (task, workspace_branch, scratch_marker) = match envelope.as_ref() {
+        Some(envelope) => (
+            envelope.task.clone(),
+            Some(envelope.branch.clone()),
+            envelope.scratch.then(|| envelope.branch.clone()),
+        ),
+        None => (raw_task, None, None),
     };
 
     let endpoint =
@@ -327,6 +335,7 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         workspace_branch,
         control_url,
         workspace,
+        scratch_marker,
         mode,
         max_turns,
         starting_turn,

@@ -146,6 +146,17 @@ pub async fn query_runs(
     run_page(capability, aggregate, &query)
 }
 
+pub(super) fn latest_deployment_status_from_get(
+    result: Result<Value, String>,
+) -> Option<CodeDeliveryDeploymentStatus> {
+    result.ok().and_then(|value| {
+        value
+            .as_array()
+            .and_then(|statuses| statuses.first())
+            .and_then(parse_deployment_status)
+    })
+}
+
 pub(super) fn run_page(
     capability: CodeGitHubCapability,
     aggregate: CachedAggregate<CodeDeliveryRunSummary>,
@@ -352,16 +363,64 @@ pub(super) async fn fetch_runs(
     };
     let mut fetched = FetchedRuns::default();
     match deployments {
-        Ok(Some(value)) => fetched.items.extend(
-            value
+        Ok(Some(value)) => {
+            let page: Vec<Value> = value
                 .as_array()
                 .into_iter()
                 .flatten()
                 .take(MAX_REMOTE_ITEMS_PER_REPO)
-                .filter_map(|deployment| {
-                    parse_deployment(&repository, deployment, None, workspaces)
-                }),
-        ),
+                .cloned()
+                .collect();
+            // Bound the statuses fan-out to this first deployments page so
+            // the 30s aggregate cache (not a per-filter overlay) owns GitHub
+            // reads. Deployments stay live observations; they have no stored
+            // list ETag the way workflow runs do.
+            let status_reads = stream::iter(page)
+                .map(|deployment| {
+                    let api = api.clone();
+                    async move {
+                        let latest = match u64_field(&deployment, "id") {
+                            Some(id) => {
+                                let endpoint = api_endpoint(
+                                    target,
+                                    &format!("deployments/{id}/statuses?per_page=1"),
+                                );
+                                match api.get(&endpoint).await {
+                                    Ok(value) => Ok(latest_deployment_status_from_get(Ok(value))),
+                                    Err(message) => Err(message),
+                                }
+                            }
+                            None => Ok(None),
+                        };
+                        (deployment, latest)
+                    }
+                })
+                .buffer_unordered(DELIVERY_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            let mut status_error = None;
+            for (deployment, latest) in status_reads {
+                let latest = match latest {
+                    Ok(latest) => latest,
+                    Err(message) => {
+                        if status_error.is_none() {
+                            status_error = Some(message);
+                        }
+                        None
+                    }
+                };
+                if let Some(item) =
+                    parse_deployment(&repository, &deployment, latest.as_ref(), workspaces)
+                {
+                    fetched.items.push(item);
+                }
+            }
+            if let Some(message) = status_error {
+                fetched
+                    .errors
+                    .push(detail_source_error(target, "deployment statuses", message));
+            }
+        }
         Ok(None) => {}
         Err(message) => fetched
             .errors

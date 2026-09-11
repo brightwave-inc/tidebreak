@@ -424,6 +424,14 @@ fn code_routes_go_through_the_owner_scoped_view() {
                          `session_bound_to_grant` authorization path"
                     ));
                 }
+            } else if name == "conversation.rs" {
+                if !text.contains("ExternalGrantAuth") || !text.contains("require_bound(") {
+                    findings.push(format!(
+                        "{name} is the adapter conversation-tool route but is \
+                         missing its `ExternalGrantAuth` / `require_bound` \
+                         authorization path"
+                    ));
+                }
             } else {
                 findings.push(format!(
                     "{name} defines route handlers but never extracts `ScopedCode`"

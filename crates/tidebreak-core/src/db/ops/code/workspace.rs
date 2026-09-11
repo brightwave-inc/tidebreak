@@ -87,6 +87,20 @@ pub async fn list_workspaces(
         .collect()
 }
 
+/// Every workspace on the machine, across owners.
+///
+/// A system path, not a request path: boot recovery sweeps private scratch
+/// roots against the live rows. Nothing reachable from a route may call it.
+pub async fn list_workspaces_all_owners(store: &DbStore) -> Result<Vec<CodeWorkspace>> {
+    entities::code_workspace::Entity::find()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(workspace_from_row)
+        .collect()
+}
+
 /// Every workspace in one lifecycle state, across owners.
 ///
 /// Boot recovery uses this only for the transient `Archiving` state. Owner
