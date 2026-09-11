@@ -37,11 +37,12 @@ export function recoveryAttention(
   };
 }
 
-/** The live digest supersedes the snapshot, including a stale recovery reason. */
+/** A matching live digest supersedes the snapshot and its recovery reason. */
 export function sessionRecoveryState(
   session: CodeSessionSnapshot | null | undefined,
   digest: CodeSessionDigest | undefined,
 ) {
+  if (session && digest?.session !== session.id) digest = undefined;
   const lifecycle = digest?.lifecycle ?? session?.lifecycle;
   const rawAttention = digest?.attention ?? session?.attention;
   const reason = digest

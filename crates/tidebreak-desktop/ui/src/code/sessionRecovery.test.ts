@@ -3,6 +3,7 @@ import type { CodeSessionDigest, CodeSessionSnapshot } from "../api/types";
 import { sessionRecoveryState } from "./sessionRecovery";
 
 const snapshot = {
+  id: "selected",
   lifecycle: "fenced",
   fence_reason: { type: "orphan_alive" },
   attention: {
@@ -13,6 +14,7 @@ const snapshot = {
 
 it("unblocks the composer when a live digest recovers a stale snapshot", () => {
   const digest = {
+    session: snapshot.id,
     lifecycle: "idle",
     attention: { state: { type: "idle" }, source: "lifecycle" },
   } as CodeSessionDigest;
@@ -26,6 +28,7 @@ it("unblocks the composer when a live digest recovers a stale snapshot", () => {
 
 it("shows the live failure prompt while the snapshot still says recovery is pending", () => {
   const digest = {
+    session: snapshot.id,
     lifecycle: "fenced",
     attention: {
       state: {
@@ -46,6 +49,7 @@ it("shows the live failure prompt while the snapshot still says recovery is pend
 
 it("takes the live reason when recovery fails on a pinned session", () => {
   const digest = {
+    session: snapshot.id,
     lifecycle: "fenced",
     fence_reason: {
       type: "probe_ambiguous",
@@ -67,6 +71,7 @@ it("takes the live reason when recovery fails on a pinned session", () => {
 
 it("offers manual recovery for older servers without recovery digest fields", () => {
   const digest = {
+    session: snapshot.id,
     lifecycle: "fenced",
     attention: snapshot.attention,
   } as CodeSessionDigest;
@@ -80,6 +85,7 @@ it("offers manual recovery for older servers without recovery digest fields", ()
 
 it("shows a safe manual fallback for an older server's pinned recovery", () => {
   const digest = {
+    session: snapshot.id,
     lifecycle: "fenced",
     attention: {
       state: { type: "manual", note: "Review today" },
@@ -89,4 +95,52 @@ it("shows a safe manual fallback for an older server's pinned recovery", () => {
   const result = sessionRecoveryState(snapshot, digest);
   expect(result.attention?.state).toMatchObject({ type: "needs_you" });
   expect(result.reason).toBeUndefined();
+});
+
+it("ignores a fenced sibling digest when the selected session is healthy", () => {
+  const selected = {
+    ...snapshot,
+    lifecycle: "idle" as const,
+    fence_reason: undefined,
+    attention: {
+      state: { type: "idle" as const },
+      source: "lifecycle" as const,
+    },
+  };
+  const sibling = {
+    session: "sibling",
+    lifecycle: "fenced",
+    fence_reason: {
+      type: "probe_ambiguous",
+      detail: "Sibling recovery stopped",
+    },
+    attention: {
+      state: {
+        type: "needs_you",
+        prompt: "Retry the sibling session.",
+        source: "lifecycle",
+      },
+      source: "lifecycle",
+    },
+  } as CodeSessionDigest;
+  expect(sessionRecoveryState(selected, sibling)).toEqual({
+    lifecycle: "idle",
+    attention: selected.attention,
+    reason: undefined,
+    blocksTurn: false,
+  });
+});
+
+it("ignores a healthy sibling digest when the selected session is fenced", () => {
+  const sibling = {
+    session: "sibling",
+    lifecycle: "idle",
+    attention: { state: { type: "idle" }, source: "lifecycle" },
+  } as CodeSessionDigest;
+  expect(sessionRecoveryState(snapshot, sibling)).toEqual({
+    lifecycle: "fenced",
+    attention: snapshot.attention,
+    reason: snapshot.fence_reason,
+    blocksTurn: true,
+  });
 });
