@@ -707,6 +707,7 @@ pub enum Event {
         #[ts(optional)]
         message_id: Option<uuid::Uuid>,
     },
+
     /// The turn finished successfully.
     TurnCompleted {
         /// Token accounting as reported by the engine.

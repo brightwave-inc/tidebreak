@@ -15,6 +15,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+uuid.workspace = true
 tidebreak-core = { path = "../tidebreak-core" }
 async-trait = { workspace = true }
 chrono = { workspace = true }

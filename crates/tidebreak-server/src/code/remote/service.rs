@@ -1927,6 +1927,9 @@ mod tests {
             channel_ts: "1700000001.000100".into(),
             actor: tidebreak_core::TurnActor::default(),
             context: None,
+            steer: false,
+            expected_turn_id: None,
+            correlation_uuid: None,
         };
         let first = runtime
             .external_submit_message(&owner, grant.id, binding.session_id, message())
@@ -1959,6 +1962,313 @@ mod tests {
         };
         assert_eq!(turn.id, replayed.id);
         assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn external_steering_rejects_missing_target_and_replays_original_receipt() {
+        use tidebreak_core::code::ExternalSteerQueuedReason;
+        for (harness, compatible, stale, oversized_frame) in [
+            (HarnessKind::ClaudeCode, false, false, false),
+            (HarnessKind::Codex, false, false, false),
+            (HarnessKind::Codex, true, false, false),
+            (HarnessKind::Codex, true, true, false),
+            (HarnessKind::Codex, true, false, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut spawn_settings = settings();
+            spawn_settings.engine = Some(harness);
+            spawn_settings.engines = Some(vec![harness]);
+            spawn_settings.embedded_engine_registration = true;
+            let (runtime, fake, owner, _) =
+                runtime_with_remote_settings(dir.path(), spawn_settings).await;
+            let (grant, _) = runtime
+                .mint_adapter_grant(&owner, "slack", "U1", "T1")
+                .await
+                .unwrap();
+            let (resolution, _) = runtime
+                .external_get_or_create(
+                    &owner,
+                    None,
+                    grant.id,
+                    "slack",
+                    "T1/C1/steer",
+                    None,
+                    None,
+                    harness,
+                    session_settings(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+                panic!("expected creation");
+            };
+            let make_message =
+                |event: &str, steer, target, correlation| crate::code::runtime::ExternalMessage {
+                    // Escaping exceeds the frame limit while the original text still fits.
+                    text: if oversized_frame && event == "steer" {
+                        "\"".repeat(20 * 1024)
+                    } else {
+                        "Read the thread.".into()
+                    },
+                    event_id: event.into(),
+                    channel_ts: "1.0".into(),
+                    actor: tidebreak_core::TurnActor::default(),
+                    context: None,
+                    steer,
+                    expected_turn_id: target,
+                    correlation_uuid: correlation,
+                };
+            let invalid = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message("invalid", true, None, None),
+                )
+                .await;
+            assert!(invalid.is_err());
+            assert!(tidebreak_core::db::code::list_queued_turns(
+                &runtime.db,
+                &owner,
+                binding.session_id
+            )
+            .await
+            .unwrap()
+            .is_empty());
+            assert!(fake.spawns.lock().unwrap().is_empty());
+            let first = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message("first", false, None, None),
+                )
+                .await
+                .unwrap();
+            let ExternalMessageOutcome::NewTurn(active) = first else {
+                panic!("expected active turn: {first:?}");
+            };
+            if compatible {
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(), state: SandboxState::Running, latest_event_seq: 1,
+                    events: vec![event(1, "supervisor_started", serde_json::json!({"agent":"tidebreak-supervised-agent", "steering_protocol":1,"runtime_id":uuid::Uuid::new_v4().to_string()}))],
+                });
+                let remote = runtime.remote_sessions().unwrap();
+                let mut session = runtime
+                    .get_session(&owner, binding.session_id)
+                    .await
+                    .unwrap();
+                remote
+                    .driver(&runtime.db, runtime.bus.as_ref())
+                    .pump(&mut session, 0)
+                    .await
+                    .unwrap();
+            }
+            let correlation = uuid::Uuid::new_v4();
+            let expected_turn = if stale {
+                tidebreak_core::TurnId::new()
+            } else {
+                active.id
+            };
+            let first_steer = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message("steer", true, Some(expected_turn), Some(correlation)),
+                )
+                .await
+                .unwrap();
+            let expected_reason = if stale || oversized_frame {
+                ExternalSteerQueuedReason::StaleTurn
+            } else if compatible {
+                ExternalSteerQueuedReason::Unacknowledged
+            } else {
+                ExternalSteerQueuedReason::SteerUnsupported
+            };
+            let ExternalMessageOutcome::SteerQueued { turn_id, reason } = first_steer else {
+                panic!("expected queued receipt: {first_steer:?}");
+            };
+            assert_eq!(reason, expected_reason);
+            let sends = fake.sends.lock().unwrap().len();
+            assert_eq!(sends, usize::from(compatible && !stale && !oversized_frame));
+            let tail = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message("later", false, None, None),
+                )
+                .await
+                .unwrap();
+            let ExternalMessageOutcome::Queued(tail) = tail else {
+                panic!("expected later message to queue: {tail:?}");
+            };
+            let rows = tidebreak_core::db::code::list_queued_turns(
+                &runtime.db,
+                &owner,
+                binding.session_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].id, turn_id);
+            assert_eq!(rows[1].id, tail.id);
+            let replay = runtime
+                .external_submit_message(
+                    &owner,
+                    grant.id,
+                    binding.session_id,
+                    make_message(
+                        "steer",
+                        true,
+                        Some(tidebreak_core::TurnId::new()),
+                        Some(uuid::Uuid::new_v4()),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(replay, ExternalMessageOutcome::SteerQueued { turn_id: replayed, reason } if replayed == turn_id && reason == expected_reason)
+            );
+            assert_eq!(
+                fake.sends.lock().unwrap().len(),
+                sends,
+                "a replay must not dispatch again"
+            );
+            if compatible && !stale && !oversized_frame {
+                let target = tidebreak_core::db::code::external_steer_target_by_correlation(
+                    &runtime.db,
+                    &owner,
+                    binding.session_id,
+                    correlation,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(target.expected_turn_id, active.id);
+                assert!(
+                    tidebreak_core::db::code::queued_turn_head(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                    "unknown delivery holds the queue"
+                );
+            } else {
+                assert_eq!(
+                    tidebreak_core::db::code::queued_turn_head(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    turn_id,
+                    "proven fallback releases the original head before the later message"
+                );
+                // Once fallback promotes, its original admission receipt still replays.
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(),
+                    state: SandboxState::Running,
+                    latest_event_seq: 3,
+                    events: vec![
+                        event(2, "turn_started", serde_json::json!({"turn":1})),
+                        event(
+                            3,
+                            "turn_completed",
+                            serde_json::json!({"turn":1,"exit_code":0}),
+                        ),
+                    ],
+                });
+                let remote = runtime.remote_sessions().unwrap();
+                let mut session = runtime
+                    .get_session(&owner, binding.session_id)
+                    .await
+                    .unwrap();
+                remote
+                    .driver(&runtime.db, runtime.bus.as_ref())
+                    .pump(&mut session, 0)
+                    .await
+                    .unwrap();
+                runtime.promote_remote_queue_heads().await.unwrap();
+                assert_eq!(
+                    tidebreak_core::db::code::get_open_turn(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    turn_id
+                );
+                let remaining = tidebreak_core::db::code::list_queued_turns(
+                    &runtime.db,
+                    &owner,
+                    binding.session_id,
+                )
+                .await
+                .unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].id, tail.id);
+                let replay = runtime
+                    .external_submit_message(
+                        &owner,
+                        grant.id,
+                        binding.session_id,
+                        make_message("steer", true, Some(active.id), Some(correlation)),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(replay, ExternalMessageOutcome::SteerQueued { turn_id: replayed, reason } if replayed == turn_id && reason == expected_reason)
+                );
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(),
+                    state: SandboxState::Running,
+                    latest_event_seq: 5,
+                    events: vec![
+                        event(4, "turn_started", serde_json::json!({"turn":2})),
+                        event(
+                            5,
+                            "turn_completed",
+                            serde_json::json!({"turn":2,"exit_code":0}),
+                        ),
+                    ],
+                });
+                session = runtime
+                    .get_session(&owner, binding.session_id)
+                    .await
+                    .unwrap();
+                remote
+                    .driver(&runtime.db, runtime.bus.as_ref())
+                    .pump(&mut session, 0)
+                    .await
+                    .unwrap();
+                runtime.promote_remote_queue_heads().await.unwrap();
+                assert_eq!(
+                    tidebreak_core::db::code::get_open_turn(
+                        &runtime.db,
+                        &owner,
+                        binding.session_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                    tail.id
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -2015,6 +2325,9 @@ mod tests {
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
                 context: None,
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
             };
             let first = runtime
                 .external_submit_message(&owner, grant, binding.session_id, message("Ev1"))
@@ -2176,6 +2489,9 @@ mod tests {
                 channel_ts: "1.0".into(),
                 actor: tidebreak_core::TurnActor::default(),
                 context: None,
+                steer: false,
+                expected_turn_id: None,
+                correlation_uuid: None,
             };
             let lock = remote.promotion_lock(binding.session_id);
             let guard = lock.lock().await;
@@ -2306,6 +2622,9 @@ mod tests {
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2333,6 +2652,9 @@ mod tests {
                     event_id: "Ev1".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2356,6 +2678,9 @@ mod tests {
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2374,6 +2699,9 @@ mod tests {
                     event_id: "Ev2".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2397,6 +2725,9 @@ mod tests {
                     event_id: "Ev3".to_owned(),
                     channel_ts: "1700000003.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await;
@@ -2419,6 +2750,9 @@ mod tests {
                     event_id: "Ev4".to_owned(),
                     channel_ts: "1700000004.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await;
@@ -2469,6 +2803,9 @@ mod tests {
                     event_id: "Ev0".to_owned(),
                     channel_ts: "1700000000.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2484,6 +2821,9 @@ mod tests {
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2511,6 +2851,9 @@ mod tests {
                     event_id: "EvA".to_owned(),
                     channel_ts: "1700000001.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await
@@ -2586,6 +2929,9 @@ mod tests {
                     event_id: "EvB".to_owned(),
                     channel_ts: "1700000002.000100".to_owned(),
                     actor: tidebreak_core::TurnActor::default(),
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await

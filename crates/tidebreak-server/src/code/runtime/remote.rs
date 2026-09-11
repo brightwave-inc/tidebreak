@@ -446,7 +446,10 @@ impl CodeRuntime {
                     if mode > policy.ceiling {
                         return Err(ServerError::conflict_kind(
                             "permission_mode_above_ceiling",
-                            format!("This deployment allows channel sessions up to {}. To allow {mode}, raise TIDEBREAK_EXTERNAL_PERMISSION_CEILING.", policy.ceiling),
+                            format!(
+                                "This deployment allows channel sessions up to {}. To allow {mode}, raise TIDEBREAK_EXTERNAL_PERMISSION_CEILING.",
+                                policy.ceiling
+                            ),
                         ));
                     }
                     let session = self
@@ -1155,6 +1158,9 @@ impl CodeRuntime {
             channel_ts,
             actor,
             context,
+            steer,
+            expected_turn_id,
+            correlation_uuid,
         } = message;
         if !tidebreak_core::db::code::session_bound_to_grant(&self.db, owner, session_id, grant_id)
             .await?
@@ -1181,7 +1187,14 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        let record = tidebreak_core::db::code::record_external_message_with_context(
+        // A sandbox admission needs a durable correlation id so its ack can
+        // settle without ambiguity; mint one when the caller did not supply it.
+        let correlation_uuid = if steer {
+            Some(correlation_uuid.unwrap_or_else(uuid::Uuid::new_v4))
+        } else {
+            correlation_uuid
+        };
+        let record = tidebreak_core::db::code::record_external_message_with_steer(
             &self.db,
             owner,
             session_id,
@@ -1190,6 +1203,11 @@ impl CodeRuntime {
             &text,
             &actor,
             context.as_ref(),
+            tidebreak_core::db::code::ExternalSteerAdmissionInput {
+                request_steer: steer,
+                expected_turn_id,
+                correlation_uuid,
+            },
         )
         .await
         .map_err(|error| match error {
@@ -1198,10 +1216,69 @@ impl CodeRuntime {
             }
             tidebreak_core::db::code::ExternalMessageIntakeError::Store(error) => error.into(),
         })?;
+        use tidebreak_core::code::{ExternalSteerAdmission, ExternalSteerQueuedReason};
         let (turn_id, fresh) = match &record {
             tidebreak_core::ExternalMessageRecord::Recorded(row) => (row.id, true),
-            tidebreak_core::ExternalMessageRecord::Replay { turn_id } => (*turn_id, false),
+            tidebreak_core::ExternalMessageRecord::Replay { turn_id, .. } => (*turn_id, false),
         };
+        // The first delivery owns the receipt metadata. A replay never steers again.
+        if let tidebreak_core::ExternalMessageRecord::Replay {
+            steer_requested: Some(true),
+            expected_turn_id: Some(target),
+            correlation_uuid: stored_correlation,
+            admission,
+            queued_reason,
+            ..
+        } = &record
+        {
+            return Ok(if *admission == Some(ExternalSteerAdmission::Steered) {
+                ExternalMessageOutcome::Steered {
+                    turn_id,
+                    expected_turn_id: *target,
+                    correlation_uuid: *stored_correlation,
+                }
+            } else {
+                ExternalMessageOutcome::SteerQueued {
+                    turn_id,
+                    reason: queued_reason.unwrap_or(ExternalSteerQueuedReason::Unacknowledged),
+                }
+            });
+        }
+        if steer && fresh {
+            let target = expected_turn_id.expect("steering target validated before recording");
+            if session.execution_location == ExecutionLocation::Sandbox {
+                return self
+                    .steer_remote_external(
+                        owner,
+                        &session,
+                        &event_id,
+                        &text,
+                        target,
+                        turn_id,
+                        correlation_uuid
+                            .expect("steering correlation is assigned before recording"),
+                    )
+                    .await;
+            }
+            let reason = self
+                .steer_external(
+                    owner,
+                    session_id,
+                    event_id.clone(),
+                    text,
+                    target,
+                    correlation_uuid,
+                )
+                .await?;
+            return Ok(match reason {
+                Some(reason) => ExternalMessageOutcome::SteerQueued { turn_id, reason },
+                None => ExternalMessageOutcome::Steered {
+                    turn_id,
+                    expected_turn_id: target,
+                    correlation_uuid,
+                },
+            });
+        }
         if fresh {
             // Best effort: a refusal leaves the row queued for the sweep.
             let session = self.get_session(owner, session_id).await?;
@@ -1225,6 +1302,146 @@ impl CodeRuntime {
         }
         // The row the first delivery caused was retracted before it ran.
         Ok(ExternalMessageOutcome::Dropped)
+    }
+
+    /// Dispatch to one durable sandbox target. Native acknowledgment settles the receipt.
+    #[allow(clippy::too_many_arguments)]
+    async fn steer_remote_external(
+        &self,
+        owner: &OwnerId,
+        session: &Session,
+        event_id: &str,
+        text: &str,
+        expected_turn_id: tidebreak_core::TurnId,
+        turn_id: tidebreak_core::TurnId,
+        correlation_uuid: uuid::Uuid,
+    ) -> Result<ExternalMessageOutcome, ServerError> {
+        use tidebreak_core::code::supervisor_tools::{encode_steer_frame, SupervisorSteerFrame};
+        use tidebreak_core::code::ExternalSteerQueuedReason;
+        let queued = |reason| ExternalMessageOutcome::SteerQueued { turn_id, reason };
+        if !supports_sandbox_steer(session.harness_kind) {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::SteerUnsupported,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::SteerUnsupported));
+        }
+        let open = tidebreak_core::db::code::get_open_turn(&self.db, owner, session.id).await?;
+        let Some(open) = open.filter(|turn| turn.id == expected_turn_id) else {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::StaleTurn,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
+        };
+        let Some(remote) = self.remote_sessions() else {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::SteerUnsupported,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::SteerUnsupported));
+        };
+        let Some(runtime_id) = remote
+            .driver(&self.db, self.bus.as_ref())
+            .steering_runtime(owner, session.id)
+            .await?
+        else {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::SteerUnsupported,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::SteerUnsupported));
+        };
+        let incarnation =
+            tidebreak_core::db::code::latest_incarnation(&self.db, owner, session.id).await?;
+        let Some(incarnation) = incarnation else {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::StaleTurn,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
+        };
+        let target = incarnation
+            .sandbox_id
+            .as_deref()
+            .zip(native_steer_turn(open.ordinal, incarnation.starting_turn).ok());
+        let Some((sandbox_id, native_turn)) = target else {
+            self.settle_external_queued(
+                owner,
+                session.id,
+                event_id,
+                expected_turn_id,
+                ExternalSteerQueuedReason::StaleTurn,
+            )
+            .await?;
+            return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
+        };
+        let claimed = tidebreak_core::db::code::claim_external_steer_target(
+            &self.db,
+            owner,
+            session.id,
+            event_id,
+            expected_turn_id,
+            correlation_uuid,
+            sandbox_id,
+            native_turn,
+            runtime_id,
+        )
+        .await?;
+        if claimed {
+            // A network error cannot prove that the inbox rejected this instruction.
+            // Preserve the receipt until durable native admission evidence arrives.
+            let dispatch = remote
+                .driver(&self.db, self.bus.as_ref())
+                .send_steer_frame(
+                    owner,
+                    session.id,
+                    encode_steer_frame(&SupervisorSteerFrame {
+                        expected_turn_id: expected_turn_id.to_string(),
+                        sandbox_id: sandbox_id.to_owned(),
+                        runtime_id: runtime_id.to_string(),
+                        native_turn,
+                        correlation_uuid: correlation_uuid.to_string(),
+                        body: text.to_owned(),
+                    }),
+                )
+                .await;
+            if matches!(
+                dispatch,
+                Err(crate::code::remote::driver::SteerDispatchError::NotSent(_))
+            ) {
+                self.settle_external_queued(
+                    owner,
+                    session.id,
+                    event_id,
+                    expected_turn_id,
+                    ExternalSteerQueuedReason::StaleTurn,
+                )
+                .await?;
+                return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
+            }
+        }
+        Ok(queued(ExternalSteerQueuedReason::Unacknowledged))
     }
 
     pub(super) async fn interrupt_remote(&self, session: &Session) -> Result<(), ServerError> {
@@ -1309,5 +1526,38 @@ impl CodeRuntime {
             )
             .await;
         }
+    }
+}
+
+/// Whether a sandbox harness has a verified acknowledged mid-turn steering
+/// channel. Codex's `turn/steer` is verified; Claude reports Unknown and
+/// must never be claimed steered on a stdin write.
+fn supports_sandbox_steer(harness: tidebreak_core::HarnessKind) -> bool {
+    matches!(harness, tidebreak_core::HarnessKind::Codex)
+}
+
+fn native_steer_turn(ordinal: i64, starting_turn: i32) -> Result<u32, ServerError> {
+    ordinal
+        .checked_sub(i64::from(starting_turn))
+        .and_then(|offset| offset.checked_add(1))
+        .filter(|turn| *turn > 0)
+        .and_then(|turn| u32::try_from(turn).ok())
+        .ok_or_else(|| {
+            ServerError::conflict_kind(
+                "stale_turn",
+                "The turn does not belong to this sandbox incarnation.",
+            )
+        })
+}
+
+#[cfg(test)]
+mod steer_target_tests {
+    use super::native_steer_turn;
+    #[test]
+    fn maps_session_ordinals_into_each_incarnation() {
+        assert_eq!(native_steer_turn(1, 1).unwrap(), 1);
+        assert_eq!(native_steer_turn(4, 4).unwrap(), 1);
+        assert_eq!(native_steer_turn(5, 4).unwrap(), 2);
+        assert!(native_steer_turn(3, 4).is_err());
     }
 }

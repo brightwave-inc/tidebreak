@@ -128,6 +128,7 @@ enum PendingWriteState {
 struct PendingSteer {
     expected_turn_id: String,
     text: String,
+    correlation_uuid: Option<uuid::Uuid>,
     reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
     deadline: Option<Instant>,
     write_state: PendingWriteState,
@@ -401,7 +402,13 @@ impl CodexSession {
     /// write removes a queued request, while cancellation after that point
     /// leaves the stream reader responsible for the acknowledgement and
     /// `UserSteered` event.
-    async fn request_steer(&self, thread_id: String, text: String) -> Result<(), HarnessError> {
+    #[allow(clippy::too_many_arguments)]
+    async fn request_steer(
+        &self,
+        thread_id: String,
+        text: String,
+        correlation: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
         let Some(stdin) = self.stdin.lock().expect("codex stdin").clone() else {
             return Err(HarnessError::SteeringRejected(
                 "the engine child has no stdin".into(),
@@ -416,7 +423,10 @@ impl CodexSession {
                     ControlTurn::Active(turn_id) => {
                         let expected_turn_id = turn_id.clone();
                         let rpc_id = self.next_rpc_id();
-                        let client_message_id = format!("tidebreak-steer-{rpc_id}");
+                        let correlation_uuid = correlation;
+                        let client_message_id = correlation_uuid
+                            .map(|uuid| format!("tidebreak-steer-{uuid}"))
+                            .unwrap_or_else(|| format!("tidebreak-steer-{rpc_id}"));
                         let message = steer_request(
                             rpc_id,
                             &thread_id,
@@ -434,6 +444,7 @@ impl CodexSession {
                             PendingSteer {
                                 expected_turn_id,
                                 text: text.clone(),
+                                correlation_uuid,
                                 reply: Some(tx),
                                 deadline: None,
                                 write_state: PendingWriteState::Queued,
@@ -476,9 +487,11 @@ impl CodexSession {
             message,
         );
         let result = rx.await.unwrap_or_else(|_| {
-            Err(HarnessError::SteeringRejected(
-                "the engine dropped the steering response".into(),
-            ))
+            Err(if correlation.is_some() {
+                HarnessError::Other("The engine dropped the steering acknowledgment.".into())
+            } else {
+                HarnessError::SteeringRejected("the engine dropped the steering response".into())
+            })
         });
         registration.disarm();
         result
@@ -493,8 +506,9 @@ impl CodexSession {
         };
         for (id, mut pending) in pending {
             if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Err(HarnessError::SteeringRejected(
-                    "the prior turn ended before steering was accepted".into(),
+                let _ = reply.send(Err(pending_steer_failure(
+                    &pending,
+                    "the prior turn ended before steering was accepted",
                 )));
             }
             self.parser
@@ -553,16 +567,19 @@ impl CodexSession {
                 .filter_map(|id| state.pending.remove(&id).map(|pending| (id, pending)))
                 .collect::<Vec<_>>();
             for pending in state.pending.values_mut() {
-                pending.accept_response = false;
+                pending.accept_response = pending.correlation_uuid.is_some();
+                pending
+                    .deadline
+                    .get_or_insert_with(|| Instant::now() + CONTROL_RPC_TIMEOUT);
                 if let Some(reply) = pending.reply.take() {
-                    let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+                    let _ = reply.send(Err(pending_steer_failure(pending, detail)));
                 }
             }
             (removed, state.interrupt.take())
         };
         for (id, mut pending) in removed {
             if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+                let _ = reply.send(Err(pending_steer_failure(&pending, detail)));
             }
             self.parser
                 .lock()
@@ -594,7 +611,7 @@ impl CodexSession {
         };
         for (id, mut pending) in pending {
             if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+                let _ = reply.send(Err(pending_steer_failure(&pending, detail)));
             }
             self.parser
                 .lock()
@@ -625,8 +642,9 @@ impl CodexSession {
 
     fn expire_control_requests(&self) {
         let now = Instant::now();
-        let expired = {
+        let forgotten = {
             let mut state = self.control_state.lock().expect("codex control state");
+            let active = matches!(state.turn, ControlTurn::Active(_) | ControlTurn::Starting);
             let ids = state
                 .pending
                 .iter()
@@ -637,16 +655,30 @@ impl CodexSession {
                         .then_some(*id)
                 })
                 .collect::<Vec<_>>();
-            ids.into_iter()
-                .filter_map(|id| state.pending.remove(&id).map(|pending| (id, pending)))
-                .collect::<Vec<_>>()
-        };
-        for (id, mut pending) in expired {
-            if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Err(HarnessError::SteeringRejected(
-                    "timed out waiting for the engine to accept steering".into(),
-                )));
+            let mut forgotten = Vec::new();
+            for id in ids {
+                let pending = state.pending.get_mut(&id).expect("pending request exists");
+                if let Some(reply) = pending.reply.take() {
+                    let _ = reply.send(Err(pending_steer_failure(
+                        pending,
+                        "timed out waiting for the engine to accept steering",
+                    )));
+                }
+                if active
+                    && pending.correlation_uuid.is_some()
+                    && pending.write_state != PendingWriteState::Queued
+                {
+                    // Keep the native correlation so a later ACK can settle the durable receipt.
+                    // The terminal boundary installs a bounded drain deadline.
+                    pending.deadline = None;
+                } else {
+                    state.pending.remove(&id);
+                    forgotten.push(id);
+                }
             }
+            forgotten
+        };
+        for id in forgotten {
             self.parser
                 .lock()
                 .expect("codex parser")
@@ -1236,7 +1268,10 @@ impl CodexSession {
                         if pending.accept_response && result.is_ok() {
                             self.spec
                                 .sink
-                                .emit(HarnessEvent::UserSteered { text: pending.text })
+                                .emit(HarnessEvent::UserSteered {
+                                    text: pending.text,
+                                    correlation_uuid: pending.correlation_uuid,
+                                })
                                 .await;
                         }
                         if let Some(reply) = pending.reply.take() {
@@ -1404,12 +1439,20 @@ impl HarnessSession for CodexSession {
     }
 
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
+        self.steer_with_correlation(text, None).await
+    }
+
+    async fn steer_with_correlation(
+        &self,
+        text: String,
+        correlation_uuid: Option<uuid::Uuid>,
+    ) -> Result<(), HarnessError> {
         let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
             return Err(HarnessError::SteeringRejected(
                 "the engine session has no thread id".into(),
             ));
         };
-        self.request_steer(thread_id, text).await
+        self.request_steer(thread_id, text, correlation_uuid).await
     }
 
     async fn decide(
@@ -1596,12 +1639,10 @@ fn validate_steer_response(value: &Value, expected_turn_id: &str) -> Result<(), 
         .pointer("/result/turnId")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            HarnessError::SteeringRejected(
-                "the engine returned no turn id for the steering request".into(),
-            )
+            HarnessError::Other("the engine returned no turn id for the steering request".into())
         })?;
     if accepted_turn_id != expected_turn_id {
-        return Err(HarnessError::SteeringRejected(format!(
+        return Err(HarnessError::Other(format!(
             "the engine acknowledged turn {accepted_turn_id}, not active turn {expected_turn_id}"
         )));
     }
@@ -1721,7 +1762,7 @@ fn fail_control_write(
         .remove(&rpc_id);
     if let Some(mut pending) = pending {
         if let Some(reply) = pending.reply.take() {
-            let _ = reply.send(Err(HarnessError::SteeringRejected(detail)));
+            let _ = reply.send(Err(pending_steer_failure(&pending, &detail)));
         }
     }
     parser
@@ -1753,3 +1794,12 @@ where
 
 #[cfg(test)]
 mod tests;
+
+// A completed write with a lost acknowledgment does not prove native rejection.
+fn pending_steer_failure(pending: &PendingSteer, detail: &str) -> HarnessError {
+    if pending.correlation_uuid.is_some() && pending.write_state != PendingWriteState::Queued {
+        HarnessError::Other(detail.into())
+    } else {
+        HarnessError::SteeringRejected(detail.into())
+    }
+}

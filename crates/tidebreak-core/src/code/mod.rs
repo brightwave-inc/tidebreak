@@ -2167,7 +2167,90 @@ pub enum ExternalMessageRecord {
     Replay {
         /// The id shared by the queue row and the turn it promotes into.
         turn_id: TurnId,
+        /// Whether the first delivery asked to steer into the active native
+        /// turn. Absent on old rows, which means queue-default.
+        steer_requested: Option<bool>,
+        /// The native turn the admission targeted, when the caller supplied
+        /// one and the row is recent enough to hold the metadata.
+        expected_turn_id: Option<TurnId>,
+        /// The caller's correlation id, echoed so a replayed delivery can
+        /// reconcile the same admission without resending text.
+        correlation_uuid: Option<uuid::Uuid>,
+        /// Durable admission resolution. `None` means the machine is still
+        /// waiting for an engine acknowledgement; the caller must not render
+        /// the message as steered yet.
+        admission: Option<ExternalSteerAdmission>,
+        /// The bounded reason behind a queued admission, preserved for replay.
+        queued_reason: Option<ExternalSteerQueuedReason>,
     },
+}
+
+/// The durable resolution of one external steering admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSteerAdmission {
+    /// The native engine acknowledged the instruction into the expected turn.
+    Steered,
+    /// The message did not steer; it sits (or will sit) in the durable queue.
+    Queued,
+}
+
+impl ExternalSteerAdmission {
+    /// Stable wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Steered => "steered",
+            Self::Queued => "queued",
+        }
+    }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "steered" => Some(Self::Steered),
+            "queued" => Some(Self::Queued),
+            _ => None,
+        }
+    }
+}
+
+/// A bounded reason attached to a queued steering admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSteerQueuedReason {
+    /// The harness does not support acknowledged mid-turn steering.
+    SteerUnsupported,
+    /// No active turn matched the expected id, or the turn was stale.
+    StaleTurn,
+    /// The machine could not prove the engine acknowledged the instruction.
+    Unacknowledged,
+}
+
+impl ExternalSteerQueuedReason {
+    /// Stable wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SteerUnsupported => "steer_unsupported",
+            Self::StaleTurn => "stale_turn",
+            Self::Unacknowledged => "unacknowledged",
+        }
+    }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "steer_unsupported" => Some(Self::SteerUnsupported),
+            "stale_turn" => Some(Self::StaleTurn),
+            "unacknowledged" => Some(Self::Unacknowledged),
+            _ => None,
+        }
+    }
 }
 
 /// The outcome of asking for a new incarnation under the owner's cap.

@@ -834,7 +834,12 @@ impl HarnessSession for ScriptedSession {
         if let Some(detail) = &self.steering_rejection {
             return Err(HarnessError::SteeringRejected(detail.clone()));
         }
-        self.sink.emit(HarnessEvent::UserSteered { text }).await;
+        self.sink
+            .emit(HarnessEvent::UserSteered {
+                text,
+                correlation_uuid: None,
+            })
+            .await;
         Ok(())
     }
 

@@ -161,16 +161,36 @@ fn text<'a>(args: &'a Value, key: &str, max: usize) -> Result<&'a str, ServerErr
 impl Tool for SessionTool {
     fn spec(&self) -> ToolSpec {
         let (description, properties, required) = match self.name {
-            "code_repos" => ("List repositories available to this conversation's personal or bot identity. Choose repositories from the task; the conversation does not need a default repository.", json!({}), json!([])),
-            "code_session_create" => ("Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. The configured GitHub identity controls repository access across every channel; no channel repository approval is needed.", json!({
-                "repository":{"type":"string","description":"GitHub owner/name"},
-                "task":{"type":"string","maxLength":16000},
-                "request_key":{"type":"string","maxLength":128,"description":"Stable key for this task, reused on retries."},
-                "harness":{"type":"string","description":"Optional installed harness; defaults to claude_code."}
-            }), json!(["repository","task","request_key"])),
-            "code_run_turn" => ("Send a follow-up to one of this conversation's child sessions. Use a stable request_key to prevent duplicate turns on retry.", json!({"session_id":{"type":"string"},"text":{"type":"string","maxLength":16000},"request_key":{"type":"string","maxLength":128}}), json!(["session_id","text","request_key"])),
-            "code_wait" => ("Read child results, waiting up to 20 seconds while they run. Results remain in requested order. If waiting is true, call again after other useful work. A child awaiting approval includes its pending cards.", json!({"session_ids":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string"}}}), json!(["session_ids"])),
-            _ => ("List this conversation's child sessions, including their repositories and status.", json!({}), json!([])),
+            "code_repos" => (
+                "List repositories available to this conversation's personal or bot identity. Choose repositories from the task; the conversation does not need a default repository.",
+                json!({}),
+                json!([]),
+            ),
+            "code_session_create" => (
+                "Start independent work in a repository and return its child session. Use a different request_key for each task and reuse it on retries. You may start children in different repositories. Read their results with code_wait before answering. The configured GitHub identity controls repository access across every channel; no channel repository approval is needed.",
+                json!({
+                    "repository":{"type":"string","description":"GitHub owner/name"},
+                    "task":{"type":"string","maxLength":16000},
+                    "request_key":{"type":"string","maxLength":128,"description":"Stable key for this task, reused on retries."},
+                    "harness":{"type":"string","description":"Optional installed harness; defaults to claude_code."}
+                }),
+                json!(["repository", "task", "request_key"]),
+            ),
+            "code_run_turn" => (
+                "Send a follow-up to one of this conversation's child sessions. Use a stable request_key to prevent duplicate turns on retry.",
+                json!({"session_id":{"type":"string"},"text":{"type":"string","maxLength":16000},"request_key":{"type":"string","maxLength":128}}),
+                json!(["session_id", "text", "request_key"]),
+            ),
+            "code_wait" => (
+                "Read child results, waiting up to 20 seconds while they run. Results remain in requested order. If waiting is true, call again after other useful work. A child awaiting approval includes its pending cards.",
+                json!({"session_ids":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string"}}}),
+                json!(["session_ids"]),
+            ),
+            _ => (
+                "List this conversation's child sessions, including their repositories and status.",
+                json!({}),
+                json!([]),
+            ),
         };
         ToolSpec {
             name: self.name.into(),
@@ -368,7 +388,10 @@ impl SessionTool {
                 .count()
                 >= 8
         {
-            return Err(ServerError::conflict_kind("child_session_limit", "A conversation can start at most 16 children and run at most 8 at once. Wait for running children before starting more."));
+            return Err(ServerError::conflict_kind(
+                "child_session_limit",
+                "A conversation can start at most 16 children and run at most 8 at once. Wait for running children before starting more.",
+            ));
         }
         if let Some(lender) = &auth.lender {
             // Refuse a missing person connection rather than silently moving
@@ -483,7 +506,7 @@ impl SessionTool {
                     return Err(ServerError::conflict_kind(
                         "child_unavailable",
                         "This child session ended or belongs to another connection.",
-                    ))
+                    ));
                 }
             };
             runtime.get_session(&auth.parent.owner, id).await?
@@ -586,6 +609,9 @@ async fn send(
                     channel_ts: chrono::Utc::now().timestamp_micros().to_string(),
                     actor,
                     context: None,
+                    steer: false,
+                    expected_turn_id: None,
+                    correlation_uuid: None,
                 },
             )
             .await?;

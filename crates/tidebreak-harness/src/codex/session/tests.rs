@@ -591,6 +591,7 @@ fn register_pending(
         PendingSteer {
             expected_turn_id: "TURN-1".into(),
             text: "redirect".into(),
+            correlation_uuid: None,
             reply: Some(reply),
             deadline,
             write_state,
@@ -1083,7 +1084,7 @@ fn steer_response_must_acknowledge_the_expected_turn() {
     validate_steer_response(&json!({ "result": { "turnId": "TURN-1" } }), "TURN-1").unwrap();
     let mismatch = validate_steer_response(&json!({ "result": { "turnId": "TURN-2" } }), "TURN-1")
         .unwrap_err();
-    assert!(matches!(mismatch, HarnessError::SteeringRejected(_)));
+    assert!(matches!(mismatch, HarnessError::Other(_)));
     let rejected = validate_steer_response(
         &json!({ "error": { "message": "turn is no longer steerable" } }),
         "TURN-1",
@@ -1332,10 +1333,15 @@ async fn rejected_or_mismatched_ack_never_emits_user_steered() {
             Some(Instant::now() + CONTROL_RPC_TIMEOUT),
         );
         session.emit_parsed(&response.to_string()).await;
-        assert!(matches!(
-            receiver.await.unwrap(),
-            Err(HarnessError::SteeringRejected(_))
-        ));
+        let error = receiver.await.unwrap().unwrap_err();
+        if response.get("error").is_some() {
+            assert!(matches!(error, HarnessError::SteeringRejected(_)));
+        } else {
+            assert!(
+                matches!(error, HarnessError::Other(_)),
+                "a mismatched ACK does not prove rejection"
+            );
+        }
         assert!(!sink
             .events
             .lock()
@@ -1424,7 +1430,7 @@ async fn native_steer_uses_the_active_turn_id_and_waits_for_ack() {
         .expect("codex test events")
         .iter()
         .filter_map(|event| match event {
-            HarnessEvent::UserSteered { text } => Some(text.clone()),
+            HarnessEvent::UserSteered { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -2081,4 +2087,110 @@ fn apps_channel_mounts_an_http_server_with_the_bearer_in_the_environment() {
         "the adapter's token is the only source; settings cannot supply one"
     );
     validate_launch_plan(&plan).unwrap();
+}
+
+#[tokio::test]
+async fn correlated_steer_write_failure_only_releases_before_writing() {
+    for write_state in [
+        PendingWriteState::Queued,
+        PendingWriteState::Writing,
+        PendingWriteState::Written,
+    ] {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let receiver = register_pending(&session, 7, write_state, None);
+        session
+            .control_state
+            .lock()
+            .unwrap()
+            .pending
+            .get_mut(&7)
+            .unwrap()
+            .correlation_uuid = Some(uuid::Uuid::new_v4());
+        fail_control_write(
+            &session.control_state,
+            &session.control_state_changed,
+            &session.parser,
+            7,
+            "write failed".into(),
+        );
+        let error = receiver.await.unwrap().unwrap_err();
+        if write_state == PendingWriteState::Queued {
+            assert!(matches!(error, HarnessError::SteeringRejected(_)));
+        } else {
+            assert!(
+                matches!(error, HarnessError::Other(_)),
+                "possible delivery must not release fallback: {error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn correlated_steer_late_ack_survives_timeout() {
+    let sink = Arc::new(RecordingSink::default());
+    let session = unit_session(sink.clone());
+    let correlation = uuid::Uuid::new_v4();
+    let receiver = register_pending(
+        &session,
+        7,
+        PendingWriteState::Written,
+        Some(Instant::now()),
+    );
+    session
+        .control_state
+        .lock()
+        .unwrap()
+        .pending
+        .get_mut(&7)
+        .unwrap()
+        .correlation_uuid = Some(correlation);
+    session.expire_control_requests();
+    assert!(matches!(
+        receiver.await.unwrap(),
+        Err(HarnessError::Other(_))
+    ));
+    assert!(session
+        .control_state
+        .lock()
+        .unwrap()
+        .pending
+        .contains_key(&7));
+    session
+        .emit_parsed(r#"{"id":7,"result":{"turnId":"TURN-1"}}"#)
+        .await;
+    assert!(sink.events.lock().unwrap().iter().any(|event| matches!(event, HarnessEvent::UserSteered { correlation_uuid: Some(id), .. } if *id == correlation)));
+    assert!(session.control_state.lock().unwrap().pending.is_empty());
+}
+
+#[tokio::test]
+async fn correlated_steer_timeout_does_not_hold_terminal_drain_forever() {
+    let session = unit_session(Arc::new(RecordingSink::default()));
+    let receiver = register_pending(
+        &session,
+        7,
+        PendingWriteState::Written,
+        Some(Instant::now()),
+    );
+    session
+        .control_state
+        .lock()
+        .unwrap()
+        .pending
+        .get_mut(&7)
+        .unwrap()
+        .correlation_uuid = Some(uuid::Uuid::new_v4());
+    session.expire_control_requests();
+    assert!(matches!(
+        receiver.await.unwrap(),
+        Err(HarnessError::Other(_))
+    ));
+    session.close_control_turn_for_terminal("completed", false);
+    {
+        let mut state = session.control_state.lock().unwrap();
+        let pending = state.pending.get_mut(&7).unwrap();
+        assert!(pending.deadline.is_some());
+        pending.deadline = Some(Instant::now());
+    }
+    session.expire_control_requests();
+    assert!(!session.controls_pending());
 }

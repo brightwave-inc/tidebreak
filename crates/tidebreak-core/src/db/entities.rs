@@ -1747,6 +1747,15 @@ pub mod code_external_event {
         pub channel_ts: String,
         pub turn_id: Uuid,
         pub created_at: DateTimeUtc,
+        pub steer_requested: bool,
+        pub expected_turn_id: Option<Uuid>,
+        pub correlation_uuid: Option<Uuid>,
+        pub steer_sandbox_id: Option<String>,
+        pub steer_native_turn: Option<i64>,
+        pub steer_runtime_id: Option<Uuid>,
+        pub outcome: Option<String>,
+        pub outcome_reason: Option<String>,
+        pub outcome_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

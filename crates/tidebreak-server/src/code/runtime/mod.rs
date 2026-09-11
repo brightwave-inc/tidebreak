@@ -76,7 +76,8 @@ use super::native_runtime::{NativeRuntime, NativeRuntimeScope};
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, spawn_session_worker, wake_queue, AttachmentStore, ExecutionSettingsSettlement,
-    PermissionModeSettlement, TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
+    PermissionModeSettlement, SteerAdmission, TriggerDeliveryClaim, WorkerCommand, WorkerError,
+    WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -152,6 +153,14 @@ pub struct ExternalMessage {
     pub actor: TurnActor,
     /// Bounded prior thread messages; accepted only with channel opt-in.
     pub context: Option<tidebreak_core::code::ExternalThreadContext>,
+    /// Whether this delivery asked to steer into the active native turn.
+    /// Old clients omit it and keep the queue-default contract.
+    pub steer: bool,
+    /// The native turn the instruction targets; required when `steer` is true.
+    pub expected_turn_id: Option<TurnId>,
+    /// Caller correlation id; echoed in the admission response and carried
+    /// into the supervised sandbox so an engine UUID maps back here.
+    pub correlation_uuid: Option<uuid::Uuid>,
 }
 
 /// Result of one external message delivery (`docs/slack-sessions.md`,
@@ -159,10 +168,28 @@ pub struct ExternalMessage {
 /// earned, derived from the row's current state.
 #[derive(Debug)]
 pub enum ExternalMessageOutcome {
+    /// A durable steering receipt remains queued or awaits acknowledgment.
+    SteerQueued {
+        turn_id: TurnId,
+        reason: tidebreak_core::code::ExternalSteerQueuedReason,
+    },
     /// The message became a running turn.
     NewTurn(Box<Turn>),
     /// The session was busy; the message sits as a durable queue row.
     Queued(Box<QueuedTurn>),
+    /// The engine acknowledged the instruction into the expected active
+    /// Tidebreak turn. The message row itself remains parked until that
+    /// turn settles and is then consumed without resending its text.
+    Steered {
+        /// The durable receipt/message id the admission owns; stable for
+        /// replay and distinct from the target turn.
+        turn_id: TurnId,
+        /// The active Tidebreak turn the engine acknowledged, matching the
+        /// caller's `expected_turn_id` exactly.
+        expected_turn_id: TurnId,
+        /// Caller correlation id, echoed verbatim.
+        correlation_uuid: Option<uuid::Uuid>,
+    },
     /// The row the first delivery caused was retracted before it could
     /// run; the replay has nothing to point at.
     Dropped,
@@ -837,7 +864,10 @@ impl CodeRuntime {
             return Ok(None);
         };
         if engine.is_in_process() {
-            return Err(ServerError::unprocessable_kind("sandbox_settings_unavailable", "this sandbox profile must select an external harness as its default; choose Internal explicitly to run on the machine"));
+            return Err(ServerError::unprocessable_kind(
+                "sandbox_settings_unavailable",
+                "this sandbox profile must select an external harness as its default; choose Internal explicitly to run on the machine",
+            ));
         }
         let session = Self::remote_session_value(
             owner,
