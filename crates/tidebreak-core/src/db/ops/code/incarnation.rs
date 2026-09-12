@@ -29,6 +29,10 @@ use super::super::super::{entities, store_err, DbStore};
 use super::super::agent_run::database_now;
 use super::super::{acquire_advisory_lock, AdvisoryLockName};
 
+/// A failed terminal checkpoint must not authorize a successor, even when
+/// an older supervisor reports a clean stop afterward.
+pub const TERMINAL_CHECKPOINT_FAILED: &str = "terminal_checkpoint_failed";
+
 fn incarnation_from_model(
     model: entities::code_session_incarnation::Model,
 ) -> Result<CodeSessionIncarnation> {
@@ -213,7 +217,8 @@ pub async fn activate_incarnation(
 }
 
 /// Marks an incarnation stopped, from intent or active. Idempotent: a row
-/// already stopped keeps its first reason.
+/// already stopped keeps its first reason. A terminal checkpoint failure
+/// recorded before shutdown remains the reason when the lifecycle closes.
 pub async fn stop_incarnation(
     store: &DbStore,
     owner: &OwnerId,
@@ -228,7 +233,13 @@ pub async fn stop_incarnation(
         )
         .col_expr(
             entities::code_session_incarnation::Column::StopReason,
-            sea_orm::sea_query::Expr::value(reason),
+            sea_orm::sea_query::Expr::case(
+                entities::code_session_incarnation::Column::StopReason
+                    .eq(TERMINAL_CHECKPOINT_FAILED),
+                TERMINAL_CHECKPOINT_FAILED,
+            )
+            .finally(reason)
+            .into(),
         )
         .col_expr(
             entities::code_session_incarnation::Column::StoppedAt,
@@ -317,6 +328,9 @@ pub struct IncarnationSideEffects<'a> {
     /// Whether this event is the supervisor's goodbye, raising the gate
     /// reincarnation waits on.
     pub terminal_events_journaled: bool,
+    /// Whether the final repository save failed. Latch the stop reason and
+    /// keep later goodbye events from accepting an older checkpoint.
+    pub terminal_checkpoint_failed: bool,
 }
 
 /// Journals one sandbox event's projection, applies its incarnation-row
@@ -398,7 +412,19 @@ pub async fn ingest_incarnation_event(
             sea_orm::sea_query::Expr::value(reference),
         );
     }
-    if side_effects.terminal_events_journaled {
+    if side_effects.terminal_checkpoint_failed {
+        update = update
+            .col_expr(
+                entities::code_session_incarnation::Column::StopReason,
+                sea_orm::sea_query::Expr::value(TERMINAL_CHECKPOINT_FAILED),
+            )
+            .col_expr(
+                entities::code_session_incarnation::Column::TerminalEventsJournaled,
+                sea_orm::sea_query::Expr::value(false),
+            );
+    } else if side_effects.terminal_events_journaled
+        && incarnation.stop_reason.as_deref() != Some(TERMINAL_CHECKPOINT_FAILED)
+    {
         update = update.col_expr(
             entities::code_session_incarnation::Column::TerminalEventsJournaled,
             sea_orm::sea_query::Expr::value(true),

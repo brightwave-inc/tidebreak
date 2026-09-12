@@ -64,6 +64,8 @@ struct Projection {
     /// Whether this event closes the incarnation's stream: the supervisor
     /// said goodbye, so its terminal events are now journaled.
     pub terminal_flush: bool,
+    /// A terminal save failure prevents a later goodbye from accepting stale work.
+    pub terminal_checkpoint_failed: bool,
     /// Whether the event kind was not recognized.
     pub unrecognized: bool,
 }
@@ -201,6 +203,9 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
         }
         "wip_push_failed" | "wip_push_unavailable" => {
             let reason = payload_str(payload, "reason").unwrap_or(kind);
+            out.terminal_checkpoint_failed = kind == "wip_push_failed"
+                && (payload_str(payload, "checkpoint") == Some("terminal")
+                    || reason == "checkpoint_task_failed");
             out.journal.push(notice(
                 HarnessNoticeLevel::Warning,
                 format!("The sandbox could not checkpoint its work ({reason})."),
@@ -347,6 +352,7 @@ async fn apply_one(
             task_output: projection.task_output.as_deref(),
             wip_ref: projection.wip_ref.as_deref(),
             terminal_events_journaled: projection.terminal_flush,
+            terminal_checkpoint_failed: projection.terminal_checkpoint_failed,
         },
     )
     .await?;
@@ -653,6 +659,167 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(live.attention.state, AttentionState::DoneUnreviewed);
+    }
+
+    #[tokio::test]
+    async fn a_failed_final_checkpoint_keeps_an_older_wip_ref_fenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
+        let incarnation = seeded_incarnation(&db, &session).await;
+        let b = binding(&session, incarnation);
+        let stopped = read(
+            SandboxState::Completed,
+            3,
+            vec![
+                event(1, "wip_pushed", json!({ "ref": "mg-wip/earlier" })),
+                event(2, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                event(
+                    3,
+                    "wip_push_failed",
+                    json!({ "checkpoint": "terminal", "reason": "push_failed" }),
+                ),
+            ],
+        );
+        let outcome = ingest_events(&db, &bus, &b, &stopped).await.unwrap();
+        assert!(matches!(
+            outcome.fence,
+            Some(FenceReason::TerminalFlushMissing { .. })
+        ));
+        assert!(!outcome.terminal_flush_journaled);
+        let stored = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.last_wip_ref.as_deref(), Some("mg-wip/earlier"));
+        assert!(!stored.terminal_events_journaled);
+    }
+
+    #[tokio::test]
+    async fn an_old_supervisors_goodbye_cannot_hide_a_failed_terminal_checkpoint() {
+        for split in [false, true] {
+            for failure in [
+                json!({ "checkpoint": "terminal", "reason": "push_failed" }),
+                json!({ "reason": "checkpoint_task_failed" }),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
+                let incarnation = seeded_incarnation(&db, &session).await;
+                let b = binding(&session, incarnation);
+                let mut events = vec![
+                    event(1, "wip_pushed", json!({ "ref": "mg-wip/earlier" })),
+                    event(2, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                    event(3, "wip_push_failed", failure),
+                ];
+                if split {
+                    ingest_events(&db, &bus, &b, &read(SandboxState::Running, 3, events))
+                        .await
+                        .unwrap();
+                    tidebreak_core::db::code::stop_incarnation(
+                        &db,
+                        &session.owner,
+                        incarnation,
+                        Some("expired"),
+                    )
+                    .await
+                    .unwrap();
+                    events = Vec::new();
+                }
+                events.push(event(
+                    4,
+                    "supervisor_stopped",
+                    json!({ "reason": "supervisor_stop" }),
+                ));
+                let outcome = ingest_events(&db, &bus, &b, &read(SandboxState::Expired, 4, events))
+                    .await
+                    .unwrap();
+                assert!(outcome.fence.is_some(), "split={split}");
+                assert!(!outcome.terminal_flush_journaled, "split={split}");
+                tidebreak_core::db::code::stop_incarnation(
+                    &db,
+                    &session.owner,
+                    incarnation,
+                    Some("expired"),
+                )
+                .await
+                .unwrap();
+                let stored = latest_incarnation(&db, &session.owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.last_wip_ref.as_deref(), Some("mg-wip/earlier"));
+                assert_eq!(
+                    stored.stop_reason.as_deref(),
+                    Some("terminal_checkpoint_failed")
+                );
+                assert!(!stored.terminal_events_journaled);
+                // A later batch or another clone's successful push cannot erase
+                // the failed terminal save. The cursor still advances normally.
+                let tail = ingest_events(
+                    &db,
+                    &bus,
+                    &b,
+                    &read(
+                        SandboxState::Expired,
+                        6,
+                        vec![
+                            event(5, "wip_pushed", json!({ "ref": "mg-wip/another-clone" })),
+                            event(
+                                6,
+                                "supervisor_stopped",
+                                json!({ "reason": "supervisor_stop" }),
+                            ),
+                        ],
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(!tail.terminal_flush_journaled);
+                let stored = latest_incarnation(&db, &session.owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.events_cursor, 6);
+                assert!(crate::driver::recovery_block(&stored, true).is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_later_terminal_save_can_recover_from_a_failed_turn_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
+        let incarnation = seeded_incarnation(&db, &session).await;
+        let b = binding(&session, incarnation);
+        let outcome = ingest_events(
+            &db,
+            &bus,
+            &b,
+            &read(
+                SandboxState::Expired,
+                3,
+                vec![
+                    event(
+                        1,
+                        "wip_push_failed",
+                        json!({ "checkpoint": "successful_turn", "reason": "push_failed" }),
+                    ),
+                    event(
+                        2,
+                        "wip_pushed",
+                        json!({ "checkpoint": "terminal", "ref": "mg-wip/saved" }),
+                    ),
+                    event(
+                        3,
+                        "supervisor_stopped",
+                        json!({ "reason": "supervisor_stop" }),
+                    ),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.terminal_flush_journaled);
+        assert!(outcome.fence.is_none());
     }
 
     /// A terminal environment state without the supervisor's goodbye demands
