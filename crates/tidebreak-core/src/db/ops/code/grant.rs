@@ -8,7 +8,9 @@
 //! discarded those tokens, so a replay is theft — revokes the grant in the
 //! same transaction that detects it.
 
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait,
+};
 
 use crate::code::{CodeExternalGrant, CodeGrantId, CodeGrantKind, GrantRotation};
 use crate::error::{AgentError, Result};
@@ -16,6 +18,26 @@ use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::agent_run::database_now;
+
+/// Take the writer before reading a grant or its bindings. SQLite cannot
+/// upgrade a read snapshot after another writer commits.
+pub(super) async fn acquire_external_grant_write_lock<C: ConnectionTrait>(
+    conn: &C,
+    owner: Option<&OwnerId>,
+    grant_id: CodeGrantId,
+) -> Result<()> {
+    let mut update = entities::code_external_grant::Entity::update_many()
+        .col_expr(
+            entities::code_external_grant::Column::Id,
+            sea_orm::sea_query::Expr::col(entities::code_external_grant::Column::Id),
+        )
+        .filter(entities::code_external_grant::Column::Id.eq(grant_id.0));
+    if let Some(owner) = owner {
+        update = update.filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()));
+    }
+    update.exec(conn).await.map_err(store_err)?;
+    Ok(())
+}
 
 fn grant_from_model(model: entities::code_external_grant::Model) -> Result<CodeExternalGrant> {
     Ok(CodeExternalGrant {
@@ -271,6 +293,7 @@ pub async fn revoke_external_grant(
     reason: &str,
 ) -> Result<Option<CodeExternalGrant>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_external_grant_write_lock(&transaction, Some(owner), grant_id).await?;
     let Some(row) = entities::code_external_grant::Entity::find_by_id(grant_id.0)
         .filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
@@ -312,6 +335,7 @@ pub async fn revoke_external_grant_all_owners(
     reason: &str,
 ) -> Result<Option<CodeExternalGrant>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_external_grant_write_lock(&transaction, None, grant_id).await?;
     let Some(row) = entities::code_external_grant::Entity::find_by_id(grant_id.0)
         .one(&transaction)
         .await
