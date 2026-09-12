@@ -273,6 +273,7 @@ pub struct CodeRuntime {
     workers: Mutex<HashMap<SessionId, WorkerHandle>>,
     recovery_locks: Mutex<HashMap<SessionId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     recovery_attempts: Mutex<HashMap<SessionId, auto_recovery::RecoveryAttempt>>,
+    recovery_probe_times: Mutex<HashMap<tidebreak_core::CodeIncarnationId, Instant>>,
     recovery_sweep: Mutex<Option<auto_recovery::RecoverySweepGuard>>,
     recovery_started: AtomicBool,
     /// Sessions whose worker must move to the selected engine binary once
@@ -553,6 +554,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
             recovery_attempts: Mutex::new(HashMap::new()),
+            recovery_probe_times: Mutex::new(HashMap::new()),
             recovery_sweep: Mutex::new(None),
             recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),
@@ -731,6 +733,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
             recovery_attempts: Mutex::new(HashMap::new()),
+            recovery_probe_times: Mutex::new(HashMap::new()),
             recovery_sweep: Mutex::new(None),
             recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),

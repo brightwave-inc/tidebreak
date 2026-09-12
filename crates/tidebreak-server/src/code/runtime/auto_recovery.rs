@@ -144,13 +144,31 @@ impl CodeRuntime {
                 ExecutionLocation::Machine,
                 Some(FenceReason::OrphanAlive | FenceReason::ResumeLost { .. }),
             ) => true,
-            (ExecutionLocation::Sandbox, Some(FenceReason::SandboxLost { .. })) => {
-                let row = tidebreak_core::db::code::latest_incarnation(
+            (
+                ExecutionLocation::Sandbox,
+                Some(FenceReason::SandboxLost { .. } | FenceReason::TerminalFlushMissing { .. }),
+            ) => {
+                let mut row = tidebreak_core::db::code::latest_incarnation(
                     &self.db,
                     &session.owner,
                     session.id,
                 )
                 .await?;
+                if let Some(stopped) = row.as_mut() {
+                    if !stopped.terminal_events_journaled
+                        && self
+                            .completed_idle_scratch_is_drained(&session, stopped)
+                            .await?
+                    {
+                        tidebreak_core::db::code::mark_incarnation_terminal_events_journaled(
+                            &self.db,
+                            &session.owner,
+                            stopped.id,
+                        )
+                        .await?;
+                        stopped.terminal_events_journaled = true;
+                    }
+                }
                 match row {
                     Some(row)
                         if row.state == IncarnationState::Stopped
@@ -323,6 +341,101 @@ impl CodeRuntime {
             }
         }
         Ok(())
+    }
+
+    // An idle shutdown can omit the supervisor's goodbye after a successful
+    // turn. Recover only scratch sessions whose complete output is durable.
+    async fn completed_idle_scratch_is_drained(
+        &self,
+        session: &Session,
+        row: &tidebreak_core::CodeSessionIncarnation,
+    ) -> Result<bool, ServerError> {
+        use crate::code::remote::wire::SandboxState;
+        use tidebreak_core::db::code::{latest_incarnation, latest_turn, record_incarnation_spend};
+
+        if session.workspace_id.is_some()
+            || row.state != IncarnationState::Stopped
+            || !matches!(row.stop_reason.as_deref(), Some("failed" | "expired"))
+            || row.events_cursor <= 0
+        {
+            return Ok(false);
+        }
+        let Some(turn) = latest_turn(&self.db, &session.owner, session.id).await? else {
+            return Ok(false);
+        };
+        if turn.status != tidebreak_core::TurnStatus::Completed
+            || turn.ordinal < i64::from(row.starting_turn)
+        {
+            return Ok(false);
+        }
+        let (Some(remote), Some(sandbox_id)) = (self.remote_sessions(), row.sandbox_id.as_deref())
+        else {
+            return Ok(false);
+        };
+        {
+            let now = Instant::now();
+            let mut probes = self.recovery_probe_times.lock().expect("recovery probes");
+            probes.retain(|_, next| *next > now);
+            if probes.contains_key(&row.id) {
+                return Ok(false);
+            }
+            probes.insert(row.id, now + RECOVERY_BACKOFF);
+        }
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            remote
+                .provisioner
+                .status(&session.owner, session.id, sandbox_id),
+        )
+        .await;
+        let Ok(Ok(status)) = status else {
+            return Ok(false);
+        };
+        if status.sandbox_id != sandbox_id
+            || !matches!(status.state, SandboxState::Failed | SandboxState::Expired)
+            || status.failure_reason.as_deref() != Some("idle_ceiling")
+            || status.pending_messages != 0
+            || status.repository_url.is_some()
+            || status.latest_event_seq <= 0
+            || status
+                .spend_microusd
+                .zip(status.spend_ceiling_microusd)
+                .is_some_and(|(spend, ceiling)| spend >= ceiling)
+        {
+            return Ok(false);
+        }
+        if row.events_cursor < status.latest_event_seq {
+            // Fenced sessions have no pump. Catch up one page per probe while
+            // keeping the fence and all queue holds in place.
+            let drain = tokio::time::timeout(
+                Duration::from_secs(5),
+                remote
+                    .driver(&self.db, self.bus.as_ref())
+                    .drain_stopped_events(session, row.id),
+            )
+            .await;
+            if !matches!(drain, Ok(Ok(true))) {
+                return Ok(false);
+            }
+        }
+        // Status is remote I/O. Recheck the durable identity and turn before
+        // accepting the drain; a newer incarnation cannot inherit this proof.
+        let current = latest_incarnation(&self.db, &session.owner, session.id).await?;
+        let latest = latest_turn(&self.db, &session.owner, session.id).await?;
+        if !current.is_some_and(|current| {
+            current.id == row.id
+                && current.state == IncarnationState::Stopped
+                && current.sandbox_id.as_deref() == Some(sandbox_id)
+                && current.events_cursor >= status.latest_event_seq
+        }) || !latest.is_some_and(|latest| {
+            latest.id == turn.id && latest.status == tidebreak_core::TurnStatus::Completed
+        }) {
+            return Ok(false);
+        }
+        if let Some(spend) = status.spend_microusd {
+            record_incarnation_spend(&self.db, &session.owner, row.id, spend).await?;
+        }
+        Ok(true)
     }
 
     pub(super) async fn retain_failed_recovery(

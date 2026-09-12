@@ -8919,3 +8919,116 @@ async fn steer_recovery_delete_failure_rolls_back_without_poisoning_receipt() {
     assert_eq!(Some(rows[0].id), decision.retry_turn_id);
     assert_ne!(rows[0].id, original.id);
 }
+
+async fn external_mutation_waits_for_sqlite_writer(operation: &str) {
+    use sea_orm::{ActiveModelTrait, Set, TransactionTrait};
+    use std::time::Duration;
+
+    let (_dir, store) = super::temp_store_with_max_connections(4).await;
+    let store = std::sync::Arc::new(store);
+    let owner = OwnerId::local();
+    let grant = crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        crate::db::code::MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: "U1",
+            workspace_identity: "T1",
+            kind: crate::code::CodeGrantKind::Person,
+        },
+        &fake_hash("writer-token"),
+        &fake_hash("writer-refresh"),
+    )
+    .await
+    .unwrap();
+    let (_, mut session) = external_pair(&owner, RepoId::new(), "writer-wait");
+    session.workspace_id = None;
+    let revoked_at = (operation != "create")
+        .then(|| chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap());
+    let writer = store.conn.begin().await.unwrap();
+    entities::code_external_grant::ActiveModel {
+        id: Set(grant.id.0),
+        external_identity: Set("U1".to_owned()),
+        revoked_at: Set(revoked_at),
+        revoked_reason: Set((operation != "create").then(|| "first reason".to_owned())),
+        ..Default::default()
+    }
+    .update(&writer)
+    .await
+    .unwrap();
+    let task_store = store.clone();
+    let task_owner = owner.clone();
+    let operation = operation.to_owned();
+    let mut task = tokio::spawn(async move {
+        match operation.as_str() {
+            "create" => {
+                let result = crate::db::code::resolve_external_machine_session(
+                    &task_store,
+                    &task_owner,
+                    grant.id,
+                    "slack",
+                    "T1/C1/writer-wait",
+                    &session,
+                )
+                .await?;
+                assert!(matches!(
+                    result,
+                    crate::code::ExternalSessionResolution::Created(_)
+                ));
+            }
+            "revoke" => {
+                let result = crate::db::code::revoke_external_grant(
+                    &task_store,
+                    &task_owner,
+                    grant.id,
+                    "second reason",
+                )
+                .await?;
+                let revoked = result.unwrap();
+                assert_eq!(revoked.revoked_reason.as_deref(), Some("first reason"));
+                assert_eq!(revoked.revoked_at, revoked_at);
+            }
+            "admin-revoke" => {
+                let result = crate::db::code::revoke_external_grant_all_owners(
+                    &task_store,
+                    grant.id,
+                    "second reason",
+                )
+                .await?;
+                let revoked = result.unwrap();
+                assert_eq!(revoked.revoked_reason.as_deref(), Some("first reason"));
+                assert_eq!(revoked.revoked_at, revoked_at);
+            }
+            _ => unreachable!(),
+        }
+        Ok::<(), crate::AgentError>(())
+    });
+    // A read followed by a write fails immediately with SQLITE_BUSY here.
+    // Taking the writer before the first read instead waits for this commit.
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
+    writer.commit().await.unwrap();
+    assert!(
+        early.is_err(),
+        "the mutation must wait for the writer: {early:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn external_creation_waits_for_sqlite_writer() {
+    external_mutation_waits_for_sqlite_writer("create").await;
+}
+
+#[tokio::test]
+async fn grant_revocation_waits_for_sqlite_writer() {
+    external_mutation_waits_for_sqlite_writer("revoke").await;
+}
+
+#[tokio::test]
+async fn admin_grant_revocation_waits_for_sqlite_writer() {
+    external_mutation_waits_for_sqlite_writer("admin-revoke").await;
+}

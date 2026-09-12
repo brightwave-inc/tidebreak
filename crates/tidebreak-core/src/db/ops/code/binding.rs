@@ -225,6 +225,7 @@ async fn resolve_external_session_inner(
     context: Option<ExternalSessionChannelContext<'_>>,
 ) -> Result<ExternalSessionResolution> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    super::grant::acquire_external_grant_write_lock(&transaction, Some(owner), grant_id).await?;
     if let Some(hit) = entities::code_external_binding::Entity::find()
         .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_external_binding::Column::ChannelKind.eq(channel_kind))
