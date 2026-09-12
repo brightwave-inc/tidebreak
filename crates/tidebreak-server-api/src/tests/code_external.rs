@@ -530,14 +530,7 @@ impl crate::obo_gateway::GitCredentialLender for LendingFake {
 #[tokio::test]
 async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route() {
     let lender = Arc::new(LendingFake::new());
-    let gateway = Arc::new(
-        crate::obo_gateway::OboGateway::new(
-            "https://gateway.example",
-            "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed".to_owned(),
-        )
-        .unwrap(),
-    );
-    let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway));
+    let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::keys_only());
     let (router, _fake, runtime, repo_id, _token, _dir) = external_app_built({
         let lender = lender.clone();
         let relay = relay.clone();
@@ -2816,15 +2809,7 @@ async fn a_refused_borrow_answers_the_helper_and_journals_the_reason() {
         ),
     ] {
         let lender = Arc::new(RefusingFake(refusal));
-        let gateway = Arc::new(
-            crate::obo_gateway::OboGateway::new(
-                "https://gateway.example",
-                "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed"
-                    .to_owned(),
-            )
-            .unwrap(),
-        );
-        let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway));
+        let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::keys_only());
         let (router, _fake, runtime, repo_id, _token, _dir) = external_app_built({
             let lender = lender.clone();
             let relay = relay.clone();

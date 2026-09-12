@@ -377,7 +377,10 @@ impl CodeRuntime {
         {
             let listings = match delegated.as_ref() {
                 Some(gateway) => Some(gateway.compat_listings(owner).await?),
-                None => match self.harness_llm() {
+                None => match self
+                    .harness_llm()
+                    .filter(|relay| relay.forwards_inference())
+                {
                     Some(relay) => Some(relay.listings(owner).await?),
                     None => None,
                 },
