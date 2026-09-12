@@ -2107,7 +2107,11 @@ harness_version: string,
 /**
  * Engine-native resume token, when the stream reported one.
  */
-resume_ref?: string, } | { "type": "turn_started",
+resume_ref?: string, } | { "type": "model_reported",
+/**
+ * Model identifier reported by the engine.
+ */
+model: string, } | { "type": "turn_started",
 /**
  * The turn being processed.
  */

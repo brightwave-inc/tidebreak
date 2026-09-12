@@ -6,6 +6,10 @@
     "resume_ref": "1ab03711-0488-40db-945a-21a95e9a8884"
   },
   {
+    "type": "model_reported",
+    "model": "claude-sonnet-5"
+  },
+  {
     "type": "assistant_delta",
     "text": "This"
   },

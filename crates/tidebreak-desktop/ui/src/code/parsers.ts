@@ -3799,6 +3799,18 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           ? { resume_ref: value.resume_ref }
           : {}),
       };
+    case "model_reported":
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "model_reported" }>>(value, [
+          "type",
+          "model",
+        ]) ||
+        !nonEmptyLine(value.model) ||
+        value.model.length > 160
+      ) {
+        return null;
+      }
+      return { type: "model_reported", model: value.model };
     case "turn_started":
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "turn_started" }>>(value, [

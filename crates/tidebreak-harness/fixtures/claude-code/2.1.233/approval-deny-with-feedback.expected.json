@@ -6,6 +6,10 @@
     "resume_ref": "aa8bfc30-886d-4792-93f4-ce64c1cc00a5"
   },
   {
+    "type": "model_reported",
+    "model": "claude-sonnet-5"
+  },
+  {
     "type": "tool_started",
     "call_id": "toolu_01Pwo7nMXPQZWnBMyeTuL8ts",
     "name": "Write",

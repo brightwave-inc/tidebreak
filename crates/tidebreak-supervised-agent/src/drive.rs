@@ -349,7 +349,9 @@ impl<E: Engine> Driver<E> {
             }
         }
 
+        let mut reported_model = None;
         let end = loop {
+            self.report_effective_model(handle.as_ref(), &mut reported_model);
             self.drain_steer_acks(handle.as_mut());
             let step = tokio::select! {
                 end = handle.wait() => TurnStep::End(end),
@@ -374,6 +376,7 @@ impl<E: Engine> Driver<E> {
         // Flush that evidence before reporting completion, then forget unresolved targets.
         self.drain_steer_acks(handle.as_mut());
         self.pending_steers.clear();
+        self.report_effective_model(handle.as_ref(), &mut reported_model);
         let record = handle.assistant_record();
         match end {
             TurnEnd::Interrupted => {
@@ -457,6 +460,17 @@ impl<E: Engine> Driver<E> {
         // Between turns the engine is momentarily idle; this poll flushes the
         // completion events and picks up anything the endpoint queued.
         self.poll(true).await
+    }
+
+    fn report_effective_model(&mut self, handle: &dyn TurnHandle, reported: &mut Option<String>) {
+        let Some(model) = handle.effective_model() else {
+            return;
+        };
+        if reported.as_ref() != Some(&model) {
+            self.outbox
+                .push("model_reported", serde_json::json!({ "model": model }));
+            *reported = Some(model);
+        }
     }
 
     /// Delivers pending inbox messages into a running turn, in order.
@@ -1024,6 +1038,7 @@ mod tests {
         ends: tokio::sync::Mutex<mpsc::UnboundedReceiver<TurnEnd>>,
         end_sender: mpsc::UnboundedSender<TurnEnd>,
         records: Mutex<VecDeque<Option<AssistantRecord>>>,
+        model: Mutex<Option<String>>,
     }
 
     #[derive(Clone)]
@@ -1046,6 +1061,7 @@ mod tests {
                     ends: tokio::sync::Mutex::new(ends),
                     end_sender,
                     records: Mutex::new(VecDeque::new()),
+                    model: Mutex::new(None),
                 }),
             }
         }
@@ -1119,6 +1135,10 @@ mod tests {
 
         fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
             std::mem::take(&mut *self.state.steer_acks.lock().unwrap())
+        }
+
+        fn effective_model(&self) -> Option<String> {
+            self.state.model.lock().unwrap().clone()
         }
 
         fn assistant_record(&mut self) -> Option<AssistantRecord> {
@@ -2078,6 +2098,33 @@ mod tests {
         let output_at = kinds.iter().position(|kind| kind == "task_output");
         let stopped_at = kinds.iter().position(|kind| kind == "supervisor_stopped");
         assert!(output_at < stopped_at);
+    }
+
+    #[tokio::test]
+    async fn reports_the_effective_model_before_completion() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        *engine.state.model.lock().unwrap() = Some("effective-model".into());
+        engine.finish(TurnEnd::Completed { success: true });
+        let run = tokio::spawn(driver(engine, &url, &inputs("turn", None)).run());
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        assert_eq!(
+            event_payload(&state, "model_reported", 0)["model"],
+            "effective-model"
+        );
+        let kinds = event_kinds(&state);
+        assert!(
+            kinds.iter().position(|kind| kind == "model_reported")
+                < kinds.iter().position(|kind| kind == "turn_completed")
+        );
+        state.lock().unwrap().stop = Some("cancelled".into());
+        run.await.unwrap().unwrap();
     }
 
     #[tokio::test]

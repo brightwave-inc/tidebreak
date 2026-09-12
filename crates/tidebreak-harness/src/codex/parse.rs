@@ -43,6 +43,7 @@ pub struct CodexStreamParser {
     /// to `None` because their spawn ran on the parent thread.
     subagent_parents: HashMap<String, Option<String>>,
     emitted_session: bool,
+    reported_model: Option<String>,
     /// Child frames are accepted only while their parent turn is open.
     parent_turn_active: bool,
     /// Thread-wide counters at the start of the active turn.
@@ -761,7 +762,28 @@ impl CodexStreamParser {
         let method = self.outbound_methods.remove(&id).unwrap_or_default();
         let result = value.get("result").cloned().unwrap_or(Value::Null);
         match method.as_str() {
-            "thread/start" | "thread/resume" => self.emit_session_started(&result),
+            "thread/start" | "thread/resume" => {
+                let mut events = self.emit_session_started(&result);
+                // The response carries the resolved model; thread/started may arrive first.
+                if let Some(model) = result
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| {
+                        !model.is_empty()
+                            && model.encode_utf16().count() <= 160
+                            && !model.chars().any(char::is_control)
+                    })
+                {
+                    if self.reported_model.as_deref() != Some(model) {
+                        self.reported_model = Some(model.to_owned());
+                        events.push(HarnessEvent::ModelReported {
+                            model: model.to_owned(),
+                        });
+                    }
+                }
+                events
+            }
             "turn/start" => {
                 if let Some(turn_id) = result.pointer("/turn/id").and_then(Value::as_str) {
                     self.last_turn_id = Some(turn_id.to_owned());
@@ -1686,6 +1708,26 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn reports_the_resolved_model_even_when_the_start_notification_arrives_first() {
+        let out = CodexStreamParser::parse_ndjson(
+            r#"
+{"dir":"in","msg":{"method":"thread/started","params":{"thread":{"id":"parent","cliVersion":"0.147.0"}}}}
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent"},"model":"gpt-effective"}}}
+"#,
+        );
+        assert!(out.events.iter().any(|event| matches!(event,
+            HarnessEvent::ModelReported { model } if model == "gpt-effective")));
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

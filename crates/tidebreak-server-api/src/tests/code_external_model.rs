@@ -710,6 +710,58 @@ async fn external_snapshot_labels_the_saved_model_after_channel_default_changes(
 }
 
 #[tokio::test]
+async fn external_snapshot_reports_the_observed_model_without_changing_the_selection() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let fixture = fixture_with_channel_runtime(false, true).await;
+    let (status, created) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/observed", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id: SessionId = serde_json::from_value(created["session_id"].clone()).unwrap();
+    let session = fixture
+        .runtime
+        .get_session(&fixture.grant.owner, session_id)
+        .await
+        .unwrap();
+    assert_eq!(session.harness_kind, tidebreak_core::HarnessKind::Codex);
+    tidebreak_core::db::code::append_event(
+        &fixture.runtime.db,
+        &fixture.grant.owner,
+        session_id,
+        session.spawn_epoch,
+        &tidebreak_core::Event::ModelReported {
+            model: "gpt-effective".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let address = super::code::serve(fixture.router.clone()).await;
+    let mut request = format!("ws://{address}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", fixture.bearer).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(frame["snapshot"]["model_display_name"], "gpt-effective");
+    assert_eq!(frame["snapshot"]["model"], created["model"]);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn channel_sandbox_catalog_uses_grant_without_local_cli_and_rejects_other_engines() {
     use axum::extract::FromRequestParts;
     let fixture = fixture_with_channel_runtime(false, true).await;

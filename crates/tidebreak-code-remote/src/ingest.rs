@@ -119,6 +119,20 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
                 resume_ref: None,
             });
         }
+        "model_reported" => {
+            if let Some(model) = payload_str(payload, "model")
+                .map(str::trim)
+                .filter(|model| {
+                    !model.is_empty()
+                        && model.encode_utf16().count() <= 160
+                        && !model.chars().any(char::is_control)
+                })
+            {
+                out.journal.push(Event::ModelReported {
+                    model: model.to_owned(),
+                });
+            }
+        }
         "turn_started" => {
             if let Some(turn_id) = binding.turn_id {
                 out.journal.push(Event::TurnStarted { turn_id });
@@ -399,10 +413,81 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn observed_model_is_durable_scoped_and_does_not_change_the_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, _, _) = seed(dir.path()).await;
+        let incarnation = seeded_incarnation(&db, &session).await;
+        let b = binding(&session, incarnation);
+        let batch = read(
+            SandboxState::Running,
+            1,
+            vec![event(
+                1,
+                "model_reported",
+                json!({"model":"effective-model"}),
+            )],
+        );
+        ingest_events(&db, &bus, &b, &batch).await.unwrap();
+        ingest_events(&db, &bus, &b, &batch).await.unwrap();
+        // Unrelated later events must not hide the model on reconnect.
+        for _ in 0..150 {
+            tidebreak_core::db::code::append_event(
+                &db,
+                &b.owner,
+                b.session_id,
+                b.spawn_epoch,
+                &Event::AssistantDelta {
+                    text: "activity".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            tidebreak_core::db::code::latest_reported_model(&db, &b.owner, b.session_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("effective-model")
+        );
+        assert!(tidebreak_core::db::code::latest_reported_model(
+            &db,
+            &OwnerId::new("user:other").unwrap(),
+            b.session_id
+        )
+        .await
+        .unwrap()
+        .is_none());
+        let saved = get_session(&db, &b.owner, b.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.model, session.model);
+        let page = list_events(&db, &b.owner, b.session_id, 0, 200)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .filter(|row| matches!(row.event, Event::ModelReported { .. }))
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn the_projection_maps_the_supervisor_vocabulary() {
         let session = session_value();
         let b = binding(&session, CodeIncarnationId::new());
+
+        for model in ["", "invalid\nmodel", "invalid\tmodel"] {
+            assert!(
+                project_event(&b, "model_reported", &json!({ "model": model }))
+                    .journal
+                    .is_empty()
+            );
+        }
 
         let started = project_event(&b, "turn_started", &json!({ "turn": 3 }));
         assert!(matches!(started.journal[0], Event::TurnStarted { .. }));

@@ -4200,6 +4200,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
             harness_version,
             resume_ref,
         },
+        HarnessEvent::ModelReported { model } => Event::ModelReported { model },
         HarnessEvent::TurnStarted => Event::TurnStarted { turn_id: turn_id? },
         HarnessEvent::AssistantDelta { text } => Event::AssistantDelta { text },
         HarnessEvent::AssistantMessage {

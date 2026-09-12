@@ -1043,6 +1043,19 @@ async fn external_session_model_display_name(
     grant: &CodeExternalGrant,
     session: &tidebreak_core::Session,
 ) -> Option<String> {
+    if !session.harness_kind.is_in_process() {
+        if let Some(runtime) = state.code.as_ref() {
+            if let Ok(Some(model)) = tidebreak_core::db::code::latest_reported_model(
+                &runtime.db,
+                &grant.owner,
+                session.id,
+            )
+            .await
+            {
+                return Some(model);
+            }
+        }
+    }
     let selection = session.model.as_deref()?;
     if !session.harness_kind.is_in_process() {
         return Some(selection.to_owned());

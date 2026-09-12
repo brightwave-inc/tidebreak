@@ -38,6 +38,7 @@ pub struct ClaudeStreamParser {
     /// assemble.
     open_blocks: HashMap<BlockKey, OpenToolCall>,
     emitted_session: bool,
+    reported_model: Option<String>,
 }
 
 /// Which content block a stream event belongs to.
@@ -140,21 +141,29 @@ impl ClaudeStreamParser {
         let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
         match subtype {
             "init" => {
+                if parent_call_id(value).is_some() {
+                    return Vec::new();
+                }
                 if let Some(session_id) = value.get("session_id").and_then(Value::as_str) {
                     self.resume_ref = Some(session_id.to_owned());
                 }
                 if let Some(version) = value.get("claude_code_version").and_then(Value::as_str) {
                     self.version = Some(version.to_owned());
                 }
+                let mut events = self.report_model(value.get("model"));
                 if self.emitted_session {
-                    return Vec::new();
+                    return events;
                 }
                 self.emitted_session = true;
-                vec![HarnessEvent::SessionStarted {
-                    harness_kind: HarnessKind::ClaudeCode,
-                    harness_version: self.version.clone().unwrap_or_else(|| "unknown".into()),
-                    resume_ref: self.resume_ref.clone(),
-                }]
+                events.insert(
+                    0,
+                    HarnessEvent::SessionStarted {
+                        harness_kind: HarnessKind::ClaudeCode,
+                        harness_version: self.version.clone().unwrap_or_else(|| "unknown".into()),
+                        resume_ref: self.resume_ref.clone(),
+                    },
+                );
+                events
             }
             "permission_denied" => {
                 let message = value
@@ -265,6 +274,9 @@ impl ClaudeStreamParser {
         // Every line a subagent produces carries the parent `Task` call's id
         // at the top level (decision 52); the parent's own lines say null.
         let parent = parent_call_id(value);
+        if parent.is_none() {
+            events.extend(self.report_model(value.pointer("/message/model")));
+        }
         let content = value
             .pointer("/message/content")
             .and_then(Value::as_array)
@@ -292,6 +304,27 @@ impl ClaudeStreamParser {
             }
         }
         events
+    }
+
+    fn report_model(&mut self, value: Option<&Value>) -> Vec<HarnessEvent> {
+        let Some(model) = value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| {
+                !model.is_empty()
+                    && model.encode_utf16().count() <= 160
+                    && !model.chars().any(char::is_control)
+            })
+        else {
+            return Vec::new();
+        };
+        if self.reported_model.as_deref() == Some(model) {
+            return Vec::new();
+        }
+        self.reported_model = Some(model.to_owned());
+        vec![HarnessEvent::ModelReported {
+            model: model.to_owned(),
+        }]
     }
 
     fn parse_user(&mut self, value: &Value) -> Vec<HarnessEvent> {
@@ -734,6 +767,30 @@ fn bound(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_the_parent_model_without_borrowing_a_child_model() {
+        let out = ClaudeStreamParser::parse_ndjson(
+            r#"
+{"type":"system","subtype":"init","session_id":"parent","model":"claude-default"}
+{"type":"system","subtype":"init","session_id":"child","parent_tool_use_id":"child-task","model":"child-init-model"}
+{"type":"assistant","parent_tool_use_id":"child","message":{"model":"child-model","content":[]}}
+{"type":"assistant","message":{"model":"claude-default","content":[]}}
+{"type":"assistant","message":{"model":"claude-effective","content":[]}}
+{"type":"assistant","message":{"model":"invalid\nmodel","content":[]}}
+"#,
+        );
+        let models: Vec<_> = out
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::ModelReported { model } => Some(model.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models, ["claude-default", "claude-effective"]);
+        assert_eq!(out.resume_ref.as_deref(), Some("parent"));
+    }
 
     /// `usage.iterations` is one entry per API call. Summing the turn totals
     /// counts the transcript once per call, so a three-call turn reads as

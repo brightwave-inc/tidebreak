@@ -391,6 +391,7 @@ enum Terminal {
 #[derive(Default)]
 struct TurnSink {
     last: Mutex<Option<Terminal>>,
+    model: Mutex<Option<String>>,
     assistant: Mutex<AssistantBuffer>,
     steer_acks: Mutex<Vec<uuid::Uuid>>,
 }
@@ -456,6 +457,9 @@ impl TurnSink {
 impl HarnessEventSink for TurnSink {
     async fn emit(&self, event: HarnessEvent) {
         match event {
+            HarnessEvent::ModelReported { model } => {
+                *self.model.lock().unwrap() = Some(model);
+            }
             HarnessEvent::TurnCompleted { .. } => {
                 *self.last.lock().unwrap() = Some(Terminal::Completed);
             }
@@ -606,6 +610,10 @@ impl TurnHandle for HarnessTurn {
 
     fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
         std::mem::take(&mut *self.sink.steer_acks.lock().unwrap())
+    }
+
+    fn effective_model(&self) -> Option<String> {
+        self.sink.model.lock().unwrap().clone()
     }
 
     fn assistant_record(&mut self) -> Option<AssistantRecord> {
@@ -1421,6 +1429,36 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
             text: text.to_owned(),
             parent_call_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn observed_model_survives_turn_boundaries_without_becoming_the_requested_model() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![
+            ScriptedTurn {
+                events: vec![
+                    HarnessEvent::ModelReported {
+                        model: "resolved-model".into(),
+                    },
+                    completed_event(),
+                ],
+                outcome: Ok(TurnOutcome::Clean),
+                waits_for_interrupt: false,
+            },
+            ScriptedTurn {
+                events: vec![completed_event()],
+                outcome: Ok(TurnOutcome::Clean),
+                waits_for_interrupt: false,
+            },
+        ]));
+        let mut engine = engine_over(adapter, probe(true));
+        engine.spec.model = None;
+        let mut first = engine.start_turn(request("first")).await.unwrap();
+        first.wait().await;
+        assert_eq!(first.effective_model().as_deref(), Some("resolved-model"));
+        let mut second = engine.start_turn(request("second")).await.unwrap();
+        second.wait().await;
+        assert_eq!(second.effective_model().as_deref(), Some("resolved-model"));
+        assert!(engine.spec.model.is_none());
     }
 
     #[tokio::test]

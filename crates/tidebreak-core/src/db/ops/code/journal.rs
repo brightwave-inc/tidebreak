@@ -524,6 +524,38 @@ fn turn_is_reconstructable(turn_id: TurnId, events: &[SequencedEvent]) -> bool {
     true
 }
 
+/// The latest model the parent engine reports, without changing the requested model.
+pub async fn latest_reported_model(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Option<String>> {
+    use sea_orm::{sea_query::Expr, DatabaseBackend};
+    let kind = match store.conn.get_database_backend() {
+        DatabaseBackend::Postgres => "event->>'type' = 'model_reported'",
+        _ => "json_extract(event, '$.type') = 'model_reported'",
+    };
+    let row = entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .filter(Expr::cust(kind))
+        .order_by_desc(entities::event::Column::Seq)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(row.and_then(|row| {
+        row.event
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .filter(|model| {
+                !model.trim().is_empty()
+                    && model.encode_utf16().count() <= 160
+                    && !model.chars().any(char::is_control)
+            })
+            .map(str::to_owned)
+    }))
+}
+
 /// Newest journal events for one session, newest first. Digests use this
 /// bounded tail to identify an unresolved top-level tool without replaying a
 /// long conversation on every updates-socket connection.

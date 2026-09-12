@@ -6,6 +6,10 @@
     "resume_ref": "01a006c6-f970-7c32-87f2-1511e1be0f44"
   },
   {
+    "type": "model_reported",
+    "model": "gpt-5.6-luna"
+  },
+  {
     "type": "turn_started"
   },
   {

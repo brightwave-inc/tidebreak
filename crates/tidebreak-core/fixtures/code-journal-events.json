@@ -162,5 +162,9 @@
   {
     "type": "compaction_finished",
     "compacted": true
+  },
+  {
+    "type": "model_reported",
+    "model": "effective-model"
   }
 ]

@@ -902,6 +902,235 @@ async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
         .any(|message| message.interrupt));
 }
 
+/// Exercise the adapter's HTTP and replay routes after the real driver observes
+/// a stopped lease, including Clear fault and the next Slack message.
+#[tokio::test]
+async fn slack_recovery_http_delivers_scratch_answers_and_preserves_repository_and_spend_gates() {
+    for (repository, state, goodbye, may_continue) in [
+        (false, SandboxState::Failed, false, true),
+        (false, SandboxState::Failed, true, true),
+        (false, SandboxState::CeilingExceeded, false, false),
+        (true, SandboxState::Failed, false, false),
+    ] {
+        let (router, fake, runtime, repo, token, _dir) = external_app_with_token().await;
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let owner = OwnerId::local();
+        let (_, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U-recovery", "T1")
+            .await
+            .unwrap();
+        let create = client
+            .post(format!("http://{addr}/external/code/sessions"))
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({
+                "external_key": "T1/C-recovery/1.1", "harness": "claude_code",
+                "repo_id": if repository { Some(repo) } else { None },
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let created: serde_json::Value = create.json().await.unwrap();
+        let id: tidebreak_core::SessionId =
+            serde_json::from_value(created["session_id"].clone()).unwrap();
+        let path = format!("http://{addr}/external/code/sessions/{id}");
+        let message = |event: &str| {
+            serde_json::json!({
+                "event_id": event, "text": event, "channel_ts": "2.1",
+            })
+        };
+        client
+            .post(format!("{path}/messages"))
+            .bearer_auth(&pair.token)
+            .json(&message("original task"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+        let event = |seq, kind: &str, payload| SandboxEvent {
+            seq,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+        };
+        let mut events = vec![
+            event(1, "turn_started", serde_json::json!({"turn": 1})),
+            event(
+                2,
+                "assistant_record",
+                serde_json::json!({"body": "Saved first answer"}),
+            ),
+            event(
+                3,
+                "turn_completed",
+                serde_json::json!({"turn": 1, "exit_code": 0}),
+            ),
+        ];
+        if goodbye {
+            events.push(event(
+                4,
+                "supervisor_stopped",
+                serde_json::json!({"reason": "idle_ceiling"}),
+            ));
+        }
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-ext".into(),
+            state,
+            latest_event_seq: events.last().unwrap().seq,
+            events,
+        });
+        let mut session = runtime.get_session(&owner, id).await.unwrap();
+        runtime
+            .remote_sessions()
+            .unwrap()
+            .driver(&runtime.db, runtime.bus.as_ref())
+            .pump(&mut session, 0)
+            .await
+            .unwrap();
+        if !goodbye {
+            assert_eq!(session.lifecycle, tidebreak_core::SessionLifecycle::Fenced);
+            let clear = client
+                .post(format!("{path}/reap"))
+                .bearer_auth(&pair.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                clear.status(),
+                reqwest::StatusCode::OK,
+                "{}",
+                clear.text().await.unwrap()
+            );
+        }
+        let retry = client
+            .post(format!("{path}/messages"))
+            .bearer_auth(&pair.token)
+            .json(&message("fresh retry"))
+            .send()
+            .await
+            .unwrap();
+        let retry_status = retry.status();
+        let retry: serde_json::Value = retry.json().await.unwrap();
+        assert!(retry_status.is_success(), "{retry}");
+        if !may_continue {
+            assert_eq!(
+                fake.spawns.lock().unwrap().len(),
+                1,
+                "a stopped repository or spend limit cannot buy another sandbox"
+            );
+            assert!(runtime.list_queued_turns(&owner, id).await.unwrap().1);
+            let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, id, 0, 100)
+                .await
+                .unwrap();
+            let refusal = if repository {
+                "without a saved checkpoint"
+            } else {
+                "reached its spend ceiling"
+            };
+            assert!(events.events.iter().any(|row| matches!(
+                &row.event, tidebreak_core::Event::HarnessNotice { message, .. } if message.contains(refusal)
+            )), "the refusal must explain the retained queue");
+            continue;
+        }
+        assert_eq!(fake.spawns.lock().unwrap().len(), 2, "{retry}");
+        assert!(runtime
+            .list_queued_turns(&owner, id)
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(fake.spawns.lock().unwrap()[1]
+            .task
+            .contains("Saved first answer"));
+        let duplicate: serde_json::Value = client
+            .post(format!("{path}/messages"))
+            .bearer_auth(&pair.token)
+            .json(&message("fresh retry"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            duplicate, retry,
+            "Slack retries must return the existing receipt"
+        );
+        assert_eq!(fake.spawns.lock().unwrap().len(), 2);
+
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-ext".into(),
+            state: SandboxState::Running,
+            latest_event_seq: 3,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({"turn": 1})),
+                event(
+                    2,
+                    "assistant_record",
+                    serde_json::json!({"body": "HTTP-RECOVERY-OK"}),
+                ),
+                event(
+                    3,
+                    "turn_completed",
+                    serde_json::json!({"turn": 1, "exit_code": 0}),
+                ),
+            ],
+        });
+        let mut session = runtime.get_session(&owner, id).await.unwrap();
+        runtime
+            .remote_sessions()
+            .unwrap()
+            .driver(&runtime.db, runtime.bus.as_ref())
+            .pump(&mut session, 0)
+            .await
+            .unwrap();
+        assert_eq!(session.lifecycle, tidebreak_core::SessionLifecycle::Idle);
+        assert!(!runtime.has_worker(id));
+        let web: serde_json::Value = client
+            .get(format!("http://{addr}/sessions/{id}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(web["id"], id.to_string());
+        assert_eq!(web["execution_location"], "sandbox");
+        assert!(web["workspace_id"].is_null());
+
+        let mut request = format!("ws://{addr}/external/code/sessions/{id}/events")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {}", pair.token).parse().unwrap(),
+        );
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if frame
+                    .to_text()
+                    .is_ok_and(|text| text.contains("HTTP-RECOVERY-OK"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Slack event replay must deliver the recovered answer");
+    }
+}
+
 /// A configured runtime places an external session in the sandbox and leaves
 /// a desktop session on the same app on the machine, with a host worktree.
 #[tokio::test]

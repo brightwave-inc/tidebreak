@@ -1199,6 +1199,10 @@ describe("parseCodeEvent", () => {
       usage,
     });
     expect(
+      parseCodeEvent({ type: "model_reported", model: "claude-effective" }),
+    ).toEqual({ type: "model_reported", model: "claude-effective" });
+    expect(parseCodeEvent({ type: "model_reported", model: "\n" })).toBeNull();
+    expect(
       parseCodeEvent({
         type: "credential_refused",
         reason: "connection_ended",

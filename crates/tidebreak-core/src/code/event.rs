@@ -580,6 +580,11 @@ pub enum Event {
         #[ts(optional)]
         resume_ref: Option<String>,
     },
+    /// The parent engine reports the model it uses, independent of the requested selection.
+    ModelReported {
+        /// Model identifier reported by the engine.
+        model: String,
+    },
     /// A user→engine turn has begun.
     TurnStarted {
         /// The turn being processed.
@@ -984,6 +989,7 @@ mod tests {
             Event::CompactionStarted => 22,
             Event::CompactionFinished { .. } => 23,
             Event::CredentialRefused { .. } => 24,
+            Event::ModelReported { .. } => 25,
         }
     }
 
@@ -1129,6 +1135,9 @@ mod tests {
             },
             Event::CompactionStarted,
             Event::CompactionFinished { compacted: true },
+            Event::ModelReported {
+                model: "effective-model".into(),
+            },
         ]
     }
 

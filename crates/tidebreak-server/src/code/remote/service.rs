@@ -495,12 +495,16 @@ mod tests {
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
             wait_for_provision_gate(&self.spawn_gate).await;
-            self.spawns.lock().unwrap().push(arguments.clone());
+            let sandbox_id = {
+                let mut spawns = self.spawns.lock().unwrap();
+                spawns.push(arguments.clone());
+                format!("sb-{}", spawns.len())
+            };
             if let Some(error) = self.spawn_errors.lock().unwrap().pop_front() {
                 return Err(error);
             }
             Ok(SandboxLease {
-                sandbox_id: "sb-1".to_owned(),
+                sandbox_id,
                 state: SandboxState::Pending,
                 latest_event_seq: 0,
                 expires_in_seconds: 7200,
@@ -1607,16 +1611,45 @@ mod tests {
                 .get_session(&owner, binding.session_id)
                 .await
                 .unwrap();
-            crate::code::recovery::fence_session(
-                &runtime.db,
-                runtime.bus.as_ref(),
-                &mut session,
-                FenceReason::SandboxLost {
-                    detail: "idle timeout".into(),
-                },
-            )
-            .await
-            .unwrap();
+            // Reproduce the real idle-expiry path. The prior implementation
+            // reaped an active lease, which hid the stopped-checkpoint refusal.
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: SandboxState::Failed,
+                latest_event_seq: 4,
+                events: vec![
+                    event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                    event(
+                        2,
+                        "assistant_record",
+                        serde_json::json!({ "body": "Previous answer" }),
+                    ),
+                    event(
+                        3,
+                        "turn_completed",
+                        serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                    ),
+                    event(4, "failed", serde_json::json!({ "reason": "idle_ceiling" })),
+                ],
+            });
+            runtime
+                .remote_sessions()
+                .unwrap()
+                .driver(&runtime.db, runtime.bus.as_ref())
+                .pump(&mut session, 0)
+                .await
+                .unwrap();
+            assert_eq!(session.lifecycle, SessionLifecycle::Fenced);
+            runtime.recover().await.unwrap();
+            assert_eq!(
+                runtime
+                    .get_session(&owner, session.id)
+                    .await
+                    .unwrap()
+                    .lifecycle,
+                SessionLifecycle::Fenced,
+                "automatic recovery cannot accept missing output"
+            );
             if manual_pause {
                 runtime
                     .set_queue_paused(&owner, session.id, true)
@@ -1648,7 +1681,86 @@ mod tests {
                     matches!(result, ExternalMessageOutcome::NewTurn(_)),
                     "fresh input must start after clearing an empty queue: {result:?}"
                 );
-                assert_eq!(fake.spawns.lock().unwrap().len(), 2);
+                {
+                    let spawns = fake.spawns.lock().unwrap();
+                    assert_eq!(spawns.len(), 2);
+                    assert!(spawns[1].repository.is_none());
+                    assert!(spawns[1].task.contains("Previous answer"));
+                    assert!(spawns[1]
+                        .task
+                        .contains("Temporary files from the previous sandbox are unavailable"));
+                }
+                let replay = runtime
+                    .external_submit_message(&owner, grant, session.id, message("fresh retry"))
+                    .await
+                    .unwrap();
+                let (
+                    ExternalMessageOutcome::NewTurn(first),
+                    ExternalMessageOutcome::NewTurn(replay),
+                ) = (result, replay)
+                else {
+                    panic!("expected the same accepted turn");
+                };
+                assert_eq!(first.id, replay.id);
+                assert_eq!(
+                    fake.spawns.lock().unwrap().len(),
+                    2,
+                    "duplicate Slack input must not respawn"
+                );
+
+                // Recreate the server over its durable database before ingesting
+                // the answer. The replacement sandbox starts its own sequence.
+                let resumed = CodeRuntime::new(
+                    runtime.db.clone(),
+                    dir.path().to_path_buf(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .with_remote_sessions(RemoteSessions::new(fake.clone(), settings()));
+                resumed.recover().await.unwrap();
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-2".into(),
+                    state: SandboxState::Running,
+                    latest_event_seq: 3,
+                    events: vec![
+                        event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                        event(
+                            2,
+                            "assistant_record",
+                            serde_json::json!({ "body": "RECOVERY-OK" }),
+                        ),
+                        event(
+                            3,
+                            "turn_completed",
+                            serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                        ),
+                    ],
+                });
+                let mut session = resumed.get_session(&owner, session.id).await.unwrap();
+                resumed
+                    .remote_sessions()
+                    .unwrap()
+                    .driver(&resumed.db, resumed.bus.as_ref())
+                    .pump(&mut session, 0)
+                    .await
+                    .unwrap();
+                let completed = latest_turn(&resumed.db, &owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(completed.id, first.id);
+                assert_eq!(completed.status, TurnStatus::Completed);
+                let events =
+                    tidebreak_core::db::code::list_events(&resumed.db, &owner, session.id, 0, 100)
+                        .await
+                        .unwrap();
+                assert_eq!(events.events.iter().filter(|row| matches!(
+                    &row.event, tidebreak_core::Event::AssistantMessage { text, .. } if text == "RECOVERY-OK"
+                )).count(), 1, "the recovered answer must be available to Slack and web replay");
                 assert!(
                     !runtime
                         .list_queued_turns(&owner, session.id)
