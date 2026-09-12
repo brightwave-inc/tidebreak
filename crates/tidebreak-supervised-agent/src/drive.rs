@@ -2367,6 +2367,10 @@ mod tests {
             assert!(result.is_err(), "a failed checkpoint must fail shutdown");
             let kinds = event_kinds(&state);
             assert!(kinds.iter().any(|kind| kind == "wip_push_failed"));
+            let failed = event_payload(&state, "wip_push_failed", 0);
+            assert_eq!(failed["checkpoint"], "terminal");
+            assert_eq!(failed["terminal_reason"], "idle_ceiling");
+            assert_eq!(failed["reason"], "push_failed");
             assert!(!kinds.iter().any(|kind| kind == "supervisor_stopped"));
             assert_eq!(
                 kinds.iter().filter(|kind| *kind == "wip_pushed").count(),
