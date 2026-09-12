@@ -1336,6 +1336,69 @@ impl RemoteDriver<'_> {
         Ok(report)
     }
 
+    /// Drain one bounded page for a stopped, fenced incarnation. Recovery
+    /// uses this after confirming an idle shutdown through fresh status.
+    /// This does not cancel, send messages, settle turns, or run host tools.
+    pub async fn drain_stopped_events(
+        &self,
+        session: &Session,
+        incarnation: tidebreak_core::CodeIncarnationId,
+    ) -> Result<bool, tidebreak_core::AgentError> {
+        let Some(row) = latest_incarnation(self.db, &session.owner, session.id).await? else {
+            return Ok(false);
+        };
+        if session.lifecycle != SessionLifecycle::Fenced
+            || row.id != incarnation
+            || row.state != IncarnationState::Stopped
+        {
+            return Ok(false);
+        }
+        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+            return Ok(false);
+        };
+        let read = self
+            .provisioner
+            .events(
+                &session.owner,
+                session.id,
+                sandbox_id,
+                EventCursor {
+                    after_seq: Some(row.events_cursor),
+                    limit: Some(100),
+                    wait_seconds: Some(0),
+                },
+            )
+            .await;
+        let Ok(read) = read else {
+            return Ok(false);
+        };
+        if read.sandbox_id != sandbox_id
+            || !read.state.is_terminal()
+            || read.events.iter().any(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "turn_started" | "turn_completed" | "turn_interrupted" | "host_tool_request"
+                )
+            })
+        {
+            return Ok(false);
+        }
+        let binding = IngestBinding {
+            owner: session.owner.clone(),
+            session_id: session.id,
+            spawn_epoch: session.spawn_epoch,
+            incarnation: row.id,
+            harness_kind: session.harness_kind,
+            turn_id: None,
+        };
+        ingest_events(self.db, self.bus, &binding, &read).await?;
+        Ok(latest_incarnation(self.db, &session.owner, session.id)
+            .await?
+            .is_some_and(|current| {
+                current.id == row.id && current.events_cursor >= read.latest_event_seq
+            }))
+    }
+
     /// Reap a fenced remote session: cancel whatever the environment still
     /// holds, close the incarnation record, and resolve the fence.
     ///

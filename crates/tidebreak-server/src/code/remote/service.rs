@@ -484,6 +484,8 @@ mod tests {
         /// Every events read issued, scripted or not.
         event_reads_issued: StdMutex<usize>,
         cancels: StdMutex<Vec<String>>,
+        status_override: StdMutex<Option<SandboxStatus>>,
+        status_reads: StdMutex<usize>,
     }
 
     #[async_trait]
@@ -517,6 +519,10 @@ mod tests {
             _session: tidebreak_core::SessionId,
             sandbox_id: &str,
         ) -> Result<SandboxStatus, RemoteSandboxError> {
+            *self.status_reads.lock().unwrap() += 1;
+            if let Some(status) = self.status_override.lock().unwrap().clone() {
+                return Ok(status);
+            }
             Ok(SandboxStatus {
                 sandbox_id: sandbox_id.to_owned(),
                 state: SandboxState::Running,
@@ -1557,8 +1563,24 @@ mod tests {
         );
     }
 
+    fn idle_status(sandbox_id: &str, latest_event_seq: i64) -> SandboxStatus {
+        SandboxStatus {
+            sandbox_id: sandbox_id.into(),
+            state: SandboxState::Failed,
+            failure_reason: Some("idle_ceiling".into()),
+            termination_reason: None,
+            latest_event_seq,
+            pending_messages: 0,
+            spend_microusd: Some(100_000),
+            spend_ceiling_microusd: Some(5_000_000),
+            possibly_stalled: false,
+            repository_url: None,
+            completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+
     #[tokio::test]
-    async fn slack_message_after_reap_starts_without_replaying_queued_work() {
+    async fn slack_message_after_idle_recovery_preserves_history_and_held_queues() {
         for (pending, manual_pause) in [(false, false), (true, false), (false, true)] {
             let dir = tempfile::tempdir().unwrap();
             let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
@@ -1615,8 +1637,8 @@ mod tests {
             // reaped an active lease, which hid the stopped-checkpoint refusal.
             fake.event_reads.lock().unwrap().push_back(SandboxEvents {
                 sandbox_id: "sb-1".into(),
-                state: SandboxState::Failed,
-                latest_event_seq: 4,
+                state: SandboxState::Running,
+                latest_event_seq: 3,
                 events: vec![
                     event(1, "turn_started", serde_json::json!({ "turn": 1 })),
                     event(
@@ -1629,8 +1651,33 @@ mod tests {
                         "turn_completed",
                         serde_json::json!({ "turn": 1, "exit_code": 0 }),
                     ),
-                    event(4, "failed", serde_json::json!({ "reason": "idle_ceiling" })),
                 ],
+            });
+            runtime
+                .remote_sessions()
+                .unwrap()
+                .driver(&runtime.db, runtime.bus.as_ref())
+                .pump(&mut session, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                latest_turn(&runtime.db, &owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                TurnStatus::Completed
+            );
+            // Expiry arrives on a later read, after the successful turn settled.
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: SandboxState::Failed,
+                latest_event_seq: 4,
+                events: vec![event(
+                    4,
+                    "failed",
+                    serde_json::json!({ "reason": "idle_ceiling" }),
+                )],
             });
             runtime
                 .remote_sessions()
@@ -1656,12 +1703,55 @@ mod tests {
                     .await
                     .unwrap();
             }
-            runtime.reap(&owner, session.id).await.unwrap();
+            assert!(matches!(
+                runtime
+                    .get_session(&owner, session.id)
+                    .await
+                    .unwrap()
+                    .fence_reason,
+                Some(FenceReason::TerminalFlushMissing { .. })
+            ));
+            *fake.status_override.lock().unwrap() = Some(idle_status("sb-1", 5));
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: SandboxState::Failed,
+                latest_event_seq: 5,
+                events: vec![event(
+                    5,
+                    "container_output",
+                    serde_json::json!({ "body": "stopped" }),
+                )],
+            });
+            // Upgrade a persisted fence without an explicit reap or queue reset.
+            let runtime = Arc::new(
+                CodeRuntime::new(
+                    runtime.db.clone(),
+                    dir.path().to_path_buf(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .with_remote_sessions(RemoteSessions::new(fake.clone(), settings())),
+            );
+            runtime.recover().await.unwrap();
+            assert_eq!(
+                runtime
+                    .get_session(&owner, session.id)
+                    .await
+                    .unwrap()
+                    .lifecycle,
+                SessionLifecycle::Idle
+            );
+            assert!(fake.cancels.lock().unwrap().is_empty());
             assert_eq!(
                 fake.spawns.lock().unwrap().len(),
                 1,
-                "clearing a fault must not start work"
+                "recovery must not start work"
             );
+            *fake.status_override.lock().unwrap() = None;
             let result = runtime
                 .external_submit_message(&owner, grant, session.id, message("fresh retry"))
                 .await
@@ -1679,7 +1769,7 @@ mod tests {
             } else {
                 assert!(
                     matches!(result, ExternalMessageOutcome::NewTurn(_)),
-                    "fresh input must start after clearing an empty queue: {result:?}"
+                    "fresh input must start after recovering an empty queue: {result:?}"
                 );
                 {
                     let spawns = fake.spawns.lock().unwrap();
@@ -1769,6 +1859,200 @@ mod tests {
                         .1
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_recovery_requires_completed_drained_scratch_output() {
+        for case in [
+            "running_turn",
+            "interrupted_turn",
+            "pending_message",
+            "unread_events",
+            "wrong_sandbox",
+            "running_sandbox",
+            "other_failure",
+            "repository_status",
+            "repository_workspace",
+            "spend_stop",
+            "spent_budget",
+            "earlier_incarnation",
+            "tail_has_turn",
+            "tail_wrong_sandbox",
+            "tail_not_terminal",
+            "tail_partial",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+            let repository = (case == "repository_workspace").then_some(repo.id);
+            let grant = tidebreak_core::CodeGrantId::new();
+            let (resolution, _) = runtime
+                .external_get_or_create(
+                    &owner,
+                    None,
+                    grant,
+                    "slack",
+                    "T1/C1/refusal",
+                    repository,
+                    None,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+                panic!("expected creation");
+            };
+            let mut session = runtime
+                .get_session(&owner, binding.session_id)
+                .await
+                .unwrap();
+            runtime
+                .submit_turn(&owner, session.id, "start".into(), None, None, vec![], None)
+                .await
+                .unwrap();
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: SandboxState::Failed,
+                latest_event_seq: 4,
+                events: vec![
+                    event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                    event(
+                        2,
+                        "assistant_record",
+                        serde_json::json!({ "body": "answer" }),
+                    ),
+                    event(
+                        3,
+                        "turn_completed",
+                        serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                    ),
+                    event(4, "failed", serde_json::json!({ "reason": "idle_ceiling" })),
+                ],
+            });
+            runtime
+                .remote_sessions()
+                .unwrap()
+                .driver(&runtime.db, runtime.bus.as_ref())
+                .pump(&mut session, 0)
+                .await
+                .unwrap();
+            let mut status = idle_status("sb-1", 4);
+            match case {
+                "pending_message" => status.pending_messages = 1,
+                "unread_events" => status.latest_event_seq = 5,
+                "wrong_sandbox" => status.sandbox_id = "another-sandbox".into(),
+                "running_sandbox" => status.state = SandboxState::Running,
+                "other_failure" => status.failure_reason = Some("wall_clock_ceiling".into()),
+                "repository_status" => {
+                    status.repository_url = Some("https://github.com/test/tools".into())
+                }
+                "spend_stop" => {
+                    status.state = SandboxState::CeilingExceeded;
+                    status.failure_reason = Some("spend_ceiling_exceeded".into());
+                }
+                "spent_budget" => status.spend_microusd = status.spend_ceiling_microusd,
+                "running_turn" | "interrupted_turn" => {
+                    let mut turn = latest_turn(&runtime.db, &owner, session.id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    turn.status = if case == "running_turn" {
+                        TurnStatus::Running
+                    } else {
+                        TurnStatus::Interrupted
+                    };
+                    tidebreak_core::db::code::save_turn(&runtime.db, &owner, &turn)
+                        .await
+                        .unwrap();
+                }
+                "earlier_incarnation" => {
+                    use tidebreak_core::db::code::{
+                        activate_incarnation, create_incarnation_intent, stop_incarnation,
+                    };
+                    let tidebreak_core::IncarnationAdmission::Admitted(row) =
+                        create_incarnation_intent(&runtime.db, &owner, session.id, 2, 2)
+                            .await
+                            .unwrap()
+                    else {
+                        panic!("expected incarnation")
+                    };
+                    activate_incarnation(&runtime.db, &owner, row.id, "sb-2")
+                        .await
+                        .unwrap();
+                    tidebreak_core::db::code::ingest_incarnation_event(
+                        &runtime.db,
+                        &owner,
+                        session.id,
+                        session.spawn_epoch,
+                        row.id,
+                        4,
+                        tidebreak_core::db::code::IncarnationSideEffects {
+                            journal: &[],
+                            task_output: None,
+                            wip_ref: None,
+                            terminal_events_journaled: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    stop_incarnation(&runtime.db, &owner, row.id, Some("failed"))
+                        .await
+                        .unwrap();
+                    status.sandbox_id = "sb-2".into();
+                }
+                "tail_has_turn" | "tail_wrong_sandbox" | "tail_not_terminal" | "tail_partial" => {
+                    status.latest_event_seq = 6;
+                    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                        sandbox_id: if case == "tail_wrong_sandbox" {
+                            "sb-other"
+                        } else {
+                            "sb-1"
+                        }
+                        .into(),
+                        state: if case == "tail_not_terminal" {
+                            SandboxState::Running
+                        } else {
+                            SandboxState::Failed
+                        },
+                        latest_event_seq: 6,
+                        events: vec![event(
+                            5,
+                            if case == "tail_has_turn" {
+                                "turn_started"
+                            } else {
+                                "container_output"
+                            },
+                            serde_json::json!({ "body": "late diagnostic", "turn": 2 }),
+                        )],
+                    });
+                }
+                "repository_workspace" => {}
+                _ => unreachable!(),
+            }
+            *fake.status_override.lock().unwrap() = Some(status);
+            let status_reads = *fake.status_reads.lock().unwrap();
+            // Recovery sees the same persisted fence on subsequent sweeps.
+            runtime.recover().await.unwrap();
+            runtime.recover().await.unwrap();
+            if case == "other_failure" {
+                assert_eq!(
+                    *fake.status_reads.lock().unwrap(),
+                    status_reads + 1,
+                    "repeated sweeps must pace status probes"
+                );
+            }
+            let current = runtime.get_session(&owner, session.id).await.unwrap();
+            assert_eq!(current.lifecycle, SessionLifecycle::Fenced, "{case}");
+            let row = tidebreak_core::db::code::latest_incarnation(&runtime.db, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!row.terminal_events_journaled, "{case}");
+            assert_eq!(fake.spawns.lock().unwrap().len(), 1, "{case}");
+            assert!(fake.cancels.lock().unwrap().is_empty(), "{case}");
         }
     }
 
