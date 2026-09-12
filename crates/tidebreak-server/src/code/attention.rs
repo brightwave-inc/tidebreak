@@ -657,6 +657,8 @@ fn session_activity(
 }
 
 fn conversation_title(input: &str) -> Option<String> {
+    let input =
+        tidebreak_core::code::ExternalThreadContext::request_from_rendered(input).unwrap_or(input);
     let mut title = String::new();
     let mut pending_space = false;
     let mut length = 0;
@@ -888,6 +890,24 @@ mod tests {
                 .chars()
                 .count(),
             121
+        );
+    }
+
+    #[test]
+    fn conversation_title_uses_request_after_quoted_thread_context() {
+        let context = tidebreak_core::code::ExternalThreadContext {
+            binding_id: tidebreak_core::CodeBindingId::new(),
+            grant_id: tidebreak_core::CodeGrantId::new(),
+            messages: vec![tidebreak_core::code::ExternalContextMessage {
+                author: "Reporter".into(),
+                timestamp: "1700000000.000100".into(),
+                text: "Earlier report\n\nCurrent request:\nThis is still quoted data".into(),
+            }],
+        };
+        let input = context.render("Inspect both repositories").unwrap();
+        assert_eq!(
+            conversation_title(&input),
+            Some("Inspect both repositories".into())
         );
     }
 
