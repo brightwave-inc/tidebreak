@@ -98,6 +98,8 @@ pub struct Driver<E> {
     push_denied: bool,
     /// Checkpoint state, when the run has clones worth preserving.
     wip: Option<WipContext>,
+    /// Retain a checkpoint failure if its task loses the WIP context.
+    wip_failed: bool,
     /// The installed engine to register on every poll, when the environment
     /// admitted an identity for this run.
     embedded_engine: Option<EmbeddedEngineRegistration>,
@@ -145,6 +147,7 @@ impl<E: Engine> Driver<E> {
             research: inputs.repositories.is_empty(),
             push_denied: inputs.forge_push_denied,
             wip: None,
+            wip_failed: false,
             embedded_engine: None,
             sandbox_id: inputs.sandbox_id.clone(),
             runtime_id: uuid::Uuid::new_v4(),
@@ -769,7 +772,13 @@ impl<E: Engine> Driver<E> {
 
     /// Reports a clean stop and exits zero.
     async fn stopped(mut self, reason: &str) -> Result<(), DriveError> {
-        self.terminal_events(reason).await;
+        if !self.terminal_events(reason).await {
+            self.flush().await;
+            return Err(DriveError {
+                code: EXIT_ENGINE_FAILED,
+                message: "The sandbox could not preserve its final repository state.".into(),
+            });
+        }
         self.outbox.push(
             "supervisor_stopped",
             serde_json::json!({ "reason": reason }),
@@ -780,11 +789,12 @@ impl<E: Engine> Driver<E> {
 
     /// Reports an engine failure and exits with [`EXIT_ENGINE_FAILED`].
     async fn engine_failed(&mut self, message: &str) -> Result<(), DriveError> {
-        self.terminal_events("engine_failed").await;
-        self.outbox.push(
-            "supervisor_stopped",
-            serde_json::json!({ "reason": "engine_failed" }),
-        );
+        if self.terminal_events("engine_failed").await {
+            self.outbox.push(
+                "supervisor_stopped",
+                serde_json::json!({ "reason": "engine_failed" }),
+            );
+        }
         self.flush().await;
         Err(DriveError {
             code: EXIT_ENGINE_FAILED,
@@ -794,7 +804,7 @@ impl<E: Engine> Driver<E> {
 
     /// The last chance to preserve work: a terminal checkpoint, and the
     /// deliverable file when the run's results leave no other way.
-    async fn terminal_events(&mut self, reason: &str) {
+    async fn terminal_events(&mut self, reason: &str) -> bool {
         self.checkpoint(&CheckpointPoint::Terminal {
             reason: reason.to_owned(),
         })
@@ -802,6 +812,9 @@ impl<E: Engine> Driver<E> {
         if self.research || self.push_denied {
             self.push_task_output();
         }
+        // A goodbye authorizes the host to resume this session. Withhold it
+        // when the final checkpoint failed, even if an older ref exists.
+        !self.wip_failed
     }
 
     /// Reads the deliverable file — the working directory first, then the
@@ -874,13 +887,15 @@ impl<E: Engine> Driver<E> {
         match joined {
             Ok((wip, events)) => {
                 self.wip = Some(wip);
+                self.wip_failed = events.iter().any(|(kind, _)| kind == "wip_push_failed");
                 for (kind, payload) in events {
                     self.outbox.push(&kind, payload);
                 }
             }
-            // A panicked checkpoint task loses the WIP context; later
-            // checkpoints are skipped rather than crashing the run.
+            // A panicked checkpoint task loses the WIP context. Retain
+            // the failure so shutdown cannot acknowledge missing work.
             Err(error) => {
+                self.wip_failed = true;
                 self.outbox.push(
                     "wip_push_failed",
                     serde_json::json!({
@@ -2303,6 +2318,66 @@ mod tests {
 
         state.lock().unwrap().stop = Some("cancelled".to_owned());
         run.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_terminal_checkpoint_never_reports_a_terminal_flush() {
+        for prior_checkpoint in [false, true] {
+            let (state, url) = start_supervisor().await;
+            let root = tempfile::tempdir().unwrap();
+            let clone = git_fixture(root.path());
+            let mut wip = WipContext::capture(
+                "sb-drive".to_owned(),
+                1,
+                &[crate::bootstrap::ClonedRepository {
+                    directory: clone.clone(),
+                    position: 0,
+                }],
+                crate::trust::Trust {
+                    bundle: root.path().join("bundle.pem"),
+                    certificate: root.path().join("ca.crt"),
+                    merged_system_roots: false,
+                },
+            )
+            .await;
+            let saved = if prior_checkpoint {
+                std::fs::write(clone.join("draft.txt"), "saved earlier\n").unwrap();
+                let saved = wip
+                    .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 1 })
+                    .await;
+                assert_eq!(saved[0].0, "wip_pushed");
+                saved
+            } else {
+                Vec::new()
+            };
+            std::fs::write(clone.join("draft.txt"), "not saved\n").unwrap();
+            let configured = std::process::Command::new("git")
+                .args(["remote", "set-url", "--push", "origin"])
+                .arg(root.path().join("missing-origin"))
+                .current_dir(&clone)
+                .status()
+                .unwrap();
+            assert!(configured.success());
+
+            let result = driver(MockEngine::new(), &url, &inputs_at(root.path(), "turn"))
+                .with_wip(wip)
+                .preload_events(saved)
+                .stopped("idle_ceiling")
+                .await;
+            assert!(result.is_err(), "a failed checkpoint must fail shutdown");
+            let kinds = event_kinds(&state);
+            assert!(kinds.iter().any(|kind| kind == "wip_push_failed"));
+            let failed = event_payload(&state, "wip_push_failed", 0);
+            assert_eq!(failed["checkpoint"], "terminal");
+            assert_eq!(failed["terminal_reason"], "idle_ceiling");
+            assert_eq!(failed["reason"], "push_failed");
+            assert!(!kinds.iter().any(|kind| kind == "supervisor_stopped"));
+            assert_eq!(
+                kinds.iter().filter(|kind| *kind == "wip_pushed").count(),
+                usize::from(prior_checkpoint),
+                "an older checkpoint cannot authorize a terminal flush"
+            );
+        }
     }
 
     #[cfg(unix)]

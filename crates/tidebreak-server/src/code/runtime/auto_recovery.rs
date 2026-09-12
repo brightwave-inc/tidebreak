@@ -154,19 +154,28 @@ impl CodeRuntime {
                     session.id,
                 )
                 .await?;
-                if let Some(stopped) = row.as_mut() {
+                if let Some(stopped) = row.as_ref() {
                     if !stopped.terminal_events_journaled
                         && self
-                            .completed_idle_scratch_is_drained(&session, stopped)
+                            .completed_idle_incarnation_is_drained(&session, stopped)
                             .await?
                     {
-                        tidebreak_core::db::code::mark_incarnation_terminal_events_journaled(
+                        if session.workspace_id.is_none() {
+                            tidebreak_core::db::code::mark_incarnation_terminal_events_journaled(
+                                &self.db,
+                                &session.owner,
+                                stopped.id,
+                            )
+                            .await?;
+                        }
+                        // Draining can record a newer WIP ref. Repository
+                        // recovery needs that ref and a real supervisor goodbye.
+                        row = tidebreak_core::db::code::latest_incarnation(
                             &self.db,
                             &session.owner,
-                            stopped.id,
+                            session.id,
                         )
                         .await?;
-                        stopped.terminal_events_journaled = true;
                     }
                 }
                 match row {
@@ -343,9 +352,9 @@ impl CodeRuntime {
         Ok(())
     }
 
-    // An idle shutdown can omit the supervisor's goodbye after a successful
-    // turn. Recover only scratch sessions whose complete output is durable.
-    async fn completed_idle_scratch_is_drained(
+    // An idle shutdown can deliver final events after the session is fenced.
+    // Only scratch sessions may recover without the supervisor's goodbye.
+    async fn completed_idle_incarnation_is_drained(
         &self,
         session: &Session,
         row: &tidebreak_core::CodeSessionIncarnation,
@@ -353,8 +362,7 @@ impl CodeRuntime {
         use crate::code::remote::wire::SandboxState;
         use tidebreak_core::db::code::{latest_incarnation, latest_turn, record_incarnation_spend};
 
-        if session.workspace_id.is_some()
-            || row.state != IncarnationState::Stopped
+        if row.state != IncarnationState::Stopped
             || !matches!(row.stop_reason.as_deref(), Some("failed" | "expired"))
             || row.events_cursor <= 0
         {
@@ -395,13 +403,33 @@ impl CodeRuntime {
             || !matches!(status.state, SandboxState::Failed | SandboxState::Expired)
             || status.failure_reason.as_deref() != Some("idle_ceiling")
             || status.pending_messages != 0
-            || status.repository_url.is_some()
             || status.latest_event_seq <= 0
             || status
                 .spend_microusd
                 .zip(status.spend_ceiling_microusd)
                 .is_some_and(|(spend, ceiling)| spend >= ceiling)
         {
+            return Ok(false);
+        }
+        if let Some(workspace) = self.session_workspace(session).await? {
+            // Repository recovery requires the durable graceful-stop intent.
+            // A hard idle kill cannot prove that the final work was saved.
+            if status.state != SandboxState::Expired
+                || status.termination_reason.as_deref() != Some("idle_ceiling")
+            {
+                return Ok(false);
+            }
+            let repo = self.get_repo(&session.owner, workspace.repo_id).await?;
+            let (Some(host), Some(owner), Some(name)) =
+                (&repo.origin_host, &repo.origin_owner, &repo.origin_name)
+            else {
+                return Ok(false);
+            };
+            let expected = format!("https://{host}/{owner}/{name}");
+            if status.repository_url.as_deref() != Some(expected.as_str()) {
+                return Ok(false);
+            }
+        } else if status.repository_url.is_some() {
             return Ok(false);
         }
         if row.events_cursor < status.latest_event_seq {
@@ -427,6 +455,7 @@ impl CodeRuntime {
                 && current.state == IncarnationState::Stopped
                 && current.sandbox_id.as_deref() == Some(sandbox_id)
                 && current.events_cursor >= status.latest_event_seq
+                && (session.workspace_id.is_none() || current.terminal_events_journaled)
         }) || !latest.is_some_and(|latest| {
             latest.id == turn.id && latest.status == tidebreak_core::TurnStatus::Completed
         }) {
@@ -933,6 +962,7 @@ mod remote_and_admission_tests {
                     task_output: None,
                     wip_ref: checkpoint,
                     terminal_events_journaled: terminal,
+                    terminal_checkpoint_failed: false,
                 },
             )
             .await

@@ -137,7 +137,8 @@ impl WipContext {
 
     /// Checkpoints every tree, returning the events to report.
     ///
-    /// A tree with nothing new to preserve produces no event. A tree that
+    /// A successful turn with nothing new to preserve produces no event.
+    /// At shutdown, every tree must have a checkpoint ref. A tree that
     /// fails produces a `wip_push_failed` naming what went wrong, and the
     /// remaining trees still run — one broken clone must not cost the
     /// others their snapshot.
@@ -163,6 +164,7 @@ impl WipContext {
                     self.sandbox_id, self.incarnation
                 ),
                 point: point.fields(),
+                terminal: matches!(point, CheckpointPoint::Terminal { .. }),
                 share,
             };
             if let Some(event) = checkpoint_tree(&mut self.trees[index], &job).await {
@@ -190,6 +192,7 @@ struct TreeJob<'a> {
     reference: String,
     message: String,
     point: serde_json::Value,
+    terminal: bool,
     share: Instant,
 }
 
@@ -243,11 +246,14 @@ async fn checkpoint_tree(tree: &mut TreeState, job: &TreeJob<'_>) -> Option<Even
         true
     } else if tree.last_pushed_head.as_deref() == Some(head.as_str()) {
         false
-    } else if tree
-        .initial_head
-        .as_deref()
-        .is_some_and(|initial| initial != head)
+    } else if job.terminal
+        || tree
+            .initial_head
+            .as_deref()
+            .is_some_and(|initial| initial != head)
     {
+        // At shutdown, preserve the exact clone even without changes.
+        // The repository's base branch can move before the next turn.
         true
     } else {
         // A clean tree still at its starting head may hold commits the turn
@@ -782,6 +788,93 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    async fn assert_terminal_checkpoint_restores_clone(dirty: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let clone = fixture(root.path());
+        let mut context = context(root.path(), &clone).await;
+        let base = run(&clone, &["rev-parse", "HEAD"]);
+        assert!(context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 1 })
+            .await
+            .is_empty());
+        if dirty {
+            std::fs::write(clone.join("draft.txt"), "unfinished\n").unwrap();
+        }
+
+        let events = context
+            .checkpoint(&CheckpointPoint::Terminal {
+                reason: "idle_ceiling".into(),
+            })
+            .await;
+        assert_eq!(events.len(), 1);
+        let (kind, payload) = &events[0];
+        assert_eq!(kind, "wip_pushed");
+        assert_eq!(payload["checkpoint"], "terminal");
+        assert_eq!(payload["terminal_reason"], "idle_ceiling");
+        assert_eq!(payload["created_commit"], dirty);
+        assert_eq!(run(&clone, &["rev-parse", "HEAD"]), base);
+
+        // A later base-branch commit must not change the restored snapshot.
+        let origin = root.path().join("origin");
+        std::fs::write(origin.join("README.md"), "later base\n").unwrap();
+        run(&origin, &["add", "README.md"]);
+        run(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-m",
+                "advance base",
+            ],
+        );
+        let restored = root.path().join("restored");
+        run(
+            root.path(),
+            &[
+                "clone",
+                "--branch",
+                "mg-wip/sb-1-i1",
+                &origin.display().to_string(),
+                &restored.display().to_string(),
+            ],
+        );
+        assert_eq!(run(&restored, &["rev-parse", "HEAD"]), payload["commit"]);
+        assert_eq!(
+            std::fs::read_to_string(restored.join("README.md")).unwrap(),
+            "hello\n"
+        );
+        assert_eq!(restored.join("draft.txt").exists(), dirty);
+        if dirty {
+            assert_eq!(
+                std::fs::read_to_string(restored.join("draft.txt")).unwrap(),
+                "unfinished\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(clone.join("draft.txt")).unwrap(),
+                "unfinished\n"
+            );
+        }
+        assert!(context
+            .checkpoint(&CheckpointPoint::Terminal {
+                reason: "idle_ceiling".into(),
+            })
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_terminal_checkpoint_restores_an_unchanged_clone() {
+        assert_terminal_checkpoint_restores_clone(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_terminal_checkpoint_restores_a_dirty_clone() {
+        assert_terminal_checkpoint_restores_clone(true).await;
+    }
+
     /// The second checkpoint of the same dirty state must be silent: the
     /// snapshot already exists and re-pushing it every turn is churn.
     #[tokio::test]
@@ -899,6 +992,7 @@ mod tests {
             reference: checkpoint_ref("sb-1", 1, 0),
             message: "m".to_owned(),
             point: serde_json::json!({}),
+            terminal: false,
             share: Instant::now() + CHECKPOINT_BUDGET,
         };
         let (kind, payload) =

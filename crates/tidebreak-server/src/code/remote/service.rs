@@ -479,6 +479,7 @@ mod tests {
         spawn_gate: StdMutex<Option<Arc<ProvisionGate>>>,
         send_gate: StdMutex<Option<Arc<ProvisionGate>>>,
         spawn_errors: StdMutex<VecDeque<RemoteSandboxError>>,
+        send_errors: StdMutex<VecDeque<RemoteSandboxError>>,
         sends: StdMutex<Vec<String>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
         /// Every events read issued, scripted or not.
@@ -566,6 +567,9 @@ mod tests {
             wait_for_provision_gate(&self.send_gate).await;
             let super::super::wire::SupervisorMessageBody::Input(body) = &message.body;
             self.sends.lock().unwrap().push(body.clone());
+            if let Some(error) = self.send_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
             Ok(MessageReceipt {
                 seq: 1,
                 interrupt: false,
@@ -1563,6 +1567,199 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn slack_message_during_idle_checkpoint_runs_once_after_the_sandbox_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let grant = tidebreak_core::CodeGrantId::new();
+        let (resolution, _) = runtime
+            .external_get_or_create(
+                &owner,
+                None,
+                grant,
+                "slack",
+                "T1/C1/idle-checkpoint",
+                Some(repo.id),
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+            panic!("expected a new Slack session");
+        };
+        let session_id = binding.session_id;
+        let message = |event: &str| crate::code::runtime::ExternalMessage {
+            text: event.into(),
+            event_id: event.into(),
+            channel_ts: "1.0".into(),
+            actor: tidebreak_core::TurnActor::default(),
+            context: None,
+            steer: false,
+            expected_turn_id: None,
+            correlation_uuid: None,
+        };
+        assert!(matches!(
+            runtime
+                .external_submit_message(&owner, grant, session_id, message("start"))
+                .await
+                .unwrap(),
+            ExternalMessageOutcome::NewTurn(_)
+        ));
+        let mut session = runtime.get_session(&owner, session_id).await.unwrap();
+        let remote = runtime.remote_sessions().unwrap();
+        let driver = remote.driver(&runtime.db, runtime.bus.as_ref());
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".into(),
+            state: SandboxState::Running,
+            latest_event_seq: 3,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                event(
+                    2,
+                    "assistant_record",
+                    serde_json::json!({ "body": "Previous answer" }),
+                ),
+                event(
+                    3,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                ),
+            ],
+        });
+        driver.pump(&mut session, 0).await.unwrap();
+        assert_eq!(session.lifecycle, SessionLifecycle::Idle);
+        let mut stopping = idle_status("sb-1", 3);
+        stopping.state = SandboxState::Running;
+        stopping.failure_reason = None;
+        stopping.termination_reason = Some("idle_ceiling".into());
+        stopping.completed_at = None;
+        stopping.repository_url = Some("https://github.com/acme/tools".into());
+        *fake.status_override.lock().unwrap() = Some(stopping);
+        fake.send_errors
+            .lock()
+            .unwrap()
+            .push_back(RemoteSandboxError::Refused {
+                operation: "send",
+                code: "sandbox_already_terminal".into(),
+                message: "This sandbox is `running` and is not accepting messages.".into(),
+            });
+
+        let late = "Continue after idle";
+        let ExternalMessageOutcome::Queued(queued) = runtime
+            .external_submit_message(&owner, grant, session_id, message(late))
+            .await
+            .unwrap()
+        else {
+            panic!("a refused send must leave the Slack message queued");
+        };
+        let queued_id = queued.id;
+        let ExternalMessageOutcome::Queued(replayed) = runtime
+            .external_submit_message(&owner, grant, session_id, message(late))
+            .await
+            .unwrap()
+        else {
+            panic!("the repeated Slack event must resolve to its queued receipt");
+        };
+        assert_eq!(replayed.id, queued_id);
+        assert_eq!(fake.sends.lock().unwrap().as_slice(), &[late.to_owned()]);
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+        assert!(
+            tidebreak_core::db::code::get_open_turn(&runtime.db, &owner, session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (rows, paused) = runtime.list_queued_turns(&owner, session_id).await.unwrap();
+        assert!(!paused);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, queued_id);
+        assert_eq!(rows[0].message, late);
+
+        // The final checkpoint arrives while the supervisor still owns the pod.
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".into(),
+            state: SandboxState::Running,
+            latest_event_seq: 5,
+            events: vec![
+                event(
+                    4,
+                    "wip_pushed",
+                    serde_json::json!({ "ref": "mg-wip/sb-1-i1" }),
+                ),
+                event(
+                    5,
+                    "supervisor_stopped",
+                    serde_json::json!({ "reason": "supervisor_stop" }),
+                ),
+            ],
+        });
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(!report.incarnation_stopped);
+        assert!(report.fenced.is_none());
+        assert_eq!(
+            runtime
+                .list_queued_turns(&owner, session_id)
+                .await
+                .unwrap()
+                .0[0]
+                .id,
+            queued_id
+        );
+
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".into(),
+            state: SandboxState::Expired,
+            latest_event_seq: 6,
+            events: vec![event(
+                6,
+                "expired",
+                serde_json::json!({ "reason": "idle_ceiling" }),
+            )],
+        });
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(report.incarnation_stopped);
+        assert!(report.fenced.is_none());
+        let mut stopped = idle_status("sb-1", 6);
+        stopped.state = SandboxState::Expired;
+        stopped.termination_reason = Some("idle_ceiling".into());
+        stopped.repository_url = Some("https://github.com/acme/tools".into());
+        *fake.status_override.lock().unwrap() = Some(stopped);
+        runtime.promote_remote_queue_heads().await.unwrap();
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let turn = latest_turn(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.id, queued_id);
+        assert_eq!(turn.ordinal, 2);
+        assert_eq!(turn.status, TurnStatus::Running);
+        assert!(runtime
+            .list_queued_turns(&owner, session_id)
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        let ExternalMessageOutcome::NewTurn(replayed) = runtime
+            .external_submit_message(&owner, grant, session_id, message(late))
+            .await
+            .unwrap()
+        else {
+            panic!("the replay must resolve to the single promoted turn");
+        };
+        assert_eq!(replayed.id, queued_id);
+        let spawns = fake.spawns.lock().unwrap();
+        assert_eq!(spawns.len(), 2);
+        assert_eq!(spawns[1].repository_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+        assert!(spawns[1].task.contains(late));
+        assert!(spawns[1].task.contains("Previous answer"));
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+        assert!(fake.cancels.lock().unwrap().is_empty());
+    }
+
     fn idle_status(sandbox_id: &str, latest_event_seq: i64) -> SandboxStatus {
         SandboxStatus {
             sandbox_id: sandbox_id.into(),
@@ -1579,11 +1776,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn slack_message_after_idle_recovery_preserves_history_and_held_queues() {
+    async fn assert_slack_idle_recovery_preserves_history_and_held_queues(repository: bool) {
         for (pending, manual_pause) in [(false, false), (true, false), (false, true)] {
             let dir = tempfile::tempdir().unwrap();
-            let (runtime, fake, owner, _) = runtime_with_remote(dir.path()).await;
+            let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
             let grant = tidebreak_core::CodeGrantId::new();
             let (resolution, _) = runtime
                 .external_get_or_create(
@@ -1592,7 +1788,7 @@ mod tests {
                     grant,
                     "slack",
                     "T1/C1/recovery",
-                    None,
+                    repository.then_some(repo.id),
                     None,
                     HarnessKind::ClaudeCode,
                     session_settings(),
@@ -1669,9 +1865,14 @@ mod tests {
                 TurnStatus::Completed
             );
             // Expiry arrives on a later read, after the successful turn settled.
+            let stopped_state = if repository {
+                SandboxState::Expired
+            } else {
+                SandboxState::Failed
+            };
             fake.event_reads.lock().unwrap().push_back(SandboxEvents {
                 sandbox_id: "sb-1".into(),
-                state: SandboxState::Failed,
+                state: stopped_state,
                 latest_event_seq: 4,
                 events: vec![event(
                     4,
@@ -1711,17 +1912,39 @@ mod tests {
                     .fence_reason,
                 Some(FenceReason::TerminalFlushMissing { .. })
             ));
-            *fake.status_override.lock().unwrap() = Some(idle_status("sb-1", 5));
-            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
-                sandbox_id: "sb-1".into(),
-                state: SandboxState::Failed,
-                latest_event_seq: 5,
-                events: vec![event(
+            let mut status = idle_status("sb-1", if repository { 6 } else { 5 });
+            status.state = stopped_state;
+            if repository {
+                status.termination_reason = Some("idle_ceiling".into());
+                status.repository_url = Some("https://github.com/acme/tools".into());
+            }
+            let final_events = if repository {
+                vec![
+                    event(
+                        5,
+                        "wip_pushed",
+                        serde_json::json!({ "ref": "mg-wip/sb-1-i1" }),
+                    ),
+                    event(
+                        6,
+                        "supervisor_stopped",
+                        serde_json::json!({ "reason": "supervisor_stop" }),
+                    ),
+                ]
+            } else {
+                vec![event(
                     5,
                     "container_output",
                     serde_json::json!({ "body": "stopped" }),
-                )],
+                )]
+            };
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: stopped_state,
+                latest_event_seq: status.latest_event_seq,
+                events: final_events,
             });
+            *fake.status_override.lock().unwrap() = Some(status);
             // Upgrade a persisted fence without an explicit reap or queue reset.
             let runtime = Arc::new(
                 CodeRuntime::new(
@@ -1774,11 +1997,19 @@ mod tests {
                 {
                     let spawns = fake.spawns.lock().unwrap();
                     assert_eq!(spawns.len(), 2);
-                    assert!(spawns[1].repository.is_none());
+                    if repository {
+                        assert_eq!(
+                            spawns[1].repository.as_deref(),
+                            Some("https://github.com/acme/tools")
+                        );
+                        assert_eq!(spawns[1].repository_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+                    } else {
+                        assert!(spawns[1].repository.is_none());
+                        assert!(spawns[1]
+                            .task
+                            .contains("Temporary files from the previous sandbox are unavailable"));
+                    }
                     assert!(spawns[1].task.contains("Previous answer"));
-                    assert!(spawns[1]
-                        .task
-                        .contains("Temporary files from the previous sandbox are unavailable"));
                 }
                 let replay = runtime
                     .external_submit_message(&owner, grant, session.id, message("fresh retry"))
@@ -1862,10 +2093,21 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn slack_message_after_idle_recovery_preserves_history_and_held_queues() {
+        assert_slack_idle_recovery_preserves_history_and_held_queues(false).await;
+    }
+
+    #[tokio::test]
+    async fn slack_repository_after_idle_recovery_preserves_history_checkpoint_and_held_queues() {
+        assert_slack_idle_recovery_preserves_history_and_held_queues(true).await;
+    }
+
     async fn assert_idle_recovery_refuses(case: &str) {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
-        let repository = (case == "repository_workspace").then_some(repo.id);
+        let repository =
+            (case.starts_with("repository_") && case != "repository_status").then_some(repo.id);
         let grant = tidebreak_core::CodeGrantId::new();
         let (resolution, _) = runtime
             .external_get_or_create(
@@ -1894,17 +2136,30 @@ mod tests {
             .submit_turn(&owner, session.id, "start".into(), None, None, vec![], None)
             .await
             .unwrap();
+        let old_wip = matches!(case, "repository_old_wip" | "repository_failed_checkpoint");
         fake.event_reads.lock().unwrap().push_back(SandboxEvents {
             sandbox_id: "sb-1".into(),
-            state: SandboxState::Failed,
+            state: if repository.is_some() {
+                SandboxState::Expired
+            } else {
+                SandboxState::Failed
+            },
             latest_event_seq: 4,
             events: vec![
                 event(1, "turn_started", serde_json::json!({ "turn": 1 })),
-                event(
-                    2,
-                    "assistant_record",
-                    serde_json::json!({ "body": "answer" }),
-                ),
+                if old_wip {
+                    event(
+                        2,
+                        "wip_pushed",
+                        serde_json::json!({ "ref": "mg-wip/earlier" }),
+                    )
+                } else {
+                    event(
+                        2,
+                        "assistant_record",
+                        serde_json::json!({ "body": "answer" }),
+                    )
+                },
                 event(
                     3,
                     "turn_completed",
@@ -1921,6 +2176,11 @@ mod tests {
             .await
             .unwrap();
         let mut status = idle_status("sb-1", 4);
+        if repository.is_some() && case != "repository_workspace" {
+            status.state = SandboxState::Expired;
+            status.termination_reason = Some("idle_ceiling".into());
+            status.repository_url = Some("https://github.com/acme/tools".into());
+        }
         match case {
             "pending_message" => status.pending_messages = 1,
             "unread_events" => status.latest_event_seq = 5,
@@ -1975,6 +2235,7 @@ mod tests {
                         task_output: None,
                         wip_ref: None,
                         terminal_events_journaled: false,
+                        terminal_checkpoint_failed: false,
                     },
                 )
                 .await
@@ -2010,8 +2271,78 @@ mod tests {
                     )],
                 });
             }
+            "repository_old_wip"
+            | "repository_failed_checkpoint"
+            | "repository_missing_checkpoint" => {
+                status.latest_event_seq = 5;
+                let tail = match case {
+                    "repository_failed_checkpoint" => event(
+                        5,
+                        "wip_push_failed",
+                        serde_json::json!({
+                            "checkpoint": "terminal", "reason": "push_failed"
+                        }),
+                    ),
+                    "repository_missing_checkpoint" => event(
+                        5,
+                        "supervisor_stopped",
+                        serde_json::json!({
+                            "reason": "supervisor_stop"
+                        }),
+                    ),
+                    _ => event(
+                        5,
+                        "container_output",
+                        serde_json::json!({ "body": "stopped" }),
+                    ),
+                };
+                let mut events = vec![tail];
+                if case == "repository_failed_checkpoint" {
+                    // Older supervised images reported a clean goodbye even
+                    // after the terminal push failed.
+                    status.latest_event_seq = 6;
+                    events.push(event(
+                        6,
+                        "supervisor_stopped",
+                        serde_json::json!({ "reason": "supervisor_stop" }),
+                    ));
+                }
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: "sb-1".into(),
+                    state: SandboxState::Expired,
+                    latest_event_seq: status.latest_event_seq,
+                    events,
+                });
+            }
+            "repository_missing_idle_intent" => status.termination_reason = None,
+            "repository_wrong_origin" => {
+                status.repository_url = Some("https://github.com/acme/other".into())
+            }
             "repository_workspace" => {}
             _ => unreachable!(),
+        }
+        if matches!(
+            case,
+            "repository_missing_idle_intent" | "repository_wrong_origin"
+        ) {
+            status.latest_event_seq = 6;
+            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                sandbox_id: "sb-1".into(),
+                state: SandboxState::Expired,
+                latest_event_seq: 6,
+                events: vec![
+                    event(
+                        5,
+                        "wip_pushed",
+                        serde_json::json!({ "ref": "mg-wip/sb-1-i1" }),
+                    ),
+                    event(
+                        6,
+                        "supervisor_stopped",
+                        serde_json::json!({ "reason": "supervisor_stop" }),
+                    ),
+                ],
+            });
         }
         *fake.status_override.lock().unwrap() = Some(status);
         let status_reads = *fake.status_reads.lock().unwrap();
@@ -2031,7 +2362,31 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!row.terminal_events_journaled, "{case}");
+        assert_eq!(
+            row.terminal_events_journaled,
+            case == "repository_missing_checkpoint",
+            "{case}"
+        );
+        if old_wip {
+            assert_eq!(
+                row.last_wip_ref.as_deref(),
+                Some("mg-wip/earlier"),
+                "{case}"
+            );
+        }
+        if case == "repository_failed_checkpoint" {
+            assert_eq!(row.events_cursor, 6);
+            assert_eq!(
+                row.stop_reason.as_deref(),
+                Some("terminal_checkpoint_failed")
+            );
+        }
+        if case == "repository_missing_checkpoint" {
+            assert!(matches!(
+                current.fence_reason,
+                Some(FenceReason::IncarnationUnresolved { .. })
+            ));
+        }
         assert_eq!(fake.spawns.lock().unwrap().len(), 1, "{case}");
         assert!(fake.cancels.lock().unwrap().is_empty(), "{case}");
     }
@@ -2057,6 +2412,11 @@ mod tests {
         idle_recovery_refuses_other_failure => "other_failure",
         idle_recovery_refuses_repository_status => "repository_status",
         idle_recovery_refuses_repository_workspace => "repository_workspace",
+        idle_recovery_refuses_repository_old_wip_without_goodbye => "repository_old_wip",
+        idle_recovery_refuses_repository_failed_final_checkpoint => "repository_failed_checkpoint",
+        idle_recovery_refuses_repository_goodbye_without_checkpoint => "repository_missing_checkpoint",
+        idle_recovery_refuses_repository_without_idle_intent => "repository_missing_idle_intent",
+        idle_recovery_refuses_repository_wrong_origin => "repository_wrong_origin",
         idle_recovery_refuses_spend_stop => "spend_stop",
         idle_recovery_refuses_spent_budget => "spent_budget",
         idle_recovery_refuses_earlier_incarnation => "earlier_incarnation",

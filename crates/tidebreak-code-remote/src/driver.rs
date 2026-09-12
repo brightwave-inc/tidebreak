@@ -388,6 +388,10 @@ pub fn recovery_block(
 ) -> Option<(&'static str, &'static str)> {
     row.sandbox_id.as_ref()?;
     match row.stop_reason.as_deref() {
+        Some(tidebreak_core::db::code::TERMINAL_CHECKPOINT_FAILED) => Some((
+            "sandbox_checkpoint_failed",
+            "This sandbox could not save its final repository state. An older checkpoint may be incomplete, so follow-ups cannot restart from it. Review the failed save before explicitly starting a new session.",
+        )),
         Some("ceiling_exceeded" | "spend_ceiling_exceeded") => Some((
             "sandbox_spend_exhausted",
             "This sandbox reached its spend ceiling. Queued follow-ups cannot start another sandbox with a fresh budget. Review its work and budget before explicitly starting a new session.",
@@ -3186,6 +3190,7 @@ mod tests {
             ("spend_ceiling_exceeded", "sandbox_spend_exhausted"),
             ("failed", "sandbox_checkpoint_missing"),
             ("expired", "sandbox_checkpoint_missing"),
+            ("terminal_checkpoint_failed", "sandbox_checkpoint_failed"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
