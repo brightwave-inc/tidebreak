@@ -1862,198 +1862,208 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn idle_recovery_requires_completed_drained_scratch_output() {
-        for case in [
-            "running_turn",
-            "interrupted_turn",
-            "pending_message",
-            "unread_events",
-            "wrong_sandbox",
-            "running_sandbox",
-            "other_failure",
-            "repository_status",
-            "repository_workspace",
-            "spend_stop",
-            "spent_budget",
-            "earlier_incarnation",
-            "tail_has_turn",
-            "tail_wrong_sandbox",
-            "tail_not_terminal",
-            "tail_partial",
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
-            let repository = (case == "repository_workspace").then_some(repo.id);
-            let grant = tidebreak_core::CodeGrantId::new();
-            let (resolution, _) = runtime
-                .external_get_or_create(
+    async fn assert_idle_recovery_refuses(case: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let repository = (case == "repository_workspace").then_some(repo.id);
+        let grant = tidebreak_core::CodeGrantId::new();
+        let (resolution, _) = runtime
+            .external_get_or_create(
+                &owner,
+                None,
+                grant,
+                "slack",
+                "T1/C1/refusal",
+                repository,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+            panic!("expected creation");
+        };
+        let mut session = runtime
+            .get_session(&owner, binding.session_id)
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(&owner, session.id, "start".into(), None, None, vec![], None)
+            .await
+            .unwrap();
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".into(),
+            state: SandboxState::Failed,
+            latest_event_seq: 4,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                event(
+                    2,
+                    "assistant_record",
+                    serde_json::json!({ "body": "answer" }),
+                ),
+                event(
+                    3,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                ),
+                event(4, "failed", serde_json::json!({ "reason": "idle_ceiling" })),
+            ],
+        });
+        runtime
+            .remote_sessions()
+            .unwrap()
+            .driver(&runtime.db, runtime.bus.as_ref())
+            .pump(&mut session, 0)
+            .await
+            .unwrap();
+        let mut status = idle_status("sb-1", 4);
+        match case {
+            "pending_message" => status.pending_messages = 1,
+            "unread_events" => status.latest_event_seq = 5,
+            "wrong_sandbox" => status.sandbox_id = "another-sandbox".into(),
+            "running_sandbox" => status.state = SandboxState::Running,
+            "other_failure" => status.failure_reason = Some("wall_clock_ceiling".into()),
+            "repository_status" => {
+                status.repository_url = Some("https://github.com/test/tools".into())
+            }
+            "spend_stop" => {
+                status.state = SandboxState::CeilingExceeded;
+                status.failure_reason = Some("spend_ceiling_exceeded".into());
+            }
+            "spent_budget" => status.spend_microusd = status.spend_ceiling_microusd,
+            "running_turn" | "interrupted_turn" => {
+                let mut turn = latest_turn(&runtime.db, &owner, session.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                turn.status = if case == "running_turn" {
+                    TurnStatus::Running
+                } else {
+                    TurnStatus::Interrupted
+                };
+                tidebreak_core::db::code::save_turn(&runtime.db, &owner, &turn)
+                    .await
+                    .unwrap();
+            }
+            "earlier_incarnation" => {
+                use tidebreak_core::db::code::{
+                    activate_incarnation, create_incarnation_intent, stop_incarnation,
+                };
+                let tidebreak_core::IncarnationAdmission::Admitted(row) =
+                    create_incarnation_intent(&runtime.db, &owner, session.id, 2, 2)
+                        .await
+                        .unwrap()
+                else {
+                    panic!("expected incarnation")
+                };
+                activate_incarnation(&runtime.db, &owner, row.id, "sb-2")
+                    .await
+                    .unwrap();
+                tidebreak_core::db::code::ingest_incarnation_event(
+                    &runtime.db,
                     &owner,
-                    None,
-                    grant,
-                    "slack",
-                    "T1/C1/refusal",
-                    repository,
-                    None,
-                    HarnessKind::ClaudeCode,
-                    session_settings(),
-                    None,
-                    None,
+                    session.id,
+                    session.spawn_epoch,
+                    row.id,
+                    4,
+                    tidebreak_core::db::code::IncarnationSideEffects {
+                        journal: &[],
+                        task_output: None,
+                        wip_ref: None,
+                        terminal_events_journaled: false,
+                    },
                 )
                 .await
                 .unwrap();
-            let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
-                panic!("expected creation");
-            };
-            let mut session = runtime
-                .get_session(&owner, binding.session_id)
-                .await
-                .unwrap();
-            runtime
-                .submit_turn(&owner, session.id, "start".into(), None, None, vec![], None)
-                .await
-                .unwrap();
-            fake.event_reads.lock().unwrap().push_back(SandboxEvents {
-                sandbox_id: "sb-1".into(),
-                state: SandboxState::Failed,
-                latest_event_seq: 4,
-                events: vec![
-                    event(1, "turn_started", serde_json::json!({ "turn": 1 })),
-                    event(
-                        2,
-                        "assistant_record",
-                        serde_json::json!({ "body": "answer" }),
-                    ),
-                    event(
-                        3,
-                        "turn_completed",
-                        serde_json::json!({ "turn": 1, "exit_code": 0 }),
-                    ),
-                    event(4, "failed", serde_json::json!({ "reason": "idle_ceiling" })),
-                ],
-            });
-            runtime
-                .remote_sessions()
-                .unwrap()
-                .driver(&runtime.db, runtime.bus.as_ref())
-                .pump(&mut session, 0)
-                .await
-                .unwrap();
-            let mut status = idle_status("sb-1", 4);
-            match case {
-                "pending_message" => status.pending_messages = 1,
-                "unread_events" => status.latest_event_seq = 5,
-                "wrong_sandbox" => status.sandbox_id = "another-sandbox".into(),
-                "running_sandbox" => status.state = SandboxState::Running,
-                "other_failure" => status.failure_reason = Some("wall_clock_ceiling".into()),
-                "repository_status" => {
-                    status.repository_url = Some("https://github.com/test/tools".into())
-                }
-                "spend_stop" => {
-                    status.state = SandboxState::CeilingExceeded;
-                    status.failure_reason = Some("spend_ceiling_exceeded".into());
-                }
-                "spent_budget" => status.spend_microusd = status.spend_ceiling_microusd,
-                "running_turn" | "interrupted_turn" => {
-                    let mut turn = latest_turn(&runtime.db, &owner, session.id)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    turn.status = if case == "running_turn" {
-                        TurnStatus::Running
-                    } else {
-                        TurnStatus::Interrupted
-                    };
-                    tidebreak_core::db::code::save_turn(&runtime.db, &owner, &turn)
-                        .await
-                        .unwrap();
-                }
-                "earlier_incarnation" => {
-                    use tidebreak_core::db::code::{
-                        activate_incarnation, create_incarnation_intent, stop_incarnation,
-                    };
-                    let tidebreak_core::IncarnationAdmission::Admitted(row) =
-                        create_incarnation_intent(&runtime.db, &owner, session.id, 2, 2)
-                            .await
-                            .unwrap()
-                    else {
-                        panic!("expected incarnation")
-                    };
-                    activate_incarnation(&runtime.db, &owner, row.id, "sb-2")
-                        .await
-                        .unwrap();
-                    tidebreak_core::db::code::ingest_incarnation_event(
-                        &runtime.db,
-                        &owner,
-                        session.id,
-                        session.spawn_epoch,
-                        row.id,
-                        4,
-                        tidebreak_core::db::code::IncarnationSideEffects {
-                            journal: &[],
-                            task_output: None,
-                            wip_ref: None,
-                            terminal_events_journaled: false,
-                        },
-                    )
+                stop_incarnation(&runtime.db, &owner, row.id, Some("failed"))
                     .await
                     .unwrap();
-                    stop_incarnation(&runtime.db, &owner, row.id, Some("failed"))
-                        .await
-                        .unwrap();
-                    status.sandbox_id = "sb-2".into();
-                }
-                "tail_has_turn" | "tail_wrong_sandbox" | "tail_not_terminal" | "tail_partial" => {
-                    status.latest_event_seq = 6;
-                    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
-                        sandbox_id: if case == "tail_wrong_sandbox" {
-                            "sb-other"
+                status.sandbox_id = "sb-2".into();
+            }
+            "tail_has_turn" | "tail_wrong_sandbox" | "tail_not_terminal" | "tail_partial" => {
+                status.latest_event_seq = 6;
+                fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+                    sandbox_id: if case == "tail_wrong_sandbox" {
+                        "sb-other"
+                    } else {
+                        "sb-1"
+                    }
+                    .into(),
+                    state: if case == "tail_not_terminal" {
+                        SandboxState::Running
+                    } else {
+                        SandboxState::Failed
+                    },
+                    latest_event_seq: 6,
+                    events: vec![event(
+                        5,
+                        if case == "tail_has_turn" {
+                            "turn_started"
                         } else {
-                            "sb-1"
-                        }
-                        .into(),
-                        state: if case == "tail_not_terminal" {
-                            SandboxState::Running
-                        } else {
-                            SandboxState::Failed
+                            "container_output"
                         },
-                        latest_event_seq: 6,
-                        events: vec![event(
-                            5,
-                            if case == "tail_has_turn" {
-                                "turn_started"
-                            } else {
-                                "container_output"
-                            },
-                            serde_json::json!({ "body": "late diagnostic", "turn": 2 }),
-                        )],
-                    });
-                }
-                "repository_workspace" => {}
-                _ => unreachable!(),
+                        serde_json::json!({ "body": "late diagnostic", "turn": 2 }),
+                    )],
+                });
             }
-            *fake.status_override.lock().unwrap() = Some(status);
-            let status_reads = *fake.status_reads.lock().unwrap();
-            // Recovery sees the same persisted fence on subsequent sweeps.
-            runtime.recover().await.unwrap();
-            runtime.recover().await.unwrap();
-            if case == "other_failure" {
-                assert_eq!(
-                    *fake.status_reads.lock().unwrap(),
-                    status_reads + 1,
-                    "repeated sweeps must pace status probes"
-                );
-            }
-            let current = runtime.get_session(&owner, session.id).await.unwrap();
-            assert_eq!(current.lifecycle, SessionLifecycle::Fenced, "{case}");
-            let row = tidebreak_core::db::code::latest_incarnation(&runtime.db, &owner, session.id)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(!row.terminal_events_journaled, "{case}");
-            assert_eq!(fake.spawns.lock().unwrap().len(), 1, "{case}");
-            assert!(fake.cancels.lock().unwrap().is_empty(), "{case}");
+            "repository_workspace" => {}
+            _ => unreachable!(),
         }
+        *fake.status_override.lock().unwrap() = Some(status);
+        let status_reads = *fake.status_reads.lock().unwrap();
+        // Recovery sees the same persisted fence on subsequent sweeps.
+        runtime.recover().await.unwrap();
+        runtime.recover().await.unwrap();
+        if case == "other_failure" {
+            assert_eq!(
+                *fake.status_reads.lock().unwrap(),
+                status_reads + 1,
+                "repeated sweeps must pace status probes"
+            );
+        }
+        let current = runtime.get_session(&owner, session.id).await.unwrap();
+        assert_eq!(current.lifecycle, SessionLifecycle::Fenced, "{case}");
+        let row = tidebreak_core::db::code::latest_incarnation(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.terminal_events_journaled, "{case}");
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1, "{case}");
+        assert!(fake.cancels.lock().unwrap().is_empty(), "{case}");
+    }
+
+    macro_rules! idle_recovery_refusal_tests {
+        ($($name:ident => $case:literal),+ $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $name() {
+                    assert_idle_recovery_refuses($case).await;
+                }
+            )+
+        };
+    }
+
+    idle_recovery_refusal_tests! {
+        idle_recovery_refuses_running_turn => "running_turn",
+        idle_recovery_refuses_interrupted_turn => "interrupted_turn",
+        idle_recovery_refuses_pending_message => "pending_message",
+        idle_recovery_refuses_unread_events => "unread_events",
+        idle_recovery_refuses_wrong_sandbox => "wrong_sandbox",
+        idle_recovery_refuses_running_sandbox => "running_sandbox",
+        idle_recovery_refuses_other_failure => "other_failure",
+        idle_recovery_refuses_repository_status => "repository_status",
+        idle_recovery_refuses_repository_workspace => "repository_workspace",
+        idle_recovery_refuses_spend_stop => "spend_stop",
+        idle_recovery_refuses_spent_budget => "spent_budget",
+        idle_recovery_refuses_earlier_incarnation => "earlier_incarnation",
+        idle_recovery_refuses_tail_has_turn => "tail_has_turn",
+        idle_recovery_refuses_tail_wrong_sandbox => "tail_wrong_sandbox",
+        idle_recovery_refuses_tail_not_terminal => "tail_not_terminal",
+        idle_recovery_refuses_tail_partial => "tail_partial",
     }
 
     /// Stop on a remote session sends an interrupt to the sandbox instead of
