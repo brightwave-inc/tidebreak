@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeApprovalCard, MAX_PAYLOAD_CHARS } from "./CodeApprovalCard";
 import type { CodeApprovalSnapshot } from "../api/types";
+import { parseCodeApproval } from "./parsers";
 
 afterEach(() => {
   cleanup();
@@ -94,6 +95,31 @@ const pendingPlan: CodeApprovalSnapshot = {
 };
 
 describe("CodeApprovalCard", () => {
+  it.each([pendingCommand, pendingQuestions, pendingPlan])(
+    "shows the Slack contributor after parsing a settled $kind.type approval",
+    (pending) => {
+      const approval = parseCodeApproval({
+        ...pending,
+        id: "49fbc2e2-8a49-4f2a-a1b4-d88a4dbabf35",
+        session_id: "a61fba8a-c67f-4a50-baf7-106d5d4561ed",
+        turn_id: "7dccefd4-f54f-4c3b-bd52-399741af7c83",
+        state: "approved",
+        decided_at: "2026-09-12T12:05:00.000Z",
+        actor: {
+          principal: null,
+          channel_kind: "slack",
+          external_identity: "U-native-canary",
+          display: "Ada Lovelace",
+        },
+      });
+      expect(approval).not.toBeNull();
+      render(<CodeApprovalCard approval={approval!} onDecide={vi.fn()} />);
+      expect(screen.getByText("Decided by Ada Lovelace")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    },
+  );
+
   it("shows the literal tool action, never the model's narration", () => {
     render(<CodeApprovalCard approval={pendingToolUse} onDecide={vi.fn()} />);
     expect(screen.getByText("Run this tool?")).toBeInTheDocument();
