@@ -280,6 +280,7 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
         // chat lane never produces (a completion with no stop reason, a
         // steer with no message row, a failure with no kind).
         Event::SessionStarted { .. }
+        | Event::ModelReported { .. }
         | Event::TurnResumed { .. }
         | Event::AssistantMessage { .. }
         | Event::ToolCompleted { output: None, .. }

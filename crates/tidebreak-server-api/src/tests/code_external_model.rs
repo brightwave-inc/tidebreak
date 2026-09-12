@@ -96,16 +96,26 @@ async fn model_gateway(empty_catalog: bool) -> (String, GatewayCalls) {
         )
         .route(
             "/compat/anthropic/v1/models",
-            get(|headers: HeaderMap| async move {
+            get(|State(calls): State<GatewayCalls>, headers: HeaderMap| async move {
                 assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
-                Json(serde_json::json!({"data": [{"id":"compat-anthropic-alias"}]}))
+                let data = if calls.empty_catalog.load(Ordering::SeqCst) {
+                    vec![]
+                } else {
+                    vec![serde_json::json!({"id":"compat-anthropic-alias"})]
+                };
+                Json(serde_json::json!({"data": data}))
             }),
         )
         .route(
             "/compat/openai/v1/models",
-            get(|headers: HeaderMap| async move {
+            get(|State(calls): State<GatewayCalls>, headers: HeaderMap| async move {
                 assert!(headers[header::AUTHORIZATION].to_str().unwrap().ends_with(DELEGATED));
-                Json(serde_json::json!({"data": [{"id":"compat-openai-alias"}]}))
+                let data = if calls.empty_catalog.load(Ordering::SeqCst) {
+                    vec![]
+                } else {
+                    vec![serde_json::json!({"id":"compat-openai-alias"})]
+                };
+                Json(serde_json::json!({"data": data}))
             }),
         )
         .route(
@@ -710,6 +720,58 @@ async fn external_snapshot_labels_the_saved_model_after_channel_default_changes(
 }
 
 #[tokio::test]
+async fn external_snapshot_reports_the_observed_model_without_changing_the_selection() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let fixture = fixture_with_channel_runtime(false, true).await;
+    let (status, created) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/observed", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id: SessionId = serde_json::from_value(created["session_id"].clone()).unwrap();
+    let session = fixture
+        .runtime
+        .get_session(&fixture.grant.owner, session_id)
+        .await
+        .unwrap();
+    assert_eq!(session.harness_kind, tidebreak_core::HarnessKind::Codex);
+    tidebreak_core::db::code::append_event(
+        &fixture.runtime.db,
+        &fixture.grant.owner,
+        session_id,
+        session.spawn_epoch,
+        &tidebreak_core::Event::ModelReported {
+            model: "gpt-effective".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let address = super::code::serve(fixture.router.clone()).await;
+    let mut request = format!("ws://{address}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", fixture.bearer).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(frame["snapshot"]["model_display_name"], "gpt-effective");
+    assert_eq!(frame["snapshot"]["model"], created["model"]);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn channel_sandbox_catalog_uses_grant_without_local_cli_and_rejects_other_engines() {
     use axum::extract::FromRequestParts;
     let fixture = fixture_with_channel_runtime(false, true).await;
@@ -750,4 +812,72 @@ async fn channel_sandbox_catalog_uses_grant_without_local_cli_and_rejects_other_
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn sandbox_defaults_resolve_the_grants_model_for_http_and_direct_child_creation() {
+    let fixture = fixture_with_channel_runtime(false, true).await;
+    let (status, created) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/default-model", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["model"], "compat-openai-alias");
+    let (resolution, _) = fixture
+        .runtime
+        .external_get_or_create(
+            &fixture.grant.owner,
+            None,
+            fixture.grant.id,
+            "slack",
+            "child/default-model",
+            None,
+            None,
+            tidebreak_core::HarnessKind::Codex,
+            crate::code::runtime::NewSessionSettings::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let tidebreak_core::ExternalSessionResolution::Created(binding) = resolution else {
+        panic!("a direct child creation must create a session");
+    };
+    let session = fixture
+        .runtime
+        .get_session(&fixture.grant.owner, binding.session_id)
+        .await
+        .unwrap();
+    assert_eq!(session.model.as_deref(), Some("compat-openai-alias"));
+    assert!(fixture
+        .calls
+        .exchanges
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|token| token == DELEGATED));
+}
+
+#[tokio::test]
+async fn sandbox_without_granted_models_refuses_before_creating_a_session() {
+    let fixture = fixture_with_channel_runtime(true, true).await;
+    let (status, response) = post_external(
+        &fixture,
+        "/external/code/sessions",
+        serde_json::json!({
+            "external_key":"T1/C1/no-model", "channel_id":"C1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{response}");
+    assert!(fixture
+        .runtime
+        .list_sessions(&fixture.grant.owner)
+        .await
+        .unwrap()
+        .is_empty());
 }

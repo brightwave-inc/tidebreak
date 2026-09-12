@@ -6,6 +6,10 @@
     "resume_ref": "9f4a2c10-5a51-4a2e-9f6d-3f2c7f7a1b22"
   },
   {
+    "type": "model_reported",
+    "model": "claude-sonnet-5"
+  },
+  {
     "type": "assistant_message",
     "text": "Delegating the search to a subagent."
   },

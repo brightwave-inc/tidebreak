@@ -115,6 +115,11 @@ pub trait TurnHandle: Send {
     /// its own outcome.
     async fn interrupt(&mut self);
 
+    /// The parent engine's observed model, when its stream reports one.
+    fn effective_model(&self) -> Option<String> {
+        None
+    }
+
     /// The turn's assistant answer, when the engine surfaced one.
     ///
     /// Read once, after the turn ends: implementations may drain their

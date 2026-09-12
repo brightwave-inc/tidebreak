@@ -65,6 +65,14 @@ async fn gateway() -> (String, Gateway) {
                 "runtime_add_on": if body["audience"] == "runtime:tidebreak" { Some("tidebreak") } else { None },
             }))
         }))
+        .route("/compat/anthropic/v1/models", axum::routing::get(|headers: HeaderMap| async move {
+            assert!(headers.get("authorization").unwrap().to_str().unwrap().starts_with("Bearer llm-delegated-"));
+            Json(serde_json::json!({"data": [{"id": "claude-granted", "display_name": "Granted Claude"}]}))
+        }))
+        .route("/compat/openai/v1/models", axum::routing::get(|headers: HeaderMap| async move {
+            assert!(headers.get("authorization").unwrap().to_str().unwrap().starts_with("Bearer llm-delegated-"));
+            Json(serde_json::json!({"data": [{"id": "gpt-granted"}]}))
+        }))
         .route("/compat/openai/v1/responses", post(|headers: HeaderMap| async move {
             headers.get("authorization").unwrap().to_str().unwrap().to_owned()
         }))
@@ -434,6 +442,16 @@ async fn sandbox_admission_requires_durable_external_consent_before_accepting_wo
         panic!("completed consent must admit the session");
     };
     assert_eq!(state.mints.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .get_session(&owner, binding.session_id)
+            .await
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("claude-granted"),
+        "admission selects a model from the delegated catalog"
+    );
     tidebreak_core::db::code::record_external_message_with_context(
         &db,
         &owner,

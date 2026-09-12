@@ -382,14 +382,17 @@ fn state_token<'a>(
 
 /// A follow-up cannot authorize another budget after a spend stop. A failed
 /// checkout without a saved checkpoint cannot silently restart from the base.
-pub fn recovery_block(row: &CodeSessionIncarnation) -> Option<(&'static str, &'static str)> {
+pub fn recovery_block(
+    row: &CodeSessionIncarnation,
+    has_repository: bool,
+) -> Option<(&'static str, &'static str)> {
     row.sandbox_id.as_ref()?;
     match row.stop_reason.as_deref() {
         Some("ceiling_exceeded" | "spend_ceiling_exceeded") => Some((
             "sandbox_spend_exhausted",
             "This sandbox reached its spend ceiling. Queued follow-ups cannot start another sandbox with a fresh budget. Review its work and budget before explicitly starting a new session.",
         )),
-        Some("failed" | "expired") if row.last_wip_ref.is_none() => Some((
+        Some("failed" | "expired") if has_repository && row.last_wip_ref.is_none() => Some((
             "sandbox_checkpoint_missing",
             "This sandbox stopped without a saved checkpoint. Its work cannot be restored, so queued follow-ups will not restart from the repository base. Review the failure before explicitly starting a new session.",
         )),
@@ -734,7 +737,9 @@ impl RemoteDriver<'_> {
             if predecessor.sandbox_id.is_some() && !predecessor.terminal_events_journaled {
                 return Ok(RemoteTurnOutcome::FlushPending);
             }
-            if let Some((code, message)) = recovery_block(predecessor) {
+            if let Some((code, message)) =
+                recovery_block(predecessor, session.workspace_id.is_some())
+            {
                 refusal_notice(db, bus, session, message.to_owned(), message).await?;
                 return Ok(RemoteTurnOutcome::RecoveryBlocked {
                     code,
@@ -755,6 +760,9 @@ impl RemoteDriver<'_> {
             }
         }
         if current.is_some() {
+            if session.workspace_id.is_none() {
+                spawn_task.push_str("This conversation continues in a fresh sandbox. Temporary files from the previous sandbox are unavailable. Use saved conversation history and retrieve needed attachments again. Do not claim that previous temporary files were restored.\n\n");
+            }
             let history =
                 tidebreak_core::db::code::sandbox_resume_context(db, &owner, session.id).await?;
             if !history.is_empty() {
@@ -782,9 +790,8 @@ impl RemoteDriver<'_> {
             // Supervised answers live in the journal; a turn's narrative is
             // optional and often absent for external harnesses.
             let recent =
-                tidebreak_core::db::code::list_events(db, &owner, session.id, 0, 32).await?;
+                tidebreak_core::db::code::list_recent_events(db, &owner, session.id, 32).await?;
             let answers = recent
-                .events
                 .iter()
                 .filter_map(|entry| match &entry.event {
                     tidebreak_core::code::Event::AssistantMessage { text, .. } => {
@@ -793,7 +800,7 @@ impl RemoteDriver<'_> {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            for (seq, text) in answers.iter().rev().take(4).rev() {
+            for (seq, text) in answers.iter().take(4).rev() {
                 let excerpt = text.chars().take(512).collect::<String>();
                 spawn_task.push_str(
                     &serde_json::json!({ "historical_assistant_event": seq, "excerpt": excerpt })
@@ -3158,6 +3165,103 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn scratch_recovery_needs_no_git_checkpoint_but_preserves_spend_limits() {
+        for reason in [
+            "failed",
+            "expired",
+            "ceiling_exceeded",
+            "spend_ceiling_exceeded",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, bus, _, _, _) = seed(dir.path()).await;
+            let mut session = super::super::fixtures::session_value();
+            session.workspace_id = None;
+            tidebreak_core::db::code::insert_session(&db, &session)
+                .await
+                .unwrap();
+            let mut prior = start_turn_row(
+                &db,
+                &bus,
+                &mut session,
+                1,
+                "Remember the prior request",
+                None,
+            )
+            .await
+            .unwrap();
+            prior.status = TurnStatus::Completed;
+            tidebreak_core::db::code::set_turn_narrative(
+                &db,
+                &session.owner,
+                prior.id,
+                "The prior result is saved",
+            )
+            .await
+            .unwrap();
+            prior.ended_at = Some(chrono::Utc::now());
+            save_turn(&db, &session.owner, &prior).await.unwrap();
+            for index in 0..40 {
+                tidebreak_core::db::code::append_event(
+                    &db,
+                    &session.owner,
+                    session.id,
+                    session.spawn_epoch,
+                    &tidebreak_core::Event::AssistantMessage {
+                        text: format!("Journal answer {index}"),
+                        parent_call_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let incarnation = super::super::fixtures::seeded_incarnation(&db, &session).await;
+            stop_incarnation(&db, &session.owner, incarnation, Some(reason))
+                .await
+                .unwrap();
+            mark_incarnation_terminal_events_journaled(&db, &session.owner, incarnation)
+                .await
+                .unwrap();
+            let fake = FakeProvisioner::default();
+            let settings = settings();
+            let driver = driver!(&db, &bus, &fake, &settings);
+            let outcome = driver
+                .submit_turn(&mut session, None, None, Some("scratch"), "Continue here")
+                .await
+                .unwrap();
+            if reason.contains("ceiling") {
+                assert!(matches!(
+                    outcome,
+                    RemoteTurnOutcome::RecoveryBlocked {
+                        code: "sandbox_spend_exhausted",
+                        ..
+                    }
+                ));
+                assert!(fake.spawns.lock().unwrap().is_empty());
+            } else {
+                assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+                let spawns = fake.spawns.lock().unwrap();
+                assert_eq!(spawns.len(), 1);
+                assert!(spawns[0].task.contains("Remember the prior request"));
+                assert!(spawns[0].task.contains("The prior result is saved"));
+                assert!(spawns[0].task.contains("Journal answer 39"));
+                assert!(!spawns[0].task.contains("Journal answer 0"));
+                assert!(
+                    spawns[0].task.find("Journal answer 36")
+                        < spawns[0].task.find("Journal answer 39")
+                );
+                assert!(spawns[0].repository.is_none());
+                assert!(spawns[0].repository_ref.is_none());
+                assert!(spawns[0]
+                    .task
+                    .contains("Temporary files from the previous sandbox are unavailable"));
+                assert!(spawns[0]
+                    .task
+                    .ends_with("Current user request:\nContinue here"));
+            }
         }
     }
 

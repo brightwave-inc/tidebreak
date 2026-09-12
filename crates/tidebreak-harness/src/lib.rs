@@ -158,6 +158,11 @@ pub enum HarnessEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_ref: Option<String>,
     },
+    /// The parent engine reports the model it uses, independent of the requested selection.
+    ModelReported {
+        /// Model identifier reported by the engine.
+        model: String,
+    },
     /// A user turn has begun on the engine side.
     TurnStarted,
     /// A chunk of assistant text.

@@ -156,9 +156,10 @@ impl CodeRuntime {
                         if row.state == IncarnationState::Stopped
                             && row.terminal_events_journaled =>
                     {
-                        if let Some((_, message)) =
-                            crate::code::remote::driver::recovery_block(&row)
-                        {
+                        if let Some((_, message)) = crate::code::remote::driver::recovery_block(
+                            &row,
+                            session.workspace_id.is_some(),
+                        ) {
                             session.fence_reason = Some(FenceReason::IncarnationUnresolved {
                                 detail: message.into(),
                             });
@@ -780,9 +781,11 @@ mod remote_and_admission_tests {
     };
 
     #[tokio::test]
-    async fn automatic_remote_recovery_preserves_output_checkpoint_and_spend_gates() {
+    async fn automatic_scratch_recovery_preserves_output_and_spend_gates() {
         for (stop, checkpoint, terminal, recovered) in [
-            ("failed", None, true, false),
+            ("failed", None, true, true),
+            ("expired", None, true, true),
+            ("failed", None, false, false),
             ("ceiling_exceeded", Some("refs/heads/wip"), true, false),
             ("expired", Some("refs/heads/wip"), false, false),
             ("expired", Some("refs/heads/wip"), true, true),

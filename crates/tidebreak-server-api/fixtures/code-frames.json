@@ -1143,6 +1143,17 @@
   },
   {
     "kind": "event_frame",
+    "name": "event: model_reported",
+    "value": {
+      "event": {
+        "model": "selected-model",
+        "type": "model_reported"
+      },
+      "seq": 67
+    }
+  },
+  {
+    "kind": "event_frame",
     "name": "event: harness_notice",
     "value": {
       "event": {

@@ -172,7 +172,8 @@ impl Tool for SessionTool {
                     "repository":{"type":"string","description":"GitHub owner/name"},
                     "task":{"type":"string","maxLength":16000},
                     "request_key":{"type":"string","maxLength":128,"description":"Stable key for this task, reused on retries."},
-                    "harness":{"type":"string","description":"Optional installed harness; defaults to claude_code."}
+                    "harness":{"type":"string","description":"Optional installed harness; defaults to claude_code."},
+                    "model":{"type":"string","maxLength":160,"description":"Optional model available to this connection. Without one, a managed sandbox uses its first granted model for the selected harness protocol."}
                 }),
                 json!(["repository", "task", "request_key"]),
             ),
@@ -434,7 +435,10 @@ impl SessionTool {
         };
         let settings = NewSessionSettings {
             permission_mode,
-            model: None,
+            model: args
+                .get("model")
+                .map(|_| text(args, "model", 160).map(str::to_owned))
+                .transpose()?,
             reasoning_effort: None,
             fast_mode: false,
             permission_mode_ceiling: None,
@@ -992,9 +996,13 @@ mod tests {
             .unwrap();
             for name in ["one", "two"] {
                 let view = tool.run(&runtime, &ToolCtx::without_private_scratch(conversation.id, None), json!({
-                    "repository":format!("acme/{name}"), "task":"Inspect the repository", "request_key":name
+                    "repository":format!("acme/{name}"), "task":"Inspect the repository", "request_key":name,
+                    "model":"explicit-child-model"
                 })).await.unwrap();
                 assert_eq!(view["location"], "sandbox");
+                let id = serde_json::from_value(view["session_id"].clone()).unwrap();
+                let child = runtime.get_session(&parent.owner, id).await.unwrap();
+                assert_eq!(child.model.as_deref(), Some("explicit-child-model"));
             }
         }
         for origin in ["acme/one", "acme/two"] {

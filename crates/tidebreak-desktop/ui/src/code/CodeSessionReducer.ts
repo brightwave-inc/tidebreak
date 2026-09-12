@@ -820,6 +820,7 @@ export function reduceCodeSessionEvent(
 
   switch (event.type) {
     case "session_started":
+    case "model_reported":
       // Session metadata already comes from the durable session snapshot.
       return { state, effects };
 
