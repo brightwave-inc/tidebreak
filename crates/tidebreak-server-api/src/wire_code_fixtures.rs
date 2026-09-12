@@ -940,6 +940,15 @@ fn event_frames() -> Vec<Fixture> {
             ),
         ),
         (
+            "event: model_reported",
+            frame(
+                67,
+                Event::ModelReported {
+                    model: "selected-model".to_owned(),
+                },
+            ),
+        ),
+        (
             "event: harness_notice",
             frame(
                 54,

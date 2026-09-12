@@ -371,6 +371,26 @@ impl CodeRuntime {
                 identity,
             ));
         }
+        let mut settings = settings;
+        if location == ExecutionLocation::Sandbox
+            && matches!(harness, HarnessKind::ClaudeCode | HarnessKind::Codex)
+        {
+            let listings = match delegated.as_ref() {
+                Some(gateway) => Some(gateway.compat_listings(owner).await?),
+                None => match self.harness_llm() {
+                    Some(relay) => Some(relay.listings(owner).await?),
+                    None => None,
+                },
+            };
+            if let Some((anthropic, openai)) = listings {
+                settings.model = Some(select_external_sandbox_model(
+                    harness,
+                    settings.model.as_deref(),
+                    anthropic,
+                    openai,
+                )?);
+            }
+        }
         let workspace_grant =
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?
@@ -1559,5 +1579,92 @@ mod steer_target_tests {
         assert_eq!(native_steer_turn(4, 4).unwrap(), 1);
         assert_eq!(native_steer_turn(5, 4).unwrap(), 2);
         assert!(native_steer_turn(3, 4).is_err());
+    }
+}
+
+/// Match Gateway's sandbox bootstrap: keep an explicit granted model, otherwise
+/// select the first granted route for the engine's protocol before starting work.
+fn select_external_sandbox_model(
+    harness: HarnessKind,
+    selection: Option<&str>,
+    anthropic: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+    openai: tidebreak_core::Result<Vec<crate::obo_gateway::GatewayCompatModel>>,
+) -> Result<String, ServerError> {
+    let models: Vec<String> = match harness {
+        HarnessKind::ClaudeCode => anthropic?.into_iter().map(|row| row.id).collect(),
+        HarnessKind::Codex => openai?.into_iter().map(|row| row.id).collect(),
+        HarnessKind::Internal | HarnessKind::Opencode | HarnessKind::Grok => Vec::new(),
+    };
+    match selection {
+        Some(selected) => models.into_iter().find(|model| model == selected),
+        None => models.into_iter().next(),
+    }
+    .ok_or_else(|| {
+        ServerError::conflict_kind(
+            "model_provider_unavailable",
+            "This Slack connection cannot use the selected harness model. Choose an available model in channel settings.",
+        )
+    })
+}
+
+#[cfg(test)]
+mod external_sandbox_model_tests {
+    use super::*;
+    use crate::obo_gateway::GatewayCompatModel;
+
+    fn models(ids: &[&str]) -> tidebreak_core::Result<Vec<GatewayCompatModel>> {
+        Ok(ids
+            .iter()
+            .map(|id| GatewayCompatModel {
+                id: (*id).to_owned(),
+                display_name: None,
+                family_default: false,
+            })
+            .collect())
+    }
+
+    #[test]
+    fn defaults_and_explicit_models_use_the_engines_granted_protocol() {
+        for (harness, expected) in [
+            (HarnessKind::ClaudeCode, "claude-granted"),
+            (HarnessKind::Codex, "gpt-granted"),
+        ] {
+            assert_eq!(
+                select_external_sandbox_model(
+                    harness,
+                    None,
+                    models(&["claude-granted"]),
+                    models(&["gpt-granted", "gpt-selected"])
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            select_external_sandbox_model(
+                HarnessKind::Codex,
+                Some("gpt-selected"),
+                Err(tidebreak_core::AgentError::msg(
+                    "unused protocol is unavailable"
+                )),
+                models(&["gpt-granted", "gpt-selected"])
+            )
+            .unwrap(),
+            "gpt-selected"
+        );
+        assert!(select_external_sandbox_model(
+            HarnessKind::Codex,
+            Some("native-ungranted"),
+            models(&[]),
+            models(&["gpt-granted"])
+        )
+        .is_err());
+        assert!(select_external_sandbox_model(
+            HarnessKind::Codex,
+            None,
+            models(&["claude-granted"]),
+            models(&[])
+        )
+        .is_err());
     }
 }
