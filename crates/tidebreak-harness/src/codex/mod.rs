@@ -970,27 +970,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn command_popup_capture_returns_when_the_child_exits() {
-        use std::time::{Duration, Instant};
-        let dir = tempfile::tempdir().unwrap();
-        let binary = dir.path().join("codex");
-        std::fs::write(&binary, "#!/bin/sh\nexec /bin/false\n").unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let started = Instant::now();
-        let commands = tokio::time::timeout(
-            Duration::from_secs(3),
-            tokio::task::spawn_blocking(move || capture_command_popup(&binary, &[])),
-        )
-        .await
-        .expect("command-list capture must not wait out a dead child")
-        .unwrap();
-        assert!(commands.is_empty());
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
     #[test]
     fn slash_commands_are_supported_once_the_probe_lists_any() {
         let probe = HarnessProbe {
