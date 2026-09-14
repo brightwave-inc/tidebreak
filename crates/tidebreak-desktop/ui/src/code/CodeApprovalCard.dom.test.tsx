@@ -149,8 +149,8 @@ describe("CodeApprovalCard", () => {
     render(<CodeApprovalCard approval={pendingPlan} onDecide={vi.fn()} />);
     expect(screen.getByText("Approve this plan?")).toBeInTheDocument();
     expect(screen.getByText("auto")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
   });
 
   it("leads with the command and keeps the harness payload collapsed", () => {

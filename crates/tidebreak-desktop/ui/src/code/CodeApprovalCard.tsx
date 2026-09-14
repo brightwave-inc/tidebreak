@@ -40,8 +40,6 @@ export function CodeApprovalCard({
   const [payloadOpen, setPayloadOpen] = useState(false);
   const payloadId = useId();
   const decided = approval.state !== "pending";
-  const canDecide =
-    approval.kind.type !== "questions" && approval.kind.type !== "plan";
   const decidedBy = actorLabel(approval.actor);
 
   useEffect(() => {
