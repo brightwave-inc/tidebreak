@@ -629,8 +629,6 @@ describe("terminal transcript presentation", () => {
           chat_id: "chat-1",
           turn_id: "turn-remembered",
           code_session_id: null,
-          code_turn_id: null,
-          workspace_id: null,
         },
         evidence: [{ kind: "message" as const, message_id: "answer" }],
       },

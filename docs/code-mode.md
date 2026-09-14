@@ -578,7 +578,7 @@ GET             /approvals                     pending approvals
 POST            /approvals/{id}/decision       settle an approval
 WS              /updates                       shared updates stream
 
-POST/GET/DELETE /code/workspaces/{id}/terminals      DELETE closes every terminal at once
+POST/GET         /code/workspaces/{id}/terminals
 DELETE          /code/workspaces/{id}/terminals/{tid}    close one
 GET             /code/workspaces/{id}/terminals/{tid}/read?cursor=
 POST            /code/workspaces/{id}/terminals/{tid}/write | /resize

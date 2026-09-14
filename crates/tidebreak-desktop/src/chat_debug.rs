@@ -900,20 +900,21 @@ fn pretty_if_json(raw: &str) -> String {
 fn push_fenced(out: &mut String, language: &str, content: &str, cap: Option<usize>) {
     let (body, note) = match cap {
         Some(cap) if content.len() > cap => {
-            let cut = floor_char_boundary(content, cap);
+            let (body, _) = tidebreak_core::truncate_utf8(content, cap);
+            let cut = body.len();
             (
-                &content[..cut],
+                body,
                 Some(format!(
                     "\n_Truncated: {cut} of {} bytes shown._\n",
                     content.len()
                 )),
             )
         }
-        _ => (content, None),
+        _ => (content.to_owned(), None),
     };
-    let fence = "`".repeat(longest_backtick_run(body).max(2) + 1);
+    let fence = "`".repeat(longest_backtick_run(&body).max(2) + 1);
     let _ = writeln!(out, "{fence}{language}");
-    out.push_str(body);
+    out.push_str(&body);
     if !body.ends_with('\n') {
         out.push('\n');
     }
@@ -936,14 +937,6 @@ fn longest_backtick_run(content: &str) -> usize {
         }
     }
     longest
-}
-
-fn floor_char_boundary(value: &str, index: usize) -> usize {
-    let mut index = index.min(value.len());
-    while index > 0 && !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }
 
 #[derive(Debug, Deserialize)]

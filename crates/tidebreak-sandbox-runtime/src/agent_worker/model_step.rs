@@ -408,11 +408,11 @@ pub(super) enum SandboxToolCallDisposition {
 pub(super) fn rejection_result(message: &str) -> String {
     let mut result: String = message.chars().filter(|byte| *byte != '\0').collect();
     if result.len() > tidebreak_core::SandboxToolCall::MAX_RESULT_BYTES {
-        let mut cut = tidebreak_core::SandboxToolCall::MAX_RESULT_BYTES;
-        while cut > 0 && !result.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        result.truncate(cut);
+        result = tidebreak_core::truncate_utf8(
+            &result,
+            tidebreak_core::SandboxToolCall::MAX_RESULT_BYTES,
+        )
+        .0;
     }
     if result.trim().is_empty() {
         return "The call could not be dispatched.".to_owned();

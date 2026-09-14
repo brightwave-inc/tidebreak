@@ -85,6 +85,26 @@ A bare `tidebreak` with no arguments runs `serve`.
 Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
 for `run` and `watch`).
 
+The code family is a thin client of the server API, not a second product
+surface. These server capabilities stay HTTP-only on purpose — they are
+interactive desktop or agent-MCP workflows, and a CLI verb would either
+duplicate the desktop or invent a gate the interactive CLI does not have:
+
+- Queued follow-ups (`list_queued_code_turns` is used by `agent-mcp`; there is
+  no `tidebreak code queue` verb)
+- Mid-turn steer, reasoning effort, and fast mode
+- Forking a session into a transcript for another engine
+- Triggers
+- Auxiliary terminals
+- Pull-request comments, merge, ready, and check-log download
+- Delivery center
+- Analytics and subscription usage
+- Checkpoint restore and retry-setup
+- Worktree search, tree, and blob
+- Worktree-root configuration
+- Clone
+- `code repo add` setup/archive scripts and quick actions
+
 Code mode always drives Tidebreak's pinned harness packages through its exact
 managed Node runtime. The desktop app provisions that runtime; a headless
 server can reuse it when it starts with the same `TIDEBREAK_DATA_DIR`, but does

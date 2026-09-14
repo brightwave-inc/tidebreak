@@ -28,16 +28,17 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use tidebreak_harness::{spawn_process_tree, BoundedProcessOutput, OutputBudget};
+use tidebreak_harness::{BoundedProcessOutput, OutputBudget};
 use tokio::process::Command;
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{timeout_at, Instant};
+
+use super::git_runner;
 use tracing::warn;
 
 use tidebreak_core::code::SequencedEvent;
@@ -51,12 +52,10 @@ use tidebreak_core::{
 
 use super::bus::CodeEventBus;
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_TIMEOUT: Duration = git_runner::GIT_TIMEOUT;
 const GIT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
-const GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const GIT_OUTPUT_LINES: usize = 200_000;
-const GIT_ERROR_BYTES: usize = 64 * 1024;
-const GIT_ERROR_LINES: usize = 2_048;
+const GIT_OUTPUT_BYTES: usize = git_runner::STDOUT_BYTES;
+const GIT_OUTPUT_LINES: usize = git_runner::STDOUT_LINES;
 const MAX_DIFF_LINES: usize = 32_768;
 
 /// Default bound on a unified-diff body.
@@ -1445,14 +1444,8 @@ async fn git_bytes_with_literal_paths_bounded(
 }
 
 fn git_command(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = git_runner::git_command(Some(cwd));
     command
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "Tidebreak")
         .env("GIT_AUTHOR_EMAIL", "tidebreak@localhost")
         .env("GIT_COMMITTER_NAME", "Tidebreak")
@@ -1505,19 +1498,19 @@ async fn run_git_command_bounded_typed(
     stdout_budget: OutputBudget,
     accept_truncated_stdout: bool,
 ) -> Result<(Vec<u8>, bool), GitCommandError> {
-    let child = spawn_process_tree(&mut command)
-        .map_err(|err| GitCommandError::Failed(format!("failed to spawn git: {err}")))?;
-    let output = timeout(
+    let labeled = format!("git {description}");
+    let output = git_runner::wait_command_bounded(
+        &mut command,
         limit,
-        child.wait_with_bounded_output(
-            stdout_budget,
-            OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
-            true,
-        ),
+        stdout_budget,
+        git_runner::default_stderr_budget(),
+        &labeled,
     )
     .await
-    .map_err(|_| GitCommandError::timed_out(&description))?
-    .map_err(|err| GitCommandError::Failed(format!("git {description} failed: {err}")))?;
+    .map_err(|err| match err {
+        git_runner::BoundedCommandError::TimedOut => GitCommandError::timed_out(&description),
+        git_runner::BoundedCommandError::Failed(message) => GitCommandError::Failed(message),
+    })?;
     finish_git_output(output, &description, accept_truncated_stdout)
         .map_err(GitCommandError::Failed)
 }
@@ -1527,36 +1520,12 @@ fn finish_git_output(
     description: &str,
     accept_truncated_stdout: bool,
 ) -> Result<(Vec<u8>, bool), String> {
-    let stdout_truncated = output.stdout.truncated;
-    let stderr_truncated = output.stderr.truncated;
-    let stderr_empty = output.stderr.bytes.is_empty();
-    if output.status.success() && !output.terminated_for_output {
-        return if stdout_truncated && !accept_truncated_stdout {
-            Err(format!("git {description} output exceeded its limit"))
-        } else {
-            Ok((output.stdout.bytes, stdout_truncated))
-        };
-    }
-    if output.terminated_for_output
-        && stdout_truncated
-        && !stderr_truncated
-        && stderr_empty
-        && accept_truncated_stdout
-    {
-        return Ok((output.stdout.bytes, true));
-    }
-
-    let stdout = output.stdout.into_marked_text().trim().to_owned();
-    let stderr = output.stderr.into_marked_text().trim().to_owned();
-    if output.terminated_for_output {
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(if detail.is_empty() {
-            format!("git {description} output exceeded its limit")
-        } else {
-            format!("git {description} output exceeded its limit: {detail}")
-        });
-    }
-    Err(if stderr.is_empty() { stdout } else { stderr })
+    git_runner::finish_bounded_command(
+        output,
+        accept_truncated_stdout,
+        &format!("git {description} output exceeded its limit"),
+        true,
+    )
 }
 
 /// Fingerprint of the user's `HEAD` and index, used to prove a checkpoint

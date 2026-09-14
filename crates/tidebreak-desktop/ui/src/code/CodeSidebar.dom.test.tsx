@@ -54,7 +54,6 @@ const client = {
   getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
   getCodeSubscriptionUsage: vi.fn(async () => ({
     source: "model_gateway" as const,
-    diagnostics: [],
     providers: [
       {
         id: "anthropic",
@@ -64,15 +63,11 @@ const client = {
             id: "personal",
             label: "Personal",
             is_own: true,
-            state: "available",
-            updated_at_unix_seconds: Math.floor(Date.now() / 1000),
             windows: [
               {
                 key: "7d-fable",
                 label: "Weekly (Fable)",
                 used_percent: 91,
-                resets_at_unix_seconds: Math.floor(Date.now() / 1000) + 3600,
-                status: "allowed_warning",
               },
             ],
           },

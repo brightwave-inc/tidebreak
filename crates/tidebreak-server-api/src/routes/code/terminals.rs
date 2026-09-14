@@ -54,20 +54,6 @@ pub async fn list_terminals(
     ))
 }
 
-pub async fn close_workspace_terminals(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    code: ScopedCode,
-    Path(id): Path<WorkspaceId>,
-) -> Result<StatusCode, ServerError> {
-    let _ = code.require_workspace_owner(id).await?;
-    if !state.terminals.close_workspace_and_wait(id).await {
-        return Err(map_terminal(TerminalError::Io(
-            "terminal shutdown did not complete".into(),
-        )));
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
 pub async fn close_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
     code: ScopedCode,

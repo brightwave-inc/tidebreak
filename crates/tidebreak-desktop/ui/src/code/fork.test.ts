@@ -32,10 +32,7 @@ describe("forkFraming", () => {
   it("tells the child to read the transcript before the records", () => {
     const framing = forkFraming({
       path: "/private/forks/s1/g1/transcript.md",
-      dir: "/private/forks/s1/g1",
-      byte_len: 2_048,
       turns: 12,
-      total_turns: 12,
       truncated: false,
     });
     expect(framing).toContain("Read the attached transcript first");
@@ -51,10 +48,7 @@ describe("forkFraming", () => {
   it("warns about later work when the fork stopped before the newest turn", () => {
     const framing = forkFraming({
       path: "/private/forks/s1/g2/transcript.md",
-      dir: "/private/forks/s1/g2",
-      byte_len: 2_048,
       turns: 7,
-      total_turns: 7,
       at_turn_ordinal: 7,
       truncated: false,
     });
@@ -68,10 +62,7 @@ describe("forkTranscriptFile", () => {
     expect(
       forkTranscriptFile({
         path: "/private/forks/s1/g1/transcript.md",
-        dir: "/private/forks/s1/g1",
-        byte_len: 2_048,
         turns: 12,
-        total_turns: 12,
         truncated: false,
       }),
     ).toEqual({
@@ -85,10 +76,7 @@ describe("forkTranscriptFile", () => {
     expect(
       forkTranscriptFile({
         path: "/private/forks/s2/g1/transcript.md",
-        dir: "/private/forks/s2/g1",
-        byte_len: 524_288,
         turns: 1,
-        total_turns: 40,
         truncated: true,
       }).detail,
     ).toBe("Transcript, most recent 1 turn");

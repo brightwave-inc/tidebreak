@@ -1145,9 +1145,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/workspaces/{id}/terminals",
-            post(routes::code::create_terminal)
-                .get(routes::code::list_terminals)
-                .delete(routes::code::close_workspace_terminals),
+            post(routes::code::create_terminal).get(routes::code::list_terminals),
         )
         .route(
             "/code/workspaces/{id}/terminals/{tid}",

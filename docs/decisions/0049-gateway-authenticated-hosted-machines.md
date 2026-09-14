@@ -1,6 +1,6 @@
 # 49. Gateway-authenticated hosted machines
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-19
 - Owners: server, desktop
 - Related: [`0047-gateway-linked-hosting.md`](0047-gateway-linked-hosting.md),

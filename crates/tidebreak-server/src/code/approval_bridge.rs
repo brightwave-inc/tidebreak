@@ -666,12 +666,6 @@ async fn handle_memory_tool(
                 Some("reference") => MemoryKind::Reference,
                 _ => MemoryKind::Fact,
             };
-            let turn = tidebreak_core::db::code::get_open_turn(
-                &runtime.db,
-                &session.owner,
-                subject.session_id,
-            )
-            .await?;
             let events = tidebreak_core::db::code::list_recent_events(
                 &runtime.db,
                 &session.owner,
@@ -699,8 +693,6 @@ async fn handle_memory_tool(
                     author: MemoryAuthor::Model,
                     origin: MemoryOrigin {
                         code_session_id: Some(subject.session_id),
-                        code_turn_id: turn.as_ref().map(|turn| turn.id),
-                        workspace_id: session.workspace_id,
                         ..Default::default()
                     },
                     evidence: vec![MemoryEvidence::Event {

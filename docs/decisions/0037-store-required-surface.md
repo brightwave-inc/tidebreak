@@ -1,6 +1,6 @@
 # 37. Store methods that both real impls provide are required
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: persistence
 - Related: [`crates/tidebreak-core/src/storage/store.rs`](../../crates/tidebreak-core/src/storage/store.rs)

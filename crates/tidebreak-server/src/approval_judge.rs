@@ -272,7 +272,8 @@ fn conversation_digest(messages: &[Message]) -> Vec<JudgeContextMessage> {
         .collect();
     let mut digest = Vec::new();
     for message in recent.into_iter().rev() {
-        let text = head(message.content.trim(), MAX_CONTEXT_MESSAGE_BYTES);
+        let (text, _) =
+            tidebreak_core::truncate_utf8(message.content.trim(), MAX_CONTEXT_MESSAGE_BYTES);
         if text.is_empty() {
             continue;
         }
@@ -280,10 +281,7 @@ fn conversation_digest(messages: &[Message]) -> Vec<JudgeContextMessage> {
             Role::User => JudgeSpeaker::User,
             _ => JudgeSpeaker::Assistant,
         };
-        digest.push(JudgeContextMessage {
-            speaker,
-            text: text.to_owned(),
-        });
+        digest.push(JudgeContextMessage { speaker, text });
     }
     digest
 }
@@ -481,18 +479,6 @@ async fn request_verdict(
     }
     serde_json::from_str(strip_json_fence(content.trim()))
         .map_err(|error| AgentError::msg(format!("judge returned invalid JSON: {error}")))
-}
-
-/// The leading `max_bytes` of `text`, cut on a character boundary.
-fn head(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// Unwrap a fenced code block, for runtimes that accept an output constraint

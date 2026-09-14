@@ -202,8 +202,6 @@ function parseMemoryOrigin(value: unknown): MemoryOrigin | null {
       "chat_id",
       "turn_id",
       "code_session_id",
-      "code_turn_id",
-      "workspace_id",
     ])
   ) {
     return null;
@@ -212,8 +210,6 @@ function parseMemoryOrigin(value: unknown): MemoryOrigin | null {
     value.chat_id,
     value.turn_id,
     value.code_session_id,
-    value.code_turn_id,
-    value.workspace_id,
   ] as unknown[]) {
     if (!(id === undefined || id === null || nonEmptyBounded(id, 128))) {
       return null;
@@ -224,10 +220,6 @@ function parseMemoryOrigin(value: unknown): MemoryOrigin | null {
     turn_id: typeof value.turn_id === "string" ? value.turn_id : null,
     code_session_id:
       typeof value.code_session_id === "string" ? value.code_session_id : null,
-    code_turn_id:
-      typeof value.code_turn_id === "string" ? value.code_turn_id : null,
-    workspace_id:
-      typeof value.workspace_id === "string" ? value.workspace_id : null,
   };
 }
 
