@@ -543,7 +543,9 @@ export const PullRequestStackDetail: Story = {
   args: { scenario: "pull-requests-stacked" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByText("Stack base: extract the fact store"));
+    await userEvent.click(
+      canvas.getByText("Stack base: extract the fact store"),
+    );
   },
 };
 
@@ -556,7 +558,9 @@ export const PullRequestStackDetailWithoutAutoMerge: Story = {
   args: { scenario: "pull-requests-stacked-auto-merge-unavailable" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByText("Stack base: extract the fact store"));
+    await userEvent.click(
+      canvas.getByText("Stack base: extract the fact store"),
+    );
   },
 };
 
