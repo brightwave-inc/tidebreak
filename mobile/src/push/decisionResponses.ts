@@ -22,15 +22,20 @@
  * that will be refused, the press degrades to a tray message pointing at the
  * app. Administrator verbs are not offered at all: a notification is written
  * for the run's owner, and the owner cancel is the right (and only) verb.
+ *
+ * The slug itself is never a reason to refuse: `runtimeSlug.ts` records why a
+ * fallback always mints a working token, so discovery failing here costs the
+ * audit trail a meaningful audience and nothing else.
  */
 
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
-import { fetchRefusingRedirects } from "../lib/http";
+import type { AppListResponse } from "../lib/consoleTypes";
+import { GatewayClient, hasErrorCode } from "../lib/gatewayClient";
 import { claimNotificationResponse } from "../lib/push";
 import { grantsRuntimeExecute } from "../lib/scope";
 import { RESOURCE_CONTROL, runtimeResource } from "../lib/resource";
-import { validatedBaseUrl } from "../lib/url";
+import { runtimeSlugFrom } from "../lib/runtimeSlug";
 import {
   connections,
   hydrateConnections,
@@ -124,65 +129,50 @@ function connectionFor(installationId: string | null): GatewayConnection | null 
 }
 
 /**
- * The MCP endpoint slug whose `runtime:<slug>` resource carries the owner
- * verbs, discovered from the member catalog. Deliberately not guessed: a
- * wrong slug is refused by the gateway, and a refusal the user cannot read is
- * worse than an honest "open the app".
+ * A client for one resource of a *named* connection.
+ *
+ * Deliberately not `consoleClients.ts`: those factories resolve whichever
+ * connection is active, and a push can name a gateway that is not it. Minting
+ * against the connection the payload names — rather than switching the active
+ * one to match — keeps a tray press from silently re-pointing the whole app.
  */
-async function runtimeSlug(
-  gatewayUrl: string,
-  accessToken: string,
-): Promise<string | null> {
-  try {
-    const response = await fetchRefusingRedirects(
-      `${validatedBaseUrl(gatewayUrl)}/api/v1/cli/apps`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-    if (!response.ok) {
-      return null;
-    }
-    const body = (await response.json()) as {
-      apps?: { mcp_endpoint_slugs?: unknown }[];
-    };
-    for (const app of body.apps ?? []) {
-      const slugs = app.mcp_endpoint_slugs;
-      if (Array.isArray(slugs)) {
-        const slug = slugs.find(
-          (value): value is string =>
-            typeof value === "string" && value.length > 0,
-        );
-        if (slug) {
-          return slug;
-        }
-      }
-    }
-    return null;
-  } catch {
+function clientFor(
+  connection: GatewayConnection,
+  resource: string,
+): GatewayClient | null {
+  const store = connections.tokensFor(connection.id);
+  if (!store) {
     return null;
   }
+  return new GatewayClient({
+    baseUrl: connection.gatewayUrl,
+    resource,
+    tokens: { getAccessToken: (wanted) => store.getAccessToken(wanted) },
+  });
 }
 
-async function runtimeRequest(
-  gatewayUrl: string,
-  accessToken: string,
-  path: string,
-  body?: unknown,
-): Promise<void> {
-  const response = await fetchRefusingRedirects(
-    `${validatedBaseUrl(gatewayUrl)}${path}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`${path} failed (HTTP ${response.status})`);
+/**
+ * The runtime slug for this connection.
+ *
+ * Uncached, unlike `consoleClients.ts`: a tray press is a rare event, and a
+ * headless launch would not see that module's cache anyway. Discovery failing
+ * is not an error — `runtimeSlugFrom` falls back to a slug that mints a working
+ * token, because the verbs bind to the caller rather than to an endpoint
+ * (`runtimeSlug.ts`).
+ */
+async function resolveRuntimeSlug(
+  connection: GatewayConnection,
+): Promise<string> {
+  let apps: AppListResponse | null = null;
+  try {
+    apps =
+      (await clientFor(connection, RESOURCE_CONTROL)?.request<AppListResponse>(
+        "/api/v1/cli/apps",
+      )) ?? null;
+  } catch {
+    apps = null;
   }
+  return runtimeSlugFrom(apps);
 }
 
 async function performDecisionAction(
@@ -194,27 +184,19 @@ async function performDecisionAction(
 ): Promise<void> {
   const [pendingTitle, pendingBody] = pendingCopy(action, runName);
   await presentFeedback(response, pendingTitle, pendingBody, true);
-  const store = connections.tokensFor(connection.id);
-  if (!store) {
-    await degrade(response, action, runName);
-    return;
-  }
   try {
-    const control = await store.getAccessToken(RESOURCE_CONTROL);
-    const slug = await runtimeSlug(connection.gatewayUrl, control);
-    if (!slug) {
+    const slug = await resolveRuntimeSlug(connection);
+    const runtime = clientFor(connection, runtimeResource(slug));
+    if (!runtime) {
       await degrade(response, action, runName);
       return;
     }
-    const runtime = await store.getAccessToken(runtimeResource(slug));
     const id = encodeURIComponent(sandboxId);
     if (action === "nudge") {
-      await runtimeRequest(
-        connection.gatewayUrl,
-        runtime,
-        `/api/v1/runtime/sandboxes/${id}/messages`,
-        { body: NUDGE_MESSAGE_BODY, interrupt: true },
-      );
+      await runtime.request(`/api/v1/runtime/sandboxes/${id}/messages`, {
+        method: "POST",
+        body: { body: NUDGE_MESSAGE_BODY, interrupt: true },
+      });
       await presentFeedback(
         response,
         "Nudge sent",
@@ -223,11 +205,9 @@ async function performDecisionAction(
       );
       return;
     }
-    await runtimeRequest(
-      connection.gatewayUrl,
-      runtime,
-      `/api/v1/runtime/sandboxes/${id}/cancel`,
-    );
+    await runtime.request(`/api/v1/runtime/sandboxes/${id}/cancel`, {
+      method: "POST",
+    });
     await presentFeedback(
       response,
       action === "accept_stop" ? "Accepted" : "Cancelling",
@@ -236,7 +216,22 @@ async function performDecisionAction(
         : `${runName} is being cancelled.`,
       false,
     );
-  } catch {
+  } catch (error) {
+    // The run may have ended between the push and the press. The gateway says
+    // so rather than acting, and that is a calm "already finished" rather than
+    // a failure worth asking the user to retry.
+    if (
+      hasErrorCode(error, "sandbox_already_terminal") ||
+      hasErrorCode(error, "sandbox_unavailable")
+    ) {
+      await presentFeedback(
+        response,
+        "Already finished",
+        `${runName} ended before your response arrived — nothing to do.`,
+        false,
+      );
+      return;
+    }
     // Includes the locked-device path: the credential lives in the keychain
     // and can be unreadable before first unlock, which surfaces here as a
     // failed request rather than a crash.

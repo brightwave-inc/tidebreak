@@ -100,7 +100,11 @@ Push rides the gateway (mg ADR 0093) and is offered only where
 - Decision kinds carry action buttons (Nudge / Cancel / Accept & stop). They
   use the owner-scoped runtime verbs, so a session whose grant lacks
   `runtime:execute` degrades to a tray message pointing back at the app rather
-  than firing a request the gateway would refuse.
+  than firing a request the gateway would refuse. The `runtime:<slug>` audience
+  is resolved through `runtimeSlug.ts`, so a member on an installation that
+  serves no MCP endpoint can still cancel and steer their own runs from the
+  tray. A run that ended between the push and the press reads as "Already
+  finished" rather than as a failure.
 - **Android is display-form only today.** This repository ships no
   `google-services.json`, so an Android build has no FCM registration, never
   claims `renders_data_messages`, and therefore receives ordinary tap-only

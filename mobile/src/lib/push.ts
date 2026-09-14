@@ -17,10 +17,11 @@
  * gate on; callers that skip the gate get a refusal, not a silent no-op.
  */
 
-import { fetchRefusingRedirects, type HttpFetch } from "./http";
+import { GatewayClient } from "./gatewayClient";
+import type { HttpFetch } from "./http";
+import { RESOURCE_CONTROL } from "./resource";
 import type { SecureStorage } from "./storage";
 import type { GatewayMeta } from "./types";
-import { validatedBaseUrl } from "./url";
 
 /** One kind's effective setting, as the gateway reports it. */
 export type PushPreference = {
@@ -75,31 +76,17 @@ async function cliRequest(
   init: { method: string; body?: unknown; signal?: AbortSignal },
   fetchImpl?: HttpFetch,
 ): Promise<unknown> {
-  const base = validatedBaseUrl(gatewayUrl);
-  const response = await fetchRefusingRedirects(
-    `${base}${path}`,
-    {
-      method: init.method,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      ...(init.body === undefined
-        ? {}
-        : { body: JSON.stringify(init.body) }),
-      ...(init.signal ? { signal: init.signal } : {}),
-    },
-    fetchImpl,
-  );
-  if (!response.ok) {
-    throw new Error(`${path} failed (HTTP ${response.status})`);
-  }
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
+  // The shared client owns redirect refusal and both refusal wire shapes
+  // (`gatewayClient.ts`). These routes authenticate the already-minted
+  // `control` token rather than a resource this module mints, so the token
+  // source simply hands it back.
+  const client = new GatewayClient({
+    baseUrl: gatewayUrl,
+    resource: RESOURCE_CONTROL,
+    tokens: { getAccessToken: async () => accessToken },
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
+  return client.request<unknown>(path, init);
 }
 
 /** Idempotent upsert of this connection's device row. */
