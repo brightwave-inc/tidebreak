@@ -190,11 +190,13 @@ text line, and keep the title on one line. Expand while work is still
 happening, and expand a failed card so the error is one click away; a
 settled, successful card collapses to a single row.
 
-`ApprovalCard` is the canonical consent surface. It leads with a short
-question, shows the exact action in a muted preview block, and lists
-choices as numbered rows ordered narrowest grant first. Destructive or
-irreversible actions open a dialog instead; do not use an approval card
-for a delete confirmation.
+`ApprovalCard` is the canonical consent surface for command, file, network,
+and tool-use grants. It leads with a short question, shows the exact action in
+a muted preview block, and lists choices as numbered rows ordered narrowest
+grant first. Question and plan continuations use their own answer protocols;
+never render them as binary approval choices. Destructive or irreversible
+actions open a dialog instead; do not use an approval card for a delete
+confirmation.
 
 `ChatStatusChip` is the canonical activity summary for a conversation.
 It shows live work first, outputs otherwise, and collapses to a compact

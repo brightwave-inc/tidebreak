@@ -372,6 +372,12 @@ export function BrowserToolbar({
             </WithTooltip>
           )}
 
+        {engine?.capabilities.developerDiagnostics && (
+          <span className="shrink-0 text-2xs font-medium text-muted-foreground">
+            Developer diagnostics
+          </span>
+        )}
+
         {viewportControl && (
           <div className="shrink-0">
             {isValidElement(viewportControl)
