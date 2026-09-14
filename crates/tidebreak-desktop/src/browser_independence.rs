@@ -12,7 +12,7 @@ pub(crate) const SHARED_TAB: &str = "This tab has no independent agent host. Ope
 pub(crate) const UNAVAILABLE: &str = "Independent in-app browser input is unavailable in this build. Use chrome_connect with mode managed for an independent browser. No input was sent.";
 
 pub(crate) fn available() -> bool {
-    cfg!(all(target_os = "macos", feature = "independent-wk-host"))
+    cfg!(target_os = "macos")
 }
 
 pub(crate) fn require_available() -> Result<(), String> {
@@ -40,7 +40,7 @@ pub(crate) fn require_host(
     workspace_id: &str,
     fence: BrowserObservationFence,
 ) -> Result<(), String> {
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     {
         validate_host(available(), crate::agent_browser_host::has_host(webview)?)?;
         crate::agent_browser_host::authorize_input(
@@ -51,7 +51,7 @@ pub(crate) fn require_host(
             fence.instance_id,
         )
     }
-    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (webview, registry, capability_id, workspace_id, fence);
         validate_host(available(), false)
@@ -68,29 +68,21 @@ pub(crate) fn require_native_host(
     fence: BrowserObservationFence,
 ) -> Result<(), String> {
     require_host(webview, registry, capability_id, workspace_id, fence)?;
-    #[cfg(feature = "independent-wk-host")]
-    {
-        crate::agent_browser_host::verify_native_window(view)?;
-        crate::agent_browser_dialogs::verify(view)?;
-        crate::agent_browser_dialogs::take_blocked(view)
-    }
-    #[cfg(not(feature = "independent-wk-host"))]
-    {
-        let _ = view;
-        Err(UNAVAILABLE.to_owned())
-    }
+    crate::agent_browser_host::verify_native_window(view)?;
+    crate::agent_browser_dialogs::verify(view)?;
+    crate::agent_browser_dialogs::take_blocked(view)
 }
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 struct NavigationSubmission {
     sender: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     deadline: tokio::time::Instant,
 }
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 struct NavigationCancellation(std::sync::Arc<std::sync::Mutex<NavigationSubmission>>);
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 impl Drop for NavigationCancellation {
     fn drop(&mut self) {
         if let Ok(mut state) = self.0.lock() {
@@ -99,7 +91,7 @@ impl Drop for NavigationCancellation {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 fn submit_navigation(
     state: &std::sync::Mutex<NavigationSubmission>,
     submit: impl FnOnce() -> Result<(), String>,
@@ -134,7 +126,7 @@ pub(crate) async fn navigate(
     destination_origin: &tidebreak_core::BrowserOrigin,
 ) -> Result<(), String> {
     require_host(webview, registry, capability_id, workspace_id, fence)?;
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     {
         use objc2_foundation::{NSString, NSURLRequest, NSURL};
         use std::sync::{Arc, Mutex};
@@ -197,7 +189,7 @@ pub(crate) async fn navigate(
             .map_err(|_| "independent browser navigation timed out".to_owned())?
             .map_err(|_| "independent browser navigation was interrupted".to_owned())?
     }
-    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (browser_id, origin, destination, destination_origin);
         Err(UNAVAILABLE.to_owned())
@@ -226,12 +218,9 @@ mod tests {
 
     #[test]
     fn feature_disabled_build_cannot_authorize_browser_open() {
-        assert_eq!(
-            require_available().is_ok(),
-            cfg!(all(target_os = "macos", feature = "independent-wk-host"))
-        );
+        assert_eq!(require_available().is_ok(), cfg!(target_os = "macos"));
     }
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn canceled_navigation_never_loads_an_autofocusing_page() {
         use std::sync::{Arc, Mutex};
@@ -244,7 +233,7 @@ mod tests {
         submit_navigation(&state, || panic!("a canceled navigation loaded a page"));
     }
 
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn queued_navigation_checks_deadline_and_receiver_before_loading() {
         use std::sync::Mutex;
@@ -268,7 +257,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn active_navigation_returns_the_guard_result_once() {
         use std::sync::Mutex;

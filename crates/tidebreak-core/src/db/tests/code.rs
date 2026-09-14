@@ -20,9 +20,10 @@ use crate::db::code::{
     queued_turn_head, recover_interrupted_session, replace_session_attention,
     replace_session_execution_settings, save_session, save_turn, save_workspace,
     search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
-    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
-    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
-    CodeTranscriptSearchSource, JournalError, SessionExecutionSettings, MAX_REPLAY_EVENTS,
+    set_session_context, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    set_turn_rewrite, set_workspace_title_if, settle_approval_claim, update_queued_turn,
+    ClaimedApprovalSettlement, CodeTranscriptSearchSource, JournalError, SessionExecutionSettings,
+    MAX_REPLAY_EVENTS,
 };
 use crate::db::entities;
 use crate::{
@@ -2339,6 +2340,50 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
         .events
         .is_empty());
     assert!(store.get_chat(chat.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn deleting_a_parent_chat_deletes_its_session_children() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let parent = super::sample_chat();
+    let child = super::sample_chat();
+    let grandchild = super::sample_chat();
+    for chat in [&parent, &child, &grandchild] {
+        store.create_chat(chat).await.unwrap();
+    }
+    set_session_context(
+        &store,
+        &owner,
+        SessionId(child.id.0),
+        None,
+        Some(SessionId(parent.id.0)),
+        Some("child"),
+    )
+    .await
+    .unwrap();
+    set_session_context(
+        &store,
+        &owner,
+        SessionId(grandchild.id.0),
+        None,
+        Some(SessionId(child.id.0)),
+        Some("grandchild"),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        store.delete_chat(parent.id).await.unwrap(),
+        crate::storage::DeleteChatOutcome::Deleted { .. }
+    ));
+    for chat in [&parent, &child, &grandchild] {
+        assert!(store.get_chat(chat.id).await.unwrap().is_none());
+        assert!(get_session(&store, &owner, SessionId(chat.id.0))
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[tokio::test]

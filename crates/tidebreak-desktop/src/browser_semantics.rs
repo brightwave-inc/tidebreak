@@ -1499,7 +1499,7 @@ pub(crate) async fn browser_native_act(
     let dispatch_registry = registry.clone();
     let browser_id = arguments.browser_id.clone();
     let dispatch_origin = origin.clone();
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let independent_native = qualified_independent_host_action(
         &arguments.action,
         &target.fingerprint.tag,
@@ -1516,7 +1516,7 @@ pub(crate) async fn browser_native_act(
             effect,
             confirmation_id,
             move || async move {
-                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                #[cfg(target_os = "macos")]
                 if arguments.execution_mode == tidebreak_core::BrowserExecutionMode::Background
                     && independent_native
                 {
@@ -1615,7 +1615,7 @@ fn browser_input_method(
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 fn qualified_independent_host_action(
     action: &tidebreak_core::BrowserAction,
     tag: &str,
@@ -1887,7 +1887,6 @@ async fn evaluate_background_action(
                 return;
             }
         };
-        #[cfg(feature = "independent-wk-host")]
         let dialog_view = objc2::Message::retain(view);
         let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
             let mut state = callback_state
@@ -1896,7 +1895,6 @@ async fn evaluate_background_action(
             if state.cancelled {
                 return;
             }
-            #[cfg(feature = "independent-wk-host")]
             if let Err(message) = crate::agent_browser_dialogs::take_blocked(&dialog_view) {
                 if let Some(sender) = state.sender.take() {
                     let _ = sender.send(Err(message));
@@ -2803,17 +2801,13 @@ async fn wait_for_native_action_processing(
             }
             return;
         }
-        #[cfg(feature = "independent-wk-host")]
         let dialog_view = objc2::Message::retain(view);
         let handler = RcBlock::new(move || {
             finish_native_processing(&callback_sender, deadline, || {
-                #[cfg(feature = "independent-wk-host")]
                 {
                     crate::agent_browser_dialogs::take_blocked(&dialog_view)
                         .map_err(NativeInputFailure::Engine)
                 }
-                #[cfg(not(feature = "independent-wk-host"))]
-                Ok(())
             });
         });
         match kind {
@@ -3279,15 +3273,6 @@ unsafe fn dispatch_independent_host_action(
     action: &tidebreak_core::BrowserAction,
     phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
-    #[cfg(not(feature = "independent-wk-host"))]
-    {
-        let _ = (view, resolution, action, phase);
-        Err(NativeInputFailure::Typed {
-            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
-            message: "Independent native browser input is not enabled.".to_owned(),
-        })
-    }
-    #[cfg(feature = "independent-wk-host")]
     {
         use objc2::{msg_send, sel};
         use objc2_foundation::{NSNotFound, NSRange, NSString};
@@ -7932,7 +7917,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn independent_host_promotes_only_qualified_actions() {
         use tidebreak_core::BrowserAction;

@@ -360,11 +360,12 @@ impl InternalApprovalRequest {
             ApprovalKind::Plan { .. } => Self::Plan { turn_id },
             ApprovalKind::Command { cmd, cwd } => {
                 let (command, preview_truncated) = bound_preview_text(cmd);
+                let approval = ToolApprovalKind::for_tool_name("exec");
                 Self::ToolUse {
                     auto_judging,
                     tool_name: "exec".into(),
                     class: ApprovalClass::Workspace,
-                    approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                    approval,
                     grant_scopes: Vec::new(),
                     preview: Some(ToolActionPreview::Exec {
                         command,
@@ -399,21 +400,30 @@ impl InternalApprovalRequest {
                     preview_truncated: path_truncated || summary_truncated,
                 }
             }
-            ApprovalKind::Network { summary } | ApprovalKind::Other { summary } => {
+            ApprovalKind::Network { summary } => {
                 let (summary, preview_truncated) = bound_preview_text(summary);
                 Self::ToolUse {
                     auto_judging,
-                    tool_name: "other".into(),
+                    tool_name: "web_extract".into(),
                     class: ApprovalClass::Sensitive,
-                    approval: ToolApprovalKind::Unsupported,
+                    approval: ToolApprovalKind::WebExtractMayFetchUrl,
                     grant_scopes: Vec::new(),
-                    preview: Some(ToolActionPreview::WriteFile {
-                        path: summary,
+                    preview: Some(ToolActionPreview::WebExtract {
+                        url: summary,
                         summary: None,
                     }),
                     preview_truncated,
                 }
             }
+            ApprovalKind::Other { .. } => Self::ToolUse {
+                auto_judging,
+                tool_name: "other".into(),
+                class: ApprovalClass::Sensitive,
+                approval: ToolApprovalKind::Unsupported,
+                grant_scopes: Vec::new(),
+                preview: None,
+                preview_truncated: false,
+            },
         }
     }
 }
@@ -918,6 +928,59 @@ mod tests {
             preview_truncated,
             "a set the summary cannot hold is a truncated preview"
         );
+    }
+
+    #[test]
+    fn legacy_approval_kinds_project_truthful_actions() {
+        let turn_id = TurnId::new();
+        let command = InternalApprovalRequest::from_kind(
+            &ApprovalKind::Command {
+                cmd: "cargo test".into(),
+                cwd: None,
+            },
+            turn_id,
+            false,
+        );
+        assert!(matches!(
+            command,
+            InternalApprovalRequest::ToolUse {
+                approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                preview: Some(ToolActionPreview::Exec { .. }),
+                ..
+            }
+        ));
+
+        let network = InternalApprovalRequest::from_kind(
+            &ApprovalKind::Network {
+                summary: "https://example.com".into(),
+            },
+            turn_id,
+            false,
+        );
+        assert!(matches!(
+            network,
+            InternalApprovalRequest::ToolUse {
+                approval: ToolApprovalKind::WebExtractMayFetchUrl,
+                preview: Some(ToolActionPreview::WebExtract { ref url, .. }),
+                ..
+            } if url == "https://example.com"
+        ));
+
+        let other = InternalApprovalRequest::from_kind(
+            &ApprovalKind::Other {
+                summary: "approve an unknown action".into(),
+            },
+            turn_id,
+            false,
+        );
+        assert!(matches!(
+            other,
+            InternalApprovalRequest::ToolUse {
+                approval: ToolApprovalKind::Unsupported,
+                preview: None,
+                ..
+            }
+        ));
     }
 
     #[test]

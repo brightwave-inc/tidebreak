@@ -1,14 +1,10 @@
 //! The sandbox supervisor: the non-agent component that owns the transport
-//! listener and (eventually) holds credentials and fronts egress.
+//! listener.
 //!
 //! The supervisor is deliberately **distinct from the agent process**. Per the
-//! [credential separation](../../docs/sandbox-providers.md) invariant, the
-//! non-agent component owns the transport listener, holds credentials, and
-//! substitutes them at its own egress boundary so a third-party credential never
-//! enters the agent's address space. This slice ships the listener half of that
-//! separation and leaves the credential/egress boundary as a **documented stub**
-//! ([`CredentialProxy`]) marking exactly where it plugs in — the full egress
-//! proxy is its own step and is not built here.
+//! [credential separation](../../docs/sandbox-providers.md) design, the
+//! non-agent component owns the transport listener. The credential/egress proxy
+//! that would enforce third-party credential separation is not built.
 //!
 //! In this crate the split is structural: [`Supervisor`] binds the listener and
 //! serves each host connection against the run's transport ([`SandboxRun`]),
@@ -43,36 +39,10 @@ const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 /// stay immediate.
 const PER_CONNECTION_BURST_LIMIT: u32 = 100;
 
-/// The credential and egress boundary the supervisor owns — a documented stub.
-///
-/// In the full design the agent addresses a connected service with an opaque
-/// placeholder and this boundary substitutes the real credential and strips
-/// agent-supplied authentication, terminating TLS at the supervisor. None of
-/// that is built in this slice: an attached-only run carries no credential (the
-/// host is the model proxy, reached over reverse RPC), so there is nothing to
-/// substitute yet. This type exists to name the seam the egress step wires in.
-#[derive(Debug, Default)]
-#[non_exhaustive]
-pub struct CredentialProxy;
-
-impl CredentialProxy {
-    /// A credential/egress boundary that holds and substitutes nothing.
-    ///
-    /// The real proxy replaces this: it holds the run's scoped credentials, is
-    /// the only component that ever sees them, and applies the egress policy
-    /// snapshot the host delivered at admission.
-    #[must_use]
-    pub fn stub() -> Self {
-        Self
-    }
-}
-
 /// The sandbox supervisor. Owns the transport listener; the agent loop does not.
 pub struct Supervisor {
     listener: TcpListener,
     run: SandboxRun,
-    #[allow(dead_code)]
-    credentials: CredentialProxy,
 }
 
 impl Supervisor {
@@ -87,11 +57,7 @@ impl Supervisor {
     /// Propagates the bind failure if the address cannot be listened on.
     pub async fn bind(addr: &str, run: SandboxRun) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        Ok(Self {
-            listener,
-            run,
-            credentials: CredentialProxy::stub(),
-        })
+        Ok(Self { listener, run })
     }
 
     /// The address the listener actually bound, so a caller that passed port 0

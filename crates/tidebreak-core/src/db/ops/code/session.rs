@@ -140,6 +140,29 @@ pub(in crate::db) async fn delete_session_dependents_on<C>(
 where
     C: ConnectionTrait,
 {
+    let child_ids = entities::code_session_context::Entity::find()
+        .select_only()
+        .column(entities::code_session_context::Column::SessionId)
+        .filter(entities::code_session_context::Column::ParentSessionId.eq(id.0))
+        .into_tuple::<uuid::Uuid>()
+        .all(connection)
+        .await
+        .map_err(store_err)?;
+    let mut descendant_blob_ids = Vec::new();
+    for child_id in child_ids {
+        descendant_blob_ids.extend(
+            Box::pin(delete_session_dependents_on(
+                connection,
+                SessionId(child_id),
+            ))
+            .await?,
+        );
+        entities::session::Entity::delete_by_id(child_id)
+            .exec(connection)
+            .await
+            .map_err(store_err)?;
+    }
+
     let turn_ids = entities::turn::Entity::find()
         .select_only()
         .column(entities::turn::Column::Id)
@@ -252,6 +275,7 @@ where
         .await
         .map_err(store_err)?;
 
+    blob_ids.extend(descendant_blob_ids);
     blob_ids.sort_unstable();
     blob_ids.dedup();
     Ok(blob_ids)
