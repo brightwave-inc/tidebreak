@@ -41,7 +41,7 @@ pub mod types {
     pub use crate::code::types::*;
 }
 mod updates;
-mod usage;
+pub(crate) mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
@@ -105,8 +105,7 @@ pub(crate) use sessions::{
     set_session_reasoning_effort, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
-    close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
-    resize_terminal, write_terminal,
+    close_terminal, create_terminal, list_terminals, read_terminal, resize_terminal, write_terminal,
 };
 pub(crate) use triggers::{
     create_repo_trigger, delete_repo_trigger, list_repo_triggers, update_repo_trigger,

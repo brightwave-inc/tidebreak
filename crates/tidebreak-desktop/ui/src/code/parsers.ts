@@ -1434,8 +1434,7 @@ export function parseCodeSubscriptionUsage(
   if (
     !isRecord(value) ||
     !isMember(value.source, USAGE_SOURCES) ||
-    !Array.isArray(value.providers) ||
-    !lineList(value.diagnostics)
+    !Array.isArray(value.providers)
   ) {
     return null;
   }
@@ -1456,9 +1455,6 @@ export function parseCodeSubscriptionUsage(
         !wireId(account.id) ||
         !nonEmptyLine(account.label) ||
         typeof account.is_own !== "boolean" ||
-        !lineText(account.state) ||
-        (account.updated_at_unix_seconds !== undefined &&
-          !isFiniteNumber(account.updated_at_unix_seconds)) ||
         !Array.isArray(account.windows)
       ) {
         return null;
@@ -1469,11 +1465,7 @@ export function parseCodeSubscriptionUsage(
           !isRecord(window) ||
           !wireId(window.key) ||
           !nonEmptyLine(window.label) ||
-          !isFiniteNumber(window.used_percent) ||
-          (window.resets_at_unix_seconds !== undefined &&
-            !isFiniteNumber(window.resets_at_unix_seconds)) ||
-          !optionalLine(window.status) ||
-          !optionalLine(window.model_scope)
+          !isFiniteNumber(window.used_percent)
         ) {
           return null;
         }
@@ -1481,24 +1473,13 @@ export function parseCodeSubscriptionUsage(
           key: window.key,
           label: window.label,
           used_percent: window.used_percent,
-          ...(window.resets_at_unix_seconds !== undefined
-            ? { resets_at_unix_seconds: window.resets_at_unix_seconds }
-            : {}),
-          ...(window.status !== undefined ? { status: window.status } : {}),
-          ...(window.model_scope !== undefined
-            ? { model_scope: window.model_scope }
-            : {}),
         });
       }
       accounts.push({
         id: account.id,
         label: account.label,
         is_own: account.is_own,
-        state: account.state,
         windows,
-        ...(account.updated_at_unix_seconds !== undefined
-          ? { updated_at_unix_seconds: account.updated_at_unix_seconds }
-          : {}),
       });
     }
     providers.push({ id: provider.id, label: provider.label, accounts });
@@ -1506,7 +1487,6 @@ export function parseCodeSubscriptionUsage(
   return {
     source: value.source,
     providers,
-    diagnostics: [...value.diagnostics],
   };
 }
 
@@ -1922,18 +1902,12 @@ export function parseCodeForkTranscript(
     !isRecord(value) ||
     !onlyKeys<WireCodeForkTranscript>(value, [
       "path",
-      "dir",
-      "byte_len",
       "turns",
-      "total_turns",
       "at_turn_ordinal",
       "truncated",
     ]) ||
     !lineText(value.path) ||
-    !lineText(value.dir) ||
-    typeof value.byte_len !== "number" ||
     typeof value.turns !== "number" ||
-    typeof value.total_turns !== "number" ||
     (value.at_turn_ordinal !== undefined &&
       !isFiniteNumber(value.at_turn_ordinal)) ||
     typeof value.truncated !== "boolean"
@@ -1942,10 +1916,7 @@ export function parseCodeForkTranscript(
   }
   return {
     path: value.path,
-    dir: value.dir,
-    byte_len: value.byte_len,
     turns: value.turns,
-    total_turns: value.total_turns,
     ...(value.at_turn_ordinal !== undefined
       ? { at_turn_ordinal: value.at_turn_ordinal }
       : {}),
@@ -4811,7 +4782,6 @@ export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
       "created_at",
       "revoked_at",
       "revoked_reason",
-      "channels",
     ]) ||
     !wireId(value.id) ||
     !optionalLine(value.kind) ||
@@ -4824,8 +4794,7 @@ export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
     !timestamp(value.created_at) ||
     !optionalTimestamp(value.rotated_at) ||
     !optionalTimestamp(value.revoked_at) ||
-    !optionalBlock(value.revoked_reason) ||
-    (value.channels !== undefined && !parseGrantChannels(value.channels))
+    !optionalBlock(value.revoked_reason)
   ) {
     return null;
   }
@@ -4848,40 +4817,7 @@ export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
     ...(value.revoked_reason !== undefined
       ? { revoked_reason: value.revoked_reason }
       : {}),
-    ...(value.channels !== undefined
-      ? { channels: value.channels as CodeGrantSnapshot["channels"] }
-      : {}),
   };
-}
-
-function parseGrantChannels(value: unknown): boolean {
-  if (!Array.isArray(value)) return false;
-  for (const entry of value) {
-    if (
-      !isRecord(entry) ||
-      !onlyKeys<{
-        channel_id: string;
-        repository: string;
-        state: string;
-        set_by_identity: string;
-        set_by_display: string;
-      }>(entry, [
-        "channel_id",
-        "repository",
-        "state",
-        "set_by_identity",
-        "set_by_display",
-      ]) ||
-      !nonEmptyLine(entry.channel_id) ||
-      !nonEmptyLine(entry.repository) ||
-      !nonEmptyLine(entry.state) ||
-      !nonEmptyLine(entry.set_by_identity) ||
-      !nonEmptyLine(entry.set_by_display)
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 export function parseCodeGrantList(value: unknown): CodeGrantSnapshot[] | null {

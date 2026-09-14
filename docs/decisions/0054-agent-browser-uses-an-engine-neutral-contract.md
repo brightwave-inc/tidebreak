@@ -1,6 +1,6 @@
 # 54. Agent Browser Uses an Engine-Neutral Contract and Ships on WKWebView First
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
 - Owners: desktop, agent runtime
 - Related: [`0013-computer-use-screen-capture-and-app-control.md`](0013-computer-use-screen-capture-and-app-control.md),

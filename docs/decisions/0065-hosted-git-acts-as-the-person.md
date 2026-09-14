@@ -1,6 +1,6 @@
 # 65. Hosted git and pull requests act as the person
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Owners: server, desktop
 - Related: [`0034-harness-discovery-credentials.md`](0034-harness-discovery-credentials.md),

@@ -1,6 +1,6 @@
 # 96. Slack channels share the instance GitHub App repository access
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-10
 - Owners: thet
 - Related: [0090](0090-a-session-acts-as-one-forge-identity.md); [0092](0092-workspace-grants.md); [0093](0093-a-session-can-have-several-conversation-bindings.md); [0094](0094-repository-optional-conversations-on-the-internal-engine.md)

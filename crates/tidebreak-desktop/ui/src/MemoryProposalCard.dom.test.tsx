@@ -23,8 +23,6 @@ const record: MemoryRecord = {
       chat_id: "chat-1",
       turn_id: "turn-1",
       code_session_id: null,
-      code_turn_id: null,
-      workspace_id: null,
     },
     evidence: [{ kind: "message", message_id: "message-1" }],
   },

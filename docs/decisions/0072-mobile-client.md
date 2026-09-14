@@ -1,6 +1,6 @@
 # 72. Supervision-first mobile client
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Owners: mobile
 - Related: [`0049-gateway-authenticated-hosted-machines.md`](0049-gateway-authenticated-hosted-machines.md),

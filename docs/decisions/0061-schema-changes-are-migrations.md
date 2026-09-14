@@ -1,6 +1,6 @@
 # 61. Schema Changes Are Migrations, Not Database Resets
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - Owners: core
 - Related: [`crates/tidebreak-core/src/db/migration.rs`](../../crates/tidebreak-core/src/db/migration.rs)

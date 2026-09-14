@@ -181,7 +181,6 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     listCodeHarnessModels: async (kind: HarnessKind) => ({ kind, models: [] }),
     getCodeSubscriptionUsage: async () => ({
       source: "model_gateway",
-      diagnostics: [],
       providers: [
         {
           id: "anthropic",
@@ -191,13 +190,11 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
               id: "personal",
               label: "Personal",
               is_own: true,
-              state: "available",
               windows: [
                 {
                   key: "weekly",
                   label: "Weekly",
                   used_percent: 64,
-                  status: "allowed",
                 },
               ],
             },

@@ -70,20 +70,6 @@ pub struct CodeGrantSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revoked_reason: Option<String>,
-    /// Channels and repositories a workspace grant covers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub channels: Option<Vec<CodeGrantChannelSnapshot>>,
-}
-
-/// One channel and repository a workspace grant has named.
-#[derive(Debug, Clone, Serialize, TS)]
-pub struct CodeGrantChannelSnapshot {
-    pub channel_id: String,
-    pub repository: String,
-    pub state: String,
-    pub set_by_identity: String,
-    pub set_by_display: String,
 }
 
 impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
@@ -101,7 +87,6 @@ impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
             created_at: grant.created_at,
             revoked_at: grant.revoked_at,
             revoked_reason: grant.revoked_reason,
-            channels: None,
         }
     }
 }
@@ -123,15 +108,6 @@ impl CodeGrantSnapshot {
             Some(profile) => snapshot.with_profile(profile),
             None => snapshot,
         }
-    }
-
-    pub fn with_channels(mut self, channels: Vec<CodeGrantChannelSnapshot>) -> Self {
-        self.channels = if channels.is_empty() {
-            None
-        } else {
-            Some(channels)
-        };
-        self
     }
 }
 
@@ -897,18 +873,12 @@ pub struct CodeRepoSource {
 /// A written fork handoff: `POST /sessions/{id}/fork`.
 ///
 /// `path` is the condensed transcript, absolute under private storage so a
-/// child agent of any engine can read it without Git ever indexing it. `dir`
-/// is the fork's own directory, which also holds one full per-turn record —
-/// `turn-0007.md` for turn 7 — and any retained image attachments.
+/// child agent of any engine can read it without Git ever indexing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeForkTranscript {
     pub path: String,
-    pub dir: String,
-    pub byte_len: u64,
     /// Complete turn histories the condensed transcript renders in full.
     pub turns: u32,
-    /// Turns the fork covers, up to and including the fork point.
-    pub total_turns: u32,
     /// The fork point's turn ordinal, present when the conversation
     /// continued past it — later turns are excluded from the handoff.
     #[serde(skip_serializing_if = "Option::is_none")]

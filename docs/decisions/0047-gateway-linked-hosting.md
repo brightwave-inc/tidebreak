@@ -1,6 +1,6 @@
 # 47. Gateway-linked hosting: machines, clients, and roster-derived identity
 
-- Status: Proposed (amended 2026-08-25, see [Amendment](#amendment-2026-08-25))
+- Status: Accepted (amended 2026-08-25, see [Amendment](#amendment-2026-08-25))
 - Date: 2026-08-19
 - Owners: server, desktop
 - Related: [`0006-self-host-deployment-plane-authorization.md`](0006-self-host-deployment-plane-authorization.md),

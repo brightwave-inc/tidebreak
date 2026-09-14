@@ -1,6 +1,6 @@
 # 73. Agent MCP drives chat over the attach contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Owners: cli
 - Related: [`0007-cli-headless-feature-parity.md`](0007-cli-headless-feature-parity.md),

@@ -44,32 +44,6 @@ fn confirmation_token(headers: &HeaderMap) -> Result<&str, ServerError> {
 
 /// `GET /code/grants` — every grant the owner holds, revoked ones
 /// included so a theft-triggered revoke and its reason stay visible.
-async fn snapshot_grant(
-    code: &ScopedCode,
-    grant: tidebreak_core::CodeExternalGrant,
-    profile: Option<tidebreak_core::CodeGrantProfile>,
-) -> Result<CodeGrantSnapshot, ServerError> {
-    let mut snapshot = CodeGrantSnapshot::from_grant_and_profile(grant.clone(), profile);
-    if grant.kind.is_workspace() {
-        let channels = code
-            .list_channel_repository_confirms(&grant.owner, grant.id)
-            .await?
-            .into_iter()
-            .map(|row| crate::code::types::CodeGrantChannelSnapshot {
-                channel_id: row.channel_id,
-                repository: row.repository,
-                state: row.state.as_str().to_owned(),
-                set_by_identity: row.set_by_identity,
-                set_by_display: row.set_by_display,
-            })
-            .collect();
-        snapshot = snapshot.with_channels(channels);
-    }
-    Ok(snapshot)
-}
-
-/// `GET /code/grants` — every grant the owner holds, revoked ones
-/// included so a theft-triggered revoke and its reason stay visible.
 /// Admins also see workspace grants owned by the service principal.
 pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>>, ServerError> {
     let mut grants = code.list_adapter_grants().await?;
@@ -94,7 +68,7 @@ pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>
     let mut snapshots = Vec::new();
     for grant in grants {
         let profile = profiles.remove(&grant.id);
-        snapshots.push(snapshot_grant(&code, grant, profile).await?);
+        snapshots.push(CodeGrantSnapshot::from_grant_and_profile(grant, profile));
     }
     Ok(Json(snapshots))
 }

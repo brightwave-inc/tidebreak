@@ -1,6 +1,6 @@
 # 46. Rich Turn Input Rides Harness Capabilities
 
-- Status: Proposed (amended 2026-08-22, see [Amendment](#amendment-2026-08-22))
+- Status: Accepted (amended 2026-08-22, see [Amendment](#amendment-2026-08-22))
 - Date: 2026-08-18
 - Owners: code mode
 - Related: 0031 (adapter capability honesty), 0033 (approvals never paraphrase),

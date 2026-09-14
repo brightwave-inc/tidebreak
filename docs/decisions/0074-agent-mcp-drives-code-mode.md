@@ -1,6 +1,6 @@
 # 74. Agent MCP drives code mode over the attach contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Owners: cli
 - Related: [`0073-agent-mcp-drives-chat-over-attach.md`](0073-agent-mcp-drives-chat-over-attach.md),

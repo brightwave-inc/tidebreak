@@ -170,9 +170,6 @@ impl ConfiguredResolver {
     }
 }
 
-/// Backward-compatible alias — earlier slices called this `KeyedResolver`.
-pub type KeyedResolver = ConfiguredResolver;
-
 #[async_trait]
 impl ProviderResolver for ConfiguredResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {

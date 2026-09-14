@@ -1313,19 +1313,13 @@ at_turn?: TurnId, };
  * A written fork handoff: `POST /sessions/{id}/fork`.
  *
  * `path` is the condensed transcript, absolute under private storage so a
- * child agent of any engine can read it without Git ever indexing it. `dir`
- * is the fork's own directory, which also holds one full per-turn record —
- * `turn-0007.md` for turn 7 — and any retained image attachments.
+ * child agent of any engine can read it without Git ever indexing it.
  */
-export type CodeForkTranscript = { path: string, dir: string, byte_len: number,
+export type CodeForkTranscript = { path: string,
 /**
  * Complete turn histories the condensed transcript renders in full.
  */
 turns: number,
-/**
- * Turns the fork covers, up to and including the fork point.
- */
-total_turns: number,
 /**
  * The fork point's turn ordinal, present when the conversation
  * continued past it — later turns are excluded from the handoff.
@@ -1368,11 +1362,6 @@ export type CodeGithubRepositories = { repositories: Array<CodeGithubRepository>
  * One GitHub repository the add-repository picker can offer.
  */
 export type CodeGithubRepository = { full_name: string, private: boolean, description?: string, };
-
-/**
- * One channel and repository a workspace grant has named.
- */
-export type CodeGrantChannelSnapshot = { channel_id: string, repository: string, state: string, set_by_identity: string, set_by_display: string, };
 
 /**
  * Identifies one adapter grant: a channel user's link to this machine.
@@ -1419,11 +1408,7 @@ avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: strin
  * Why the grant was revoked, in owner-facing words. A theft-triggered
  * revoke reaches the owner here.
  */
-revoked_reason?: string,
-/**
- * Channels and repositories a workspace grant covers.
- */
-channels?: Array<CodeGrantChannelSnapshot>, };
+revoked_reason?: string, };
 
 /**
  * State of one warm harness install, returned by
@@ -1536,6 +1521,16 @@ name: string,
  * Status derived from the spanning call.
  */
 status: CodeSubagentStatus, };
+
+export type CodeSubscriptionUsage = { source: CodeSubscriptionUsageSource, providers: Array<CodeSubscriptionUsageProvider>, };
+
+export type CodeSubscriptionUsageAccount = { id: string, label: string, is_own: boolean, windows: Array<CodeSubscriptionUsageWindow>, };
+
+export type CodeSubscriptionUsageProvider = { id: string, label: string, accounts: Array<CodeSubscriptionUsageAccount>, };
+
+export type CodeSubscriptionUsageSource = "model_gateway" | "direct" | "unavailable";
+
+export type CodeSubscriptionUsageWindow = { key: string, label: string, used_percent: number, };
 
 /**
  * Identifies one auxiliary terminal attached to a workspace.
@@ -3413,15 +3408,7 @@ turn_id?: TurnId | null,
 /**
  * Originating code session.
  */
-code_session_id?: SessionId | null,
-/**
- * Originating code turn.
- */
-code_turn_id?: TurnId | null,
-/**
- * Workspace attached to the originating code session.
- */
-workspace_id?: WorkspaceId | null, };
+code_session_id?: SessionId | null, };
 
 /**
  * Authorship and source evidence for one record.

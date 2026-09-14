@@ -59,7 +59,6 @@ function idleSocket(): WebSocket {
 
 const gatewayUsage: CodeSubscriptionUsage = {
   source: "model_gateway",
-  diagnostics: [],
   providers: [
     {
       id: "anthropic",
@@ -69,20 +68,16 @@ const gatewayUsage: CodeSubscriptionUsage = {
           id: "personal",
           label: "Personal",
           is_own: true,
-          state: "available",
-          updated_at_unix_seconds: 1787580900,
           windows: [
             {
               key: "five-hour",
               label: "5-hour",
               used_percent: 38,
-              status: "allowed",
             },
             {
               key: "weekly",
               label: "Weekly",
               used_percent: 72,
-              status: "allowed",
             },
           ],
         },
@@ -96,13 +91,11 @@ const gatewayUsage: CodeSubscriptionUsage = {
           id: "team",
           label: "Team",
           is_own: false,
-          state: "available",
           windows: [
             {
               key: "weekly",
               label: "Weekly",
               used_percent: 86,
-              status: "allowed_warning",
             },
           ],
         },
@@ -113,7 +106,6 @@ const gatewayUsage: CodeSubscriptionUsage = {
 
 const localUsage: CodeSubscriptionUsage = {
   source: "unavailable",
-  diagnostics: ["Model Gateway usage is unavailable."],
   providers: [],
 };
 

@@ -190,7 +190,6 @@ describe("parseCodeSubscriptionUsage", () => {
   it("accepts normalized personal and shared provider windows", () => {
     const usage = {
       source: "model_gateway",
-      diagnostics: [],
       providers: [
         {
           id: "anthropic",
@@ -200,15 +199,11 @@ describe("parseCodeSubscriptionUsage", () => {
               id: "personal",
               label: "Personal",
               is_own: true,
-              state: "available",
-              updated_at_unix_seconds: 1_776_000_000,
               windows: [
                 {
                   key: "weekly",
                   label: "Weekly (7d)",
                   used_percent: 58,
-                  resets_at_unix_seconds: 1_776_086_400,
-                  status: "allowed",
                 },
               ],
             },
@@ -223,7 +218,6 @@ describe("parseCodeSubscriptionUsage", () => {
     const unavailable = {
       source: "unavailable",
       providers: [],
-      diagnostics: ["No machine-readable usage source was found."],
     };
     expect(parseCodeSubscriptionUsage(unavailable)).toEqual(unavailable);
     expect(
@@ -232,7 +226,6 @@ describe("parseCodeSubscriptionUsage", () => {
     expect(
       parseCodeSubscriptionUsage({
         source: "direct",
-        diagnostics: [],
         providers: [
           {
             id: "openai",
@@ -242,7 +235,6 @@ describe("parseCodeSubscriptionUsage", () => {
                 id: "codex",
                 label: "Codex Pro",
                 is_own: true,
-                state: "available",
                 windows: [
                   {
                     key: "session",

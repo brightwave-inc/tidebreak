@@ -1,6 +1,6 @@
 # 60. Triggers Are Durable Rules On Pull-Request Facts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - Owners: code mode, harness integration
 - Related: [`0009-queued-turns.md`](0009-queued-turns.md),

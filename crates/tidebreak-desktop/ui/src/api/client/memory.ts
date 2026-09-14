@@ -86,8 +86,6 @@ export function withMemoryApi<TBase extends Constructor<HttpCore>>(
                 chat_id: null,
                 turn_id: null,
                 code_session_id: null,
-                code_turn_id: null,
-                workspace_id: null,
               },
               evidence: body.evidence ?? [],
               links: body.links ?? [],

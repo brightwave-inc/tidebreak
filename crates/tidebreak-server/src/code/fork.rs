@@ -627,12 +627,9 @@ fn clip(section: &mut String, budget: usize) {
     if section.len() <= budget {
         return;
     }
-    let mut end = budget.saturating_sub(CUT.len()).min(section.len());
-    while end > 0 && !section.is_char_boundary(end) {
-        end -= 1;
-    }
-    section.truncate(end);
-    section.push_str(CUT);
+    let (mut kept, _) = tidebreak_core::truncate_utf8(section, budget.saturating_sub(CUT.len()));
+    kept.push_str(CUT);
+    *section = kept;
 }
 
 /// One reduced turn: the ask's first line, and where the full record is.

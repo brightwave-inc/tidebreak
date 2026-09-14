@@ -218,8 +218,6 @@ impl TurnMemoryCapturer {
                 author: MemoryAuthor::Model,
                 origin: MemoryOrigin {
                     code_session_id: Some(session_id),
-                    code_turn_id: Some(turn_id),
-                    workspace_id: session.workspace_id,
                     ..Default::default()
                 },
                 evidence,
@@ -439,14 +437,11 @@ fn context_file_block(body: &str) -> String {
     const CLOSE: &str = "</context-files>\n";
 
     let body_budget = MAX_CONTEXT_DIFF_BYTES.saturating_sub(OPEN.len() + CLOSE.len() + 1);
-    let mut end = body.len().min(body_budget);
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut block = String::with_capacity(OPEN.len() + end + 1 + CLOSE.len());
+    let (kept, _) = tidebreak_core::truncate_utf8(body, body_budget);
+    let mut block = String::with_capacity(OPEN.len() + kept.len() + 1 + CLOSE.len());
     block.push_str(OPEN);
-    block.push_str(&body[..end]);
-    if !body[..end].ends_with('\n') {
+    block.push_str(&kept);
+    if !kept.ends_with('\n') {
         block.push('\n');
     }
     block.push_str(CLOSE);

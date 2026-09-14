@@ -20,6 +20,7 @@ use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, ProbeCapture};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
+use ts_rs::TS;
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
@@ -28,50 +29,40 @@ use crate::extract::Json;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct CodeSubscriptionUsage {
-    source: UsageSource,
-    providers: Vec<UsageProvider>,
-    diagnostics: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSubscriptionUsage {
+    pub source: CodeSubscriptionUsageSource,
+    pub providers: Vec<CodeSubscriptionUsageProvider>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-enum UsageSource {
+pub enum CodeSubscriptionUsageSource {
     ModelGateway,
     Direct,
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct UsageProvider {
-    id: String,
-    label: String,
-    accounts: Vec<UsageAccount>,
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSubscriptionUsageProvider {
+    pub id: String,
+    pub label: String,
+    pub accounts: Vec<CodeSubscriptionUsageAccount>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct UsageAccount {
-    id: String,
-    label: String,
-    is_own: bool,
-    state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    updated_at_unix_seconds: Option<i64>,
-    windows: Vec<UsageWindow>,
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSubscriptionUsageAccount {
+    pub id: String,
+    pub label: String,
+    pub is_own: bool,
+    pub windows: Vec<CodeSubscriptionUsageWindow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct UsageWindow {
-    key: String,
-    label: String,
-    used_percent: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resets_at_unix_seconds: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model_scope: Option<String>,
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSubscriptionUsageWindow {
+    pub key: String,
+    pub label: String,
+    pub used_percent: f64,
 }
 
 /// Read subscription quota sources only for the local-profile owner.
@@ -94,9 +85,8 @@ where
 {
     if !owner.is_local() {
         return CodeSubscriptionUsage {
-            source: UsageSource::Unavailable,
+            source: CodeSubscriptionUsageSource::Unavailable,
             providers: Vec::new(),
-            diagnostics: vec!["Subscription usage is unavailable for hosted accounts.".to_owned()],
         };
     }
 
@@ -113,39 +103,30 @@ async fn collect_usage_after_modelctl<C, F>(
 ) -> CodeSubscriptionUsage
 where
     C: FnOnce() -> F,
-    F: Future<Output = Result<Option<UsageProvider>, String>>,
+    F: Future<Output = Result<Option<CodeSubscriptionUsageProvider>, String>>,
 {
-    let mut diagnostics = Vec::new();
     match modelctl {
         Ok(Some(report)) if !report.providers.is_empty() => return report,
-        Ok(_) => diagnostics.push("Model Gateway returned no subscription usage.".into()),
+        Ok(_) => {}
         Err(error) => {
             tracing::debug!("model-gateway usage unavailable: {error}");
-            diagnostics.push("Model Gateway usage is unavailable.".into());
         }
     }
 
     match collect_direct().await {
         Ok(Some(provider)) => CodeSubscriptionUsage {
-            source: UsageSource::Direct,
+            source: CodeSubscriptionUsageSource::Direct,
             providers: vec![provider],
-            diagnostics,
         },
-        Ok(None) => {
-            diagnostics.push("Codex returned no subscription usage.".into());
-            CodeSubscriptionUsage {
-                source: UsageSource::Unavailable,
-                providers: Vec::new(),
-                diagnostics,
-            }
-        }
+        Ok(None) => CodeSubscriptionUsage {
+            source: CodeSubscriptionUsageSource::Unavailable,
+            providers: Vec::new(),
+        },
         Err(error) => {
             tracing::debug!("direct Codex usage unavailable: {error}");
-            diagnostics.push("Direct Codex usage is unavailable.".into());
             CodeSubscriptionUsage {
-                source: UsageSource::Unavailable,
+                source: CodeSubscriptionUsageSource::Unavailable,
                 providers: Vec::new(),
-                diagnostics,
             }
         }
     }
@@ -235,8 +216,6 @@ struct ModelctlProvider {
 struct ModelctlBinding {
     #[serde(default)]
     is_own: bool,
-    limit_state: String,
-    usage_updated_at_unix_seconds: Option<i64>,
     #[serde(default)]
     usage_windows: Vec<ModelctlWindow>,
 }
@@ -246,9 +225,6 @@ struct ModelctlWindow {
     key: String,
     label: String,
     used_percent: f64,
-    resets_at_unix_seconds: Option<i64>,
-    status: Option<String>,
-    model_scope: Option<String>,
 }
 
 fn normalize_modelctl(raw: ModelctlUsage) -> CodeSubscriptionUsage {
@@ -284,28 +260,23 @@ fn normalize_modelctl(raw: ModelctlUsage) -> CodeSubscriptionUsage {
                             },
                         )
                     };
-                    UsageAccount {
+                    CodeSubscriptionUsageAccount {
                         id,
                         label,
                         is_own: binding.is_own,
-                        state: binding.limit_state,
-                        updated_at_unix_seconds: binding.usage_updated_at_unix_seconds,
                         windows: binding
                             .usage_windows
                             .into_iter()
-                            .map(|window| UsageWindow {
+                            .map(|window| CodeSubscriptionUsageWindow {
                                 key: window.key,
                                 label: window.label,
                                 used_percent: window.used_percent,
-                                resets_at_unix_seconds: window.resets_at_unix_seconds,
-                                status: window.status,
-                                model_scope: window.model_scope,
                             })
                             .collect(),
                     }
                 })
                 .collect::<Vec<_>>();
-            (!accounts.is_empty()).then_some(UsageProvider {
+            (!accounts.is_empty()).then_some(CodeSubscriptionUsageProvider {
                 id: provider.provider_kind,
                 label: provider.name,
                 accounts,
@@ -313,13 +284,12 @@ fn normalize_modelctl(raw: ModelctlUsage) -> CodeSubscriptionUsage {
         })
         .collect();
     CodeSubscriptionUsage {
-        source: UsageSource::ModelGateway,
+        source: CodeSubscriptionUsageSource::ModelGateway,
         providers,
-        diagnostics: Vec::new(),
     }
 }
 
-async fn collect_codex() -> Result<Option<UsageProvider>, String> {
+async fn collect_codex() -> Result<Option<CodeSubscriptionUsageProvider>, String> {
     let probe = probe_shell(&HostEnv::from_process(), "codex")
         .await
         .map_err(|error| error.to_string())?;
@@ -378,7 +348,7 @@ async fn collect_codex() -> Result<Option<UsageProvider>, String> {
     result
 }
 
-fn normalize_codex(result: Value) -> Result<Option<UsageProvider>, String> {
+fn normalize_codex(result: Value) -> Result<Option<CodeSubscriptionUsageProvider>, String> {
     let raw: CodexRateLimits = serde_json::from_value(result)
         .map_err(|error| format!("could not decode rate limits: {error}"))?;
     let snapshots = raw.rate_limits_by_limit_id.unwrap_or_else(|| {
@@ -387,18 +357,12 @@ fn normalize_codex(result: Value) -> Result<Option<UsageProvider>, String> {
         snapshots
     });
     let mut windows = Vec::new();
-    let mut state = "available".to_owned();
     let mut plan = None;
     for (limit_id, snapshot) in snapshots {
         let limit_label = snapshot
             .limit_name
             .clone()
             .unwrap_or_else(|| humanize_limit_id(&limit_id));
-        if snapshot.rate_limit_reached_type.is_some()
-            || snapshot.spend_control_reached == Some(true)
-        {
-            state = "limited".into();
-        }
         plan = plan.or(snapshot.plan_type.clone());
         if let Some(window) = snapshot.primary {
             windows.push(codex_window(&limit_id, &limit_label, "primary", window));
@@ -411,17 +375,15 @@ fn normalize_codex(result: Value) -> Result<Option<UsageProvider>, String> {
         return Ok(None);
     }
     windows.sort_by(|left, right| left.label.cmp(&right.label));
-    Ok(Some(UsageProvider {
+    Ok(Some(CodeSubscriptionUsageProvider {
         id: "openai".into(),
         label: "Codex".into(),
-        accounts: vec![UsageAccount {
+        accounts: vec![CodeSubscriptionUsageAccount {
             id: "codex-direct".into(),
             label: plan
                 .map(|plan| format!("Codex {}", title_case(&plan)))
                 .unwrap_or_else(|| "Codex".into()),
             is_own: true,
-            state,
-            updated_at_unix_seconds: Some(chrono::Utc::now().timestamp()),
             windows,
         }],
     }))
@@ -441,8 +403,6 @@ struct CodexSnapshot {
     primary: Option<CodexWindow>,
     secondary: Option<CodexWindow>,
     plan_type: Option<String>,
-    rate_limit_reached_type: Option<String>,
-    spend_control_reached: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,10 +410,14 @@ struct CodexSnapshot {
 struct CodexWindow {
     used_percent: f64,
     window_duration_mins: Option<i64>,
-    resets_at: Option<i64>,
 }
 
-fn codex_window(limit_id: &str, limit_label: &str, slot: &str, window: CodexWindow) -> UsageWindow {
+fn codex_window(
+    limit_id: &str,
+    limit_label: &str,
+    slot: &str,
+    window: CodexWindow,
+) -> CodeSubscriptionUsageWindow {
     let duration = window
         .window_duration_mins
         .map(format_window_duration)
@@ -463,13 +427,10 @@ fn codex_window(limit_id: &str, limit_label: &str, slot: &str, window: CodexWind
     } else {
         format!("{duration} · {limit_label}")
     };
-    UsageWindow {
+    CodeSubscriptionUsageWindow {
         key: format!("{limit_id}-{slot}"),
         label,
         used_percent: window.used_percent,
-        resets_at_unix_seconds: window.resets_at,
-        status: None,
-        model_scope: None,
     }
 }
 
@@ -526,13 +487,12 @@ mod tests {
     #[tokio::test]
     async fn local_owner_receives_collected_subscription_usage() {
         let expected = CodeSubscriptionUsage {
-            source: UsageSource::Direct,
-            providers: vec![UsageProvider {
+            source: CodeSubscriptionUsageSource::Direct,
+            providers: vec![CodeSubscriptionUsageProvider {
                 id: "openai".into(),
                 label: "Codex".into(),
                 accounts: Vec::new(),
             }],
-            diagnostics: Vec::new(),
         };
 
         let report =
@@ -550,25 +510,20 @@ mod tests {
         let report = collect_usage_for_owner(&owner, || async move {
             collected_in_route.store(true, Ordering::SeqCst);
             CodeSubscriptionUsage {
-                source: UsageSource::Direct,
+                source: CodeSubscriptionUsageSource::Direct,
                 providers: Vec::new(),
-                diagnostics: Vec::new(),
             }
         })
         .await;
 
         assert!(!collected.load(Ordering::SeqCst));
-        assert_eq!(report.source, UsageSource::Unavailable);
+        assert_eq!(report.source, CodeSubscriptionUsageSource::Unavailable);
         assert!(report.providers.is_empty());
-        assert_eq!(
-            report.diagnostics,
-            vec!["Subscription usage is unavailable for hosted accounts."]
-        );
     }
 
     #[tokio::test]
     async fn direct_usage_is_used_when_modelctl_is_unavailable() {
-        let direct = UsageProvider {
+        let direct = CodeSubscriptionUsageProvider {
             id: "openai".into(),
             label: "Codex".into(),
             accounts: Vec::new(),
@@ -580,12 +535,8 @@ mod tests {
             })
             .await;
 
-        assert_eq!(report.source, UsageSource::Direct);
+        assert_eq!(report.source, CodeSubscriptionUsageSource::Direct);
         assert_eq!(report.providers, vec![direct]);
-        assert_eq!(
-            report.diagnostics,
-            vec!["Model Gateway usage is unavailable."]
-        );
     }
 
     #[test]
@@ -632,7 +583,7 @@ mod tests {
         }))
         .expect("fixture");
         let report = normalize_modelctl(raw);
-        assert_eq!(report.source, UsageSource::ModelGateway);
+        assert_eq!(report.source, CodeSubscriptionUsageSource::ModelGateway);
         assert_eq!(report.providers[0].accounts.len(), 2);
         assert!(report.providers[0].accounts[0].is_own);
         assert_eq!(
