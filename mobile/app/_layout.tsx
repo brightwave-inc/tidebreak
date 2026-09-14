@@ -60,6 +60,28 @@ export default function RootLayout() {
           <Stack.Screen name="approvals" options={{ title: "Approvals" }} />
           <Stack.Screen name="settings" options={{ title: "Settings" }} />
           <Stack.Screen name="connections" options={{ title: "Connections" }} />
+          <Stack.Screen name="console" options={{ title: "Gateway" }} />
+          <Stack.Screen name="sandboxes" options={{ title: "Sandboxes" }} />
+          <Stack.Screen name="sandbox/[id]" options={{ title: "Sandbox" }} />
+          <Stack.Screen name="activity" options={{ title: "Activity" }} />
+          <Stack.Screen name="catalog" options={{ title: "Models & apps" }} />
+          <Stack.Screen name="limits" options={{ title: "My limits" }} />
+          <Stack.Screen
+            name="subscriptions"
+            options={{ title: "Subscriptions" }}
+          />
+          <Stack.Screen
+            name="shared-apps/index"
+            options={{ title: "Shared apps" }}
+          />
+          <Stack.Screen
+            name="shared-apps/[id]"
+            options={{ title: "Shared app" }}
+          />
+          <Stack.Screen
+            name="conversation/[id]"
+            options={{ title: "Conversation" }}
+          />
         </Stack>
       </QueryClientProvider>
     </GestureHandlerRootView>
