@@ -98,7 +98,7 @@ export function ToolCardShell({
         onClick={() => setExpanded(!expanded)}
       >
         <span
-          className="tool-card-icon text-muted-foreground mt-0.5 shrink-0 [&>svg]:size-3.5"
+          className="tool-card-icon text-muted-foreground flex h-(--text-md--line-height) shrink-0 items-center [&>svg]:size-3.5"
           aria-hidden="true"
         >
           {icon}
@@ -122,7 +122,10 @@ export function ToolCardShell({
             </span>
           ) : null}
         </span>
-        <span className="text-muted-foreground ml-auto flex h-5 shrink-0 items-center gap-1.5 text-xs tabular-nums">
+        {/* Height matches the title's text-md line box, so the metadata and
+            chevron center on the first title line even though the root rem
+            (interface zoom) makes spacing units smaller than that line. */}
+        <span className="text-muted-foreground ml-auto flex h-(--text-md--line-height) shrink-0 items-center gap-1.5 text-xs tabular-nums">
           {trailing}
           <ChevronDown
             className={cn(

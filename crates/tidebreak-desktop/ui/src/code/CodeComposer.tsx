@@ -109,7 +109,6 @@ export function PermissionModePicker({
   pending,
   onChange,
   scopeKey = "code-create",
-  posture,
 }: {
   value: PermissionMode;
   availableModes?: readonly PermissionMode[];
@@ -118,7 +117,6 @@ export function PermissionModePicker({
   pending?: boolean;
   onChange?: (mode: PermissionMode) => void;
   scopeKey?: string;
-  posture?: string;
 }) {
   const locked = !onChange;
   const menu = (
@@ -162,16 +160,7 @@ export function PermissionModePicker({
       </WithTooltip>
     );
   }
-  return (
-    <span className="flex min-w-0 flex-col items-end">
-      {control}
-      {posture && (
-        <span className="text-muted-foreground text-xs whitespace-nowrap">
-          {posture}
-        </span>
-      )}
-    </span>
-  );
+  return <span className="flex min-w-0 flex-col items-end">{control}</span>;
 }
 
 /** Rail entry that lifts the vendor filter off a mixed catalog. */
@@ -676,7 +665,6 @@ export function CodeComposer({
   disabled,
   running,
   permissionMode,
-  permissionPosture,
   availableModes = MODES,
   unavailableReason,
   harness,
@@ -709,7 +697,6 @@ export function CodeComposer({
   disabled?: boolean;
   running: boolean;
   permissionMode: PermissionMode;
-  permissionPosture?: string;
   availableModes?: readonly PermissionMode[];
   /** Why no permission mode can start this session. */
   unavailableReason?: string;
@@ -1207,7 +1194,6 @@ export function CodeComposer({
             pending={settingsPending}
             onChange={onModeChange}
             scopeKey={sessionId ?? "code-create"}
-            posture={permissionPosture}
           />
         }
         contextUsage={contextUsage}

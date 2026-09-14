@@ -77,7 +77,6 @@ import { startFirstSession } from "./startWorkspaceSession";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   createPermissionModes,
-  createPermissionModePosture,
   defaultCreatePermissionMode,
   effortLadder,
   gatewayCodeModels,
@@ -877,7 +876,7 @@ export function NewWorkspaceDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-h-[calc(100dvh-1rem)] max-w-4xl gap-0 overflow-hidden p-0 sm:max-h-[calc(100dvh-3rem)] sm:rounded-xl"
+        className="max-h-[calc(100dvh-1rem)] max-w-5xl gap-0 overflow-hidden p-0 sm:max-h-[calc(100dvh-3rem)] sm:rounded-xl"
         withCloseButton={false}
         aria-describedby={undefined}
         onOpenAutoFocus={(event) => {
@@ -1282,14 +1281,6 @@ export function NewWorkspaceDialog({
                     />
                   </span>
                 </WithTooltip>
-                {selectedHarness && (
-                  <p className="text-muted-foreground px-2 text-xs whitespace-nowrap">
-                    {createPermissionModePosture(
-                      postedMode,
-                      selectedHarness.caps,
-                    )}
-                  </p>
-                )}
                 {selectedHarness?.relaunch_composes_permission_mode ===
                   false && (
                   <p className="text-muted-foreground px-2 text-xs">
