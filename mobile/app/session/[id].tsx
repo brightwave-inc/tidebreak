@@ -36,7 +36,7 @@ import {
 } from "../../src/lib/submission";
 import type { TimelineItem } from "../../src/lib/transcript";
 import { useSessionDraftRecoveryStore } from "../../src/session/draftRecovery";
-import { useSessionStore } from "../../src/session/store";
+import { useActiveConnection } from "../../src/session/store";
 import { useMachineClient } from "../../src/session/useMachineClient";
 import { useSessionEvents } from "../../src/session/useSessionEvents";
 
@@ -50,7 +50,7 @@ export default function SessionDetailScreen() {
     title?: string;
     workspace?: string;
   }>();
-  const session = useSessionStore((state) => state.session);
+  const connection = useActiveConnection();
   const client = useMachineClient();
   const queryClient = useQueryClient();
   const recoveredDraft = useSessionDraftRecoveryStore((state) =>
@@ -312,7 +312,7 @@ export default function SessionDetailScreen() {
     }
   }
 
-  if (!session?.machine || !params.id) {
+  if (!connection?.machine || !params.id) {
     return (
       <SafeAreaView className="flex-1 bg-page-background px-5 py-6">
         <ErrorText>Attach a machine to supervise this session.</ErrorText>

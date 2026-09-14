@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertResourceEcho,
+  isAllowedResource,
   tidebreakMachineResource,
 } from "./resource";
 import { validatedBaseUrl } from "./url";
@@ -29,5 +30,31 @@ describe("tidebreakMachineResource", () => {
     expect(() =>
       assertResourceEcho(derived, "tidebreak:deadbeef"),
     ).toThrow(/does not match/);
+  });
+});
+
+describe("isAllowedResource", () => {
+  it("permits the union the merged app mints", () => {
+    expect(isAllowedResource("control")).toBe(true);
+    expect(isAllowedResource("control_plane")).toBe(true);
+    expect(isAllowedResource("runtime:engineering")).toBe(true);
+    expect(
+      isAllowedResource(tidebreakMachineResource("https://machine.example.com")),
+    ).toBe(true);
+  });
+
+  it("still refuses everything else", () => {
+    // Inference and MCP credentials are not this client's business, whatever a
+    // response asks it to mint.
+    for (const resource of [
+      "llm",
+      "mcp:github",
+      "connector",
+      "sandbox:00000000-0000-0000-0000-000000000000",
+      "control_planet",
+      "",
+    ]) {
+      expect(isAllowedResource(resource)).toBe(false);
+    }
   });
 });

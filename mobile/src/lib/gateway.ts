@@ -1,9 +1,9 @@
 import { createPkcePair } from "./pkce";
 import { randomUrlSafe } from "./crypto";
 import { fetchRefusingRedirects, type HttpFetch } from "./http";
+import { requestedScope } from "./scope";
 import {
   CLIENT_ID,
-  OAUTH_SCOPE,
   PRODUCTION_REDIRECT_URI,
   type GatewayIdentity,
   type GatewayMeta,
@@ -19,9 +19,18 @@ export type AuthorizeRequest = {
   verifier: string;
 };
 
+/**
+ * `meta` is the unauthenticated metadata pairing already read. It decides the
+ * scope: the gateway refuses a scope it does not advertise rather than
+ * ignoring it (`scope.ts`).
+ *
+ * The requested scope is deliberately not returned. What a session may do is
+ * read from the grant the exchange reports, never from what was asked for.
+ */
 export function buildAuthorizeRequest(
   gatewayUrl: string,
   redirectUri = PRODUCTION_REDIRECT_URI,
+  meta?: GatewayMeta | null,
 ): AuthorizeRequest {
   const base = validatedBaseUrl(gatewayUrl);
   const pkce = createPkcePair();
@@ -30,7 +39,7 @@ export function buildAuthorizeRequest(
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", CLIENT_ID);
   url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("scope", OAUTH_SCOPE);
+  url.searchParams.set("scope", requestedScope(meta));
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");

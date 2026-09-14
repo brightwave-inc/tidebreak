@@ -45,14 +45,14 @@ import {
   type MobilePlanDecision,
   type MobileUserQuestionAnswer,
 } from "../../src/lib/chatPrompts";
-import { useSessionStore } from "../../src/session/store";
+import { useActiveMachine } from "../../src/session/store";
 import { useMachineClient } from "../../src/session/useMachineClient";
 
 export default function ChatDetailScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
   const params = useLocalSearchParams<{ id?: string; title?: string }>();
-  const machine = useSessionStore((state) => state.session?.machine);
+  const machine = useActiveMachine();
   const client = useMachineClient();
   const queryClient = useQueryClient();
   const scrollRef = useRef<ScrollView>(null);

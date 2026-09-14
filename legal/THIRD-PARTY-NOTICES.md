@@ -644,7 +644,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/katharostech/cfg_aliases
 - License text: `LICENSE` ([L-48513346d335](#l-48513346d335))
 
-### chacha20 0.10.1
+### chacha20 0.10.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/stream-ciphers
@@ -3084,7 +3084,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sunfishcode/rustix-linux-procfs
 - License text: `COPYRIGHT` ([L-adda0c416b03](#l-adda0c416b03)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### rustls 0.23.43
+### rustls 0.23.45
 
 - License: `Apache-2.0 OR ISC OR MIT`
 - Repository: https://github.com/rustls/rustls

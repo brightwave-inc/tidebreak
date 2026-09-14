@@ -128,17 +128,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           # Keep the frozen notes on this draft, but do not publish it yet.
           # Publishing here makes GitHub treat the release as immutable, so
           # later asset uploads fail. Release Drafter only updates
           # non-prerelease drafts, so this shape freezes the notes and
           # lets the next merge start a new draft.
-          gh api --method PATCH \
+          # Include the frozen tag when updating draft flags; omitting it can
+          # rebind a GitHub draft to an untagged placeholder.
+          # Preserve the captured target metadata. The existing Git tag
+          # remains the authority for the source SHA.
+          release_target="$(jq -er '.target_commitish' "$RUNNER_TEMP/release-snapshot.json")"
+          release_json="$(jq -n --arg tag "$RELEASE_TAG" --arg target "$release_target" \
+            '{draft: true, prerelease: true} + {tag_name: $tag, target_commitish: $target}' | gh api \
+            --method PATCH \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -f draft=true \
-            -f prerelease=true \
-            >/dev/null
+            --input -)"
+          jq -e '.draft == true and .prerelease == true' <<<"$release_json" >/dev/null || {
+            echo "Failed to keep release $RELEASE_ID as a draft after marking it in-flight." >&2
+            exit 1
+          }
+          jq -e --arg tag "$RELEASE_TAG" --arg target "$release_target" \
+            '.tag_name == $tag and .target_commitish == $target' <<<"$release_json" >/dev/null || {
+            echo "GitHub changed the frozen identity of release $RELEASE_ID." >&2
+            exit 1
+          }
       - name: Require a commit from main
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
