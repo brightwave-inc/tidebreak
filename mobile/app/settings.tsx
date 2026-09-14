@@ -1,11 +1,26 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Application from "expo-application";
 import { useRouter } from "expo-router";
 import * as Updates from "expo-updates";
-import { useCallback, useEffect, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Pressable, Switch, Text, View } from "react-native";
 import { Button } from "../src/components/Controls";
 import { Screen, Body } from "../src/components/Screen";
-import { connections } from "../src/session/runtime";
+import { connectionLabel } from "../src/lib/connections";
+import { fetchGatewayMeta } from "../src/lib/gateway";
+import {
+  applyPushPreference,
+  fetchPushPreferences,
+  gatewayDeliversPush,
+  pushKindCopy,
+  setPushPreference,
+  type PushPreference,
+} from "../src/lib/push";
+import { RESOURCE_CONTROL } from "../src/lib/resource";
+import { deregisterConnection } from "../src/push/registration";
+import { readPushToken } from "../src/push/tokenCache";
+import { connections, secureStorage } from "../src/session/runtime";
+import { signOutActiveConnection } from "../src/session/signOut";
 import { useActiveConnection, useConnectionStore } from "../src/session/store";
 
 /** One labelled fact about this installation. */
@@ -21,6 +36,212 @@ function Fact({ label, value }: { label: string; value: string }) {
         {value}
       </Text>
     </View>
+  );
+}
+
+function Card({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <View className="rounded-xl border border-border bg-background p-4 gap-2">
+      <Text className="text-xs uppercase tracking-wide text-muted-foreground">
+        {title}
+      </Text>
+      {children}
+    </View>
+  );
+}
+
+/** A connection's `control` bearer, for the CLI-surface push routes. */
+function controlToken(connectionId: string): Promise<string> {
+  const store = connections.tokensFor(connectionId);
+  if (!store) {
+    return Promise.reject(new Error("That connection is no longer signed in."));
+  }
+  return store.getAccessToken(RESOURCE_CONTROL);
+}
+
+/**
+ * Per-kind notification toggles.
+ *
+ * Rendered only against a gateway that advertises push, because a dark
+ * installation answers these routes with a refusal rather than an empty list.
+ * Suppression happens at the gateway's enqueue site, so a flipped switch
+ * affects every device this account is signed into — said plainly below the
+ * list, since a per-device reading of these controls would be wrong.
+ */
+function NotificationPreferences({
+  connectionId,
+  gatewayUrl,
+}: {
+  connectionId: string;
+  gatewayUrl: string;
+}) {
+  const queryClient = useQueryClient();
+  const queryKey = ["push-preferences", connectionId] as const;
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+
+  const preferences = useQuery({
+    queryKey,
+    queryFn: async () =>
+      fetchPushPreferences(gatewayUrl, await controlToken(connectionId)),
+  });
+
+  async function toggle(kind: string, enabled: boolean) {
+    const previous = queryClient.getQueryData<PushPreference[]>(queryKey);
+    // Optimistic: a Switch that snaps back a second later reads as broken.
+    queryClient.setQueryData<PushPreference[]>(queryKey, (data) =>
+      data ? applyPushPreference(data, kind, enabled) : data,
+    );
+    setPending(kind);
+    setError(null);
+    try {
+      await setPushPreference(
+        gatewayUrl,
+        await controlToken(connectionId),
+        kind,
+        enabled,
+      );
+      await queryClient.invalidateQueries({ queryKey });
+    } catch {
+      if (previous) {
+        queryClient.setQueryData(queryKey, previous);
+      }
+      setError("The gateway did not accept that change. Try again.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  return (
+    <Card title="Notifications">
+      {preferences.data ? (
+        <View className="gap-3">
+          {preferences.data.map((preference) => {
+            const copy = pushKindCopy(preference.kind);
+            return (
+              <View
+                key={preference.kind}
+                className="flex-row items-center justify-between gap-3"
+              >
+                <View className="min-w-0 flex-1">
+                  <Text className="text-base text-foreground">
+                    {copy.title}
+                  </Text>
+                  <Text className="text-xs text-muted-foreground">
+                    {copy.detail}
+                  </Text>
+                </View>
+                <Switch
+                  disabled={pending !== null}
+                  value={preference.enabled}
+                  onValueChange={(enabled) =>
+                    void toggle(preference.kind, enabled)
+                  }
+                />
+              </View>
+            );
+          })}
+          <Text className="pt-1 text-xs text-muted-foreground">
+            Applies to your account on this gateway, across every device you
+            are signed into.
+          </Text>
+        </View>
+      ) : (
+        <Text className="text-sm text-muted-foreground">
+          {preferences.isError
+            ? "Could not load notification settings."
+            : "Loading…"}
+        </Text>
+      )}
+      {error ? (
+        <Text className="text-sm text-critical-foreground">{error}</Text>
+      ) : null}
+    </Card>
+  );
+}
+
+/**
+ * What this phone is registered to receive, per connection.
+ *
+ * Registration is per connection rather than per device — each gateway holds
+ * its own push address for this phone — so leaving one gateway's notifications
+ * is a per-row action and does not touch the others. Turning a row off deletes
+ * the address at the gateway; the next foreground re-registers it while
+ * permission stands, which is deliberate: this row manages the *device*, and
+ * the durable "stop sending me this" control is the per-kind toggle above.
+ */
+function DeviceRegistrations() {
+  const list = useConnectionStore((state) => state.connections);
+  const [registered, setRegistered] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    const entries = await Promise.all(
+      list.map(
+        async (connection) =>
+          [
+            connection.id,
+            (await readPushToken(secureStorage, connection.id)) !== null,
+          ] as const,
+      ),
+    );
+    setRegistered(Object.fromEntries(entries));
+  }, [list]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function turnOff(id: string, gatewayUrl: string) {
+    setBusy(id);
+    try {
+      await deregisterConnection(id, gatewayUrl);
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (list.length === 0) {
+    return null;
+  }
+
+  return (
+    <Card title="This device">
+      {list.map((connection) => (
+        <View
+          key={connection.id}
+          className="flex-row items-center justify-between gap-3 py-1"
+        >
+          <View className="min-w-0 flex-1">
+            <Text className="text-base text-foreground" numberOfLines={1}>
+              {connectionLabel(connection)}
+            </Text>
+            <Text className="text-xs text-muted-foreground">
+              {registered[connection.id]
+                ? "Registered for push"
+                : "Not registered"}
+            </Text>
+          </View>
+          {registered[connection.id] ? (
+            <Button
+              busy={busy === connection.id}
+              compact
+              label="Turn off"
+              variant="secondary"
+              accessibilityLabel={`Turn off notifications from ${connectionLabel(connection)}`}
+              onPress={() =>
+                void turnOff(connection.id, connection.gatewayUrl)
+              }
+            />
+          ) : null}
+        </View>
+      ))}
+      <Text className="pt-1 text-xs text-muted-foreground">
+        Removes this phone&apos;s push address from that gateway. Signing out
+        removes it too.
+      </Text>
+    </Card>
   );
 }
 
@@ -111,10 +332,7 @@ function AboutThisApp() {
   const busy = ota === "checking" || ota === "downloading";
 
   return (
-    <View className="rounded-xl border border-border bg-background p-4 gap-2">
-      <Text className="text-xs uppercase tracking-wide text-muted-foreground">
-        About this app
-      </Text>
+    <Card title="About this app">
       <Fact label="Version" value={version} />
       <Fact label="OTA bundle" value={bundle} />
       <Text className="pt-1 text-xs text-muted-foreground">
@@ -133,7 +351,7 @@ function AboutThisApp() {
           onPress={() => void check()}
         />
       )}
-    </View>
+    </Card>
   );
 }
 
@@ -142,13 +360,25 @@ export default function SettingsScreen() {
   const connection = useActiveConnection();
   const count = useConnectionStore((state) => state.connections.length);
 
+  // Re-read rather than trusted from the connection record: an operator can
+  // enable push long after a pairing was made, and the stored snapshot would
+  // describe the installation as it was.
+  const meta = useQuery({
+    queryKey: ["meta", connection?.gatewayUrl ?? ""],
+    queryFn: () => fetchGatewayMeta(connection?.gatewayUrl ?? ""),
+    enabled: Boolean(connection?.gatewayUrl),
+    staleTime: 60_000,
+  });
+
   /**
-   * Sign-out is per connection: this one's credential is deleted and its
-   * record forgotten, every other connection keeps its session, and the app
-   * lands wherever the survivors put it.
+   * Sign-out is per connection: this one's push registration is dropped at the
+   * gateway first — it needs a bearer this connection is about to stop being
+   * able to mint — then its credential is deleted and its record forgotten.
+   * Every other connection keeps its session, and the app lands wherever the
+   * survivors put it.
    */
   async function signOut() {
-    await connections.removeActive();
+    await signOutActiveConnection();
     const next = connections.active();
     router.replace(next?.machine ? "/home" : next ? "/attach" : "/");
   }
@@ -178,10 +408,7 @@ export default function SettingsScreen() {
           </Text>
         ) : null}
       </Pressable>
-      <View className="rounded-xl border border-border bg-background p-4 gap-2">
-        <Text className="text-xs uppercase tracking-wide text-muted-foreground">
-          Machine
-        </Text>
+      <Card title="Machine">
         <Text className="text-base text-foreground">
           {connection?.machine?.baseUrl ?? "Not attached"}
         </Text>
@@ -190,7 +417,14 @@ export default function SettingsScreen() {
             {connection.machine.resource}
           </Text>
         ) : null}
-      </View>
+      </Card>
+      {connection && gatewayDeliversPush(meta.data) ? (
+        <NotificationPreferences
+          connectionId={connection.id}
+          gatewayUrl={connection.gatewayUrl}
+        />
+      ) : null}
+      <DeviceRegistrations />
       <AboutThisApp />
       <Body>
         Sign out clears this connection&apos;s rotating refresh token and every
