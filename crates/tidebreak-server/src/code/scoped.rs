@@ -390,14 +390,21 @@ impl ScopedCode {
     }
 
     pub async fn get_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
-        self.runtime.get_workspace(&self.owner, id).await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.get_workspace(&owner, id).await
     }
 
     /// Read a workspace through ownership or a live grant on one of its sessions.
-    /// Mutation paths keep using `get_workspace`, which requires ownership.
     pub async fn read_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
-        let owner = self.workspace_owner_for_read(id).await?;
-        self.runtime.get_workspace(&owner, id).await
+        self.get_workspace(id).await
+    }
+
+    /// Require ownership of a workspace before a mutation or live terminal read.
+    pub async fn require_workspace_owner(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        self.runtime.get_workspace(&self.owner, id).await
     }
 
     async fn workspace_owner_for_read(&self, id: WorkspaceId) -> Result<OwnerId, ServerError> {
@@ -406,12 +413,13 @@ impl ScopedCode {
         {
             return Ok(workspace.owner);
         }
-        tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
-            .await?
-            .into_iter()
-            .find(|session| session.workspace_id == Some(id))
-            .map(|session| session.owner)
-            .ok_or_else(|| ServerError::not_found("code workspace not found"))
+        let session =
+            tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
+                .await?
+                .into_iter()
+                .find(|session| session.workspace_id == Some(id))
+                .ok_or_else(|| ServerError::not_found("code workspace not found"))?;
+        self.session_owner_for_read(session.id).await
     }
 
     /// Require a writable workspace whose commands may run on this machine.
@@ -458,9 +466,8 @@ impl ScopedCode {
         query: &str,
         limit: Option<u32>,
     ) -> Result<(Vec<String>, bool), ServerError> {
-        self.runtime
-            .workspace_tree(&self.owner, id, query, limit)
-            .await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.workspace_tree(&owner, id, query, limit).await
     }
 
     pub async fn workspace_search(
@@ -471,8 +478,9 @@ impl ScopedCode {
         exclude: &str,
         limit: Option<u32>,
     ) -> Result<(Vec<worktree::WorktreeSearchMatch>, bool), ServerError> {
+        let owner = self.workspace_owner_for_read(id).await?;
         self.runtime
-            .workspace_search(&self.owner, id, query, include, exclude, limit)
+            .workspace_search(&owner, id, query, include, exclude, limit)
             .await
     }
 
@@ -504,7 +512,8 @@ impl ScopedCode {
         id: WorkspaceId,
         path: &str,
     ) -> Result<worktree::WorktreeBlob, ServerError> {
-        self.runtime.workspace_blob(&self.owner, id, path).await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.workspace_blob(&owner, id, path).await
     }
 
     pub async fn workspace_file(
@@ -512,7 +521,8 @@ impl ScopedCode {
         id: WorkspaceId,
         path: &str,
     ) -> Result<worktree::WorktreeFile, ServerError> {
-        self.runtime.workspace_file(&self.owner, id, path).await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.workspace_file(&owner, id, path).await
     }
 
     pub async fn workspace_files(
@@ -520,7 +530,8 @@ impl ScopedCode {
         id: WorkspaceId,
         turn_id: Option<TurnId>,
     ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<TurnId>), ServerError> {
-        self.runtime.workspace_files(&self.owner, id, turn_id).await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.workspace_files(&owner, id, turn_id).await
     }
 
     pub async fn workspace_diff(
@@ -529,9 +540,8 @@ impl ScopedCode {
         turn_id: Option<TurnId>,
         file: Option<&str>,
     ) -> Result<(String, bool, Diffstat, Option<TurnId>), ServerError> {
-        self.runtime
-            .workspace_diff(&self.owner, id, turn_id, file)
-            .await
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.workspace_diff(&owner, id, turn_id, file).await
     }
 
     // ------------------------------------------------------------------
@@ -911,14 +921,16 @@ impl ScopedCode {
         id: SessionId,
         at_turn: Option<tidebreak_core::TurnId>,
     ) -> Result<super::fork::WrittenTranscript, ServerError> {
-        self.runtime.fork_transcript(&self.owner, id, at_turn).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.fork_transcript(&owner, id, at_turn).await
     }
 
     pub async fn session_debug(
         &self,
         id: SessionId,
     ) -> Result<(Session, Vec<Turn>, Vec<SequencedEvent>), ServerError> {
-        self.runtime.session_debug(&self.owner, id).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.session_debug(&owner, id).await
     }
 
     pub async fn resolve_turn_attachments(
