@@ -32,6 +32,21 @@ pnpm test
 
 Shipping to TestFlight: see [`DEPLOYING.md`](DEPLOYING.md).
 
+## Generated types
+
+`src/generated/` is committed output. Do not hand-edit it; CI regenerates and
+fails on any difference.
+
+| File | Source | Regenerate |
+| --- | --- | --- |
+| `wire.ts` | the desktop UI's generated wire types, byte-identical | `pnpm sync-wire` |
+| `gatewayAdmin.ts` | `schemas/gateway-admin-openapi.json`, via `openapi-typescript` | `pnpm sync-gateway-openapi` |
+
+The gateway admin snapshot is a pinned contract refreshed on demand, not on
+every gateway deploy — see [`schemas/README.md`](schemas/README.md) for where it
+comes from and how to refresh it. `src/lib/gatewayAdmin.ts` holds the named
+aliases screens should import instead of indexing the generated file directly.
+
 ## Pairing
 
 1. Enter the gateway public base URL.
