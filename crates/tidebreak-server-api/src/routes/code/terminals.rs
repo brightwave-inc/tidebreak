@@ -43,7 +43,7 @@ pub async fn list_terminals(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<Vec<CodeTerminalSnapshot>>, ServerError> {
-    let _ = code.get_workspace(id).await?;
+    let _ = code.require_workspace_owner(id).await?;
     Ok(Json(
         state
             .terminals
@@ -59,7 +59,7 @@ pub async fn close_workspace_terminals(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = code.get_workspace(id).await?;
+    let _ = code.require_workspace_owner(id).await?;
     if !state.terminals.close_workspace_and_wait(id).await {
         return Err(map_terminal(TerminalError::Io(
             "terminal shutdown did not complete".into(),
@@ -73,7 +73,7 @@ pub async fn close_terminal(
     code: ScopedCode,
     Path(path): Path<WorkspaceTerminalPath>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = code.get_workspace(path.id).await?;
+    let _ = code.require_workspace_owner(path.id).await?;
     let terminals = state.terminals.clone();
     tokio::task::spawn_blocking(move || terminals.close(path.id, path.tid))
         .await
@@ -88,7 +88,7 @@ pub async fn read_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
     Query(query): Query<TerminalReadQuery>,
 ) -> Result<Json<CodeTerminalRead>, ServerError> {
-    let _ = code.get_workspace(path.id).await?;
+    let _ = code.require_workspace_owner(path.id).await?;
     Ok(Json(read_wire(
         path.tid,
         path.id,

@@ -1098,6 +1098,11 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
     let session = &sessions[0];
     let path = format!("/code/workspaces/{workspace_id}");
     assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("{path}/diff")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a caller without a session grant cannot read the workspace diff"
+    );
+    assert_eq!(
         get_status(&client, addr, BOB_TOKEN, &path).await,
         reqwest::StatusCode::NOT_FOUND
     );
@@ -1180,9 +1185,35 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await,
         reqwest::StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        get_status(&client, addr, BOB_TOKEN, &format!("{path}/tree")).await,
-        reqwest::StatusCode::NOT_FOUND
+    for suffix in [
+        "/tree",
+        "/files",
+        "/blob?path=README.md",
+        "/file?path=README.md",
+        "/search?query=private",
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
+            reqwest::StatusCode::OK,
+            "a granted reader must read {suffix}"
+        );
+    }
+    let diff: serde_json::Value = client
+        .get(format!("http://{addr}{path}/diff"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        diff["diff"]
+            .as_str()
+            .is_some_and(|body| body.contains("private-sibling.txt")),
+        "a granted reader sees the shared workspace diff"
     );
     assert_eq!(
         client
@@ -1206,19 +1237,6 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await,
         reqwest::StatusCode::NOT_FOUND
     );
-    // No turn selector must not resolve an ungranted sibling's latest checkpoint.
-    for suffix in [
-        "/files",
-        "/diff",
-        "/blob?path=README.md",
-        "/file?path=README.md",
-        "/search?query=private",
-    ] {
-        assert_eq!(
-            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
-            reqwest::StatusCode::NOT_FOUND
-        );
-    }
     let revoke = client
         .delete(format!(
             "http://{addr}/sessions/{session}/access/principal:user:bob"
