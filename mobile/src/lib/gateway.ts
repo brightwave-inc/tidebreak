@@ -1,9 +1,9 @@
 import { createPkcePair } from "./pkce";
 import { randomUrlSafe } from "./crypto";
 import { fetchRefusingRedirects, type HttpFetch } from "./http";
+import { requestedScope } from "./scope";
 import {
   CLIENT_ID,
-  OAUTH_SCOPE,
   PRODUCTION_REDIRECT_URI,
   type GatewayIdentity,
   type GatewayMeta,
@@ -17,20 +17,29 @@ export type AuthorizeRequest = {
   redirectUri: string;
   state: string;
   verifier: string;
+  /** The scope actually asked for, so the caller can record what was granted. */
+  scope: string;
 };
 
+/**
+ * `meta` is the unauthenticated metadata pairing already read. It decides the
+ * scope: the gateway refuses a scope it does not advertise rather than
+ * ignoring it, so anything not advertised is not requested (`scope.ts`).
+ */
 export function buildAuthorizeRequest(
   gatewayUrl: string,
   redirectUri = PRODUCTION_REDIRECT_URI,
+  meta?: GatewayMeta | null,
 ): AuthorizeRequest {
   const base = validatedBaseUrl(gatewayUrl);
   const pkce = createPkcePair();
   const state = randomUrlSafe(24);
+  const scope = requestedScope(meta);
   const url = new URL(`${base}/oauth/authorize`);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", CLIENT_ID);
   url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("scope", OAUTH_SCOPE);
+  url.searchParams.set("scope", scope);
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
@@ -39,6 +48,7 @@ export function buildAuthorizeRequest(
     redirectUri,
     state,
     verifier: pkce.verifier,
+    scope,
   };
 }
 

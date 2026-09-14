@@ -4,24 +4,27 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { tokenStore } from "../src/session/runtime";
-import { useSessionStore } from "../src/session/store";
+import { connections } from "../src/session/runtime";
+import { useConnectionStore } from "../src/session/store";
 
 const queryClient = new QueryClient();
 
 export default function RootLayout() {
-  const setHydrated = useSessionStore((state) => state.setHydrated);
-  const signOutLocal = useSessionStore((state) => state.signOutLocal);
+  const setHydrated = useConnectionStore((state) => state.setHydrated);
+  const apply = useConnectionStore((state) => state.apply);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const stop = tokenStore.onSignedOut(signOutLocal);
-    void tokenStore.hydrate().then((session) => {
-      setHydrated(session);
+    // Every change to the connection set lands here: pairing, switching,
+    // signing out of one connection, and a gateway revoking one session's
+    // refresh family.
+    const stop = connections.onChange(apply);
+    void connections.hydrate().then((snapshot) => {
+      setHydrated(snapshot);
       setReady(true);
     });
     return stop;
-  }, [setHydrated, signOutLocal]);
+  }, [setHydrated, apply]);
 
   if (!ready) {
     return null;
@@ -56,6 +59,7 @@ export default function RootLayout() {
           <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
           <Stack.Screen name="approvals" options={{ title: "Approvals" }} />
           <Stack.Screen name="settings" options={{ title: "Settings" }} />
+          <Stack.Screen name="connections" options={{ title: "Connections" }} />
         </Stack>
       </QueryClientProvider>
     </GestureHandlerRootView>

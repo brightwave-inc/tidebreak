@@ -14,8 +14,7 @@ import {
 } from "../src/lib/gateway";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
 import { validatedBaseUrl } from "../src/lib/url";
-import { tokenStore } from "../src/session/runtime";
-import { useSessionStore } from "../src/session/store";
+import { connections } from "../src/session/runtime";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -28,7 +27,6 @@ function redirectUri(): string {
 
 export default function PairScreen() {
   const router = useRouter();
-  const setSession = useSessionStore((state) => state.setSession);
   const [url, setUrl] = useState("");
   const [phase, setPhase] = useState<"idle" | "authorizing" | "attaching">(
     "idle",
@@ -42,7 +40,9 @@ export default function PairScreen() {
     try {
       const gatewayUrl = validatedBaseUrl(url);
       const meta = await fetchGatewayMeta(gatewayUrl);
-      const request = buildAuthorizeRequest(gatewayUrl, redirectUri());
+      // Meta decides the scope: a gateway refuses a scope it does not
+      // advertise outright, which would break sign-in rather than narrow it.
+      const request = buildAuthorizeRequest(gatewayUrl, redirectUri(), meta);
       const result = await WebBrowser.openAuthSessionAsync(
         request.authorizationUrl,
         request.redirectUri,
@@ -56,32 +56,43 @@ export default function PairScreen() {
         verifier: request.verifier,
         redirectUri: request.redirectUri,
       });
-      await tokenStore.replace({
+      await connections.addGateway({
         gatewayUrl,
         refreshToken: tokens.refresh_token,
-        installationId: meta.installation_id,
-        machinePrefillUrl: meta.tidebreak_machine_url ?? undefined,
-        accessTokens: [],
+        ...(meta.installation_id
+          ? { installationId: meta.installation_id }
+          : {}),
+        ...(meta.tidebreak_machine_url
+          ? { machinePrefillUrl: meta.tidebreak_machine_url }
+          : {}),
+        // What the session was actually granted, from the exchange that
+        // answers about the session. A gateway that echoes nothing leaves it
+        // unrecorded, which reads as the baseline authority.
+        grantedScope: tokens.scope ?? request.scope,
       });
+      const tokenStore = connections.activeTokens();
       try {
         const controlToken = await tokenStore.getAccessToken(RESOURCE_CONTROL);
         const identity = await fetchIdentity(gatewayUrl, controlToken);
-        await tokenStore.update({ identity });
+        await connections.updateActive({ identity });
       } catch {
         // Identity is shown later from a control-scoped mint.
       }
-      setSession(tokenStore.snapshot());
       // The gateway named a machine and attach validation refuses anything but
       // that deployment's own, so the confirm screen would be ceremony: run it
       // here. A failure routes to the Attach screen with its error state.
       setPhase("attaching");
       const outcome = await autoAttach(
-        { gatewayUrl, machinePrefillUrl: meta.tidebreak_machine_url ?? undefined },
+        {
+          gatewayUrl,
+          ...(meta.tidebreak_machine_url
+            ? { machinePrefillUrl: meta.tidebreak_machine_url }
+            : {}),
+        },
         { getAccessToken: (resource) => tokenStore.getAccessToken(resource) },
       );
       if (outcome.kind === "attached") {
-        await tokenStore.update({ machine: outcome.machine });
-        setSession(tokenStore.snapshot());
+        await connections.updateActive({ machine: outcome.machine });
         router.replace("/home");
         return;
       }

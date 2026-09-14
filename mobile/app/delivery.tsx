@@ -32,7 +32,7 @@ import {
   type MobileDeliveryPullRequest,
   type MobileDeliverySourceError,
 } from "../src/lib/deliveryApi";
-import { useSessionStore } from "../src/session/store";
+import { useActiveMachine } from "../src/session/store";
 import { useMachineClient } from "../src/session/useMachineClient";
 
 const LANE_META: Record<
@@ -85,7 +85,7 @@ export default function DeliveryScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
   const queryClient = useQueryClient();
-  const machine = useSessionStore((state) => state.session?.machine);
+  const machine = useActiveMachine();
   const client = useMachineClient();
   const repositoryRefreshRef = useRef(false);
   const pullRequestRefreshRef = useRef(false);

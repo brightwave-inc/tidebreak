@@ -37,9 +37,30 @@ export type DiscoveredMachine = {
   gatewayUrl: string;
 };
 
+/**
+ * How a machine is expected to authenticate, chosen by the kind of connection
+ * attaching it.
+ *
+ * `gateway` is the only implemented strategy: the machine must speak Model
+ * Gateway auth, echo the resource this client derived, and name the paired
+ * deployment. The union exists so standalone pairing (#3404) adds a
+ * `{ kind: "machine" }` strategy — a direct URL with a static token, whose
+ * discovery names no gateway — instead of loosening the check here.
+ */
+export type AttachTarget = { kind: "gateway"; gatewayUrl: string };
+
+export function gatewayTarget(gatewayUrl: string): AttachTarget {
+  return { kind: "gateway", gatewayUrl };
+}
+
+/**
+ * Discovery, then the per-kind verification. The echoed resource is never
+ * trusted: the caller's derivation from the URL the user entered is, and the
+ * echo only has to agree with it.
+ */
 export async function discoverMachine(
   machineUrl: string,
-  pairedGatewayUrl: string,
+  target: AttachTarget,
   fetchImpl?: HttpFetch,
 ): Promise<DiscoveredMachine> {
   let baseUrl: string;
@@ -127,7 +148,7 @@ export async function discoverMachine(
     );
   }
   try {
-    if (!urlsMatch(discovery.gateway_url, pairedGatewayUrl)) {
+    if (!urlsMatch(discovery.gateway_url, target.gatewayUrl)) {
       throw new Error("mismatch");
     }
   } catch {
@@ -140,7 +161,7 @@ export async function discoverMachine(
   return {
     baseUrl,
     resource: derived,
-    gatewayUrl: validatedBaseUrl(pairedGatewayUrl),
+    gatewayUrl: validatedBaseUrl(target.gatewayUrl),
   };
 }
 
