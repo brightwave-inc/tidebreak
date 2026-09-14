@@ -568,13 +568,17 @@ mod tests {
         ) -> Result<MessageReceipt, RemoteSandboxError> {
             wait_for_provision_gate(&self.send_gate).await;
             let super::super::wire::SupervisorMessageBody::Input(body) = &message.body;
-            self.sends.lock().unwrap().push(body.clone());
+            let seq = {
+                let mut sends = self.sends.lock().unwrap();
+                sends.push(body.clone());
+                sends.len() as i64
+            };
             self.send_interrupts.lock().unwrap().push(message.interrupt);
             if let Some(error) = self.send_errors.lock().unwrap().pop_front() {
                 return Err(error);
             }
             Ok(MessageReceipt {
-                seq: 1,
+                seq,
                 interrupt: false,
                 pending_messages: 0,
             })

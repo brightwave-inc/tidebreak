@@ -206,7 +206,7 @@ pub async fn prepare(
     };
     // Explicit connection proof must be valid even when the preference is disabled.
     let explicit_person = match starter.and_then(|s| s.personal_grant_id) {
-        Some(id) => tidebreak_core::db::code::personal_inference_grant(
+        Some(id) => tidebreak_core::db::code::personal_inference_grant_all_owners(
             &runtime.db,
             &grant.workspace_identity,
             identity
@@ -262,7 +262,7 @@ pub async fn prepare(
         explicit_person
     } else if grant.kind.is_workspace() {
         match identity {
-            Some(identity) => tidebreak_core::db::code::personal_inference_grant(
+            Some(identity) => tidebreak_core::db::code::personal_inference_grant_all_owners(
                 &runtime.db,
                 &grant.workspace_identity,
                 &identity,

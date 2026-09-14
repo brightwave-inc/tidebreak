@@ -4470,24 +4470,25 @@ mod tests {
             .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "build")
             .await
             .unwrap();
-        let spawns = fake.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1);
-        assert_eq!(
-            spawns[0].inference_sponsor,
-            prepared.freeze(session.id).sponsor
-        );
-        assert_eq!(
-            spawns[0]
-                .embedded_engine
-                .as_ref()
-                .unwrap()
-                .engine_session_id,
-            session.id.to_string()
-        );
-        assert!(spawns[0].subscription.is_none());
-        assert_eq!(session.owner, owner);
-        assert_eq!(spawns[0].repository, Some(repository_url(&repo).unwrap()));
-        drop(spawns);
+        {
+            let spawns = fake.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(
+                spawns[0].inference_sponsor,
+                prepared.freeze(session.id).sponsor
+            );
+            assert_eq!(
+                spawns[0]
+                    .embedded_engine
+                    .as_ref()
+                    .unwrap()
+                    .engine_session_id,
+                session.id.to_string()
+            );
+            assert!(spawns[0].subscription.is_none());
+            assert_eq!(session.owner, owner);
+            assert_eq!(spawns[0].repository, Some(repository_url(&repo).unwrap()));
+        }
         assert_eq!(
             tidebreak_core::db::code::inference_resolutions(&db, &owner, session.id)
                 .await

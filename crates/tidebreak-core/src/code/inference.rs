@@ -124,7 +124,7 @@ impl PreparedSessionInference {
         SessionInference {
             root_session_id: session,
             starter_external_identity: self.starter.clone(),
-            sponsor: self.supported.then(|| match &self.personal {
+            sponsor: self.supported.then_some(match &self.personal {
                 Some((_, _, delegation)) => InferenceSponsor::PreferOwnedSubscription {
                     inference_scope_id: session.0,
                     external_delegation_id: delegation.0,

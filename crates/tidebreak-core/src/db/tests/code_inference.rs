@@ -57,7 +57,7 @@ async fn inference_explicit_proof_refuses_mismatch_incomplete_missing_and_revoke
     let owner = OwnerId::local();
     let valid = personal(&store, &owner, "U1", "valid").await;
     assert_eq!(
-        personal_inference_grant(&store, "T1", "U1", Some(valid.id))
+        personal_inference_grant_all_owners(&store, "T1", "U1", Some(valid.id))
             .await
             .unwrap()
             .unwrap()
@@ -70,7 +70,7 @@ async fn inference_explicit_proof_refuses_mismatch_incomplete_missing_and_revoke
         ("T1", "U1", CodeGrantId::new()),
     ] {
         assert!(
-            personal_inference_grant(&store, workspace, identity, Some(id))
+            personal_inference_grant_all_owners(&store, workspace, identity, Some(id))
                 .await
                 .is_err()
         );
@@ -90,24 +90,30 @@ async fn inference_explicit_proof_refuses_mismatch_incomplete_missing_and_revoke
     .await
     .unwrap();
     assert!(
-        personal_inference_grant(&store, "T1", "U2", Some(incomplete.id))
+        personal_inference_grant_all_owners(&store, "T1", "U2", Some(incomplete.id))
             .await
             .is_err()
     );
-    assert!(personal_inference_grant(&store, "T1", "U2", None)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        personal_inference_grant_all_owners(&store, "T1", "U2", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     revoke_external_grant(&store, &owner, valid.id, "test revocation")
         .await
         .unwrap();
-    assert!(personal_inference_grant(&store, "T1", "U1", Some(valid.id))
-        .await
-        .is_err());
-    assert!(personal_inference_grant(&store, "T1", "U1", None)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        personal_inference_grant_all_owners(&store, "T1", "U1", Some(valid.id))
+            .await
+            .is_err()
+    );
+    assert!(
+        personal_inference_grant_all_owners(&store, "T1", "U1", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -115,13 +121,15 @@ async fn inference_ambiguous_personal_identity_does_not_choose_an_owner() {
     let (_dir, store) = temp_store().await;
     let alice = personal(&store, &OwnerId::new("alice").unwrap(), "U1", "alice").await;
     let bob = personal(&store, &OwnerId::new("bob").unwrap(), "U1", "bob").await;
-    assert!(personal_inference_grant(&store, "T1", "U1", None)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        personal_inference_grant_all_owners(&store, "T1", "U1", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     for grant in [alice, bob] {
         assert_eq!(
-            personal_inference_grant(&store, "T1", "U1", Some(grant.id))
+            personal_inference_grant_all_owners(&store, "T1", "U1", Some(grant.id))
                 .await
                 .unwrap()
                 .unwrap()
@@ -256,12 +264,17 @@ async fn inference_binding_freezes_one_selection_and_children_share_its_provider
         reason: None,
         subscription_label: Some("Personal".into()),
     };
-    record_inference_resolutions(&store, &owner, child.id, &[resolution.clone()])
+    record_inference_resolutions(&store, &owner, child.id, std::slice::from_ref(&resolution))
         .await
         .unwrap();
-    record_inference_resolutions(&store, &owner, root.id, &[resolution.clone()])
+    record_inference_resolutions(&store, &owner, root.id, std::slice::from_ref(&resolution))
         .await
         .unwrap();
+    // Shared results omit the subscription's private label.
+    let resolution = InferenceResolution {
+        subscription_label: None,
+        ..resolution
+    };
     assert_eq!(
         inference_resolutions(&store, &owner, root.id)
             .await

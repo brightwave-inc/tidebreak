@@ -83,9 +83,11 @@ pub async fn inherit_session_inference(
     transaction.commit().await.map_err(store_err)
 }
 
-/// Resolve only a completed person connection in this Slack workspace.
-/// An ambiguous mapping carries no payment authority.
-pub async fn personal_inference_grant(
+/// System lookup for a verified Slack starter when a channel service owns the session.
+/// The personal connection can belong to another owner, so callers supply the
+/// adapter-verified workspace and identity. Only a completed, unambiguous connection
+/// can carry sponsorship authority; Gateway validates the live consent separately.
+pub async fn personal_inference_grant_all_owners(
     store: &DbStore,
     workspace: &str,
     identity: &str,
