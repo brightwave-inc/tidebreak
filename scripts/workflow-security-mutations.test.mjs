@@ -687,8 +687,8 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "release builds freeze a draft tag from the trusted main workflow",
     mutate: (source) => source.replace(
-      "{tag_name: $tag, target_commitish: $sha}",
-      "{target_commitish: $sha}",
+      "{tag_name: $tag, target_commitish: $target}",
+      "{target_commitish: $target}",
     ),
   },
   {
@@ -696,7 +696,7 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "release builds freeze a draft tag from the trusted main workflow",
     mutate: (source) => source.replace(
-      ".tag_name == $tag and .target_commitish == $sha",
+      ".tag_name == $tag and .target_commitish == $target",
       ".tag_name == $tag",
     ),
   },
