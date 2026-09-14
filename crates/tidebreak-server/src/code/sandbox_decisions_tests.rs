@@ -786,3 +786,87 @@ async fn managed_cancellation_tombstones_replays_and_preserves_a_settled_actor()
         tidebreak_core::SessionLifecycle::Running
     );
 }
+
+#[tokio::test]
+async fn managed_cancellation_cannot_claim_an_ordinary_request_id() {
+    let (_dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Allow).await;
+    let (_, identity) = active_turn(&runtime, &session, incarnation).await;
+    let executor = SandboxToolExecutor::new(Arc::downgrade(&runtime));
+    let ordinary = SupervisorToolRequest {
+        cancelled: false,
+        request_id: "ordinary-call".into(),
+        tool: "code_wait".into(),
+        arguments: serde_json::json!({}),
+        turn: None,
+    };
+    executor
+        .enqueue(&session.owner, session.id, incarnation, &ordinary)
+        .await
+        .unwrap();
+    let receipt = list_native_tool_requests(&runtime.db, &session.owner, session.id, incarnation)
+        .await
+        .unwrap()
+        .remove(0);
+    let mut cancellation = question_request(&ordinary.request_id);
+    cancellation.turn = Some(identity);
+    cancellation.cancelled = true;
+    assert!(executor
+        .enqueue(&session.owner, session.id, incarnation, &cancellation)
+        .await
+        .is_err());
+    assert!(!authorize_managed_decision_delivery(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        &ordinary.request_id,
+        false,
+    )
+    .await
+    .unwrap());
+    assert!(matches!(
+        claim_native_tool_request(&runtime.db, &session.owner, &receipt)
+            .await
+            .unwrap(),
+        NativeToolClaim::Claimed(_)
+    ));
+    let result = SupervisorToolResult::failed(ordinary.request_id.clone(), "fixture result");
+    complete_native_tool_request(
+        &runtime.db,
+        &session.owner,
+        &receipt,
+        &serde_json::to_value(&result).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        executor
+            .service(&session.owner, session.id, incarnation)
+            .await
+            .unwrap(),
+        vec![result]
+    );
+    executor
+        .authorize_delivery(
+            &session.owner,
+            session.id,
+            incarnation,
+            &ordinary.request_id,
+        )
+        .await
+        .unwrap();
+    executor
+        .mark_delivered(
+            &session.owner,
+            session.id,
+            incarnation,
+            &ordinary.request_id,
+        )
+        .await
+        .unwrap();
+    assert!(executor
+        .service(&session.owner, session.id, incarnation)
+        .await
+        .unwrap()
+        .is_empty());
+}

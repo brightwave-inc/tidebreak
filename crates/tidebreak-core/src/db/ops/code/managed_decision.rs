@@ -339,6 +339,19 @@ pub async fn cancel_managed_decision(
                 .map_err(store_err)?;
         }
     } else {
+        let ordinary = entities::code_native_tool_receipt::Entity::find()
+            .filter(entities::code_native_tool_receipt::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_native_tool_receipt::Column::SessionId.eq(session.0))
+            .filter(entities::code_native_tool_receipt::Column::IncarnationId.eq(incarnation.0))
+            .filter(entities::code_native_tool_receipt::Column::RequestId.eq(&request.request_id))
+            .count(&tx)
+            .await
+            .map_err(store_err)?;
+        if ordinary != 0 {
+            return Err(invalid(
+                "request_id already belongs to an ordinary native call",
+            ));
+        }
         // This row has no approval card. A delayed proposal finds the tombstone.
         decision::ActiveModel {
             approval_id: Set(uuid::Uuid::new_v4()),

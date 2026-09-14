@@ -1385,9 +1385,10 @@ mod tests {
 
     #[test]
     fn managed_human_codex_configuration_keeps_paths_literal_and_requires_startup() {
+        let root = std::env::temp_dir();
         let spec = ToolBridgeSpec {
-            helper: PathBuf::from("/workspace/tools with spaces/helper"),
-            socket: PathBuf::from("/tmp/socket \"quoted\".sock"),
+            helper: root.join("tools with spaces").join("helper"),
+            socket: root.join("socket \"quoted\".sock"),
         };
         let config: toml::Value = toml::from_str(&spec.codex_config_override().unwrap()).unwrap();
         let human = &config["mcp_servers"]["tb-human"];
