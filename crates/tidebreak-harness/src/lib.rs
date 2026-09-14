@@ -1638,11 +1638,16 @@ mod tests {
                         // Grok ACP captures are bidirectional JSON-RPC frames, not the
                         // print-mode stream consumed by `GrokStreamParser`. ACP replay
                         // coverage lives in `grok::acp_tests`.
+                        let file_name = path
+                            .file_name()
+                            .map(|file| file.to_string_lossy().into_owned());
                         let framed_acp = name == "grok"
-                            && path
-                                .file_name()
-                                .is_some_and(|file| file.to_string_lossy().starts_with("acp-"));
-                        if !framed_acp {
+                            && file_name
+                                .as_deref()
+                                .is_some_and(|file| file.starts_with("acp-"));
+                        // Probe captures list slash commands; they are not turn streams.
+                        let command_list = file_name.as_deref() == Some("command-list.ndjson");
+                        if !framed_acp && !command_list {
                             streams.push((name.clone(), path));
                         }
                     }

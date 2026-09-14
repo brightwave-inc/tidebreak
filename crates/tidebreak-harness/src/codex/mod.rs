@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessCommand, HarnessKind, ReasoningEffort};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -33,6 +33,7 @@ use crate::{
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+const COMMAND_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Codex CLI adapter. Capabilities below are for the captured protocol line
 /// beginning at 0.147.0: verified flags are `Supported`/`Unsupported`; anything
@@ -57,14 +58,19 @@ impl HarnessAdapter for CodexAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "codex").await {
             Ok(capture) => {
-                let version = match host.declared_version(HarnessKind::Codex) {
-                    Some(declared) => Some(normalize_codex_version(declared)),
-                    None => observe_version(&capture.binary, &capture.env)
-                        .await
-                        .ok()
-                        .map(|version| normalize_codex_version(&version)),
-                };
-                let authenticated = observe_login(&capture.binary, &capture.env).await;
+                let (version, authenticated, commands) = tokio::join!(
+                    async {
+                        match host.declared_version(HarnessKind::Codex) {
+                            Some(declared) => Some(normalize_codex_version(declared)),
+                            None => observe_version(&capture.binary, &capture.env)
+                                .await
+                                .ok()
+                                .map(|version| normalize_codex_version(&version)),
+                        }
+                    },
+                    observe_login(&capture.binary, &capture.env),
+                    observe_commands(&capture.binary, &capture.env),
+                );
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -72,7 +78,7 @@ impl HarnessAdapter for CodexAdapter {
                     authenticated,
                     stderr: capture.stderr,
                     env: capture.env,
-                    commands: Vec::new(),
+                    commands,
                 }
             }
             Err(err) => HarnessProbe {
@@ -110,7 +116,11 @@ impl HarnessAdapter for CodexAdapter {
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
-            slash_commands: CapLevel::Unknown,
+            slash_commands: if probe.commands.is_empty() {
+                CapLevel::Unknown
+            } else {
+                CapLevel::Supported
+            },
             // Tidebreak contract concepts, not protocol surface (decisions
             // 0033, 0048): no external engine parks durably, takes
             // structured answers, or mints standing grants.
@@ -172,6 +182,333 @@ fn supports_native_steering(version: Option<&str>) -> bool {
         })
         .next()
         .is_some_and(|(major, minor, _)| major == 0 && minor >= 147)
+}
+
+/// Codex owns slash commands in its interactive TUI rather than app-server.
+/// Drive a short-lived PTY, type `/`, and parse the popup. The harness crate
+/// must not depend on a PTY library, so this uses libc on Unix and degrades
+/// everywhere else. A missing binary, login screen, timeout, or unrecognized
+/// rendering conservatively yields no rows.
+async fn observe_commands(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<HarnessCommand> {
+    #[cfg(not(unix))]
+    {
+        let _ = (binary, env);
+        return Vec::new();
+    }
+    #[cfg(unix)]
+    {
+        let binary = binary.to_owned();
+        let env = env.to_vec();
+        timeout(
+            COMMAND_LIST_TIMEOUT,
+            tokio::task::spawn_blocking(move || capture_command_popup(&binary, &env)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    }
+}
+
+#[cfg(unix)]
+fn capture_command_popup(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<HarnessCommand> {
+    use std::io::{ErrorKind, Read, Write};
+    use std::time::Instant;
+
+    let Some((mut master, slave)) = open_pty() else {
+        return Vec::new();
+    };
+    set_pty_size(&master, 50, 140);
+    let Ok(probe_dir) = tempfile::tempdir() else {
+        return Vec::new();
+    };
+    let mut command = std::process::Command::new(binary);
+    command.args([
+        "--no-alt-screen",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "hooks",
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "read-only",
+        "-c",
+        "tui.animations=false",
+    ]);
+    command.env_clear();
+    command.current_dir(probe_dir.path());
+    for (key, value) in filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    command.env("TERM", "xterm-256color");
+    let Ok(slave_in) = slave.try_clone() else {
+        return Vec::new();
+    };
+    let Ok(slave_out) = slave.try_clone() else {
+        return Vec::new();
+    };
+    let Ok(slave_err) = slave.try_clone() else {
+        return Vec::new();
+    };
+    command
+        .stdin(Stdio::from(slave_in))
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err));
+    let Ok(mut child) = command.spawn() else {
+        return Vec::new();
+    };
+    drop(slave);
+    set_nonblocking(&master);
+    let mut captured = Vec::new();
+    let start = Instant::now();
+    let deadline = start + COMMAND_LIST_TIMEOUT;
+    let mut sent_slash = false;
+    let mut chunk = [0_u8; 4096];
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        match master.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                let bytes = &chunk[..count];
+                captured.extend_from_slice(bytes);
+                if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+                    let _ = master.write_all(b"\x1b[1;1R");
+                }
+                if bytes.windows(7).any(|window| window == b"\x1b]10;?") {
+                    let _ = master.write_all(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
+                }
+                if bytes.windows(7).any(|window| window == b"\x1b]11;?") {
+                    let _ = master.write_all(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+                }
+                if bytes.windows(3).any(|window| window == b"\x1b[c") {
+                    let _ = master.write_all(b"\x1b[?1;2c");
+                }
+                let _ = master.flush();
+            }
+            Err(err)
+                if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::Interrupted =>
+            {
+                if !sent_slash && start.elapsed() >= Duration::from_millis(400) {
+                    let _ = master.write_all(b"/");
+                    let _ = master.flush();
+                    sent_slash = true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+        if sent_slash && start.elapsed() >= Duration::from_millis(900) {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let wait_deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < wait_deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    parse_command_popup(&captured)
+}
+
+#[cfg(unix)]
+fn open_pty() -> Option<(std::fs::File, std::fs::File)> {
+    use std::os::unix::io::FromRawFd;
+
+    // SAFETY: posix_openpt allocates a new fd. Negative means failure; a
+    // non-negative fd is uniquely owned until from_raw_fd takes it.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 {
+            return None;
+        }
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let Some(slave_path) = pty_slave_name(master) else {
+            libc::close(master);
+            return None;
+        };
+        let slave = libc::open(slave_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+        if slave < 0 {
+            libc::close(master);
+            return None;
+        }
+        Some((
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn pty_slave_name(master: libc::c_int) -> Option<std::ffi::CString> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut buf = [0 as libc::c_char; 64];
+        // SAFETY: `buf` is a writable C string buffer; ptsname_r writes a
+        // NUL-terminated path or returns non-zero.
+        unsafe {
+            if libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) != 0 {
+                return None;
+            }
+            Some(std::ffi::CStr::from_ptr(buf.as_ptr()).to_owned())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: ptsname returns a pointer into libc storage valid until the
+        // next ptsname call; this function does not call it again.
+        unsafe {
+            let ptr = libc::ptsname(master);
+            if ptr.is_null() {
+                return None;
+            }
+            Some(std::ffi::CStr::from_ptr(ptr).to_owned())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_pty_size(master: &std::fs::File, rows: u16, cols: u16) {
+    use std::os::unix::io::AsRawFd;
+    let mut size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ takes a winsize pointer; `size` is a live local.
+    unsafe {
+        let _ = libc::ioctl(
+            master.as_raw_fd(),
+            libc::TIOCSWINSZ as libc::c_ulong,
+            &mut size,
+        );
+    }
+}
+
+#[cfg(unix)]
+fn set_nonblocking(file: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fcntl on an open fd we own; F_GETFL/F_SETFL only read and write
+    // the file status flags.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+        if flags >= 0 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+fn parse_command_popup(output: &[u8]) -> Vec<HarnessCommand> {
+    let text = strip_terminal_controls(output);
+    let bytes = text.as_bytes();
+    let mut commands: Vec<HarnessCommand> = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'/') else {
+            break;
+        };
+        let start = cursor + offset;
+        let mut end = start + 1;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_lowercase()
+                || bytes[end].is_ascii_digit()
+                || matches!(bytes[end], b'-' | b'_'))
+        {
+            end += 1;
+        }
+        let name = &text[start + 1..end];
+        let spaces = bytes[end..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+        if !name.is_empty() && spaces >= 2 {
+            let description_start = end + spaces;
+            let tail = &text[description_start..];
+            let description_end = [tail.find("  /"), tail.find(['\r', '\n'])]
+                .into_iter()
+                .flatten()
+                .min()
+                .map_or(text.len(), |next| description_start + next);
+            let description = text[description_start..description_end]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !description.is_empty() && description.len() <= 200 {
+                let command = HarnessCommand {
+                    name: name.to_owned(),
+                    description,
+                };
+                if !commands.iter().any(|listed| listed.name == command.name) {
+                    commands.push(command);
+                }
+            }
+        }
+        cursor = end;
+    }
+    commands
+}
+
+fn strip_terminal_controls(output: &[u8]) -> String {
+    let mut plain = Vec::with_capacity(output.len());
+    let mut cursor = 0;
+    while cursor < output.len() {
+        if output[cursor] != 0x1b {
+            if output[cursor] == b'\r' || output[cursor] == b'\n' || output[cursor] >= b' ' {
+                plain.push(output[cursor]);
+            }
+            cursor += 1;
+            continue;
+        }
+        cursor += 1;
+        match output.get(cursor) {
+            Some(b'[') => {
+                cursor += 1;
+                let mut final_byte = None;
+                while cursor < output.len() {
+                    let byte = output[cursor];
+                    cursor += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        final_byte = Some(byte);
+                        break;
+                    }
+                }
+                if matches!(final_byte, Some(b'H' | b'f')) {
+                    plain.push(b'\n');
+                }
+            }
+            Some(b']') => {
+                cursor += 1;
+                while cursor < output.len() {
+                    if output[cursor] == 0x07 {
+                        cursor += 1;
+                        break;
+                    }
+                    if output[cursor] == 0x1b && output.get(cursor + 1) == Some(&b'\\') {
+                        cursor += 2;
+                        break;
+                    }
+                    cursor += 1;
+                }
+            }
+            Some(_) => cursor += 1,
+            None => {}
+        }
+    }
+    String::from_utf8_lossy(&plain).into_owned()
 }
 
 /// Ask the same app-server protocol a real session uses. Codex has no
@@ -597,6 +934,60 @@ mod tests {
             );
         }
         (out.events, out.unrecognized)
+    }
+
+    #[test]
+    fn command_list_reads_the_captured_popup_rows() {
+        let fixture = include_bytes!("../../fixtures/codex/0.147.0/command-list.txt");
+        assert_eq!(
+            parse_command_popup(fixture),
+            [
+                HarnessCommand {
+                    name: "compact".into(),
+                    description: "compact the conversation to prevent hitting the context limit"
+                        .into(),
+                },
+                HarnessCommand {
+                    name: "model".into(),
+                    description: "choose what model and reasoning effort to use".into(),
+                },
+                HarnessCommand {
+                    name: "permissions".into(),
+                    description: "choose what Codex is allowed to do".into(),
+                },
+            ]
+        );
+        assert!(parse_command_popup(b"old binary: unknown option").is_empty());
+        assert_eq!(
+            parse_command_popup(
+                b"\x1b[1m  /compact       compact the conversation to prevent hitting the context limit"
+            ),
+            [HarnessCommand {
+                name: "compact".into(),
+                description: "compact the conversation to prevent hitting the context limit"
+                    .into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn slash_commands_are_supported_once_the_probe_lists_any() {
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("codex-cli 0.147.0".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: vec![HarnessCommand {
+                name: "compact".into(),
+                description: "compact the conversation".into(),
+            }],
+        };
+        assert_eq!(
+            CodexAdapter::new().capabilities(&probe).slash_commands,
+            CapLevel::Supported
+        );
     }
 
     #[test]

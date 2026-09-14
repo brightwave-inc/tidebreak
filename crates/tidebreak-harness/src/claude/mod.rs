@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessCommand, HarnessKind, ReasoningEffort};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -19,6 +19,7 @@ use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
+const COMMAND_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Claude Code adapter. Capabilities below are for the captured version
 /// 2.1.233: verified flags are `Supported`/`Unsupported`; anything not
@@ -185,11 +186,16 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
-                let version = match host.declared_version(HarnessKind::ClaudeCode) {
-                    Some(declared) => Some(declared.to_owned()),
-                    None => observe_version(&capture.binary, &capture.env).await.ok(),
-                };
-                let authenticated = observe_auth(&capture.binary, &capture.env).await;
+                let (version, authenticated, commands) = tokio::join!(
+                    async {
+                        match host.declared_version(HarnessKind::ClaudeCode) {
+                            Some(declared) => Some(declared.to_owned()),
+                            None => observe_version(&capture.binary, &capture.env).await.ok(),
+                        }
+                    },
+                    observe_auth(&capture.binary, &capture.env),
+                    observe_commands(&capture.binary, &capture.env),
+                );
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -197,7 +203,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                     authenticated,
                     stderr: capture.stderr,
                     env: capture.env,
-                    commands: Vec::new(),
+                    commands,
                 }
             }
             Err(err) => HarnessProbe {
@@ -231,7 +237,11 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Supported,
-            slash_commands: CapLevel::Unknown,
+            slash_commands: if probe.commands.is_empty() {
+                CapLevel::Unknown
+            } else {
+                CapLevel::Supported
+            },
             // Tidebreak contract concepts, not protocol surface: an external
             // engine's turn state lives in its process, so nothing here can
             // park durably, take structured answers, or mint standing grants
@@ -315,6 +325,63 @@ fn auth_status_from_json(stdout: &[u8]) -> Option<bool> {
         .as_bool()
 }
 
+/// `/context` is handled locally: its stream init frame lists the commands
+/// without an inference turn. Old binaries that lack the shape simply return
+/// no rows, which keeps discovery conservative.
+async fn observe_commands(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<HarnessCommand> {
+    let mut command = Command::new(binary);
+    command
+        .args([
+            "-p",
+            "/context",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--no-session-persistence",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    let Ok(child) = crate::spawn_process_tree(&mut command) else {
+        return Vec::new();
+    };
+    let Ok(Ok(output)) = timeout(COMMAND_LIST_TIMEOUT, child.wait_with_output()).await else {
+        return Vec::new();
+    };
+    parse_command_list(&output.stdout)
+}
+
+fn parse_command_list(stdout: &[u8]) -> Vec<HarnessCommand> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|message| {
+            message.get("type").and_then(serde_json::Value::as_str) == Some("system")
+                && message.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
+        })
+        .and_then(|message| message.get("slash_commands")?.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|name| {
+            let name = name.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(HarnessCommand {
+                name: name.trim_start_matches('/').to_owned(),
+                description: String::new(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -369,6 +436,30 @@ pub(crate) mod tests {
         );
         assert_eq!(auth_status_from_json(br#"{"authMethod":"oauth"}"#), None);
         assert_eq!(auth_status_from_json(b"not json"), None);
+    }
+
+    #[test]
+    fn command_list_reads_the_captured_init_frame() {
+        let fixture = include_bytes!("../../fixtures/claude-code/2.1.233/command-list.ndjson");
+        assert_eq!(
+            parse_command_list(fixture),
+            [
+                HarnessCommand {
+                    name: "compact".into(),
+                    description: String::new(),
+                },
+                HarnessCommand {
+                    name: "context".into(),
+                    description: String::new(),
+                },
+                HarnessCommand {
+                    name: "model".into(),
+                    description: String::new(),
+                },
+            ]
+        );
+        assert!(parse_command_list(b"not json\n").is_empty());
+        assert!(parse_command_list(br#"{"type":"system","subtype":"init"}"#).is_empty());
     }
 
     #[test]
@@ -847,6 +938,26 @@ pub(crate) mod tests {
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Supported);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn slash_commands_are_supported_once_the_probe_lists_any() {
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("2.1.233 (Claude Code)".into()),
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: vec![HarnessCommand {
+                name: "compact".into(),
+                description: String::new(),
+            }],
+        };
+        assert_eq!(
+            ClaudeCodeAdapter::new().capabilities(&probe).slash_commands,
+            CapLevel::Supported
+        );
     }
 
     #[test]

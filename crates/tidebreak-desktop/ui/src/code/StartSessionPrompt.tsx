@@ -455,6 +455,7 @@ export function StartSessionPrompt({
           modelLoading={modelLoading}
           reasoningEffort={postedEffort}
           engineEfforts={engineEfforts}
+          slashCommands={selected?.commands}
           fastMode={postedFastMode}
           harnessMenu={
             <HarnessPicker

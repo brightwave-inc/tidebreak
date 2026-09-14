@@ -1,0 +1,3 @@
+  /compact       compact the conversation to prevent hitting the context limit
+  /model         choose what model and reasoning effort to use
+  /permissions   choose what Codex is allowed to do

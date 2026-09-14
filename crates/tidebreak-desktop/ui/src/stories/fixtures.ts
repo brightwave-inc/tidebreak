@@ -574,6 +574,29 @@ const fullCaps: HarnessCaps = {
   memory_loopback: "unsupported",
 };
 
+/** Probe-discovered engine slash commands, as the composer popup consumes them. */
+export const claudeSlashCommands: HarnessDoctorEntry["commands"] = [
+  { name: "compact", description: "Compact the conversation" },
+  { name: "context", description: "Show context usage" },
+  { name: "model", description: "Choose a model" },
+];
+
+export const codexSlashCommands: HarnessDoctorEntry["commands"] = [
+  {
+    name: "compact",
+    description:
+      "Compact the conversation to prevent hitting the context limit",
+  },
+  {
+    name: "model",
+    description: "Choose what model and reasoning effort to use",
+  },
+  {
+    name: "permissions",
+    description: "Choose what Codex is allowed to do",
+  },
+];
+
 function doctorEntry(
   overrides: Partial<HarnessDoctorEntry> & Pick<HarnessDoctorEntry, "kind">,
 ): HarnessDoctorEntry {
@@ -602,12 +625,14 @@ export const harnessDoctor: HarnessDoctorReport = {
       version: "2.1.234 (Claude Code)",
       path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
       authenticated: true,
+      commands: claudeSlashCommands,
     }),
     doctorEntry({
       kind: "codex",
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: true,
+      commands: codexSlashCommands,
       caps: {
         ...fullCaps,
         mid_turn_steering: "supported",
