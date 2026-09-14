@@ -126,7 +126,7 @@ where
                 json!({"tools": (["ask_user_questions","request_plan_approval"].into_iter().map(|name| {
                 let spec = human_decision_spec(name).expect("fixed human tool");
                 json!({"name":spec.name,"description":spec.description,"inputSchema":spec.input_schema,
-                    "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}})
+                    "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}})
             }).collect::<Vec<_>>())})
             }
             Some("tools/call") => {
@@ -272,6 +272,11 @@ mod tests {
         .await;
         let catalog = receive(&mut client_read).await;
         assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 2);
+        assert!(catalog["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["annotations"]["readOnlyHint"] == false));
         send(&mut client_write, json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ask_user_questions","arguments":arguments()}})).await;
         let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
