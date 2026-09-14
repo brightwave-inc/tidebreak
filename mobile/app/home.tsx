@@ -22,9 +22,10 @@ import {
 } from "../src/lib/deliveryApi";
 import { fetchIdentity } from "../src/lib/gateway";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
+import { sectionsFor } from "../src/lib/sections";
 import { attentionSessionCount } from "../src/lib/updates";
-import { tokenStore } from "../src/session/runtime";
-import { useSessionStore } from "../src/session/store";
+import { connections } from "../src/session/runtime";
+import { useActiveConnection } from "../src/session/store";
 import { useMachineClient } from "../src/session/useMachineClient";
 import { useHasSnapshot, useListedSessions } from "../src/session/updatesStore";
 import { useUpdatesFeed } from "../src/session/useUpdatesFeed";
@@ -100,8 +101,7 @@ function SectionRow({
 export default function HomeScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
-  const session = useSessionStore((state) => state.session);
-  const setSession = useSessionStore((state) => state.setSession);
+  const connection = useActiveConnection();
   const client = useMachineClient();
   const { live, refresh } = useUpdatesFeed(client);
   const sessions = useListedSessions();
@@ -109,19 +109,20 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const identityQuery = useQuery({
-    queryKey: ["identity", session?.gatewayUrl],
-    enabled: !!session,
+    queryKey: ["identity", connection?.gatewayUrl],
+    enabled: !!connection,
     queryFn: async () => {
-      const token = await tokenStore.getAccessToken(RESOURCE_CONTROL);
-      const identity = await fetchIdentity(session!.gatewayUrl, token);
-      await tokenStore.update({ identity });
-      setSession(tokenStore.snapshot());
+      const token = await connections
+        .activeTokens()
+        .getAccessToken(RESOURCE_CONTROL);
+      const identity = await fetchIdentity(connection!.gatewayUrl, token);
+      await connections.updateActive({ identity });
       return identity;
     },
   });
 
   const workspacesQuery = useQuery({
-    queryKey: ["code-workspaces", session?.machine?.baseUrl],
+    queryKey: ["code-workspaces", connection?.machine?.baseUrl],
     enabled: !!client,
     queryFn: () => listActiveCodeWorkspaces(client!),
   });
@@ -134,7 +135,7 @@ export default function HomeScreen() {
   });
 
   const repositoriesQuery = useQuery({
-    queryKey: ["mobile-delivery-repositories", session?.machine?.baseUrl],
+    queryKey: ["mobile-delivery-repositories", connection?.machine?.baseUrl],
     enabled: !!client && isFocused,
     queryFn: ({ signal }) => listMobileDeliveryRepositories(client!, { signal }),
   });
@@ -160,7 +161,7 @@ export default function HomeScreen() {
   const deliveryQuery = useQuery({
     queryKey: [
       "mobile-delivery-attention",
-      session?.machine?.baseUrl,
+      connection?.machine?.baseUrl,
       repositoryKey,
       viewerLogin ?? "",
     ],
@@ -173,7 +174,7 @@ export default function HomeScreen() {
       }),
   });
 
-  if (!session?.machine) {
+  if (!connection?.machine) {
     return (
       <Screen title="Not attached">
         <Body>Pair a gateway and attach a machine first.</Body>
@@ -187,9 +188,9 @@ export default function HomeScreen() {
     );
   }
 
-  const identity = identityQuery.data ?? session.identity;
+  const identity = identityQuery.data ?? connection.identity;
   const workspaces = workspacesQuery.data ?? [];
-  const machineHost = session.machine.baseUrl.replace(/^https?:\/\//, "");
+  const machineHost = connection.machine.baseUrl.replace(/^https?:\/\//, "");
 
   const pendingCount = approvalsQuery.data
     ? pendingApprovals(approvalsQuery.data).length
@@ -218,6 +219,10 @@ export default function HomeScreen() {
         : deliveryQuery.data
           ? mobileDeliveryNeedsYouCountLabel(deliveryQuery.data)
           : "…";
+
+  // Which surfaces this connection can show at all: its kind and what it has
+  // attached, not a fixed list per screen.
+  const sections = sectionsFor(connection);
 
   const activeSessionCount = hasSnapshot
     ? sessions.filter((digest) => digest.lifecycle !== "ended").length
@@ -288,16 +293,25 @@ export default function HomeScreen() {
         <View className="gap-2">
           <SectionLabel>Work</SectionLabel>
           <View className="rounded-xl border border-border bg-background px-4">
-            <SectionRow
-              label="Sessions"
-              {...(activeSessionCount !== null
-                ? { detail: String(activeSessionCount) }
-                : {})}
-              first
-              onPress={() => router.push("/sessions")}
-            />
-            <SectionRow label="Delivery" onPress={() => router.push("/delivery")} />
-            <SectionRow label="Chats" onPress={() => router.push("/chats")} />
+            {sections.includes("sessions") ? (
+              <SectionRow
+                label="Sessions"
+                {...(activeSessionCount !== null
+                  ? { detail: String(activeSessionCount) }
+                  : {})}
+                first
+                onPress={() => router.push("/sessions")}
+              />
+            ) : null}
+            {sections.includes("delivery") ? (
+              <SectionRow
+                label="Delivery"
+                onPress={() => router.push("/delivery")}
+              />
+            ) : null}
+            {sections.includes("chats") ? (
+              <SectionRow label="Chats" onPress={() => router.push("/chats")} />
+            ) : null}
           </View>
         </View>
 

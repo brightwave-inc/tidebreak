@@ -1,20 +1,21 @@
 import { Redirect, useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 import { Screen, Body } from "../src/components/Screen";
-import { useSessionStore } from "../src/session/store";
+import { landingRoute } from "../src/lib/sections";
+import { useActiveConnection } from "../src/session/store";
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const session = useSessionStore((state) => state.session);
+  const connection = useActiveConnection();
 
-  if (session?.machine) {
+  if (connection?.machine) {
     // Land on the hub so every surface is a push with a back affordance;
     // redirecting into an index surface leaves it as the root of the stack
     // with no way back out.
     return <Redirect href="/home" />;
   }
-  if (session) {
-    return <Redirect href="/attach" />;
+  if (connection) {
+    return <Redirect href={landingRoute(connection)} />;
   }
 
   return (
@@ -25,9 +26,9 @@ export default function WelcomeScreen() {
         using the same HTTP wire as desktop.
       </Body>
       <Body>
-        Tokens stay in the device secure store. Refresh tokens rotate; this
-        client never requests resources other than control and the machine
-        itself.
+        Tokens stay in the device secure store, one credential per connection.
+        Refresh tokens rotate, and this client only asks for the resources the
+        gateway says it may hold.
       </Body>
       <Pressable
         className="rounded-lg bg-primary px-4 py-3"

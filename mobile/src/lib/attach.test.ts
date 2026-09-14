@@ -4,6 +4,7 @@ import {
   DISCOVERY_TIMEOUT_MS,
   REASON_UNREACHABLE,
   discoverMachine,
+  gatewayTarget,
 } from "./attach";
 import { tidebreakMachineResource } from "./resource";
 
@@ -16,7 +17,7 @@ describe("discoverMachine", () => {
     const machine = "https://machine.example.com";
     const gateway = "https://gateway.example.test";
     const derived = tidebreakMachineResource(machine);
-    const ok = await discoverMachine(machine, gateway, async () =>
+    const ok = await discoverMachine(machine, gatewayTarget(gateway), async () =>
       new Response(
         JSON.stringify({
           mode: "gateway",
@@ -29,7 +30,7 @@ describe("discoverMachine", () => {
     expect(ok.resource).toBe(derived);
 
     await expect(
-      discoverMachine(machine, gateway, async () =>
+      discoverMachine(machine, gatewayTarget(gateway), async () =>
         new Response(
           JSON.stringify({
             mode: "gateway",
@@ -55,7 +56,7 @@ describe("discoverMachine", () => {
     );
     const pending = discoverMachine(
       "https://machine.example.com",
-      "https://gateway.example.test",
+      gatewayTarget("https://gateway.example.test"),
       fetchImpl,
     );
     const assertion = expect(pending).rejects.toMatchObject({
@@ -72,7 +73,7 @@ describe("discoverMachine", () => {
     vi.useFakeTimers();
     const pending = discoverMachine(
       "https://machine.example.com",
-      "https://gateway.example.test",
+      gatewayTarget("https://gateway.example.test"),
       async () =>
         new Response(
           JSON.stringify({

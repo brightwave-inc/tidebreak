@@ -6,6 +6,10 @@
 - Related: [`0049-gateway-authenticated-hosted-machines.md`](0049-gateway-authenticated-hosted-machines.md),
   [`0047-gateway-linked-hosting.md`](0047-gateway-linked-hosting.md),
   GitHub epic #2644
+- Amended by:
+  [`0097-connections-are-plural-and-typed.md`](0097-connections-are-plural-and-typed.md)
+  — the client holds several typed connections, each with its own credential
+  and refresh queue, and mints a wider resource set.
 - Supersedes: the parked “supervision-first mobile client” entry in
   [`../deferred.md`](../deferred.md)
 

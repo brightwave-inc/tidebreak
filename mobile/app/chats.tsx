@@ -16,14 +16,14 @@ import {
   listMobileChats,
   type MobileChat,
 } from "../src/lib/chatApi";
-import { useSessionStore } from "../src/session/store";
+import { useActiveMachine } from "../src/session/store";
 import { useMachineClient } from "../src/session/useMachineClient";
 
 export default function ChatsScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
   const queryClient = useQueryClient();
-  const machine = useSessionStore((state) => state.session?.machine);
+  const machine = useActiveMachine();
   const client = useMachineClient();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);

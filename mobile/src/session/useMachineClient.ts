@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { MachineClient } from "../lib/machine";
-import { tokenStore } from "./runtime";
-import { useSessionStore } from "./store";
+import { connections } from "./runtime";
+import { useActiveMachine } from "./store";
 
 // One client instance per attached machine, shared across every mount, so
 // consumers that key shared resources by client identity (the updates feed)
@@ -27,7 +27,12 @@ function machineClientFor(machine: {
       client: new MachineClient({
         baseUrl: machine.baseUrl,
         resource: machine.resource,
-        tokens: tokenStore,
+        // Resolved per call, not captured: switching connections switches
+        // which refresh family mints this machine's tokens.
+        tokens: {
+          getAccessToken: (resource) =>
+            connections.activeTokens().getAccessToken(resource),
+        },
       }),
     };
   }
@@ -35,7 +40,7 @@ function machineClientFor(machine: {
 }
 
 export function useMachineClient(): MachineClient | null {
-  const machine = useSessionStore((state) => state.session?.machine);
+  const machine = useActiveMachine();
   return useMemo(() => {
     if (!machine) return null;
     return machineClientFor(machine);

@@ -20,19 +20,19 @@ import {
 import { useMachineClient } from "../src/session/useMachineClient";
 import { useHasSnapshot, useListedSessions } from "../src/session/updatesStore";
 import { useUpdatesFeed } from "../src/session/useUpdatesFeed";
-import { useSessionStore } from "../src/session/store";
+import { useActiveConnection } from "../src/session/store";
 
 export default function SessionsScreen() {
   const router = useRouter();
-  const session = useSessionStore((state) => state.session);
+  const connection = useActiveConnection();
   const client = useMachineClient();
   const { live, refresh } = useUpdatesFeed(client);
   const rows = useListedSessions();
   const hasSnapshot = useHasSnapshot();
   const [refreshing, setRefreshing] = useState(false);
 
-  const signedOut = !session;
-  const notAttached = !session?.machine;
+  const signedOut = !connection;
+  const notAttached = !connection?.machine;
 
   // An empty list is trustworthy only after a snapshot landed; a live socket
   // with no snapshot yet still means loading.

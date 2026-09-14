@@ -9,8 +9,8 @@ import {
   type AttachFailure,
   type AttachStage,
 } from "../src/lib/autoAttach";
-import { tokenStore } from "../src/session/runtime";
-import { useSessionStore } from "../src/session/store";
+import { connections } from "../src/session/runtime";
+import { useActiveConnection } from "../src/session/store";
 
 type Stage = "idle" | AttachStage;
 
@@ -20,9 +20,8 @@ export default function AttachScreen() {
     failure?: string | string[];
     detail?: string | string[];
   }>();
-  const session = useSessionStore((state) => state.session);
-  const setSession = useSessionStore((state) => state.setSession);
-  const [url, setUrl] = useState(session?.machinePrefillUrl ?? "");
+  const connection = useActiveConnection();
+  const [url, setUrl] = useState(connection?.machinePrefillUrl ?? "");
   const [stage, setStage] = useState<Stage>("idle");
   // Auto-attach hands its failure over in route params. Read once: a retry
   // owns the error state from then on, so the params must not resurrect it.
@@ -44,18 +43,18 @@ export default function AttachScreen() {
   }, [stage]);
 
   async function attach() {
-    if (!session) {
+    if (!connection) {
       router.replace("/");
       return;
     }
     setFailure(null);
     try {
-      const machine = await attachMachine(url, session.gatewayUrl, {
-        getAccessToken: (resource) => tokenStore.getAccessToken(resource),
+      const machine = await attachMachine(url, connection.gatewayUrl, {
+        getAccessToken: (resource) =>
+          connections.activeTokens().getAccessToken(resource),
         onStage: setStage,
       });
-      await tokenStore.update({ machine });
-      setSession(tokenStore.snapshot());
+      await connections.updateActive({ machine });
       router.replace("/home");
     } catch (err) {
       setFailure(describeAttachFailure(err));

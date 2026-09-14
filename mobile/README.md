@@ -36,16 +36,42 @@ Shipping to TestFlight: see [`DEPLOYING.md`](DEPLOYING.md).
 
 1. Enter the gateway public base URL.
 2. The app calls unauthenticated `GET /api/v1/meta` and stores
-   `tidebreak_machine_url` as the machine prefill when present.
+   `tidebreak_machine_url` as the machine prefill when present. The same
+   response decides the OAuth scope to request — see Connections below.
 3. The system browser opens `{gateway}/oauth/authorize` as public client
    `tidebreak-mobile` with PKCE S256. The redirect is the app scheme plus
    `://callback` (`tidebreak://callback` in production).
 4. The authorization code is exchanged at `{gateway}/oauth/token`. Refresh
-   tokens rotate; only `control` and `tidebreak:<hex>` resources are minted.
+   tokens rotate; the resources this client will mint are `control`,
+   `control_plane`, `tidebreak:<hex>`, and `runtime:<slug>`.
 5. When the gateway advertised a machine URL, the app attaches to it
    automatically and lands on the hub. There is no confirm step: attach
    validation refuses any machine but the paired deployment's own, so
    confirming a prefilled field decides nothing.
+
+## Connections
+
+The app holds several connections at once and one is active
+(decision [97](../docs/decisions/0097-connections-are-plural-and-typed.md)).
+A connection has a kind: `gateway` is an OAuth pairing, and `machine` — a
+direct URL with a static token — is declared but unimplemented.
+
+- Each connection keeps its own credential under its own secure-store key, so
+  signing out of one leaves the others signed in. Access tokens stay in memory.
+- Settings → Gateway opens the connection list: switch, sign out, or pair
+  another gateway.
+- Upgrading from an older build migrates its single stored session into a
+  connection, keeping the pairing and its rotating refresh token.
+- A reinstall wipes stored credentials: iOS Keychain entries survive an
+  uninstall, and the recorded install time is how the app notices.
+- Scope escalation is gated on advertisement. The baseline stays
+  `openid profile offline_access`; `control_plane:read` and `runtime:execute`
+  are requested only from a gateway advertising
+  `surfaces.tidebreak_mobile_console`, and `control_plane:write` also needs
+  `surfaces.control_plane_write`. No gateway advertises the first flag yet
+  (brightwave-inc/model-gateway#2044), so today every pairing is machine-only.
+  A gateway that refuses a console resource answers `invalid_resource`, which
+  is a degraded surface rather than a sign-out.
 
 Attach validates the machine URL the same way desktop does, reads
 `/auth/discovery`, derives `tidebreak:<sha256(canonical_url)>` locally, and

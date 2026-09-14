@@ -3,6 +3,14 @@ export type TokenResponse = {
   refresh_token: string;
   expires_in: number;
   token_type: string;
+  /**
+   * The scope the gateway granted. Present on the authorization-code exchange,
+   * where it describes the session; a refresh response describes only the
+   * resource it minted, so the session grant is carried rather than re-read.
+   * Optional because an older gateway may omit it, and a missing grant reads
+   * as "no console authority" rather than as a parse failure.
+   */
+  scope?: string;
 };
 
 export type CachedAccessToken = {
@@ -11,6 +19,11 @@ export type CachedAccessToken = {
   expiresAtMs: number;
 };
 
+/**
+ * The single-session blob builds before the connection model wrote under
+ * `tidebreak.mobile.session.v1`. Read once at hydrate and migrated into a
+ * gateway connection; nothing writes this shape any more.
+ */
 export type PersistedSession = {
   gatewayUrl: string;
   refreshToken: string;
@@ -33,6 +46,29 @@ export type GatewayMeta = {
   public_url?: string;
   auth_mode?: string;
   tidebreak_machine_url?: string | null;
+  /** Capability advertisement; absent on an older gateway (see `scope.ts`). */
+  surfaces?: GatewaySurfaces;
+};
+
+/**
+ * What one installation says it supports. Every field is optional and absent
+ * means "no": a client must never request an authority the gateway has not
+ * advertised, because the authorization server refuses a scope it does not
+ * know outright rather than ignoring it.
+ */
+export type GatewaySurfaces = {
+  /**
+   * Whether this installation's `tidebreak-mobile` client may hold the gateway
+   * console resources (`control_plane`, `runtime:<slug>`) — the widening in
+   * brightwave-inc/model-gateway#2044. Absent on every gateway deployed today.
+   */
+  tidebreak_mobile_console?: boolean;
+  /**
+   * Whether the authorization server accepts the `control_plane:write` scope
+   * (mg ADR 0102). Binary-wide, so it says nothing on its own about whether
+   * this client may hold control-plane resources at all.
+   */
+  control_plane_write?: boolean;
 };
 
 export type GatewayIdentity = {
@@ -56,6 +92,5 @@ export type CodeWorkspaceStub = {
 };
 
 export const CLIENT_ID = "tidebreak-mobile";
-export const OAUTH_SCOPE = "openid profile offline_access";
 export const EXPIRY_LEEWAY_MS = 60_000;
 export const PRODUCTION_REDIRECT_URI = "tidebreak://callback";
