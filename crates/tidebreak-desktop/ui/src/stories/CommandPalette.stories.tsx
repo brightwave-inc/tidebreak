@@ -133,7 +133,7 @@ const settingsRows: PaletteRow[] = [
   {
     id: "settings:coding-harnesses",
     section: "settings",
-    label: "Coding harnesses",
+    label: "Coding engines",
     onSelect: fn(),
   },
 ];

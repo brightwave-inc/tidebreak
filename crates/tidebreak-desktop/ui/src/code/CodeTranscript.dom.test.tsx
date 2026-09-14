@@ -590,7 +590,7 @@ describe("CodeTranscript", () => {
     expect(within(alert).getByText("codex logout").tagName).toBe("CODE");
     expect(within(alert).getByText("codex login").tagName).toBe("CODE");
     expect(alert).toHaveTextContent(
-      "Then open Settings → Coding harnesses and select Re-check",
+      "Then open Settings → Coding engines and select Re-check",
     );
     expect(alert).not.toHaveTextContent("Your access token could not");
   });
@@ -625,7 +625,7 @@ describe("CodeTranscript", () => {
     expect(alerts).toHaveLength(1);
     const alert = alerts[0]!;
     expect(alert).toHaveTextContent("Version 2.1.251 or newer is required.");
-    expect(alert).toHaveTextContent("Open Settings → Coding harnesses");
+    expect(alert).toHaveTextContent("Open Settings → Coding engines");
     expect(alert).not.toHaveTextContent("Run 'claude update'");
   });
 

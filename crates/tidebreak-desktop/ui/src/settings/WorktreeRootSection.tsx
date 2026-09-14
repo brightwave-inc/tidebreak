@@ -8,7 +8,8 @@ import { SettingsField, SettingsSection } from "./primitives";
  * A worktree holds uncommitted work on a real branch, so this path is the
  * user's, not the app's — the field leads with the folder that is in force and
  * says plainly what changing it does and does not do. Presentational: the
- * panel owns loading, saving, and the native picker.
+ * panel owns loading, saving, and the native picker. The path commits on
+ * blur or when a folder is picked; there is no Save button.
  */
 export function WorktreeRootSection({
   value,
@@ -19,7 +20,7 @@ export function WorktreeRootSection({
   canBrowse,
   onChange,
   onBrowse,
-  onSave,
+  onCommit,
   onReset,
 }: {
   /** The draft in the field, which may differ from what is saved. */
@@ -34,10 +35,10 @@ export function WorktreeRootSection({
   canBrowse: boolean;
   onChange: (value: string) => void;
   onBrowse: () => void;
-  onSave: () => void;
+  onCommit: (value: string) => void;
   onReset: () => void;
 }) {
-  const dirty = value.trim() !== (inherited ? "" : effectiveRoot);
+  const stored = inherited ? "" : effectiveRoot;
   return (
     <SettingsSection
       title="Workspace folder"
@@ -55,6 +56,11 @@ export function WorktreeRootSection({
           <Input
             value={value}
             onChange={(event) => onChange(event.target.value)}
+            onBlur={() => {
+              const next = value.trim();
+              if (!next || next === stored || next === effectiveRoot) return;
+              onCommit(next);
+            }}
             placeholder={defaultRoot}
             disabled={busy}
             spellCheck={false}
@@ -72,13 +78,6 @@ export function WorktreeRootSection({
         </div>
       </SettingsField>
       <div className="flex gap-2">
-        <Button
-          type="button"
-          onClick={onSave}
-          disabled={busy || !dirty || !value.trim()}
-        >
-          {busy ? "Saving…" : "Save"}
-        </Button>
         <Button
           type="button"
           variant="ghost"

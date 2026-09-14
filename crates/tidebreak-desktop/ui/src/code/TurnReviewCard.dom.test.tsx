@@ -28,7 +28,7 @@ describe("TurnReviewCard", () => {
     );
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Settings → Coding harnesses" }),
+      screen.getByRole("button", { name: "Settings → Coding engines" }),
     );
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/settings/coding-harnesses"),

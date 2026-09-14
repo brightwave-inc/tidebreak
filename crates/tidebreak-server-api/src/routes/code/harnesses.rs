@@ -12,6 +12,38 @@ use crate::code::harness_label;
 use crate::obo_gateway::GatewayCompatModel;
 use tidebreak_core::{CapLevel, HarnessKind};
 
+/// The engine CLI's own sign-in command, named the way `gh auth login` is
+/// named on the GitHub doctor path. `None` for engines that have no login.
+fn sign_in_command(kind: HarnessKind) -> Option<&'static str> {
+    match kind {
+        HarnessKind::ClaudeCode => Some("claude login"),
+        HarnessKind::Codex => Some("codex login"),
+        HarnessKind::Opencode => Some("opencode auth login"),
+        HarnessKind::Grok => Some("grok login"),
+        HarnessKind::Internal => None,
+    }
+}
+
+fn signed_out_remediation(label: &str, kind: HarnessKind) -> String {
+    match sign_in_command(kind) {
+        Some(command) => {
+            format!("Sign in to {label} in your own terminal with `{command}`, then re-check.")
+        }
+        None => format!("Sign in to {label} in your own terminal, then re-check."),
+    }
+}
+
+fn unverified_remediation(label: &str, kind: HarnessKind) -> String {
+    match sign_in_command(kind) {
+        Some(command) => format!(
+            "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal with `{command}`, then re-check."
+        ),
+        None => format!(
+            "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal, then re-check."
+        ),
+    }
+}
+
 /// The doctor surface, served from the memoized probes (decision 0034).
 pub async fn list_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport>, ServerError> {
     Ok(Json(doctor(&code).await?))
@@ -278,11 +310,9 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 // nothing here needs (issue 2749).
                 String::new()
             } else if probe.found && probe.authenticated == Some(false) {
-                format!("Sign in to {label} in your own terminal, then re-check.")
+                signed_out_remediation(label, *kind)
             } else if probe.found && probe.authenticated.is_none() {
-                format!(
-                    "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal, then re-check."
-                )
+                unverified_remediation(label, *kind)
             } else {
                 // A missing but installable engine has nothing for the reader
                 // to repair: picking it downloads it.
@@ -305,8 +335,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 remediation,
                 stderr: probe.stderr,
                 unrecognized_event_count,
-                relaunch_composes_permission_mode: adapter
-                    .relaunch_composes_permission_mode(),
+                relaunch_composes_permission_mode: adapter.relaunch_composes_permission_mode(),
                 pinned_version: release.pinned_version,
                 managed_version: release.managed_version,
                 latest_version: release.latest_version,
@@ -431,5 +460,25 @@ mod tests {
             ),
             HarnessAuthMode::GatewayRelay
         );
+    }
+
+    #[test]
+    fn signed_out_remediation_names_the_engine_login() {
+        assert!(
+            super::signed_out_remediation("Claude Code", HarnessKind::ClaudeCode)
+                .contains("`claude login`")
+        );
+        assert!(
+            super::signed_out_remediation("Codex CLI", HarnessKind::Codex)
+                .contains("`codex login`")
+        );
+        assert!(
+            super::signed_out_remediation("opencode", HarnessKind::Opencode)
+                .contains("`opencode auth login`")
+        );
+        assert!(
+            super::signed_out_remediation("Grok CLI", HarnessKind::Grok).contains("`grok login`")
+        );
+        assert!(!super::signed_out_remediation("Tidebreak", HarnessKind::Internal).contains('`'));
     }
 }

@@ -236,9 +236,9 @@ export function codeEditorOpenFailureMessage(error: unknown): string {
     case "code_editor_path_not_found":
       return "That file is no longer in the worktree. Refresh the file tree, then try again.";
     case "code_editor_editor_unknown":
-      return "Your custom editor needs the full path to its program. Set it in Settings, Coding harnesses.";
+      return "Your custom editor needs the full path to its program. Set it in Settings, Coding engines.";
     case "code_editor_editor_unavailable":
-      return "Tidebreak could not find that editor on this computer. Pick another one in Settings, Coding harnesses.";
+      return "Tidebreak could not find that editor on this computer. Pick another one in Settings, Coding engines.";
     case "code_editor_open_failed":
       return "The editor did not start. Try opening the worktree folder instead.";
   }
