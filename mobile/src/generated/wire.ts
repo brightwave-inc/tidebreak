@@ -5558,6 +5558,10 @@ export type TranscriptRole = "user" | "assistant" | "system" | "compaction";
  * when the channel sent one. A trigger knows its own name and nothing else.
  * A row written before this field existed carries nothing and renders as the
  * session's owner.
+ *
+ * The principal is an internal key (`user:<uuid>`) and must never reach the
+ * UI; the same goes for `external_identity`. Only `display`, or a generic
+ * label derived from `channel_kind`, may render.
  */
 export type TurnActor = {
 /**
