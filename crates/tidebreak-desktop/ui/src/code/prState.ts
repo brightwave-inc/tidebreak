@@ -402,6 +402,55 @@ export function prStatus(pr: PrStateInput): PrStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Live signature
+// ---------------------------------------------------------------------------
+
+export type PrLiveSignatureInput = PrStateInput & {
+  title?: string | null;
+  head_sha?: string | null;
+  comment_count?: number | null;
+};
+
+/**
+ * Every live field of a pull request, folded into one comparable token.
+ *
+ * A surface holding a loaded snapshot compares the token of an incoming
+ * summary against the token it last saw to decide whether the pull request
+ * actually moved — state, head, checks, review, queue, or conversation — and
+ * only then re-reads the host. Comparing tokens instead of objects keeps the
+ * decision cheap and keeps identity churn (a re-rendered but unchanged row)
+ * from triggering reads.
+ */
+export function pullRequestLiveSignature(pr: PrLiveSignatureInput): string {
+  return JSON.stringify([
+    hostToken(pr.state),
+    pr.draft ?? null,
+    pr.merged ?? null,
+    pr.merged_at ?? null,
+    pr.closed_at ?? null,
+    pr.review_decision ?? null,
+    pr.mergeable ?? null,
+    pr.merge_state_status ?? null,
+    pr.auto_merge_enabled ?? null,
+    pr.in_merge_queue ?? null,
+    pr.title ?? null,
+    pr.head_sha ?? null,
+    pr.comment_count ?? null,
+    pr.checks?.map((check) => [check.name ?? null, hostToken(check.bucket)]) ??
+      null,
+    pr.check_counts
+      ? [
+          pr.check_counts.passing,
+          pr.check_counts.pending,
+          pr.check_counts.failing,
+          pr.check_counts.skipped,
+        ]
+      : null,
+    pr.checks_summary ?? null,
+  ]);
+}
+
+// ---------------------------------------------------------------------------
 // Blockers
 // ---------------------------------------------------------------------------
 

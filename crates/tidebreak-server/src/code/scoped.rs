@@ -600,7 +600,25 @@ impl ScopedCode {
     }
 
     pub async fn workspace_pr(&self, id: WorkspaceId) -> Result<WorkspaceGitStatus, ServerError> {
-        self.runtime.workspace_pr(&self.owner, id).await
+        let status = self.runtime.workspace_pr(&self.owner, id).await?;
+        // GitHub computes mergeability lazily: after a push or a base change
+        // the stored digest answers "unknown" until something reads the pull
+        // request from the host again. Being read is that ask — kick one
+        // detached conditional refresh so the UI's "Checking status" clears
+        // in seconds instead of waiting for the next hot-tier tick. The
+        // response never waits on it.
+        if status
+            .pr
+            .as_ref()
+            .is_some_and(pull_request_mergeability_unknown)
+        {
+            let runtime = Arc::clone(&self.runtime);
+            let owner = self.owner.clone();
+            tokio::spawn(async move {
+                runtime.refresh_workspace_pr_row(&owner, id).await;
+            });
+        }
+        Ok(status)
     }
 
     pub async fn workspace_pull_requests(
@@ -1492,5 +1510,70 @@ impl FromRequestParts<AppState> for ScopedCode {
                 ServerError::unauthorized("this request has no authenticated principal")
             })?;
         Self::new(state, &auth)
+    }
+}
+
+/// True while the host has not yet said whether this open pull request can
+/// merge — the state the UI renders as "Checking status". Drafts are
+/// excluded: their gate never reads mergeability, so re-asking buys nothing.
+fn pull_request_mergeability_unknown(pr: &tidebreak_core::PullRequestDigest) -> bool {
+    if !pr.state.eq_ignore_ascii_case("open") || pr.merged == Some(true) || pr.draft == Some(true) {
+        return false;
+    }
+    let unknown = |value: Option<&str>| {
+        !value.is_some_and(|token| !token.is_empty() && !token.eq_ignore_ascii_case("unknown"))
+    };
+    unknown(pr.mergeable.as_deref()) || unknown(pr.merge_state_status.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pull_request_mergeability_unknown;
+    use tidebreak_core::PullRequestDigest;
+
+    fn digest(state: &str) -> PullRequestDigest {
+        PullRequestDigest {
+            number: 7,
+            url: None,
+            state: state.into(),
+            title: None,
+            checks_summary: None,
+            check_counts: None,
+            checks: None,
+            draft: None,
+            merged: None,
+            review_decision: None,
+            mergeable: None,
+            merge_state_status: None,
+            head_branch: None,
+            base_branch: None,
+            head_sha: None,
+            auto_merge_enabled: None,
+            in_merge_queue: None,
+        }
+    }
+
+    #[test]
+    fn open_pull_request_without_mergeability_needs_a_recheck() {
+        assert!(pull_request_mergeability_unknown(&digest("open")));
+        let mut unknown = digest("open");
+        unknown.mergeable = Some("unknown".into());
+        unknown.merge_state_status = Some("unknown".into());
+        assert!(pull_request_mergeability_unknown(&unknown));
+        let mut half = digest("open");
+        half.mergeable = Some("mergeable".into());
+        assert!(pull_request_mergeability_unknown(&half));
+    }
+
+    #[test]
+    fn settled_computed_and_draft_pull_requests_do_not_recheck() {
+        let mut computed = digest("open");
+        computed.mergeable = Some("mergeable".into());
+        computed.merge_state_status = Some("clean".into());
+        assert!(!pull_request_mergeability_unknown(&computed));
+        assert!(!pull_request_mergeability_unknown(&digest("merged")));
+        let mut draft = digest("open");
+        draft.draft = Some(true);
+        assert!(!pull_request_mergeability_unknown(&draft));
     }
 }
