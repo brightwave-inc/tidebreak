@@ -555,3 +555,70 @@ pub fn decode_steer_frame(message: &str) -> Option<SupervisorSteerFrame> {
     let payload = message.strip_prefix(STEER_PREFIX)?;
     serde_json::from_str(payload).ok()
 }
+
+/// Reserved turn-stop control; the supervisor never passes it to the engine.
+pub const STOP_PREFIX: &str = "tidebreak-stop-v1\n";
+
+/// Stop only the native turn in this sandbox process.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorStopFrame {
+    pub sandbox_id: String,
+    pub runtime_id: uuid::Uuid,
+    pub native_turn: u32,
+}
+
+pub fn encode_stop_frame(frame: &SupervisorStopFrame) -> String {
+    format!(
+        "{STOP_PREFIX}{}",
+        serde_json::to_string(frame).expect("a stop frame serializes")
+    )
+}
+
+pub fn is_stop_frame(message: &str) -> bool {
+    message.starts_with(STOP_PREFIX)
+}
+
+/// Reject malformed or oversized controls before matching their target.
+pub fn decode_stop_frame(message: &str) -> Option<SupervisorStopFrame> {
+    if message.len() > MAX_FRAME_BYTES {
+        return None;
+    }
+    let frame: SupervisorStopFrame =
+        serde_json::from_str(message.strip_prefix(STOP_PREFIX)?).ok()?;
+    if frame.native_turn == 0 || frame.runtime_id.is_nil() || frame.sandbox_id.is_empty() {
+        return None;
+    }
+    Some(frame)
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn stop_controls_round_trip_and_refuse_invalid_targets() {
+        let frame = SupervisorStopFrame {
+            sandbox_id: "sandbox-1".into(),
+            runtime_id: uuid::Uuid::new_v4(),
+            native_turn: 2,
+        };
+        let encoded = encode_stop_frame(&frame);
+        assert!(is_stop_frame(&encoded));
+        assert_eq!(decode_stop_frame(&encoded), Some(frame.clone()));
+        assert!(decode_stop_frame("stop").is_none());
+        assert!(decode_stop_frame(&format!("{STOP_PREFIX}invalid")).is_none());
+        let mut invalid = frame.clone();
+        invalid.native_turn = 0;
+        assert!(decode_stop_frame(&encode_stop_frame(&invalid)).is_none());
+        invalid = frame.clone();
+        invalid.sandbox_id.clear();
+        assert!(decode_stop_frame(&encode_stop_frame(&invalid)).is_none());
+        let mut payload = serde_json::to_value(&frame).unwrap();
+        payload["body"] = serde_json::json!("untrusted input");
+        assert!(decode_stop_frame(&format!("{STOP_PREFIX}{payload}")).is_none());
+        assert!(
+            decode_stop_frame(&format!("{STOP_PREFIX}{}", " ".repeat(MAX_FRAME_BYTES))).is_none()
+        );
+    }
+}
