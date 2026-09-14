@@ -16,6 +16,7 @@ import {
   prStateChips,
   prStatus,
   pullRequestLifecycle,
+  pullRequestLiveSignature,
   pullRequestReviewSummary,
   pullRequestSettledAt,
   type PrGate,
@@ -444,5 +445,29 @@ describe("prCompactStatusLabel", () => {
       "pending",
     );
     expect(prCompactStatusLabel(pr({ state: "merged" }))).toBe("Merged");
+  });
+});
+
+describe("pullRequestLiveSignature", () => {
+  it("moves only when a live field moves", () => {
+    const base = pr();
+    expect(pullRequestLiveSignature(base)).toBe(pullRequestLiveSignature(pr()));
+    // Identity churn without a state change is not a change.
+    expect(pullRequestLiveSignature({ ...base })).toBe(
+      pullRequestLiveSignature(base),
+    );
+    for (const moved of [
+      pr({ state: "merged" }),
+      pr({ merge_state_status: "blocked" }),
+      pr({ mergeable: "unknown" }),
+      pr({ head_sha: "beefcafe" }),
+      pr({ auto_merge_enabled: true }),
+      pr({ comment_count: 3 }),
+      pr({ checks: [{ name: "ci", bucket: "pending" }] }),
+    ]) {
+      expect(pullRequestLiveSignature(moved)).not.toBe(
+        pullRequestLiveSignature(base),
+      );
+    }
   });
 });
