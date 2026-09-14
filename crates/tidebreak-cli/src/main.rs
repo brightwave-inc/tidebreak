@@ -204,6 +204,10 @@ usage: tidebreak serve
        tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
        tidebreak code session show <id>
        tidebreak code session reap <id>
+       tidebreak code share grant <session-id> <subject> [--level view|contribute]
+       tidebreak code share list <session-id>
+       tidebreak code share revoke <session-id> <subject>
+       tidebreak code share visibility <session-id> private|deployment
        tidebreak code run (--session <id> | --ws <id>) [<message>]
                   [--on-approval wait|fail] [--timeout <secs>]
        tidebreak code approvals [--session <id>]

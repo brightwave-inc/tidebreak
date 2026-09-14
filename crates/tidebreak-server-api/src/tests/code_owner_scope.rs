@@ -1080,14 +1080,6 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
     let client = reqwest::Client::new();
     let (repo_body, workspace) = register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
     let sessions = create_sibling_sessions(&client, addr, ALICE_TOKEN, &workspace, 2).await;
-    let private_turn = client
-        .post(format!("http://{addr}/sessions/{}/turns", sessions[1]))
-        .bearer_auth(ALICE_TOKEN)
-        .json(&serde_json::json!({"message": "private sibling work"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(private_turn.status(), reqwest::StatusCode::ACCEPTED);
     std::fs::write(
         std::path::Path::new(workspace["worktree_path"].as_str().unwrap())
             .join("private-sibling.txt"),
@@ -1097,6 +1089,11 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
     let workspace_id = workspace["id"].as_str().unwrap();
     let session = &sessions[0];
     let path = format!("/code/workspaces/{workspace_id}");
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("{path}/diff")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a caller without a session grant cannot read the workspace diff"
+    );
     assert_eq!(
         get_status(&client, addr, BOB_TOKEN, &path).await,
         reqwest::StatusCode::NOT_FOUND
@@ -1175,14 +1172,61 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
             &client,
             addr,
             BOB_TOKEN,
+            &format!("/sessions/{session}/debug")
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "a granted reader may inspect the shared session debug dump"
+    );
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{}/debug", sessions[1])
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a granted reader must not inspect an ungranted sibling session"
+    );
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
             &format!("/code/repos/{}", repo_body["id"].as_str().unwrap())
         )
         .await,
         reqwest::StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        get_status(&client, addr, BOB_TOKEN, &format!("{path}/tree")).await,
-        reqwest::StatusCode::NOT_FOUND
+    for suffix in [
+        "/tree",
+        "/files",
+        "/blob?path=README.md",
+        "/file?path=README.md",
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
+            reqwest::StatusCode::OK,
+            "a granted reader must read {suffix}"
+        );
+    }
+    let diff: serde_json::Value = client
+        .get(format!("http://{addr}{path}/diff"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        diff["diff"]
+            .as_str()
+            .is_some_and(|body| body.contains("private-sibling.txt")),
+        "a granted reader sees the shared workspace diff"
     );
     assert_eq!(
         client
@@ -1206,19 +1250,11 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await,
         reqwest::StatusCode::NOT_FOUND
     );
-    // No turn selector must not resolve an ungranted sibling's latest checkpoint.
-    for suffix in [
-        "/files",
-        "/diff",
-        "/blob?path=README.md",
-        "/file?path=README.md",
-        "/search?query=private",
-    ] {
-        assert_eq!(
-            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
-            reqwest::StatusCode::NOT_FOUND
-        );
-    }
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("{path}/terminals")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a granted reader must not read live terminals"
+    );
     let revoke = client
         .delete(format!(
             "http://{addr}/sessions/{session}/access/principal:user:bob"
