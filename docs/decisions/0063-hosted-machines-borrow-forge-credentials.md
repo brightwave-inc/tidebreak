@@ -1,6 +1,6 @@
 # 63. Hosted machines borrow repository-scoped forge credentials
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - Owners: server, desktop
 - Related: [`0034-harness-discovery-credentials.md`](0034-harness-discovery-credentials.md),

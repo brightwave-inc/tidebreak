@@ -2354,8 +2354,6 @@ export const memoryProposal: MemoryRecord = {
       chat_id: "9d5d84a0-6ba6-4c73-9e10-000000000001",
       turn_id: "turn-storybook-memory",
       code_session_id: null,
-      code_turn_id: null,
-      workspace_id: null,
     },
     evidence: [
       { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000001" },

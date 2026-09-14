@@ -78,7 +78,6 @@ function storyClient(scenario: HomeScenario): ApiClient {
     }),
     getCodeSubscriptionUsage: async () => ({
       source: "model_gateway",
-      diagnostics: [],
       providers: [],
     }),
     getCodeCloneDefaults: async () => ({

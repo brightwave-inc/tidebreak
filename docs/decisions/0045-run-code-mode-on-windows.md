@@ -1,6 +1,6 @@
 # 45. Run code mode on Windows
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-18
 - Owners: code mode and desktop
 - Related: [decision 32](0032-code-workspaces-worktrees-checkpoints.md),

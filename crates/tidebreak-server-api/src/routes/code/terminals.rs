@@ -54,6 +54,7 @@ pub async fn list_terminals(
     ))
 }
 
+<<<<<<< HEAD
 pub async fn close_workspace_terminals(
     axum::extract::State(state): axum::extract::State<AppState>,
     code: ScopedCode,
@@ -68,6 +69,8 @@ pub async fn close_workspace_terminals(
     Ok(StatusCode::NO_CONTENT)
 }
 
+=======
+>>>>>>> 781b5645 (chore(code): clear leftover cruft from the 2026-09-10 audit)
 pub async fn close_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
     code: ScopedCode,

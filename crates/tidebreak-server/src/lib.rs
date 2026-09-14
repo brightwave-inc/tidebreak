@@ -182,7 +182,7 @@ use axum::Router;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use resolver::KeyedResolver;
+use resolver::ConfiguredResolver;
 use tidebreak_code_execution::ExecTool;
 use tidebreak_core::{
     ask_user_questions_tool_spec, browser_act_tool_spec, browser_list_tool_spec,
@@ -1269,7 +1269,7 @@ async fn bind_inner(
     // and every surface that reads a caller's own entitlements (decision 62).
     let on_behalf_of_gateway = obo_gateway::OboGateway::from_config(&config)?;
     let resolver = Arc::new(
-        KeyedResolver::new(
+        ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
             gateway.clone(),
@@ -1874,7 +1874,7 @@ pub async fn configured_blob_store(config: &Config) -> Result<Arc<dyn BlobStore>
 /// Assemble the tools and per-turn tuning for a real launch.
 ///
 /// The model **provider** is not built here — it is resolved per turn by the
-/// [`KeyedResolver`] (a composite router over enabled providers; see
+/// [`ConfiguredResolver`] (a composite router over enabled providers; see
 /// [`resolver`]), so configuring a provider at runtime takes effect without a
 /// restart. The model *name* comes from `TIDEBREAK_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.

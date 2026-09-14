@@ -1,6 +1,6 @@
 # 48. One interaction model for chat and code
 
-- Status: Proposed (amended 2026-09-01, see [Amendment](#amendment-2026-09-01))
+- Status: Accepted (amended 2026-09-01, see [Amendment](#amendment-2026-09-01))
 - Date: 2026-08-19
 - Owners: server, code mode
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),

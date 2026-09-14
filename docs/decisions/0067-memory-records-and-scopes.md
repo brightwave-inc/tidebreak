@@ -1,6 +1,6 @@
 # 67. Memory Records and Scopes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Owners: memory
 - Related: decisions 19, 31, 48, 59, 61; [docs/code-mode.md](../code-mode.md)

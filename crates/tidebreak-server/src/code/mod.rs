@@ -21,6 +21,7 @@ pub mod delivery;
 pub mod forge_rest;
 pub mod fork;
 pub mod gh;
+pub(crate) mod git_runner;
 pub mod grants;
 pub mod harness_install;
 pub mod harness_llm;

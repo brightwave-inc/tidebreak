@@ -1,6 +1,6 @@
 # 70. A hosted machine names its own checkouts and the caller's repositories
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Owners: server, desktop
 - Related: [`0053-code-worktrees-live-in-a-user-visible-root.md`](0053-code-worktrees-live-in-a-user-visible-root.md),

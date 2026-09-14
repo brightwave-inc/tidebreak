@@ -16,9 +16,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use super::git_runner;
 use super::setup_script::{missing_image_toolchain_notice, run_workspace_script_with_env};
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_TIMEOUT: Duration = git_runner::GIT_TIMEOUT;
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default number of paths the tree route returns.
@@ -2269,10 +2270,9 @@ async fn verify_inside_worktree(path: &Path) -> Result<(), WorktreeError> {
 }
 
 async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeError> {
-    let status = git_stdout(Some(worktree_path), &["status", "--porcelain"], GIT_TIMEOUT)
+    git_runner::has_uncommitted_work(worktree_path)
         .await
-        .map_err(|err| WorktreeError::internal(format!("git status failed: {err}")))?;
-    Ok(!status.is_empty())
+        .map_err(|err| WorktreeError::internal(format!("git status failed: {err}")))
 }
 
 async fn has_non_disposable_ignored_content(worktree_path: &Path) -> Result<bool, WorktreeError> {
@@ -2639,7 +2639,6 @@ struct GitOutput {
 
 struct GitRawOutput {
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
 }
 
 fn trim_git_stdout(bytes: &[u8]) -> &[u8] {
@@ -2674,34 +2673,21 @@ async fn git_raw(
         .map(|arg| arg.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    let mut command = Command::new("git");
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn git: {err}"))?;
-    let output = timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {rendered} timed out"))?
-        .map_err(|err| format!("git {rendered} failed: {err}"))?;
-    if output.status.success() {
-        Ok(GitRawOutput {
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
-    } else {
-        let stdout = String::from_utf8_lossy(trim_git_stdout(&output.stdout)).into_owned();
-        let stderr = String::from_utf8_lossy(trim_git_stdout(&output.stderr)).into_owned();
-        Err(if stderr.is_empty() { stdout } else { stderr })
-    }
+    let description = format!("git {rendered}");
+    let mut command = git_runner::git_command(cwd);
+    command.args(&args);
+    let output = git_runner::wait_command_bounded(
+        &mut command,
+        limit,
+        git_runner::default_stdout_budget(),
+        git_runner::default_stderr_budget(),
+        &description,
+    )
+    .await
+    .map_err(|err| err.into_message(&description))?;
+    let (stdout, _) =
+        git_runner::finish_bounded_command(output, false, "git output exceeded its limit", false)?;
+    Ok(GitRawOutput { stdout })
 }
 
 async fn git(
@@ -2729,7 +2715,6 @@ async fn git_fs_stdout(
     limit: Duration,
 ) -> Result<PathBuf, String> {
     let output = git_raw(cwd, args, limit).await?;
-    let _ = output.stderr;
     Ok(path_from_git_stdout(&output.stdout))
 }
 
@@ -2738,29 +2723,7 @@ async fn git_nul_stdout(
     args: &[&str],
     limit: Duration,
 ) -> Result<Vec<String>, String> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn git: {err}"))?;
-    let output = timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        return Err(if stderr.is_empty() { stdout } else { stderr });
-    }
+    let output = git_raw(cwd, args, limit).await?;
     Ok(output
         .stdout
         .split(|byte| *byte == 0)

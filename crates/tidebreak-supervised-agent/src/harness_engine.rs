@@ -445,11 +445,8 @@ impl TurnSink {
             return;
         }
         buffer.truncated = true;
-        let mut cut = remaining;
-        while cut > 0 && !incoming.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        buffer.body.push_str(&incoming[..cut]);
+        let (piece, _) = tidebreak_core::truncate_utf8(&incoming, remaining);
+        buffer.body.push_str(&piece);
     }
 }
 

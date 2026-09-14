@@ -1,6 +1,6 @@
 # 51. On-behalf-of inference for hosted machines
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
 - Owners: server
 - Related: [`0047-gateway-linked-hosting.md`](0047-gateway-linked-hosting.md),
