@@ -664,6 +664,30 @@ describe("CodeComposer", () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("/status --json"));
   });
 
+  it("lists probe-discovered commands in the slash popup", async () => {
+    const user = userEvent.setup();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        slashCommands={[
+          { name: "compact", description: "Compact the conversation" },
+          { name: "model", description: "Choose a model" },
+        ]}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("textbox", { name: "Message" }));
+    await user.keyboard("/");
+    expect(await screen.findByRole("listbox")).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: /compact/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /model/i })).toBeInTheDocument();
+  });
+
   it("says the queue is full and keeps the draft", async () => {
     const onSend = vi
       .fn()
