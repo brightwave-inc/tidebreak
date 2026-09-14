@@ -17,9 +17,9 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::Config;
 
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 mod agent_browser_dialogs;
-#[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+#[cfg(target_os = "macos")]
 mod agent_browser_host;
 mod attachments;
 mod broker;

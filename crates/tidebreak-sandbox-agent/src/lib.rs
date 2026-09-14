@@ -48,5 +48,5 @@ pub use fs::{
     ListDirTool, ReadFileTool, WriteFileTool, LIST_DIR_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL,
 };
 pub use model::{HostModel, ModelError};
-pub use supervisor::{CredentialProxy, Supervisor};
+pub use supervisor::Supervisor;
 pub use tools::{sandbox_tool_registry, SANDBOX_REGISTRY_TOOL_NAMES};
