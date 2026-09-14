@@ -1052,7 +1052,7 @@ export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat,
  * What the connect approval page renders: the identity being linked and
  * the CSRF token its "is this you?" POST must echo.
  */
-export type CodeConnectPage = {
+export type CodeConnectPage = { inference_sponsorship_supported: boolean,
 /**
  * Which channel family is linking (for example `slack`).
  */
@@ -3024,6 +3024,11 @@ turn_id: TurnId, call_id: CallId, kind: InboxItemKind,
 action?: RendererToolName, requested_at: string, };
 
 /**
+ * Gateway reports each provider only after it resolves the actual model route.
+ */
+export type InferenceResolution = { scope_id: string, provider: string, source: string, reason?: string, };
+
+/**
  * An input modality a model accepts.
  *
  * `snake_case` matches the strings `as_str` has always produced, so the enum
@@ -4906,6 +4911,10 @@ export type SessionLifecycle = "created" | "idle" | "running" | "fenced" | "ende
  * One durable conversation with an external agent engine.
  */
 export type SessionSnapshot = {
+/**
+ * Gateway reports provider choices only after resolving a model route.
+ */
+inference_resolutions?: Array<InferenceResolution>,
 /**
  * The authenticated caller's access. Event frames omit caller-specific fields.
  */

@@ -11,6 +11,7 @@ use tidebreak_core::{CodeGrantId, CodeHandshakeId, SessionId};
 struct DelegatedGateway {
     expires_at: u64,
     gateway: Arc<OboGateway>,
+    consent: InferenceSponsorshipConsent,
 }
 
 type DelegationSlot = Arc<tokio::sync::Mutex<Option<DelegatedGateway>>>;
@@ -21,10 +22,13 @@ pub struct ExternalDelegations {
     slots: std::sync::Mutex<HashMap<CodeGrantId, DelegationSlot>>,
     sweep_started: std::sync::atomic::AtomicBool,
     revoked: std::sync::Mutex<std::collections::HashSet<CodeGrantId>>,
+    sponsorship_capability: tokio::sync::Mutex<Option<(bool, std::time::Instant)>>,
 }
 
 #[derive(serde::Deserialize)]
 struct DelegationIdentity {
+    #[serde(default)]
+    inference_sponsorship: InferenceSponsorshipConsent,
     delegation_id: String,
     resource: String,
     user_id: String,
@@ -32,11 +36,34 @@ struct DelegationIdentity {
 
 #[derive(serde::Deserialize)]
 struct DelegationToken {
+    #[serde(default)]
+    inference_sponsorship: InferenceSponsorshipConsent,
     access_token: String,
     token_type: String,
     expires_in: u64,
     resource: String,
     user_id: String,
+}
+
+/// Personal consent is written only with the exact human browser lease.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceSponsorshipConsent {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_version: Option<u32>,
+}
+impl InferenceSponsorshipConsent {
+    pub fn validate(&self) -> Result<()> {
+        if (self.enabled && self.consent_version != Some(1))
+            || (!self.enabled && self.consent_version.is_some())
+        {
+            return Err(AgentError::InvalidTarget(
+                "channel sponsorship requires consent version 1".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn reconnect() -> AgentError {
@@ -53,6 +80,7 @@ impl ExternalDelegations {
             slots: std::sync::Mutex::new(HashMap::new()),
             sweep_started: std::sync::atomic::AtomicBool::new(false),
             revoked: std::sync::Mutex::new(std::collections::HashSet::new()),
+            sponsorship_capability: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -118,11 +146,40 @@ impl ExternalDelegations {
         id: CodeHandshakeId,
         subject: &str,
     ) -> Result<()> {
+        self.enroll_with_consent(owner, id, subject, None).await
+    }
+
+    pub(crate) async fn enroll_with_consent(
+        &self,
+        owner: &OwnerId,
+        id: CodeHandshakeId,
+        subject: &str,
+        consent: Option<&InferenceSponsorshipConsent>,
+    ) -> Result<()> {
         let _ = self.machine_auth()?;
-        let response = self.gateway.client.post(self.endpoint("")?)
+        let mut body =
+            serde_json::json!({"delegation_id": id.to_string(), "resource": self.gateway.resource});
+        if let Some(consent) = consent {
+            consent.validate()?;
+            if !self.supports_inference_sponsorship().await? {
+                return Err(AgentError::InvalidTarget(
+                    "this Gateway does not support subscription preferences".into(),
+                ));
+            }
+            body["inference_sponsorship"] =
+                serde_json::to_value(consent).map_err(|e| AgentError::msg(e.to_string()))?;
+        }
+        let response = self
+            .gateway
+            .client
+            .post(self.endpoint("")?)
             .bearer_auth(subject)
-            .json(&serde_json::json!({"delegation_id": id.to_string(), "resource": self.gateway.resource}))
-            .send().await.map_err(|error| AgentError::msg(format!("gateway delegation approval failed: {error}")))?;
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                AgentError::msg(format!("gateway delegation approval failed: {error}"))
+            })?;
         let status = response.status();
         let body = read_bounded(response, RESPONSE_LIMIT).await?;
         if !status.is_success() {
@@ -135,6 +192,7 @@ impl ExternalDelegations {
         let identity: DelegationIdentity = serde_json::from_slice(&body).map_err(|_| {
             AgentError::msg("the gateway returned an unreadable delegation approval")
         })?;
+        identity.inference_sponsorship.validate()?;
         if identity.delegation_id != id.to_string()
             || identity.resource != self.gateway.resource
             || owner.as_str().strip_prefix("user:") != Some(identity.user_id.as_str())
@@ -143,7 +201,178 @@ impl ExternalDelegations {
                 "the gateway approved a different external connection".into(),
             ));
         }
+        if consent.is_some_and(|expected| expected != &identity.inference_sponsorship) {
+            return Err(AgentError::InvalidTarget(
+                "Gateway did not retain the approved subscription preference".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Missing metadata means an older deployment. A transport failure does not change a saved policy.
+    pub async fn supports_inference_sponsorship(&self) -> Result<bool> {
+        let mut cached = self.sponsorship_capability.lock().await;
+        if let Some((supported, at)) = *cached {
+            if at.elapsed() < Duration::from_secs(60) {
+                return Ok(supported);
+            }
+        }
+        let base = normalized_gateway_base(&self.gateway.gateway_base_url)?;
+        let response = self
+            .gateway
+            .client
+            .get(join_below(&base, "api/v1/meta")?)
+            .send()
+            .await
+            .map_err(|e| AgentError::msg(format!("Gateway capabilities are unavailable: {e}")))?;
+        let status = response.status();
+        let body = read_bounded(response, RESPONSE_LIMIT).await?;
+        let supported = if status == reqwest::StatusCode::NOT_FOUND {
+            false
+        } else {
+            if !status.is_success() {
+                return Err(AgentError::msg("Gateway capabilities are unavailable"));
+            }
+            let metadata: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|_| AgentError::msg("Gateway returned unreadable capabilities"))?;
+            metadata
+                .pointer("/surfaces/tidebreak_inference_sponsorship")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+        };
+        *cached = Some((supported, std::time::Instant::now()));
+        Ok(supported)
+    }
+
+    pub async fn sponsorship_consent(
+        &self,
+        owner: &OwnerId,
+        grant: CodeGrantId,
+    ) -> Result<InferenceSponsorshipConsent> {
+        self.for_grant(owner, grant).await?;
+        let slot = self
+            .slots
+            .lock()
+            .map_err(|_| AgentError::msg("external delegation state is unavailable"))?
+            .get(&grant)
+            .cloned()
+            .ok_or_else(reconnect)?;
+        let held = slot.lock().await;
+        Ok(held.as_ref().ok_or_else(reconnect)?.consent.clone())
+    }
+
+    pub async fn personal_delegation_id(
+        &self,
+        owner: &OwnerId,
+        grant: CodeGrantId,
+    ) -> Result<CodeHandshakeId> {
+        let row = tidebreak_core::db::code::get_external_grant(&self.db, owner, grant)
+            .await?
+            .ok_or_else(reconnect)?;
+        if row.kind.is_workspace() {
+            return Err(AgentError::InvalidTarget(
+                "a subscription sponsor must be a person".into(),
+            ));
+        }
+        self.for_grant(owner, grant).await?;
+        self.live_handshake(owner, grant).await
+    }
+
+    pub(crate) async fn update_sponsorship_consent(
+        &self,
+        owner: &OwnerId,
+        grant: CodeGrantId,
+        subject: &str,
+        consent: &InferenceSponsorshipConsent,
+    ) -> Result<InferenceSponsorshipConsent> {
+        consent.validate()?;
+        if !self.supports_inference_sponsorship().await? {
+            return Err(AgentError::InvalidTarget(
+                "this Gateway does not support subscription preferences".into(),
+            ));
+        }
+        let id = self.personal_delegation_id(owner, grant).await?;
+        let response = self
+            .gateway
+            .client
+            .patch(self.endpoint(&format!("/{id}/inference-sponsorship"))?)
+            .bearer_auth(subject)
+            .json(consent)
+            .send()
+            .await
+            .map_err(|e| {
+                AgentError::msg(format!("subscription preference could not be saved: {e}"))
+            })?;
+        let status = response.status();
+        let body = read_bounded(response, RESPONSE_LIMIT).await?;
+        if !status.is_success() {
+            return Err(reconnect());
+        }
+        let response: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| AgentError::msg("Gateway returned unreadable subscription consent"))?;
+        let confirmed: InferenceSponsorshipConsent = serde_json::from_value(
+            response
+                .get("inference_sponsorship")
+                .cloned()
+                .ok_or_else(|| AgentError::msg("Gateway did not confirm subscription consent"))?,
+        )
+        .map_err(|_| AgentError::msg("Gateway returned unreadable subscription consent"))?;
+        if &confirmed != consent {
+            return Err(AgentError::InvalidTarget(
+                "Gateway did not retain the requested subscription consent".into(),
+            ));
+        }
+        self.slots
+            .lock()
+            .map_err(|_| AgentError::msg("external delegation state is unavailable"))?
+            .remove(&grant);
+        Ok(confirmed)
+    }
+
+    pub async fn record_inference_resolutions(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+        resolutions: &[tidebreak_core::code::inference::InferenceResolution],
+    ) -> Result<()> {
+        tidebreak_core::db::code::record_inference_resolutions(
+            &self.db,
+            owner,
+            session,
+            resolutions,
+        )
+        .await
+    }
+
+    /// Check the frozen personal connection without replacing the executor's gateway.
+    pub async fn session_sponsor(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+    ) -> Result<Option<tidebreak_core::code::inference::InferenceSponsor>> {
+        let Some(selection) =
+            tidebreak_core::db::code::session_inference(&self.db, owner, session).await?
+        else {
+            return Ok(None);
+        };
+        if selection.sponsor.is_some() && !self.supports_inference_sponsorship().await? {
+            return Err(AgentError::InvalidTarget(
+                "Gateway no longer supports this conversation's subscription preference".into(),
+            ));
+        }
+        if let (Some(person), Some(grant)) =
+            (&selection.personal_owner, selection.personal_grant_id)
+        {
+            let actual = self.personal_delegation_id(person, grant).await?;
+            if !matches!(&selection.sponsor, Some(tidebreak_core::code::inference::InferenceSponsor::PreferOwnedSubscription {external_delegation_id, ..}) if *external_delegation_id == actual.0)
+            {
+                return Err(AgentError::InvalidTarget(
+                    "the conversation's subscription connection changed; start a new conversation"
+                        .into(),
+                ));
+            }
+        }
+        Ok(selection.sponsor)
     }
 
     async fn live_handshake(&self, owner: &OwnerId, grant: CodeGrantId) -> Result<CodeHandshakeId> {
@@ -220,6 +449,7 @@ impl ExternalDelegations {
         let token: DelegationToken = serde_json::from_slice(&body).map_err(|_| {
             AgentError::msg("the gateway returned an unreadable external connection token")
         })?;
+        token.inference_sponsorship.validate()?;
         if owner.as_str().strip_prefix("user:") != Some(token.user_id.as_str())
             || token.resource != self.gateway.resource
             || token.token_type != "Bearer"
@@ -243,6 +473,7 @@ impl ExternalDelegations {
         *held = Some(DelegatedGateway {
             expires_at: unix_time().saturating_add(token.expires_in),
             gateway: gateway.clone(),
+            consent: token.inference_sponsorship,
         });
         Ok(gateway)
     }

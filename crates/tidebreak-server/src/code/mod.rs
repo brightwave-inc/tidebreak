@@ -25,6 +25,7 @@ pub mod grants;
 pub mod harness_install;
 pub mod harness_llm;
 pub mod harness_release;
+pub mod inference_preferences;
 pub mod memory;
 pub mod memory_capture;
 pub mod naming_settings;

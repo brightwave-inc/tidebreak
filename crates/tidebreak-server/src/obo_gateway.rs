@@ -109,6 +109,7 @@ fn unix_time() -> u64 {
 struct CachedToken {
     token: Arc<str>,
     expires_at_unix: u64,
+    inference_resolutions: Vec<tidebreak_core::code::inference::InferenceResolution>,
 }
 
 impl CachedToken {
@@ -163,7 +164,11 @@ enum ExchangeBinding<'a> {
     /// 118).
     Host,
     /// The installed engine a session runs, signed by the add-on identity.
-    Engine(SessionId, &'a EmbeddedEngine),
+    Engine(
+        SessionId,
+        &'a EmbeddedEngine,
+        Option<&'a tidebreak_core::code::inference::InferenceSponsor>,
+    ),
 }
 
 /// What this process remembers about one caller.
@@ -226,6 +231,8 @@ struct OAuthError {
 /// (gateway decision 118); an ordinary exchange carries none.
 #[derive(serde::Deserialize)]
 struct ExchangeResponse {
+    #[serde(default)]
+    inference_resolutions: Vec<tidebreak_core::code::inference::InferenceResolution>,
     access_token: String,
     expires_in: u64,
     #[serde(default)]
@@ -659,7 +666,7 @@ impl OboGateway {
             .exchange_with(
                 &subject,
                 INFERENCE_AUDIENCE,
-                ExchangeBinding::Engine(session, engine),
+                ExchangeBinding::Engine(session, engine, None),
             )
             .await?;
         let token = minted.token.to_string();
@@ -685,6 +692,7 @@ impl OboGateway {
         subject: &str,
         audience: &str,
         identity: Option<&harness::HarnessIdentity>,
+        sponsor: Option<&tidebreak_core::code::inference::InferenceSponsor>,
     ) -> Result<CachedToken> {
         match identity {
             Some(identity) => {
@@ -700,7 +708,7 @@ impl OboGateway {
                 self.exchange_with(
                     subject,
                     audience,
-                    ExchangeBinding::Engine(identity.session, &engine),
+                    ExchangeBinding::Engine(identity.session, &engine, sponsor),
                 )
                 .await
             }
@@ -736,7 +744,7 @@ impl OboGateway {
             ("audience", audience),
         ];
         let bound = match binding {
-            ExchangeBinding::Engine(session, engine) => Some((
+            ExchangeBinding::Engine(session, engine, _) => Some((
                 engine.kind.as_str(),
                 engine.version.as_str(),
                 session.as_uuid().to_string(),
@@ -758,6 +766,16 @@ impl OboGateway {
             form.push(("engine", kind));
             form.push(("engine_version", version));
             form.push(("engine_session_id", session.as_str()));
+        }
+        let sponsor_json = match binding {
+            ExchangeBinding::Engine(_, _, Some(sponsor)) => {
+                sponsor.validate()?;
+                Some(serde_json::to_string(sponsor).map_err(|e| AgentError::msg(e.to_string()))?)
+            }
+            _ => None,
+        };
+        if let Some(sponsor) = sponsor_json.as_deref() {
+            form.push(("inference_sponsor", sponsor));
         }
         let response = self
             .client
@@ -808,6 +826,7 @@ impl OboGateway {
         Ok(CachedToken {
             token: exchanged.access_token.into(),
             expires_at_unix: unix_time().saturating_add(exchanged.expires_in),
+            inference_resolutions: exchanged.inference_resolutions,
         })
     }
 

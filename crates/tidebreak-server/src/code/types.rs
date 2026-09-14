@@ -139,6 +139,8 @@ impl CodeGrantSnapshot {
 /// the CSRF token its "is this you?" POST must echo.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct CodeConnectPage {
+    #[serde(default)]
+    pub inference_sponsorship_supported: bool,
     /// Which channel family is linking (for example `slack`).
     pub channel_kind: String,
     /// The person's display name in the channel.
@@ -275,6 +277,10 @@ pub struct SessionExternalOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    /// Gateway reports provider choices only after resolving a model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inference_resolutions: Option<Vec<tidebreak_core::code::inference::InferenceResolution>>,
     /// The authenticated caller's access. Event frames omit caller-specific fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -357,6 +363,7 @@ impl From<Session> for SessionSnapshot {
     fn from(session: Session) -> Self {
         let acts_as = session.acts_as();
         Self {
+            inference_resolutions: None,
             access: None,
             is_owner: None,
             id: session.id,

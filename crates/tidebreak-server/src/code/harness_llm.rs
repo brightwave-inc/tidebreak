@@ -336,8 +336,33 @@ impl HarnessLlmRelay {
             let gateway = self
                 .gateway_for_session(&subject.owner, subject.session)
                 .await?;
+            let sponsor = match &self.external {
+                Some(external) => {
+                    external
+                        .session_sponsor(&subject.owner, subject.session)
+                        .await?
+                }
+                None => None,
+            };
             match entry.harness.as_ref() {
-                Some(harness) => gateway.bearer_for_harness(&subject.owner, harness).await,
+                Some(harness) => {
+                    let (token, resolutions) = gateway
+                        .bearer_for_harness_with_sponsor(&subject.owner, harness, sponsor.as_ref())
+                        .await?;
+                    if let Some(external) = &self.external {
+                        external
+                            .record_inference_resolutions(
+                                &subject.owner,
+                                subject.session,
+                                &resolutions,
+                            )
+                            .await?;
+                    }
+                    Ok(token)
+                }
+                None if sponsor.is_some() => Err(AgentError::InvalidTarget(
+                    "the selected subscription requires an authenticated installed harness".into(),
+                )),
                 None => gateway.bearer_for(&subject.owner).await,
             }
         }

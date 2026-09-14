@@ -159,6 +159,7 @@ fn caps() -> HarnessCaps {
 
 fn session() -> SessionSnapshot {
     SessionSnapshot {
+        inference_resolutions: None,
         access: Some(tidebreak_core::SessionAccessLevel::View),
         is_owner: Some(false),
         visibility: tidebreak_core::SessionVisibility::Private,

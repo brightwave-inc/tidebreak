@@ -64,23 +64,13 @@ async fn live_turn<C: ConnectionTrait>(
         .await
         .map_err(store_err)?
         .ok_or_else(|| invalid("human decision incarnation is absent"))?;
-    let ordinal = i64::from(incarnation_row.starting_turn) + i64::from(identity.native_turn) - 1;
-    let turn = entities::turn::Entity::find()
-        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::turn::Column::SessionId.eq(session.0))
-        .filter(entities::turn::Column::Ordinal.eq(ordinal))
-        .filter(entities::turn::Column::Status.eq("running"))
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| invalid("the turn that requested this decision is no longer running"))?;
     let runtime = entities::setting::Entity::find_by_id(format!(
         "code.incarnations.{incarnation}.steering_protocol"
     ))
     .one(conn)
     .await
     .map_err(store_err)?;
-    if !runtime.is_some_and(|row| {
+    if !runtime.as_ref().is_some_and(|row| {
         row.value_json
             .get("runtime_id")
             .and_then(serde_json::Value::as_str)
@@ -96,6 +86,52 @@ async fn live_turn<C: ConnectionTrait>(
             "the supervisor that requested this decision is no longer attached",
         ));
     }
+    let exact = runtime.as_ref().is_some_and(|row| {
+        row.value_json
+            .get("turn_identity_protocol")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+    });
+    let mut query = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session.0))
+        .filter(entities::turn::Column::Status.eq("running"));
+    if exact {
+        let mapped = super::native_turn_identity::hosted_turn_for_native_on(
+            conn,
+            incarnation,
+            identity.runtime_id,
+            identity.native_turn,
+        )
+        .await?;
+        let Some(mapped) = mapped else {
+            if super::native_turn_identity::native_turn_input_pending_on(
+                conn,
+                incarnation,
+                identity.runtime_id,
+                identity.native_turn,
+            )
+            .await?
+            {
+                return Err(invalid(
+                    super::native_turn_identity::NATIVE_TURN_INPUT_PENDING,
+                ));
+            }
+            return Err(invalid(
+                "the turn that requested this decision is no longer running",
+            ));
+        };
+        query = query.filter(entities::turn::Column::Id.eq(mapped.0));
+    } else {
+        let ordinal =
+            i64::from(incarnation_row.starting_turn) + i64::from(identity.native_turn) - 1;
+        query = query.filter(entities::turn::Column::Ordinal.eq(ordinal));
+    }
+    let turn = query
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| invalid("the turn that requested this decision is no longer running"))?;
     Ok(LiveTurn {
         grant,
         turn: turn.id,

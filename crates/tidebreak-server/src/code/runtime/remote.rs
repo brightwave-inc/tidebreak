@@ -1404,10 +1404,27 @@ impl CodeRuntime {
             .await?;
             return Ok(queued(ExternalSteerQueuedReason::StaleTurn));
         };
-        let target = incarnation
-            .sandbox_id
-            .as_deref()
-            .zip(native_steer_turn(open.ordinal, incarnation.starting_turn).ok());
+        let exact = tidebreak_core::db::code::native_turn_identity_runtime(
+            &self.db,
+            owner,
+            session.id,
+            incarnation.id,
+        )
+        .await?;
+        let native_turn = if exact.is_some() {
+            tidebreak_core::db::code::native_turn_for_host(
+                &self.db,
+                owner,
+                session.id,
+                incarnation.id,
+                runtime_id,
+                open.id,
+            )
+            .await?
+        } else {
+            native_steer_turn(open.ordinal, incarnation.starting_turn).ok()
+        };
+        let target = incarnation.sandbox_id.as_deref().zip(native_turn);
         let Some((sandbox_id, native_turn)) = target else {
             self.settle_external_queued(
                 owner,
@@ -1495,9 +1512,72 @@ impl CodeRuntime {
                 "there is no active turn to interrupt",
             ));
         };
-        let message = crate::code::remote::wire::SandboxMessage {
-            body: crate::code::remote::wire::SupervisorMessageBody::Input("stop".to_owned()),
-            interrupt: true,
+        use tidebreak_core::storage::Store;
+        let protocol = self
+            .db
+            .get_setting(&format!("code.incarnations.{}.steering_protocol", row.id))
+            .await?;
+        let managed_stop = protocol.as_ref().is_some_and(|protocol| {
+            protocol
+                .get("stop_protocol")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+                && protocol
+                    .get("sandbox_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(sandbox_id)
+        });
+        let message = if managed_stop {
+            use tidebreak_core::code::supervisor_tools::{encode_stop_frame, SupervisorStopFrame};
+            let runtime_id = remote
+                .driver(&self.db, self.bus.as_ref())
+                .steering_runtime(&session.owner, session.id)
+                .await?
+                .ok_or_else(|| {
+                    ServerError::conflict_kind(
+                        "turn_not_ready",
+                        "The sandbox has not reported this turn yet. Retry Stop.",
+                    )
+                })?;
+            let open =
+                tidebreak_core::db::code::get_open_turn(&self.db, &session.owner, session.id)
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::conflict_kind(
+                            "no_active_turn",
+                            "there is no active turn to interrupt",
+                        )
+                    })?;
+            let native_turn = tidebreak_core::db::code::native_turn_for_host(
+                &self.db,
+                &session.owner,
+                session.id,
+                row.id,
+                runtime_id,
+                open.id,
+            )
+            .await?
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "turn_not_ready",
+                    "The sandbox has not reported this turn yet. Retry Stop.",
+                )
+            })?;
+            crate::code::remote::wire::SandboxMessage {
+                body: crate::code::remote::wire::SupervisorMessageBody::Input(encode_stop_frame(
+                    &SupervisorStopFrame {
+                        sandbox_id: sandbox_id.to_owned(),
+                        runtime_id,
+                        native_turn,
+                    },
+                )),
+                interrupt: false,
+            }
+        } else {
+            crate::code::remote::wire::SandboxMessage {
+                body: crate::code::remote::wire::SupervisorMessageBody::Input("stop".to_owned()),
+                interrupt: true,
+            }
         };
         match remote
             .provisioner

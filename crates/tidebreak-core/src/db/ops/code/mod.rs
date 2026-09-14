@@ -20,6 +20,7 @@ pub mod conversation_request;
 pub mod external_event;
 pub mod grant;
 pub mod incarnation;
+pub mod inference;
 pub mod journal;
 pub mod managed_decision;
 pub mod native_tool_receipt;
@@ -46,6 +47,7 @@ pub use conversation_request::*;
 pub use external_event::*;
 pub use grant::*;
 pub use incarnation::*;
+pub use inference::*;
 pub use journal::*;
 pub use managed_decision::*;
 pub use native_tool_receipt::*;
@@ -111,3 +113,6 @@ where
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
 }
+
+mod native_turn_identity;
+pub use native_turn_identity::*;

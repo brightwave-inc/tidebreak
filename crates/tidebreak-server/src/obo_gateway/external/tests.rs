@@ -14,6 +14,10 @@ const RESOURCE: &str = "tidebreak:test-machine";
 
 #[derive(Clone, Default)]
 struct Gateway {
+    sponsorship_supported: Arc<AtomicBool>,
+    metadata_failed: Arc<AtomicBool>,
+    consents: Arc<std::sync::Mutex<HashMap<String, InferenceSponsorshipConsent>>>,
+    consent_updates: Arc<AtomicUsize>,
     approvals: Arc<AtomicUsize>,
     exchanges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     exchange_forms: Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>,
@@ -28,12 +32,30 @@ struct Gateway {
 async fn gateway() -> (String, Gateway) {
     let state = Gateway::default();
     let router = Router::new()
+        .route("/api/v1/meta", axum::routing::get(|State(state): State<Gateway>| async move {
+            if state.metadata_failed.load(Ordering::SeqCst) { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+            if !state.sponsorship_supported.load(Ordering::SeqCst) { return StatusCode::NOT_FOUND.into_response(); }
+            Json(serde_json::json!({"surfaces":{"tidebreak_inference_sponsorship":1}})).into_response()
+        }))
+        .route("/api/v1/tidebreak/external-delegations/{id}/inference-sponsorship", axum::routing::patch(
+            |State(state): State<Gateway>, Path(id): Path<String>, headers: HeaderMap, Json(consent): Json<InferenceSponsorshipConsent>| async move {
+                assert_eq!(headers.get("authorization").unwrap(), "Bearer browser-owner");
+                assert!(state.enrolled.lock().unwrap().contains(&id));
+                consent.validate().unwrap();
+                state.consent_updates.fetch_add(1, Ordering::SeqCst);
+                state.consents.lock().unwrap().insert(id, consent.clone());
+                Json(serde_json::json!({"inference_sponsorship":consent}))
+            }
+        ))
         .route("/api/v1/tidebreak/external-delegations", post(|State(state): State<Gateway>, headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
             assert_eq!(headers.get("authorization").unwrap(), "Bearer browser-owner");
             assert_eq!(body["resource"], RESOURCE);
             state.approvals.fetch_add(1, Ordering::SeqCst);
             state.enrolled.lock().unwrap().insert(body["delegation_id"].as_str().unwrap().to_owned());
-            Json(serde_json::json!({"delegation_id": body["delegation_id"], "resource": RESOURCE, "user_id": USER}))
+            let consent: InferenceSponsorshipConsent = body.get("inference_sponsorship").cloned()
+                .map(serde_json::from_value).transpose().unwrap().unwrap_or_default();
+            state.consents.lock().unwrap().insert(body["delegation_id"].as_str().unwrap().to_owned(), consent.clone());
+            Json(serde_json::json!({"delegation_id": body["delegation_id"], "resource": RESOURCE, "user_id": USER, "inference_sponsorship":consent}))
         }))
         .route("/api/v1/tidebreak/external-delegations/{id}/token", post(|State(state): State<Gateway>, Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
             assert_eq!(body["client_id"], "tidebreak");
@@ -42,6 +64,7 @@ async fn gateway() -> (String, Gateway) {
             if !state.enrolled.lock().unwrap().contains(&id) { return StatusCode::NOT_FOUND.into_response(); }
             let minted = state.mints.fetch_add(1, Ordering::SeqCst) + 1;
             Json(serde_json::json!({
+                "inference_sponsorship": state.consents.lock().unwrap().get(&id).cloned().unwrap_or_default(),
                 "access_token": format!("delegated-{minted}"), "token_type": "Bearer", "expires_in": 600,
                 "user_id": if state.wrong_owner.load(Ordering::SeqCst) { "someone-else" } else { USER },
                 "resource": if state.wrong_machine.load(Ordering::SeqCst) { "tidebreak:another-machine" } else { RESOURCE },
@@ -1135,3 +1158,5 @@ async fn an_admin_approved_workspace_handshake_is_live_after_complete() {
         "llm-delegated-1"
     );
 }
+
+mod inference;

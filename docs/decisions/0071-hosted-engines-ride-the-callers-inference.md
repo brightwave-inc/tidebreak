@@ -64,6 +64,34 @@ Refusals are vendor-shaped so the engine reports them legibly: 401
 gateway session is gone (fail fast, no retry); 502 `api_error` when the
 gateway does not answer (the engine's own retry policy applies).
 
+## Amendment: an independently authorized subscription source
+
+Accepted September 14, 2026, for Slack conversations. The session owner still
+supplies model permissions, runtime authority, tools, and repository access.
+Inference may prefer a separate person's owned subscription after Gateway
+verifies that person's external delegation and consent. The hosted relay adds
+this preference only to its authenticated engine inference exchange. Git and
+other exchanges continue to use the execution owner's delegation.
+
+A DM prefers its connected person's subscription. A channel prefers the person
+whose verified request creates the conversation, when that person opts into
+channel sponsorship. A channel administrator cannot provide that personal
+consent. The person can disable sponsorship from their connection settings;
+Gateway checks consent on every use. Preferences apply to new conversations.
+
+The binding transaction saves the root inference scope, starter, and delegation
+before a worker can execute. Child sessions inherit that root scope. Gateway
+freezes each provider's account choice. Missing eligibility selects the
+execution owner's policy once; a later link cannot change that result. Revoking
+a chosen delegation, account, or consent pauses inference. Decision 51's
+fail-closed rule still applies: retries cannot change the payer.
+
+Gateway capability discovery gates the extension. Older deployments retain
+their ordinary behavior and show that preferences are unavailable. A failed
+capability request does not downgrade a saved preference. Gateway reports
+`inference_resolutions` only after resolving a provider; an empty list does not
+claim that any account served inference. No sponsor token enters a harness.
+
 ## Alternatives considered
 
 - **Inject an exchanged inference token at spawn.** Dies when the token
@@ -80,7 +108,8 @@ gateway does not answer (the engine's own retry policy applies).
 ## Consequences
 
 - Hosted Claude Code, Codex, OpenCode, and Grok sessions run turns as the
-  caller, with the caller's entitlements and metering, matching chat.
+  caller, with the caller's entitlements. Slack may use the separately authorized
+  subscription source described in the amendment.
 - A Codex thread started before this decision recorded the default
   provider in its rollout; resuming it may still fail. A new session is
   the path.

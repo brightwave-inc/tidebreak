@@ -65,6 +65,8 @@ pub struct SpawnArguments {
     /// Optional subscription account the sandbox's inference is pinned to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_sponsor: Option<tidebreak_core::code::inference::InferenceSponsor>,
     /// Optional idle ceiling in seconds, at most the profile's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout_seconds: Option<u32>,
@@ -109,6 +111,8 @@ pub struct SpawnRepository {
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct SandboxLease {
+    #[serde(default)]
+    pub inference_resolutions: Vec<tidebreak_core::code::inference::InferenceResolution>,
     /// Sandbox identifier every other call takes. Opaque here.
     pub sandbox_id: String,
     /// Lifecycle state at the moment the row committed.

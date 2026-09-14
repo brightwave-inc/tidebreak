@@ -135,6 +135,7 @@ pub(super) async fn snapshot_with_origin(
     let bindings = code.external_bindings_for_sessions(&[session.id]).await?;
     let access = code.session_access(session.id).await?;
     let mut snapshot = SessionSnapshot::from(session);
+    snapshot.inference_resolutions = Some(code.inference_resolutions(snapshot.id).await?);
     snapshot.access = Some(access.level);
     snapshot.is_owner = Some(access.owner);
     snapshot.set_external_origins(bindings);

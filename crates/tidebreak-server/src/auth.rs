@@ -486,6 +486,40 @@ impl GatewayAuthLease {
         external.enroll(owner, handshake, &self.bearer).await
     }
 
+    pub(crate) async fn enroll_external_delegation_with_consent(
+        &self,
+        external: &crate::obo_gateway::external::ExternalDelegations,
+        owner: &tidebreak_core::OwnerId,
+        handshake: tidebreak_core::CodeHandshakeId,
+        consent: Option<&crate::obo_gateway::external::InferenceSponsorshipConsent>,
+    ) -> Result<()> {
+        if &self.principal.owner_id() != owner || self.principal.is_service() {
+            return Err(AgentError::SignInRequired(
+                "personal consent requires the owner's sign-in".into(),
+            ));
+        }
+        external
+            .enroll_with_consent(owner, handshake, &self.bearer, consent)
+            .await
+    }
+
+    pub(crate) async fn update_inference_sponsorship(
+        &self,
+        external: &crate::obo_gateway::external::ExternalDelegations,
+        owner: &tidebreak_core::OwnerId,
+        grant: tidebreak_core::CodeGrantId,
+        consent: &crate::obo_gateway::external::InferenceSponsorshipConsent,
+    ) -> Result<crate::obo_gateway::external::InferenceSponsorshipConsent> {
+        if &self.principal.owner_id() != owner || self.principal.is_service() {
+            return Err(AgentError::SignInRequired(
+                "personal consent requires the owner's sign-in".into(),
+            ));
+        }
+        external
+            .update_sponsorship_consent(owner, grant, &self.bearer, consent)
+            .await
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(principal: Principal, bearer: std::sync::Arc<str>) -> Self {
         Self { principal, bearer }
