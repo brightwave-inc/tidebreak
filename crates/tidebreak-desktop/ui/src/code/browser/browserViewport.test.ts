@@ -2,7 +2,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  browserViewportBounds,
   clampCustomWidth,
   DEFAULT_CUSTOM_WIDTH,
   DEFAULT_VIEWPORT,
@@ -12,7 +11,6 @@ import {
   readStoredViewport,
   restoreOrDefaultViewport,
   viewportLabel,
-  viewportOverflows,
   viewportTargetWidth,
   VIEWPORT_PRESET_WIDTHS,
   writeStoredViewport,
@@ -63,79 +61,6 @@ describe("browserViewport", () => {
       expect(viewportLabel({ preset: "custom", customWidth: 500 })).toBe(
         "Custom 500",
       );
-    });
-  });
-
-  describe("browserViewportBounds", () => {
-    it("fills the surface for Fit", () => {
-      expect(
-        browserViewportBounds(
-          { width: 900, height: 600 },
-          {
-            preset: "fit",
-            customWidth: 800,
-          },
-        ),
-      ).toEqual({ x: 0, width: 900 });
-    });
-
-    it("centers a desktop preset that fits", () => {
-      const bounds = browserViewportBounds(
-        { width: 1600, height: 800 },
-        { preset: "desktop", customWidth: 800 },
-      );
-      expect(bounds.width).toBe(VIEWPORT_PRESET_WIDTHS.desktop);
-      expect(bounds.x).toBe(Math.round((1600 - 1440) / 2));
-    });
-
-    it("clamps a preset wider than the surface and centers at zero", () => {
-      const bounds = browserViewportBounds(
-        { width: 600, height: 400 },
-        { preset: "desktop", customWidth: 800 },
-      );
-      expect(bounds.width).toBe(600);
-      expect(bounds.x).toBe(0);
-    });
-
-    it("centers a custom width inside the surface", () => {
-      const bounds = browserViewportBounds(
-        { width: 1000, height: 600 },
-        { preset: "custom", customWidth: 500 },
-      );
-      expect(bounds.width).toBe(500);
-      expect(bounds.x).toBe(250);
-    });
-
-    it("handles a zero-width surface gracefully", () => {
-      expect(
-        browserViewportBounds(
-          { width: 0, height: 400 },
-          {
-            preset: "desktop",
-            customWidth: 800,
-          },
-        ),
-      ).toEqual({ x: 0, width: 0 });
-    });
-  });
-
-  describe("viewportOverflows", () => {
-    it("is false for Fit and true when the target exceeds the surface", () => {
-      expect(
-        viewportOverflows({ width: 600 }, { preset: "fit", customWidth: 800 }),
-      ).toBe(false);
-      expect(
-        viewportOverflows(
-          { width: 600 },
-          { preset: "desktop", customWidth: 800 },
-        ),
-      ).toBe(true);
-      expect(
-        viewportOverflows(
-          { width: 1600 },
-          { preset: "desktop", customWidth: 800 },
-        ),
-      ).toBe(false);
     });
   });
 

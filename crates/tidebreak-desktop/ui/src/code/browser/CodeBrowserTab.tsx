@@ -7,17 +7,16 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  Bot,
-  Braces,
-  ExternalLink,
-  Globe2,
-  Link2,
-  RefreshCw,
-  TriangleAlert,
-} from "lucide-react";
+import { ExternalLink, Globe2, RefreshCw, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { useComputerUseAction } from "@/computerUseAction";
 import { ComputerUseActionStatus } from "@/ComputerUseActionStatus";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
@@ -1379,80 +1378,52 @@ export function BrowserFallback({
   onRetry?: () => void;
   onOpenExternal?: () => void;
 }) {
-  const Icon = error ? TriangleAlert : Globe2;
   return (
-    <div className="relative isolate grid h-full min-h-72 place-items-center overflow-hidden bg-page-background/35 px-6 py-12">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10 opacity-45 [background-image:linear-gradient(to_right,color-mix(in_oklch,var(--border-subtle)_42%,transparent)_1px,transparent_1px),linear-gradient(to_bottom,color-mix(in_oklch,var(--border-subtle)_42%,transparent)_1px,transparent_1px)] [background-size:32px_32px] [mask-image:linear-gradient(to_bottom,transparent,black_24%,black_74%,transparent)]"
-      />
-      <div className="w-full max-w-lg text-left">
-        <div
-          className={cn(
-            "grid size-10 place-items-center rounded-xl border bg-background shadow-[0_8px_28px_color-mix(in_oklch,var(--foreground)_7%,transparent)]",
-            error
-              ? "border-critical-border text-critical"
-              : "border-border-subtle text-foreground",
-          )}
+    <Empty className="h-full min-h-72 rounded-none bg-page-background/35">
+      <EmptyHeader>
+        <EmptyMedia
+          variant="icon"
+          className={error ? "text-critical" : undefined}
         >
-          <Icon className="size-4.5" />
-        </div>
-        <p className="mt-5 text-2xs font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-          Workspace browser
-        </p>
-        <h2 className="mt-1.5 max-w-md text-xl font-semibold tracking-[-0.025em] text-balance">
+          {error ? <TriangleAlert /> : <Globe2 />}
+        </EmptyMedia>
+        <EmptyTitle>
           {error
             ? "This page did not open"
             : "Bring the live work into the workspace"}
-        </h2>
-        <p className="mt-2 max-w-md text-sm leading-6 text-pretty text-muted-foreground">
+        </EmptyTitle>
+        <EmptyDescription>
           {error ||
             "Open a local preview, documentation, or a pull request here. The browser stays attached to this workspace so you and its agents can work from the same page."}
-        </p>
-        {!error && (
-          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1.5">
-              <Braces className="size-3.5 text-foreground/70" />
-              Local previews
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <Link2 className="size-3.5 text-foreground/70" />
-              Docs and reviews
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <Bot className="size-3.5 text-foreground/70" />
-              Agent inspection
-            </span>
-          </div>
-        )}
-        {hasUrl && (onRetry || onOpenExternal) && (
-          <div className="mt-5 flex flex-wrap items-center gap-2">
-            {onRetry && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={onRetry}
-              >
-                <RefreshCw />
-                Try again
-              </Button>
-            )}
-            {onOpenExternal && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onOpenExternal}
-              >
-                <ExternalLink />
-                Open externally
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
+        </EmptyDescription>
+      </EmptyHeader>
+      {hasUrl && (onRetry || onOpenExternal) && (
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          {onRetry && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={onRetry}
+            >
+              <RefreshCw />
+              Try again
+            </Button>
+          )}
+          {onOpenExternal && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onOpenExternal}
+            >
+              <ExternalLink />
+              Open externally
+            </Button>
+          )}
+        </div>
+      )}
+    </Empty>
   );
 }
 

@@ -8,9 +8,10 @@ export const PR_GROUP_HEIGHT = 38;
 export const RUN_ROW_HEIGHT = 62;
 
 export const PR_GRID =
-  "grid-cols-[minmax(280px,1fr)_150px_110px_105px_minmax(8.75rem,auto)_95px]";
+  "grid-cols-[minmax(0,1fr)_auto] [&>*:nth-child(2)]:hidden [&>*:nth-child(3)]:hidden [&>*:nth-child(4)]:hidden [&>*:nth-child(5)]:hidden @[48rem]:grid-cols-[minmax(260px,1fr)_130px_105px_minmax(8rem,auto)_85px] @[48rem]:[&>*:nth-child(2)]:flex @[48rem]:[&>*:nth-child(3)]:flex @[48rem]:[&>*:nth-child(5)]:flex";
 
-export const RUN_GRID = "grid-cols-[minmax(260px,1fr)_150px_140px_110px]";
+export const RUN_GRID =
+  "grid-cols-[minmax(0,1fr)_auto] [&>*:nth-child(2)]:hidden [&>*:nth-child(3)]:hidden @[40rem]:grid-cols-[minmax(220px,1fr)_140px_120px_90px] @[40rem]:[&>*:nth-child(2)]:flex @[40rem]:[&>*:nth-child(3)]:flex";
 
 /**
  * A windowed row list.
