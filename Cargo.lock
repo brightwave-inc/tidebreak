@@ -7369,6 +7369,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "libc",
+ "portable-pty",
  "reqwest",
  "serde",
  "serde_json",
