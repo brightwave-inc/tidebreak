@@ -21,18 +21,22 @@ import { useConnectionStore } from "../src/session/store";
 function ConnectionRow({
   connection,
   active,
+  first,
   onSwitch,
   onRemove,
   busy,
 }: {
   connection: GatewayConnection;
   active: boolean;
+  first: boolean;
   onSwitch: () => void;
   onRemove: () => void;
   busy: boolean;
 }) {
   return (
-    <View className="gap-2 border-t border-border py-3 first:border-t-0">
+    <View
+      className={`gap-2 py-3 ${first ? "" : "border-t border-border"}`}
+    >
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Switch to ${connectionLabel(connection)}`}
@@ -103,11 +107,12 @@ export default function ConnectionsScreen() {
         <Body>No gateway is paired yet.</Body>
       ) : (
         <View className="rounded-xl border border-border bg-background px-4">
-          {list.map((connection) => (
+          {list.map((connection, position) => (
             <ConnectionRow
               key={connection.id}
               connection={connection}
               active={connection.id === activeId}
+              first={position === 0}
               busy={busy}
               onSwitch={() => void switchTo(connection.id)}
               onRemove={() => void remove(connection.id)}
