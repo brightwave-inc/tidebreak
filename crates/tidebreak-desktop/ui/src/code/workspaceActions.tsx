@@ -57,6 +57,7 @@ import {
   uneffPreparationSteps,
   uneffSessionSettings,
 } from "./uneffMe";
+import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 
 /**
  * Workspace commands shared by the card context menu and the workspace
@@ -82,7 +83,8 @@ export type WorkspaceCommandId =
   | "archive"
   | "force-archive"
   | "restore"
-  | "retry-setup";
+  | "retry-setup"
+  | "repo-settings";
 
 export type WorkspaceCommand = {
   id: WorkspaceCommandId;
@@ -234,6 +236,10 @@ export function workspaceHeaderCommands(input: {
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
     items.push({ id: "uneff-me", label: "Uneff me" });
   }
+  items.push({
+    id: "repo-settings",
+    label: "Repository settings",
+  });
   if (!input.archived) {
     for (const action of input.quickActions) {
       items.push({
@@ -441,6 +447,10 @@ export function useWorkspaceCardCommands(): {
   const [actionOutput, setActionOutput] = useState<CodeActionSnapshot | null>(
     null,
   );
+  const [repoSettings, setRepoSettings] = useState<{
+    repoId: string;
+    repoLabel: string;
+  } | null>(null);
 
   function openWorkspace(workspaceId: string) {
     void navigate({
@@ -986,6 +996,16 @@ export function useWorkspaceCardCommands(): {
         return;
       case "retry-setup":
         return runRetrySetup(context.workspace);
+      case "repo-settings": {
+        const repo = useCodeCatalogStore
+          .getState()
+          .repos.find((item) => item.id === context.workspace.repo_id);
+        setRepoSettings({
+          repoId: context.workspace.repo_id,
+          repoLabel: repo?.display_name ?? context.workspace.repo_id,
+        });
+        return;
+      }
     }
   }
 
@@ -1073,6 +1093,16 @@ export function useWorkspaceCardCommands(): {
         {dialog}
         {renameDialog}
         {outputDialog}
+        <RepositorySettingsDialog
+          open={repoSettings !== null}
+          onOpenChange={(open) => {
+            if (!open) setRepoSettings(null);
+          }}
+          client={client}
+          repoId={repoSettings?.repoId ?? null}
+          repoLabel={repoSettings?.repoLabel ?? ""}
+          onSaved={(repo) => useCodeCatalogStore.getState().upsertRepo(repo)}
+        />
       </>
     ),
   };

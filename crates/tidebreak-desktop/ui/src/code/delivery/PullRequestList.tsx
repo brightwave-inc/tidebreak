@@ -121,7 +121,7 @@ export function PullRequestList({
     [grouping, items],
   );
   return (
-    <div role="list" aria-label="Pull requests" className="min-w-[1040px]">
+    <div role="list" aria-label="Pull requests" className="@container min-w-0">
       <div
         className={cn(
           "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur",

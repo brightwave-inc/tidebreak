@@ -40,7 +40,7 @@ import {
   permittedPermissionModes,
 } from "../../../src/lib/codeLaunch";
 import { useSessionDraftRecoveryStore } from "../../../src/session/draftRecovery";
-import { useSessionStore } from "../../../src/session/store";
+import { useActiveMachine } from "../../../src/session/store";
 import { useMachineClient } from "../../../src/session/useMachineClient";
 
 const NO_HARNESSES: CodeHarnessOption[] = [];
@@ -48,7 +48,7 @@ const NO_HARNESSES: CodeHarnessOption[] = [];
 export default function StartWorkspaceSessionScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const machine = useSessionStore((state) => state.session?.machine);
+  const machine = useActiveMachine();
   const client = useMachineClient();
   const offerDraft = useSessionDraftRecoveryStore((state) => state.offer);
   const [selectedHarnessKind, setSelectedHarnessKind] =

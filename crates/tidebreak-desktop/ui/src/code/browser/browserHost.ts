@@ -43,15 +43,11 @@ export type BrowserAgentAccess = {
   halted: boolean;
   origin?: string;
   scope?: "origin" | "loopback_workspace";
-  canObserve: boolean;
-  canControl: boolean;
   /**
    * Whether this grant was taken under the screenshot disclosure. Legacy
    * grants observe and control without capture until the user re-shares.
    */
   canCaptureScreens?: boolean;
-  canDiagnose?: boolean;
-  canTransferFiles: boolean;
 };
 
 export type BrowserHostAction =
@@ -82,7 +78,6 @@ export type BrowserHostSnapshot = {
   exists: boolean;
   browserId: string;
   workspaceId: string;
-  profileId?: string;
   url?: string;
   title?: string;
   loadState?: "loading" | "ready" | "failed";

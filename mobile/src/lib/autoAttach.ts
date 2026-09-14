@@ -18,10 +18,12 @@ import {
   AttachError,
   REASON_UNREACHABLE,
   discoverMachine,
+  gatewayTarget,
   probePolicy,
 } from "./attach";
+import type { GatewayConnection } from "./connections";
 import type { HttpFetch } from "./http";
-import type { AttachedMachine, PersistedSession } from "./types";
+import type { AttachedMachine } from "./types";
 
 /** What the Attach screen renders when a machine could not be attached. */
 export type AttachFailure =
@@ -49,7 +51,7 @@ export async function attachMachine(
   deps.onStage?.("discover");
   const discovered = await discoverMachine(
     machineUrl,
-    gatewayUrl,
+    gatewayTarget(gatewayUrl),
     deps.fetchImpl,
   );
   deps.onStage?.("verify");
@@ -64,9 +66,9 @@ export async function attachMachine(
  * deployment hosts no machine and the user must name one.
  */
 export function advertisedMachineUrl(
-  session: Pick<PersistedSession, "machinePrefillUrl"> | null,
+  connection: Pick<GatewayConnection, "machinePrefillUrl"> | null,
 ): string | null {
-  const advertised = session?.machinePrefillUrl?.trim();
+  const advertised = connection?.machinePrefillUrl?.trim();
   return advertised ? advertised : null;
 }
 
@@ -86,15 +88,19 @@ export type AutoAttachOutcome =
  * a spinner.
  */
 export async function autoAttach(
-  session: Pick<PersistedSession, "gatewayUrl" | "machinePrefillUrl">,
+  connection: Pick<GatewayConnection, "gatewayUrl" | "machinePrefillUrl">,
   deps: AttachDeps,
 ): Promise<AutoAttachOutcome> {
-  const advertised = advertisedMachineUrl(session);
+  const advertised = advertisedMachineUrl(connection);
   if (!advertised) {
     return { kind: "manual", failure: null };
   }
   try {
-    const machine = await attachMachine(advertised, session.gatewayUrl, deps);
+    const machine = await attachMachine(
+      advertised,
+      connection.gatewayUrl,
+      deps,
+    );
     return { kind: "attached", machine };
   } catch (error) {
     return { kind: "manual", failure: describeAttachFailure(error) };

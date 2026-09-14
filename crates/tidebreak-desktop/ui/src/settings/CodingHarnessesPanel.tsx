@@ -220,7 +220,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
 
   return (
     <SettingsPanel
-      title="Coding harnesses"
+      title="Coding engines"
       description={`Coding engines on ${hostMachineLabel()}. Each one downloads the first time you pick it, so you only pay for the ones you use.`}
       busy={loading || refreshing}
     >
@@ -278,10 +278,13 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
           onBrowse={() => {
             void (async () => {
               const picked = await pickCodeDirectory();
-              if (picked) setRootDraft(picked);
+              if (picked) {
+                setRootDraft(picked);
+                void saveRoot(picked);
+              }
             })();
           }}
-          onSave={() => void saveRoot(rootDraft.trim())}
+          onCommit={(next) => void saveRoot(next)}
           onReset={() => void saveRoot(null)}
         />
       )}

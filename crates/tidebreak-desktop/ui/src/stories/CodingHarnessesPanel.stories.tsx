@@ -19,7 +19,7 @@ import {
 } from "./SettingsStoryHarness";
 
 /**
- * Settings → Coding harnesses, the whole page.
+ * Settings → Coding engines, the whole page.
  *
  * The engines lead, because a reader who opens this page opens it to get one
  * working. Each row states whether it is usable and carries the one control
@@ -68,7 +68,7 @@ function HarnessesShowcase({
 }
 
 const meta = {
-  title: "Settings/Coding harnesses",
+  title: "Settings/Coding engines",
   component: HarnessesShowcase,
   parameters: { layout: "fullscreen" },
 } satisfies Meta<typeof HarnessesShowcase>;

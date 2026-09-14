@@ -14,8 +14,8 @@ use std::str::FromStr;
 use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, ApprovalDecisionKind, ApprovalId, ApprovalKind, Attention, AttentionState,
-    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId, Result, SessionId,
-    SessionLifecycle, TurnId, WorkspaceId,
+    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId, Result, SessionAccessLevel,
+    SessionId, SessionLifecycle, SessionVisibility, TurnId, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -52,6 +52,10 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code session show <id>
        tidebreak code session mode <id> plan|ask|auto|allow
        tidebreak code session reap <id>
+       tidebreak code share grant <session-id> <subject> [--level view|contribute]
+       tidebreak code share list <session-id>
+       tidebreak code share revoke <session-id> <subject>
+       tidebreak code share visibility <session-id> private|deployment
        tidebreak code run (--session <id> | --ws <id>) [<message>]
                   [--on-approval wait|fail] [--timeout <secs>]
        tidebreak code approvals [--session <id>]
@@ -154,6 +158,26 @@ pub enum Command {
         id: SessionId,
         format: OutputFormat,
     },
+    ShareGrant {
+        session: SessionId,
+        subject: String,
+        level: SessionAccessLevel,
+        format: OutputFormat,
+    },
+    ShareList {
+        session: SessionId,
+        format: OutputFormat,
+    },
+    ShareRevoke {
+        session: SessionId,
+        subject: String,
+        format: OutputFormat,
+    },
+    ShareVisibility {
+        session: SessionId,
+        visibility: SessionVisibility,
+        format: OutputFormat,
+    },
     Run {
         session: Option<SessionId>,
         workspace: Option<WorkspaceId>,
@@ -237,6 +261,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> std::result::Result<Comm
         "repo" => parse_repo(&mut cursor),
         "ws" => parse_ws(&mut cursor),
         "session" => parse_session(&mut cursor),
+        "share" => parse_share(&mut cursor),
         "run" => parse_run(&mut cursor),
         "approvals" => parse_approvals(&mut cursor),
         "approve" => parse_approve(&mut cursor),
@@ -497,6 +522,71 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                 "tidebreak: reaped session {}  {}",
                 session.id,
                 session.lifecycle.as_str()
+            );
+            Ok(0)
+        }
+        Command::ShareGrant {
+            session,
+            subject,
+            level,
+            format,
+        } => {
+            let access = client
+                .grant_session_access(session, &subject, level)
+                .await?;
+            if format == OutputFormat::Json {
+                return emit_ok(&access);
+            }
+            println!(
+                "tidebreak: granted {} access to {} on session {}",
+                access.level.as_str(),
+                access.subject,
+                access.session_id
+            );
+            Ok(0)
+        }
+        Command::ShareList { session, format } => {
+            let access = client.list_session_access(session).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({ "access": access }));
+            }
+            if access.is_empty() {
+                eprintln!("tidebreak: session {session} has no access grants");
+            }
+            for row in access {
+                println!("{}\t{}", row.level.as_str(), row.subject);
+            }
+            Ok(0)
+        }
+        Command::ShareRevoke {
+            session,
+            subject,
+            format,
+        } => {
+            client.revoke_session_access(session, &subject).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "session": session,
+                    "subject": subject,
+                    "revoked": true,
+                }));
+            }
+            println!("tidebreak: revoked {subject} from session {session}");
+            Ok(0)
+        }
+        Command::ShareVisibility {
+            session,
+            visibility,
+            format,
+        } => {
+            let session = client.set_session_visibility(session, visibility).await?;
+            if format == OutputFormat::Json {
+                return emit_ok(&session);
+            }
+            println!(
+                "tidebreak: session {} visibility is now {}",
+                session.id,
+                session.visibility.as_str()
             );
             Ok(0)
         }
@@ -2126,6 +2216,88 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     }
 }
 
+fn parse_share(cursor: &mut Cursor) -> std::result::Result<Command, String> {
+    let verb = cursor.positional("a share subcommand")?;
+    match verb.as_str() {
+        "grant" => {
+            let session = cursor
+                .next()
+                .ok_or_else(|| "share grant requires a session id".to_owned())
+                .and_then(|raw| parse_session_id(&raw))?;
+            let subject = cursor
+                .next()
+                .ok_or_else(|| "share grant requires a subject".to_owned())?;
+            let mut level = SessionAccessLevel::View;
+            let mut flags = SharedFlags {
+                format: OutputFormat::Text,
+            };
+            while let Some(arg) = cursor.next() {
+                match arg.as_str() {
+                    "--level" => {
+                        let raw = cursor.value("--level")?;
+                        level = SessionAccessLevel::from_token(&raw)
+                            .ok_or_else(|| "--level expects view or contribute".to_owned())?;
+                    }
+                    other => take_format(&mut flags, cursor, other)?,
+                }
+            }
+            Ok(Command::ShareGrant {
+                session,
+                subject,
+                level,
+                format: flags.format,
+            })
+        }
+        "list" => {
+            let (session, format) = take_id_and_format(cursor, "a session id", parse_session_id)?;
+            Ok(Command::ShareList { session, format })
+        }
+        "revoke" => {
+            let session = cursor
+                .next()
+                .ok_or_else(|| "share revoke requires a session id".to_owned())
+                .and_then(|raw| parse_session_id(&raw))?;
+            let subject = cursor
+                .next()
+                .ok_or_else(|| "share revoke requires a subject".to_owned())?;
+            let mut flags = SharedFlags {
+                format: OutputFormat::Text,
+            };
+            while let Some(arg) = cursor.next() {
+                take_format(&mut flags, cursor, &arg)?;
+            }
+            Ok(Command::ShareRevoke {
+                session,
+                subject,
+                format: flags.format,
+            })
+        }
+        "visibility" => {
+            let session = cursor
+                .next()
+                .ok_or_else(|| "share visibility requires a session id".to_owned())
+                .and_then(|raw| parse_session_id(&raw))?;
+            let raw = cursor
+                .next()
+                .ok_or_else(|| "share visibility requires private or deployment".to_owned())?;
+            let visibility = SessionVisibility::from_token(&raw)
+                .ok_or_else(|| "share visibility expects private or deployment".to_owned())?;
+            let mut flags = SharedFlags {
+                format: OutputFormat::Text,
+            };
+            while let Some(arg) = cursor.next() {
+                take_format(&mut flags, cursor, &arg)?;
+            }
+            Ok(Command::ShareVisibility {
+                session,
+                visibility,
+                format: flags.format,
+            })
+        }
+        other => Err(format!("unknown share subcommand {other:?}")),
+    }
+}
+
 fn parse_run(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     let mut session = None;
     let mut workspace = None;
@@ -2632,6 +2804,46 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(
+            parse(args(&["share", "grant", &session, "principal:user:bob"])).unwrap(),
+            Command::ShareGrant {
+                level: SessionAccessLevel::View,
+                format: OutputFormat::Text,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(args(&[
+                "share",
+                "grant",
+                &session,
+                "principal:user:bob",
+                "--level",
+                "contribute",
+                "--json",
+            ]))
+            .unwrap(),
+            Command::ShareGrant {
+                level: SessionAccessLevel::Contribute,
+                format: OutputFormat::Json,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(args(&["share", "list", &session])).unwrap(),
+            Command::ShareList { .. }
+        ));
+        assert!(matches!(
+            parse(args(&["share", "revoke", &session, "principal:user:bob"])).unwrap(),
+            Command::ShareRevoke { .. }
+        ));
+        assert!(matches!(
+            parse(args(&["share", "visibility", &session, "deployment"])).unwrap(),
+            Command::ShareVisibility {
+                visibility: SessionVisibility::Deployment,
+                ..
+            }
+        ));
+        assert!(matches!(
             parse(args(&["approve", &approval])).unwrap(),
             Command::Approve { .. }
         ));
@@ -2718,6 +2930,9 @@ mod tests {
             "nope"
         ]))
         .is_err());
+        assert!(parse(args(&["share"])).is_err());
+        assert!(parse(args(&["share", "grant", &id()])).is_err());
+        assert!(parse(args(&["share", "visibility", &id(), "public"])).is_err());
     }
 
     #[test]

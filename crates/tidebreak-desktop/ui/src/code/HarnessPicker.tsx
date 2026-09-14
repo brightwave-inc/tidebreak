@@ -137,7 +137,7 @@ export function HarnessPicker({
           className="text-muted-foreground w-fit cursor-pointer text-xs underline-offset-2 hover:underline"
           onClick={() => void navigate({ to: harnessesPath })}
         >
-          Coding harnesses
+          Coding engines
         </button>
       )}
     </div>

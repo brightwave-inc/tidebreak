@@ -712,14 +712,15 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
       path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
       authenticated: undefined,
       remediation:
-        "Tidebreak could not verify the Claude Code sign-in. Sign in to Claude Code in your own terminal, then re-check.",
+        "Tidebreak could not verify the Claude Code sign-in. Sign in to Claude Code in your own terminal with `claude login`, then re-check.",
     }),
     doctorEntry({
       kind: "codex",
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: false,
-      remediation: "Sign in to Codex CLI in your own terminal, then re-check.",
+      remediation:
+        "Sign in to Codex CLI in your own terminal with `codex login`, then re-check.",
       caps: { ...fullCaps, mid_turn_steering: "supported" },
     }),
   ],

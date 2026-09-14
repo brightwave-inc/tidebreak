@@ -7,13 +7,15 @@ import {
   BrowserToolbar,
 } from "@/code/browser/BrowserToolbar";
 import { BrowserViewportControl } from "@/code/browser/BrowserViewportControl";
-import { BrowserFallback } from "@/code/browser/CodeBrowserTab";
+import { BrowserFallback, CodeBrowserTab } from "@/code/browser/CodeBrowserTab";
 import type { BrowserViewport } from "@/code/browser/browserViewport";
 import type {
   BrowserAgentAccess,
   BrowserController,
   BrowserHostSnapshot,
+  CodeBrowserHost,
 } from "@/code/browser/browserHost";
+import { Globe2, SquareTerminal, X } from "lucide-react";
 import type { BrowserSession } from "@/code/browser/browserSession";
 import { cn } from "@/lib/utils";
 
@@ -57,10 +59,58 @@ const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
     semanticSnapshot: true,
     semanticActions: false,
     screenshot: false,
+    developerDiagnostics: true,
     crossOriginFrames: false,
     profileReset: false,
   },
 };
+
+const unavailableStoryHost: CodeBrowserHost = {
+  available: () => false,
+  importLegacyState: async () => ({
+    status: "already_handled",
+    browserId: "browser-story",
+    workspaceId: "workspace-story",
+  }),
+  command: async () => {
+    throw new Error("Browser host unavailable in Storybook");
+  },
+  subscribe: async () => () => {},
+  openExternal: async () => {},
+};
+
+function ComposedBrowserTabStory() {
+  return (
+    <div className="grid min-h-dvh place-items-center bg-page-background p-6">
+      <div className="flex h-[min(720px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-lg">
+        <div className="flex h-9 shrink-0 items-end gap-0.5 border-b border-border-subtle bg-muted/25 px-2">
+          <button
+            type="button"
+            className="flex h-8 items-center gap-1.5 rounded-t-md border border-b-0 border-border-subtle bg-background px-2.5 text-xs font-medium"
+          >
+            <Globe2 className="size-3.5" /> Browser
+            <X className="ml-1 size-3 text-muted-foreground" />
+          </button>
+          <button
+            type="button"
+            className="flex h-8 items-center gap-1.5 rounded-t-md px-2.5 text-xs text-muted-foreground"
+          >
+            <SquareTerminal className="size-3.5" /> Terminal
+            <X className="ml-1 size-3" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1">
+          <CodeBrowserTab
+            workspaceId="workspace-story"
+            browserId="browser-story"
+            initialUrl="http://localhost:4173/review/browser"
+            host={unavailableStoryHost}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 const resetEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   ...inspectEngine,
   capabilities: {
@@ -90,9 +140,6 @@ const unsharedAccess: BrowserAgentAccess = {
   paused: false,
   halted: false,
   origin: "http://localhost:4173",
-  canObserve: false,
-  canControl: false,
-  canTransferFiles: false,
 };
 
 const localSharedAccess: BrowserAgentAccess = {
@@ -101,11 +148,7 @@ const localSharedAccess: BrowserAgentAccess = {
   halted: false,
   origin: "http://localhost:4173",
   scope: "loopback_workspace",
-  canObserve: true,
-  canControl: true,
   canCaptureScreens: true,
-  canDiagnose: true,
-  canTransferFiles: false,
 };
 
 // Consent persisted before the screenshot disclosure: the agent observes and
@@ -116,11 +159,7 @@ const legacySharedAccess: BrowserAgentAccess = {
   halted: false,
   origin: "http://localhost:4173",
   scope: "loopback_workspace",
-  canObserve: true,
-  canControl: true,
   canCaptureScreens: false,
-  canDiagnose: false,
-  canTransferFiles: false,
 };
 
 const pausedAccess: BrowserAgentAccess = {
@@ -128,9 +167,6 @@ const pausedAccess: BrowserAgentAccess = {
   paused: true,
   halted: true,
   origin: "https://accounts.example.org",
-  canObserve: false,
-  canControl: false,
-  canTransferFiles: false,
 };
 
 const now = Date.parse("2026-08-20T16:20:00.000Z");
@@ -911,6 +947,12 @@ export const SplitPane: StoryObj<typeof SplitPaneBrowserStory> = {
 
 export const SameDocumentNavigation: Story = {
   args: { scenario: "same-document" },
+};
+
+export const ComposedBrowserAndTerminalTabs: StoryObj<
+  typeof ComposedBrowserTabStory
+> = {
+  render: () => <ComposedBrowserTabStory />,
 };
 
 export const InspectEnableFailure: Story = {

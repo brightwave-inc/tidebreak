@@ -21,6 +21,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
+import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { harnessUnusableReason, workspaceHarnesses } from "./labels";
 import { middleTruncate } from "./workspaceCards";
@@ -48,6 +49,10 @@ export function CodeHome() {
 function CodeHomeBody() {
   const { client } = useApp();
   const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
+  const [settingsRepo, setSettingsRepo] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const doctorError = useCodeCatalogStore((state) => state.doctorError);
   const repos = useCodeCatalogStore((state) => state.repos);
@@ -204,11 +209,11 @@ function CodeHomeBody() {
           </div>
           <ul className="flex flex-col gap-1">
             {repos.map((repo) => (
-              <li key={repo.id}>
+              <li key={repo.id} className="flex min-w-0 items-center gap-1">
                 <button
                   type="button"
                   className={cn(
-                    "hover:bg-muted flex w-full cursor-pointer items-baseline gap-2 rounded-md px-3 py-2 text-left text-sm",
+                    "hover:bg-muted flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-md px-3 py-2 text-left text-sm",
                     FOCUS_RING,
                     HOVER_TINT,
                   )}
@@ -226,12 +231,35 @@ function CodeHomeBody() {
                     {middleTruncate(repo.root_path, 56)}
                   </span>
                 </button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setSettingsRepo({
+                      id: repo.id,
+                      label: repo.display_name,
+                    })
+                  }
+                >
+                  Settings
+                </Button>
               </li>
             ))}
           </ul>
         </section>
       )}
       <AddRepoPalette open={addOpen} onOpenChange={setAddOpen} />
+      <RepositorySettingsDialog
+        open={settingsRepo !== null}
+        onOpenChange={(open) => {
+          if (!open) setSettingsRepo(null);
+        }}
+        client={client}
+        repoId={settingsRepo?.id ?? null}
+        repoLabel={settingsRepo?.label ?? ""}
+        onSaved={(repo) => useCodeCatalogStore.getState().upsertRepo(repo)}
+      />
     </div>
   );
 }

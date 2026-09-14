@@ -20,7 +20,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
-use tracing::{warn, Instrument as _};
+use tracing::{error, warn, Instrument as _};
 
 use tidebreak_core::code::QueuedTurn;
 use tidebreak_core::db::code::{
@@ -4003,7 +4003,7 @@ async fn apply_side_effects(
                     turn.checkpoint_ref = hint.checkpoint_ref.clone();
                     turn.diffstat = hint.diffstat.clone();
                 }
-                let _ = save_turn(db, owner, &turn).await;
+                save_terminal_turn(db, owner, session_id, &turn).await?;
             }
         }
         // A refusal ends the turn the way a completion does: the model
@@ -4013,26 +4013,56 @@ async fn apply_side_effects(
                 turn.status = TurnStatus::Completed;
                 turn.ended_at = Some(Utc::now());
                 turn.usage = Some(usage.clone());
-                let _ = save_turn(db, owner, &turn).await;
+                save_terminal_turn(db, owner, session_id, &turn).await?;
             }
         }
         Event::TurnFailed { .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = TurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, owner, &turn).await;
+                save_terminal_turn(db, owner, session_id, &turn).await?;
             }
         }
         Event::TurnInterrupted { .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = TurnStatus::Interrupted;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, owner, &turn).await;
+                save_terminal_turn(db, owner, session_id, &turn).await?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+async fn save_terminal_turn(
+    db: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    turn: &Turn,
+) -> Result<(), JournalError> {
+    match save_turn(db, owner, turn).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            error!(
+                session = %session_id,
+                turn = %turn.id,
+                status = %turn.status.as_str(),
+                "terminal event could not close its turn because the row disappeared"
+            );
+            Err(JournalError::SessionNotFound { session_id })
+        }
+        Err(error) => {
+            error!(
+                session = %session_id,
+                turn = %turn.id,
+                status = %turn.status.as_str(),
+                error = %error,
+                "terminal event could not close its turn"
+            );
+            Err(JournalError::Store(error))
+        }
+    }
 }
 
 const MAX_HARNESS_RAW_BYTES: usize = 16 * 1024;
