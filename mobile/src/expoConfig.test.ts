@@ -19,6 +19,7 @@ type PublicExpoConfig = {
   extra?: {
     oauthRedirectUri?: string;
   };
+  plugins?: Array<string | [string, Record<string, unknown>]>;
 };
 
 function resolvePublicConfig(appVariant: string): PublicExpoConfig {
@@ -61,6 +62,23 @@ describe("Expo config", () => {
         data: [{ scheme, host: "callback" }],
         category: ["BROWSABLE", "DEFAULT"],
       });
+      // The gateway console's pairing link. Without this filter a scanned or
+      // shared provision link opens a browser instead of the app, and QR
+      // pairing silently has no way in from outside the camera screen.
+      expect(config.android?.intentFilters).toContainEqual({
+        action: "VIEW",
+        autoVerify: false,
+        data: [{ scheme, host: "provision" }],
+        category: ["BROWSABLE", "DEFAULT"],
+      });
+      // Both native surfaces this slice adds must be configured, on every
+      // variant: a missing plugin is an app that builds and then cannot ask
+      // for the camera or receive a notification.
+      const pluginNames = (config.plugins ?? []).map((plugin) =>
+        Array.isArray(plugin) ? plugin[0] : plugin,
+      );
+      expect(pluginNames).toContain("expo-camera");
+      expect(pluginNames).toContain("expo-notifications");
     },
   );
 });
