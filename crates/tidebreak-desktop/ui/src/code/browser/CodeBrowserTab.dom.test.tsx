@@ -78,9 +78,6 @@ function agentAccess(
     paused: false,
     halted: false,
     origin: "https://example.com",
-    canObserve: false,
-    canControl: false,
-    canTransferFiles: false,
     ...update,
   };
 }
@@ -1369,8 +1366,6 @@ describe("CodeBrowserTab", () => {
         agentAccess: agentAccess({
           shared: true,
           scope: "origin",
-          canObserve: true,
-          canControl: true,
         }),
       },
     });
@@ -1749,8 +1744,6 @@ describe("CodeBrowserTab", () => {
         agentAccess: agentAccess({
           shared: true,
           scope: "origin",
-          canObserve: true,
-          canControl: true,
         }),
       },
     });
@@ -2493,8 +2486,6 @@ describe("BrowserToolbar compact", () => {
         agentAccess: agentAccess({
           shared: true,
           scope: "origin",
-          canObserve: true,
-          canControl: true,
         }),
       },
     });
@@ -2637,8 +2628,6 @@ describe("BrowserToolbar compact", () => {
         agentAccess: agentAccess({
           shared: true,
           scope: "origin",
-          canObserve: true,
-          canControl: true,
         }),
       },
     });
@@ -2787,8 +2776,6 @@ describe("BrowserToolbar compact", () => {
         agentAccess: agentAccess({
           shared: true,
           scope: "origin",
-          canObserve: true,
-          canControl: true,
         }),
       },
     });

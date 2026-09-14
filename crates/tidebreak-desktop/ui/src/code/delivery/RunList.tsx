@@ -20,7 +20,7 @@ export function RunList({
     <div
       role="list"
       aria-label="Runs and deployments"
-      className="min-w-[780px]"
+      className="@container min-w-0"
     >
       <div
         className={cn(

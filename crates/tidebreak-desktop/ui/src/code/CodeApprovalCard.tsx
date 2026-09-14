@@ -37,6 +37,8 @@ export function CodeApprovalCard({
   const [payloadOpen, setPayloadOpen] = useState(false);
   const payloadId = useId();
   const decided = approval.state !== "pending";
+  const canDecide =
+    approval.kind.type !== "questions" && approval.kind.type !== "plan";
   const decidedBy = actorLabel(approval.actor);
 
   useEffect(() => {
@@ -112,7 +114,7 @@ export function CodeApprovalCard({
           </Reveal>
         </div>
       )}
-      {!decided && !denying && (
+      {!decided && canDecide && !denying && (
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
@@ -133,7 +135,7 @@ export function CodeApprovalCard({
           </Button>
         </div>
       )}
-      {!decided && denying && (
+      {!decided && canDecide && denying && (
         <div className="flex flex-col gap-2">
           <Textarea
             rows={2}

@@ -92,29 +92,6 @@ export function viewportTargetWidth(viewport: BrowserViewport): number | null {
  * positioned at the column's left/top so it visually matches the simulated
  * viewport.
  */
-export function browserViewportBounds(
-  surface: { width: number; height: number },
-  viewport: BrowserViewport,
-): { x: number; width: number } {
-  const target = viewportTargetWidth(viewport);
-  if (target === null || surface.width <= 0) {
-    return { x: 0, width: surface.width };
-  }
-  const width = Math.min(target, surface.width);
-  const x = Math.round((surface.width - width) / 2);
-  return { x, width };
-}
-
-/** True when the fixed/custom viewport is wider than the surface (overflow). */
-export function viewportOverflows(
-  surface: { width: number },
-  viewport: BrowserViewport,
-): boolean {
-  const target = viewportTargetWidth(viewport);
-  if (target === null) return false;
-  return target > surface.width;
-}
-
 // --- Persistence (presentation preference only) ---
 
 const PREFERENCE_KEY = "tidebreak.code-browser-viewport.v1";
