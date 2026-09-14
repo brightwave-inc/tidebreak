@@ -186,11 +186,13 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
-                let version = match host.declared_version(HarnessKind::ClaudeCode) {
-                    Some(declared) => Some(declared.to_owned()),
-                    None => observe_version(&capture.binary, &capture.env).await.ok(),
-                };
-                let (authenticated, commands) = tokio::join!(
+                let (version, authenticated, commands) = tokio::join!(
+                    async {
+                        match host.declared_version(HarnessKind::ClaudeCode) {
+                            Some(declared) => Some(declared.to_owned()),
+                            None => observe_version(&capture.binary, &capture.env).await.ok(),
+                        }
+                    },
                     observe_auth(&capture.binary, &capture.env),
                     observe_commands(&capture.binary, &capture.env),
                 );
@@ -936,6 +938,43 @@ pub(crate) mod tests {
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Supported);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_discovery_stays_inside_the_nextest_silence_budget() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("claude");
+        std::fs::write(&binary, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            harness_versions: Vec::new(),
+            declared_binaries: Vec::new(),
+            declared_env: Some(vec![(
+                std::ffi::OsString::from("PATH"),
+                dir.path().as_os_str().to_owned(),
+            )]),
+        };
+        let started = Instant::now();
+        let probe = ClaudeCodeAdapter::new().probe(&host).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(18),
+            "hanging binary stacked probe waits past nextest's 20s silence kill: {elapsed:?}"
+        );
+        assert!(probe.found);
+        assert!(probe.commands.is_empty());
+        assert_eq!(
+            ClaudeCodeAdapter::new().capabilities(&probe).slash_commands,
+            CapLevel::Unknown
+        );
     }
 
     #[test]
