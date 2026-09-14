@@ -2803,7 +2803,9 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       if (
         !isRecord(resolution) ||
         !onlyKeys<
-          NonNullable<CodeSessionSnapshot["inference_resolutions"]>[number]
+          NonNullable<CodeSessionSnapshot["inference_resolutions"]>[number] & {
+            subscription_label?: string;
+          }
         >(resolution, [
           "scope_id",
           "provider",
@@ -2828,9 +2830,6 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
         source: resolution.source,
         ...(resolution.reason !== undefined
           ? { reason: resolution.reason }
-          : {}),
-        ...(resolution.subscription_label !== undefined
-          ? { subscription_label: resolution.subscription_label }
           : {}),
       });
     }

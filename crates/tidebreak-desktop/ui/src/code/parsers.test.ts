@@ -2238,7 +2238,6 @@ describe("parseCodeSession inference resolutions", () => {
     scope_id: "scope-1",
     provider: "anthropic",
     source: "owned_subscription",
-    subscription_label: "Personal subscription",
   };
   const fallback = {
     scope_id: "scope-1",
@@ -2258,6 +2257,16 @@ describe("parseCodeSession inference resolutions", () => {
       parseCodeSession({ ...SESSION, inference_resolutions: [owned, fallback] })
         ?.inference_resolutions,
     ).toEqual([owned, fallback]);
+  });
+  it("discards legacy account labels from shared snapshots", () => {
+    expect(
+      parseCodeSession({
+        ...SESSION,
+        inference_resolutions: [
+          { ...owned, subscription_label: "private-account@example.test" },
+        ],
+      })?.inference_resolutions,
+    ).toEqual([owned]);
   });
   it("rejects malformed or conflicting provider resolutions", () => {
     for (const inference_resolutions of [
