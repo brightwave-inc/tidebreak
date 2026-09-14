@@ -30,9 +30,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 serde_json = { workspace = true }
 
 [features]
-# Agent-opened WK tabs use a separate, never-key native host.
-independent-wk-host = []
-default = ["tidebreak-server/keychain", "independent-wk-host"]
+default = ["tidebreak-server/keychain"]
 
 [dependencies]
 async-trait.workspace = true

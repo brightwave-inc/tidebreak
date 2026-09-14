@@ -1190,7 +1190,7 @@ impl BrowserRegistry {
     }
 
     /// Bind the opening capability before WebKit can load or redirect a page.
-    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn bind_independent_open(
         &self,
         capability_id: Uuid,
@@ -1250,7 +1250,7 @@ impl BrowserRegistry {
     }
 
     /// Publish executor availability only after its native view exists.
-    #[cfg(any(test, all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn mark_independent_host_ready(
         &self,
         browser_id: &str,

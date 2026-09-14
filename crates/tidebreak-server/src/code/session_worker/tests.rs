@@ -2805,3 +2805,121 @@ async fn durable_steer_native_ack_after_handoff_cannot_settle_the_receipt() {
         .unwrap()
         .is_none());
 }
+
+async fn insert_open_turn(db: &DbStore, session_id: SessionId) -> Turn {
+    let owner = OwnerId::local();
+    let turn = Turn {
+        actor: None,
+        id: TurnId::new(),
+        session_id,
+        ordinal: 1,
+        status: TurnStatus::Running,
+        model: None,
+        fast_mode: false,
+        user_input: "work".into(),
+        user_input_blob_id: None,
+        attachments: Vec::new(),
+        checkpoint_ref: None,
+        diffstat: None,
+        usage: None,
+        narrative: None,
+        rewrite: None,
+        started_at: Utc::now(),
+        ended_at: None,
+        park_ref: None,
+        park_wait: None,
+    };
+    insert_turn(db, &owner, &turn).await.unwrap();
+    turn
+}
+
+#[tokio::test]
+async fn terminal_events_close_the_open_turn() {
+    let owner = OwnerId::local();
+    let cases = [
+        (
+            Event::TurnCompleted {
+                usage: tidebreak_core::TurnUsage {
+                    input_tokens: 3,
+                    ..Default::default()
+                },
+                checkpoint: None,
+                stop_reason: None,
+            },
+            TurnStatus::Completed,
+        ),
+        (
+            Event::TurnRefused {
+                usage: tidebreak_core::TurnUsage {
+                    output_tokens: 2,
+                    ..Default::default()
+                },
+                refusal: tidebreak_core::RefusalOutcome::report_blocked(),
+            },
+            TurnStatus::Completed,
+        ),
+        (
+            Event::TurnFailed {
+                error: BoundedError {
+                    message: "the model stopped".into(),
+                },
+                detail: None,
+            },
+            TurnStatus::Failed,
+        ),
+        (
+            Event::TurnInterrupted { usage: None },
+            TurnStatus::Interrupted,
+        ),
+    ];
+    for (event, status) in cases {
+        let (_directory, db, _bus, session_id) =
+            seeded_session(HarnessKind::ClaudeCode, None).await;
+        let turn = insert_open_turn(&db, session_id).await;
+        apply_side_effects(&db, &owner, session_id, 1, &event)
+            .await
+            .unwrap();
+        let stored = list_turns(&db, &owner, session_id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, turn.id);
+        assert_eq!(stored[0].status, status);
+        assert!(stored[0].ended_at.is_some());
+        if let Event::TurnCompleted { usage, .. } | Event::TurnRefused { usage, .. } = &event {
+            assert_eq!(stored[0].usage.as_ref(), Some(usage));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_lost_terminal_turn_write_is_visible() {
+    let (_directory, db, _bus, session_id) = seeded_session(HarnessKind::ClaudeCode, None).await;
+    let owner = OwnerId::local();
+    let turn = Turn {
+        actor: None,
+        id: TurnId::new(),
+        session_id,
+        ordinal: 1,
+        status: TurnStatus::Completed,
+        model: None,
+        fast_mode: false,
+        user_input: "work".into(),
+        user_input_blob_id: None,
+        attachments: Vec::new(),
+        checkpoint_ref: None,
+        diffstat: None,
+        usage: None,
+        narrative: None,
+        rewrite: None,
+        started_at: Utc::now(),
+        ended_at: Some(Utc::now()),
+        park_ref: None,
+        park_wait: None,
+    };
+    let error = save_terminal_turn(&db, &owner, session_id, &turn)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        JournalError::SessionNotFound { session_id: lost } if lost == session_id
+    ));
+}
