@@ -1,3 +1,4 @@
+import { expect, userEvent, within } from "storybook/test";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import type { CodeConnectPage } from "@/api";
@@ -5,6 +6,7 @@ import { ConnectApprovalView } from "@/ConnectApprovalRoute";
 
 const casey: CodeConnectPage = {
   channel_kind: "slack",
+  inference_sponsorship_supported: true,
   display_name: "Casey Nakamura",
   workspace_name: "Acme Corp",
   state: "pending",
@@ -76,4 +78,16 @@ export const LongIdentity: Story = {
         "Acme International Engineering and Infrastructure Operations",
     },
   },
+};
+
+export const SponsorshipSelected: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const consent = canvas.getByRole("checkbox");
+    await userEvent.click(consent);
+    await expect(consent).toBeChecked();
+  },
+};
+export const SubscriptionsUnavailable: Story = {
+  args: { page: { ...casey, inference_sponsorship_supported: false } },
 };

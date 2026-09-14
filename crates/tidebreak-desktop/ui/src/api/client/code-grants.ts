@@ -9,6 +9,12 @@ import {
 } from "../../settings/channelPreferences";
 import type { CodeConnectPage, CodeGrantSnapshot, HarnessKind } from "../types";
 import {
+  parsePersonalInferencePreferences,
+  type PersonalInferencePreferences,
+  type PersonalInferencePreferencesUpdate,
+  type InferenceSponsorshipConsent,
+} from "../../settings/inferencePreferences";
+import {
   parseCodeConnectPage,
   parseCodeGrant,
   parseCodeGrantList,
@@ -69,6 +75,39 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
           ),
         ),
         "channel preferences",
+      );
+    }
+
+    async getPersonalInferencePreferences(
+      grant: string,
+    ): Promise<PersonalInferencePreferences> {
+      return requireParsed(
+        parsePersonalInferencePreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/inference-preferences`,
+            { headers: this.headers() },
+          ),
+        ),
+        "personal subscription preferences",
+      );
+    }
+
+    async setPersonalInferencePreferences(
+      grant: string,
+      preferences: PersonalInferencePreferencesUpdate,
+    ): Promise<PersonalInferencePreferences> {
+      return requireParsed(
+        parsePersonalInferencePreferences(
+          await this.json(
+            `/code/grants/${encodeURIComponent(grant)}/inference-preferences`,
+            {
+              method: "PUT",
+              headers: this.headers(true),
+              body: JSON.stringify(preferences),
+            },
+          ),
+        ),
+        "personal subscription preferences",
       );
     }
 
@@ -134,13 +173,22 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
     }
 
     /** The owner's "is this you?". Mints nothing by itself. */
-    approveCodeConnect(nonce: string, csrf: string): Promise<void> {
+    approveCodeConnect(
+      nonce: string,
+      csrf: string,
+      inferenceSponsorship?: InferenceSponsorshipConsent,
+    ): Promise<void> {
       return this.json(
         `/external/connect/${encodeURIComponent(nonce)}/approve`,
         {
           method: "POST",
           headers: this.headers(true),
-          body: JSON.stringify({ csrf }),
+          body: JSON.stringify({
+            csrf,
+            ...(inferenceSponsorship
+              ? { inference_sponsorship: inferenceSponsorship }
+              : {}),
+          }),
         },
       );
     }

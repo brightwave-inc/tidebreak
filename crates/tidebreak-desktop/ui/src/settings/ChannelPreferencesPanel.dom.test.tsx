@@ -4,8 +4,11 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, HarnessKind } from "../api";
 import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
-import { parseChannelPreferences } from "./channelPreferences";
-const preferences = {
+import {
+  type ChannelPreferencesSnapshot,
+  parseChannelPreferences,
+} from "./channelPreferences";
+const preferences: ChannelPreferencesSnapshot = {
   harness: null as HarnessKind | null,
   model: null,
   respond_automatically: true,
@@ -14,6 +17,7 @@ const preferences = {
   workspace_identity: "T1",
   settings_path: "/settings/channels",
   can_edit: true,
+  inference_sponsorship_supported: false,
 };
 function client() {
   return {
@@ -200,4 +204,72 @@ describe("Channel preferences", () => {
       parseChannelPreferences({ ...preferences, respond_automatically: "yes" }),
     ).toBeNull();
   });
+});
+
+it("saves the channel subscription choice and preserves it during other edits", async () => {
+  const api = client();
+  api.getChannelPreferences.mockResolvedValue({
+    ...preferences,
+    inference_sponsorship_supported: true,
+    subscription_preference: "prefer_starter_subscription",
+  });
+  render(
+    <ChannelPreferencesPanel
+      client={api as unknown as ApiClient}
+      grantId="grant"
+      channelId="C1"
+    />,
+  );
+  const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("combobox", {
+      name: "Channel subscription preference",
+    }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: "Use Gateway defaults" }),
+  );
+  await waitFor(() =>
+    expect(api.setChannelPreferences).toHaveBeenLastCalledWith(
+      "grant",
+      "C1",
+      expect.objectContaining({ subscription_preference: "gateway_default" }),
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("switch", { name: "Respond automatically" }),
+    ).toBeEnabled(),
+  );
+  await user.click(
+    screen.getByRole("switch", { name: "Respond automatically" }),
+  );
+  await waitFor(() =>
+    expect(api.setChannelPreferences).toHaveBeenLastCalledWith(
+      "grant",
+      "C1",
+      expect.objectContaining({
+        subscription_preference: "gateway_default",
+        respond_automatically: false,
+      }),
+    ),
+  );
+});
+it("disables subscription edits on a legacy Gateway", async () => {
+  const api = client();
+  render(
+    <ChannelPreferencesPanel
+      client={api as unknown as ApiClient}
+      grantId="grant"
+      channelId="C1"
+    />,
+  );
+  expect(
+    await screen.findByRole("combobox", {
+      name: "Channel subscription preference",
+    }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("switch", { name: "Respond automatically" }),
+  ).toBeEnabled();
 });

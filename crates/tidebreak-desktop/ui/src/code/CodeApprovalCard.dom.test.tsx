@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeApprovalCard, MAX_PAYLOAD_CHARS } from "./CodeApprovalCard";
@@ -135,12 +136,12 @@ describe("CodeApprovalCard", () => {
 
   it("lists the questions and options the engine is asking", () => {
     render(<CodeApprovalCard approval={pendingQuestions} onDecide={vi.fn()} />);
-    expect(screen.getByText("Answer these questions?")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(
       screen.getByText("Which region should the deploy target?"),
     ).toBeInTheDocument();
-    expect(screen.getByText("us-east · us-west")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.getByRole("radio", { name: "us-east" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "us-west" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
   });
 
@@ -281,5 +282,143 @@ describe("CodeApprovalCard", () => {
     expect(
       screen.getByText("no — use the fixtures directory instead"),
     ).toBeInTheDocument();
+  });
+});
+
+it("submits a structured answer and never sends a bare approve for questions", async () => {
+  const onDecide = vi.fn();
+  render(<CodeApprovalCard approval={pendingQuestions} onDecide={onDecide} />);
+  const user = userEvent.setup();
+  expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+  expect(screen.queryByText("Continue and add context")).toBeNull();
+  await user.click(screen.getByRole("radio", { name: "us-west" }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(onDecide).toHaveBeenCalledExactlyOnceWith({
+    answers: {
+      answers: [{ question_id: "q1", selected_option_ids: ["west"] }],
+    },
+  });
+});
+it("preserves several choices and free-form text while omitting unanswered questions", async () => {
+  const approval: CodeApprovalSnapshot = {
+    ...pendingQuestions,
+    kind: {
+      type: "questions",
+      questions: [
+        {
+          id: "q1",
+          header: "Region",
+          question: "Which region?",
+          question_type: "single_select",
+          allow_free_form: false,
+          options: [{ id: "east", label: "East", description: "US east" }],
+        },
+        {
+          id: "q2",
+          header: "Optional",
+          question: "Optional note?",
+          question_type: "single_select",
+          allow_free_form: true,
+          options: [],
+        },
+        {
+          id: "q3",
+          header: "Checks",
+          question: "Which checks?",
+          question_type: "multi_select",
+          allow_free_form: true,
+          options: [
+            { id: "unit", label: "Unit tests", description: "Fast checks" },
+            { id: "browser", label: "Browser tests", description: "UI checks" },
+          ],
+        },
+      ],
+    },
+  };
+  const onDecide = vi.fn();
+  render(<CodeApprovalCard approval={approval} onDecide={onDecide} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("radio", { name: "East" }));
+  await user.click(screen.getByRole("button", { name: "Next" }));
+  await user.click(screen.getByRole("button", { name: "Next" }));
+  await user.click(screen.getByRole("checkbox", { name: "Unit tests" }));
+  await user.click(screen.getByRole("checkbox", { name: "Browser tests" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Other answer" }),
+    " Also check logs ",
+  );
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(onDecide).toHaveBeenCalledExactlyOnceWith({
+    answers: {
+      answers: [
+        { question_id: "q1", selected_option_ids: ["east"] },
+        {
+          question_id: "q3",
+          selected_option_ids: ["unit", "browser"],
+          custom_answer: "Also check logs",
+        },
+      ],
+    },
+  });
+});
+it("retains an answer after a failed request and disables it while sending", async () => {
+  const onDecide = vi.fn();
+  const view = render(
+    <CodeApprovalCard approval={pendingQuestions} onDecide={onDecide} />,
+  );
+  await userEvent.setup().click(screen.getByRole("radio", { name: "us-east" }));
+  view.rerender(
+    <CodeApprovalCard
+      approval={pendingQuestions}
+      onDecide={onDecide}
+      deciding
+    />,
+  );
+  expect(screen.getByRole("radio", { name: "us-east" })).toBeDisabled();
+  view.rerender(
+    <CodeApprovalCard
+      approval={pendingQuestions}
+      onDecide={onDecide}
+      error="Could not record your answer. Try again."
+    />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Could not record your answer",
+  );
+  expect(screen.getByRole("radio", { name: "us-east" })).toBeChecked();
+  expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+it("skips questions through the supported deny decision", async () => {
+  const onDecide = vi.fn();
+  render(<CodeApprovalCard approval={pendingQuestions} onDecide={onDecide} />);
+  await userEvent.setup().click(screen.getByRole("button", { name: "Skip" }));
+  expect(onDecide).toHaveBeenCalledExactlyOnceWith(
+    "deny",
+    "Questions skipped.",
+  );
+});
+it("shows pending questions without actions to a read-only viewer", () => {
+  render(
+    <CodeApprovalCard
+      approval={pendingQuestions}
+      onDecide={vi.fn()}
+      canDecide={false}
+    />,
+  );
+  expect(
+    screen.getByText("Which region should the deploy target?"),
+  ).toBeVisible();
+  expect(screen.queryByRole("radio")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+});
+it("sends an explicit plan decision from the existing approve action", async () => {
+  const onDecide = vi.fn();
+  render(<CodeApprovalCard approval={pendingPlan} onDecide={onDecide} />);
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Approve" }));
+  expect(onDecide).toHaveBeenCalledExactlyOnceWith({
+    plan_decision: { approve: true },
   });
 });

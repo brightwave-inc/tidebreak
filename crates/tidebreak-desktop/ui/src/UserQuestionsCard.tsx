@@ -72,8 +72,12 @@ export function UserQuestionsCard({
   working,
   error,
   onAnswer,
+  allowAdditionalContext = true,
+  requireAnswer = false,
 }: {
   request: PendingUserQuestions;
+  allowAdditionalContext?: boolean;
+  requireAnswer?: boolean;
   working: boolean;
   error: string | undefined;
   onAnswer: (
@@ -357,7 +361,16 @@ export function UserQuestionsCard({
         <Separator />
 
         <div className="flex items-center justify-between gap-2">
-          {currentPage === 0 ? (
+          {currentPage === 0 && !allowAdditionalContext ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={working}
+              onClick={skipAll}
+            >
+              {questions.length === 1 ? "Skip" : "Skip all"}
+            </Button>
+          ) : currentPage === 0 ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button type="button" variant="outline" disabled={working}>
@@ -411,17 +424,19 @@ export function UserQuestionsCard({
           <div className="flex gap-2">
             {isLastPage ? (
               <>
+                {allowAdditionalContext && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={working}
+                    onClick={() => setShowContextForm(true)}
+                  >
+                    Continue and add context
+                  </Button>
+                )}
                 <Button
                   type="button"
-                  variant="outline"
-                  disabled={working}
-                  onClick={() => setShowContextForm(true)}
-                >
-                  Continue and add context
-                </Button>
-                <Button
-                  type="button"
-                  disabled={working}
+                  disabled={working || (requireAnswer && answers.length === 0)}
                   onClick={() => submit()}
                 >
                   {working ? "Sending…" : "Continue"}

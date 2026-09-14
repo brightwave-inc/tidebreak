@@ -2,6 +2,7 @@ import type { ApiClient } from "../../api/client";
 import { ArrowDown } from "lucide-react";
 import type {
   CodeApprovalSnapshot,
+  CodeApprovalDecision,
   CodeSessionSnapshot,
   CodeSubagentSummary,
   ModelInfo,
@@ -171,6 +172,7 @@ export function CodeSessionPane({
   >({});
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
+  const [approvalErrorId, setApprovalErrorId] = useState<string | null>(null);
   const sessionQueue = useCodeQueueApi(client, session.id);
   // No `?? []` fallback here: a fresh array is a new snapshot every render,
   // and zustand v5 loops on referentially unstable snapshots.
@@ -423,10 +425,11 @@ export function CodeSessionPane({
   const decideApproval = useCallback(
     async (
       approvalId: string,
-      decision: "approve" | "deny",
+      decision: CodeApprovalDecision,
       feedback?: string,
     ) => {
       setDecidingId(approvalId);
+      setApprovalErrorId(approvalId);
       setApprovalError(undefined);
       try {
         const next = await client.decideCodeApproval(approvalId, {
@@ -576,6 +579,7 @@ export function CodeSessionPane({
           approvals={approvals}
           decidingId={decidingId}
           approvalError={approvalError}
+          approvalErrorId={approvalErrorId}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
           onFileIssue={subagentCallId ? undefined : onFileIssue}

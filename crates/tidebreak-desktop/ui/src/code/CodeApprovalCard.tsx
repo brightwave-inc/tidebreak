@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
-import type { CodeApprovalSnapshot } from "../api/types";
+import type { CodeApprovalSnapshot, CodeApprovalDecision } from "../api/types";
+import { UserQuestionsCard } from "../UserQuestionsCard";
 import { toolPreviewPresentation } from "../ToolPreview";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,11 +25,13 @@ export function CodeApprovalCard({
   error,
   onDecide,
   onReveal,
+  canDecide = true,
 }: {
   approval: CodeApprovalSnapshot;
   deciding?: boolean;
   error?: string;
-  onDecide: (decision: "approve" | "deny", feedback?: string) => void;
+  onDecide: (decision: CodeApprovalDecision, feedback?: string) => void;
+  canDecide?: boolean;
   /** The reader opened the payload disclosure, which grows the card. */
   onReveal?: () => void;
 }) {
@@ -44,6 +47,45 @@ export function CodeApprovalCard({
   useEffect(() => {
     if (approval.state !== "pending") setDenying(false);
   }, [approval.state]);
+
+  if (!decided && canDecide && approval.kind.type === "questions") {
+    return (
+      <UserQuestionsCard
+        key={approval.id}
+        request={{
+          callId: approval.id,
+          turnId: approval.turn_id,
+          askedAt: approval.requested_at,
+          questions: approval.kind.questions.map((question) => ({
+            ...question,
+            questionType: question.question_type,
+            allowFreeForm: question.allow_free_form,
+          })),
+        }}
+        working={deciding === true}
+        error={error}
+        allowAdditionalContext={false}
+        requireAnswer
+        onAnswer={(answers) => {
+          if (answers.length === 0) {
+            onDecide("deny", "Questions skipped.");
+            return;
+          }
+          onDecide({
+            answers: {
+              answers: answers.map((answer) => ({
+                question_id: answer.questionId,
+                selected_option_ids: answer.selectedOptionIds,
+                ...(answer.customAnswer
+                  ? { custom_answer: answer.customAnswer }
+                  : {}),
+              })),
+            },
+          });
+        }}
+      />
+    );
+  }
 
   return (
     <section
@@ -120,7 +162,13 @@ export function CodeApprovalCard({
             type="button"
             size="sm"
             disabled={deciding}
-            onClick={() => onDecide("approve")}
+            onClick={() =>
+              onDecide(
+                approval.kind.type === "plan"
+                  ? { plan_decision: { approve: true } }
+                  : "approve",
+              )
+            }
           >
             Approve
           </Button>

@@ -13,6 +13,8 @@ const preferences: ChannelPreferencesSnapshot = {
   workspace_identity: "T04ACME",
   settings_path: "/settings/channels",
   can_edit: true,
+  inference_sponsorship_supported: true,
+  subscription_preference: "prefer_starter_subscription",
 };
 const client = {
   getChannelPreferences: async () => preferences,
@@ -139,6 +141,29 @@ export const SaveFailed: Story = {
       setChannelPreferences: async () => {
         throw new Error("The channel settings could not be saved. Try again.");
       },
+    } as unknown as ApiClient,
+  },
+};
+
+export const GatewayDefaults: Story = {
+  args: {
+    client: {
+      ...client,
+      getChannelPreferences: async () => ({
+        ...preferences,
+        subscription_preference: "gateway_default",
+      }),
+    } as unknown as ApiClient,
+  },
+};
+export const SubscriptionsUnavailable: Story = {
+  args: {
+    client: {
+      ...client,
+      getChannelPreferences: async () => ({
+        ...preferences,
+        inference_sponsorship_supported: false,
+      }),
     } as unknown as ApiClient,
   },
 };

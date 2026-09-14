@@ -2232,3 +2232,47 @@ it("preserves Slack provenance in snapshots and live digests", () => {
     }),
   ).toBeNull();
 });
+
+describe("parseCodeSession inference resolutions", () => {
+  const owned = {
+    scope_id: "scope-1",
+    provider: "anthropic",
+    source: "owned_subscription",
+    subscription_label: "Personal subscription",
+  };
+  const fallback = {
+    scope_id: "scope-1",
+    provider: "openai",
+    source: "execution_default",
+    reason: "no_eligible_owned_subscription",
+  };
+  it("preserves resolved providers without inventing a result for older snapshots", () => {
+    expect(parseCodeSession(SESSION)).not.toHaveProperty(
+      "inference_resolutions",
+    );
+    expect(
+      parseCodeSession({ ...SESSION, inference_resolutions: [] })
+        ?.inference_resolutions,
+    ).toEqual([]);
+    expect(
+      parseCodeSession({ ...SESSION, inference_resolutions: [owned, fallback] })
+        ?.inference_resolutions,
+    ).toEqual([owned, fallback]);
+  });
+  it("rejects malformed or conflicting provider resolutions", () => {
+    for (const inference_resolutions of [
+      null,
+      {},
+      [owned, owned],
+      [{ ...owned, scope_id: "" }],
+      [{ ...owned, source: "pending" }],
+      [{ ...owned, provider: "" }],
+      [{ ...owned, subscription_label: 17 }],
+      [{ ...owned, binding_id: "private" }],
+    ]) {
+      expect(
+        parseCodeSession({ ...SESSION, inference_resolutions }),
+      ).toBeNull();
+    }
+  });
+});

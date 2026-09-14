@@ -16,8 +16,10 @@ import {
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+import { SUBSCRIPTION_PREFERENCES_UNAVAILABLE } from "./inferencePreferences";
 import type {
   ChannelPreferences,
+  ChannelSubscriptionPreference,
   ChannelPreferencesSnapshot,
 } from "./channelPreferences";
 
@@ -127,6 +129,9 @@ export function ChannelPreferencesPanel({
         model,
         respond_automatically,
         instructions: savedInstructions,
+        ...(preferences.subscription_preference !== undefined
+          ? { subscription_preference: preferences.subscription_preference }
+          : {}),
         ...changes,
       });
       if (generation.current === current) setPreferences(next);
@@ -236,6 +241,50 @@ export function ChannelPreferencesPanel({
               </Select>
             </SettingsField>
             {catalogError && <SettingsError>{catalogError}</SettingsError>}
+          </SettingsSection>
+          <SettingsSection title="Subscriptions">
+            <SettingsField
+              label="Channel subscription preference"
+              hint="For new conversations, prefer the starter’s eligible subscription when they have agreed to sponsor channel work. Otherwise, use Gateway defaults. Repository and tool access stay with the channel’s connection."
+            >
+              <Select
+                value={
+                  preferences.subscription_preference ??
+                  "prefer_starter_subscription"
+                }
+                disabled={
+                  disabled || !preferences.inference_sponsorship_supported
+                }
+                onValueChange={(value) =>
+                  void save({
+                    subscription_preference:
+                      value as ChannelSubscriptionPreference,
+                  })
+                }
+              >
+                <SelectTrigger aria-label="Channel subscription preference">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="prefer_starter_subscription">
+                    Prefer the starter’s subscription
+                  </SelectItem>
+                  <SelectItem value="gateway_default">
+                    Use Gateway defaults
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </SettingsField>
+            {!preferences.inference_sponsorship_supported && (
+              <p className="text-sm text-muted-foreground" role="status">
+                {SUBSCRIPTION_PREFERENCES_UNAVAILABLE}
+              </p>
+            )}
+            <p className="text-sm text-muted-foreground">
+              Each person controls their own subscription consent in Channels →
+              Subscription settings. A channel administrator cannot grant that
+              consent for them.
+            </p>
           </SettingsSection>
           <SettingsSection title="Conversation behavior">
             <SettingsField

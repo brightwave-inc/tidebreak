@@ -10,6 +10,7 @@ import {
   type AppViewSession,
   type ApprovalGrantRung,
   type ApprovalClass,
+  type ApprovalDecisionBody as WireApprovalDecisionBody,
   type AssistantCitationSnapshot,
   type CitationLocator as WireCitationLocator,
   type ChatMessageSnapshot,
@@ -1280,6 +1281,8 @@ export type WorkspaceId = WireWorkspaceId;
 export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
 /** One durable conversation with an external coding engine. */
 export type CodeSessionSnapshot = WireCodeSessionSnapshot;
+export type CodeApprovalDecisionBody = WireApprovalDecisionBody;
+export type CodeApprovalDecision = WireApprovalDecisionBody["decision"];
 export type CodeGrantSnapshot = WireCodeGrantSnapshot;
 export type CodeConnectPage = WireCodeConnectPage;
 export type SessionId = WireCodeSessionId;
