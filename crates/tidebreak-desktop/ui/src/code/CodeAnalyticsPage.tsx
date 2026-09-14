@@ -632,8 +632,8 @@ function ModelCard({ report }: { report: CodeAnalyticsSnapshot }) {
         ))}
       </div>
       <div className="border-t border-border-subtle px-4 py-3 text-xs text-muted-foreground">
-        Prices dated {report.pricing.prices_as_of}. Third-party routes and fast
-        tiers stay unpriced.
+        Prices dated {report.pricing.prices_as_of}. Third-party routes and
+        unpublished fast tiers stay unpriced.
       </div>
     </section>
   );
