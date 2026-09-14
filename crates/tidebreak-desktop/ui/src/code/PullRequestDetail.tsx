@@ -97,6 +97,7 @@ import {
   mergeBlockedReasons,
   prStatus,
   pullRequestLifecycle,
+  pullRequestLiveSignature,
   pullRequestSettledAt,
   type PullRequestLifecycle,
 } from "./prState";
@@ -104,6 +105,79 @@ import { STATUS_MARK, STATUS_TEXT, type StatusTone } from "./statusTone";
 
 type MergeMethod = "squash" | "merge" | "rebase";
 type DetailTab = "conversation" | "files" | "checks";
+
+const CHECKING_POLL_DELAYS_MS = [1_500, 3_000, 6_000, 10_000, 15_000];
+const RECONCILE_DELAY_MS = 1_500;
+const MAX_RECONCILE_RETRIES = 3;
+const LIVE_RELOAD_DEBOUNCE_MS = 300;
+
+type ActionExpectation = {
+  targetId: string;
+  retriesLeft: number;
+  apply: (summary: CodeDeliveryPullRequestSummary) => CodeDeliveryPullRequestSummary;
+  isMet: (summary: CodeDeliveryPullRequestSummary) => boolean;
+};
+
+function mergedExpectation(): Pick<ActionExpectation, "apply" | "isMet"> {
+  return {
+    apply: (summary) =>
+      pullRequestLifecycle(summary) === "merged"
+        ? summary
+        : { ...summary, state: "merged", merged_at: new Date().toISOString() },
+    isMet: (summary) => pullRequestLifecycle(summary) === "merged",
+  };
+}
+
+function actionExpectation(
+  action: CodeDeliveryPullRequestAction,
+  hasMergeQueue: boolean,
+): Pick<ActionExpectation, "apply" | "isMet"> | null {
+  switch (action.type) {
+    case "merge":
+      if (!action.auto) return mergedExpectation();
+      return {
+        apply: (summary) =>
+          hasMergeQueue
+            ? { ...summary, in_merge_queue: true }
+            : { ...summary, auto_merge_enabled: true },
+        isMet: (summary) =>
+          pullRequestLifecycle(summary) === "merged" ||
+          summary.in_merge_queue === true ||
+          summary.auto_merge_enabled,
+      };
+    case "mark_ready":
+      return {
+        apply: (summary) => ({ ...summary, draft: false }),
+        isMet: (summary) => !summary.draft,
+      };
+    case "close":
+      return {
+        apply: (summary) =>
+          pullRequestLifecycle(summary) === "closed"
+            ? summary
+            : { ...summary, state: "closed", closed_at: new Date().toISOString() },
+        isMet: (summary) => pullRequestLifecycle(summary) === "closed",
+      };
+    case "reopen":
+      return {
+        apply: ({ closed_at: _closedAt, ...summary }) => ({ ...summary, state: "open" }),
+        isMet: (summary) => {
+          const lifecycle = pullRequestLifecycle(summary);
+          return lifecycle === "open" || lifecycle === "draft";
+        },
+      };
+    case "rerun_failed":
+      return {
+        apply: (summary) => summary,
+        isMet: (summary) => {
+          const counts = checkCounts(summary);
+          return counts.pending > 0 || counts.failing === 0;
+        },
+      };
+    default:
+      return null;
+  }
+}
 
 /**
  * The sheet's tabs, in the vocabulary the Delivery page already uses for a
@@ -178,6 +252,8 @@ export function PullRequestDetailSheet({
   initialDetail,
   loadDelayMs = 0,
   hasMergeQueue = false,
+  reconcileDelayMs,
+  checkingPollDelaysMs,
   onClose,
   onChanged,
   onDetail,
@@ -195,6 +271,8 @@ export function PullRequestDetailSheet({
   hasMergeQueue?: boolean;
   initialDetail?: CodeDeliveryPullRequestDetail;
   loadDelayMs?: number;
+  reconcileDelayMs?: number;
+  checkingPollDelaysMs?: readonly number[];
   onClose: () => void;
   onChanged: () => void;
   onDetail?: (detail: CodeDeliveryPullRequestDetail) => void;
@@ -212,6 +290,8 @@ export function PullRequestDetailSheet({
         initialDetail={initialDetail}
         loadDelayMs={loadDelayMs}
         hasMergeQueue={hasMergeQueue}
+        reconcileDelayMs={reconcileDelayMs}
+        checkingPollDelaysMs={checkingPollDelaysMs}
         onClose={onClose}
         onChanged={onChanged}
         onDetail={onDetail}
@@ -235,6 +315,8 @@ export function PullRequestDetailPane({
   initialDetail,
   loadDelayMs = 0,
   hasMergeQueue = false,
+  reconcileDelayMs = RECONCILE_DELAY_MS,
+  checkingPollDelaysMs = CHECKING_POLL_DELAYS_MS,
   onClose,
   onChanged,
   onDetail,
@@ -254,6 +336,8 @@ export function PullRequestDetailPane({
   initialDetail?: CodeDeliveryPullRequestDetail;
   /** Delay an uncached read while keyboard selection is still moving. */
   loadDelayMs?: number;
+  reconcileDelayMs?: number;
+  checkingPollDelaysMs?: readonly number[];
   onClose?: () => void;
   onChanged: () => void;
   /** Keep loaded detail available when the reader returns to this row. */
@@ -283,6 +367,10 @@ export function PullRequestDetailPane({
   const mounted = useRef(true);
   const onDetailRef = useRef(onDetail);
   const onSummaryRef = useRef(onSummary);
+  const expectation = useRef<ActionExpectation | null>(null);
+  const reconcileTimer = useRef<number | undefined>(undefined);
+  const checkingAttempts = useRef(0);
+  const checkingKeySeen = useRef<string | null>(null);
   onDetailRef.current = onDetail;
   onSummaryRef.current = onSummary;
   activeTarget.current = summary.id;
@@ -291,17 +379,33 @@ export function PullRequestDetailPane({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      window.clearTimeout(reconcileTimer.current);
     };
   }, []);
 
   const targetIsActive = (targetId: string) =>
     mounted.current && activeTarget.current === targetId;
 
-  const adoptDetail = (next: CodeDeliveryPullRequestDetail) => {
-    const adoptedSummary = preservePullRequestStackMetadata(
+  const adoptDetail = (next: CodeDeliveryPullRequestDetail, fromHost = false) => {
+    let adoptedSummary = preservePullRequestStackMetadata(
       summary,
       next.summary,
     );
+    const pending = expectation.current;
+    if (pending && pending.targetId === summary.id) {
+      if (fromHost && pending.isMet(adoptedSummary)) {
+        expectation.current = null;
+      } else if (!fromHost || pending.retriesLeft > 0) {
+        if (fromHost) pending.retriesLeft -= 1;
+        adoptedSummary = pending.apply(adoptedSummary);
+        if (fromHost) {
+          window.clearTimeout(reconcileTimer.current);
+          reconcileTimer.current = window.setTimeout(() => void load(), reconcileDelayMs);
+        }
+      } else {
+        expectation.current = null;
+      }
+    }
     const adopted =
       adoptedSummary === next.summary
         ? next
@@ -322,7 +426,7 @@ export function PullRequestDetailPane({
         number: summary.number,
       });
       if (token === generation.current && targetIsActive(targetId)) {
-        adoptDetail(next);
+        adoptDetail(next, true);
       }
     } catch (caught) {
       if (token === generation.current && targetIsActive(targetId)) {
@@ -342,6 +446,10 @@ export function PullRequestDetailPane({
     setCommentOrder("newest");
     setDraftComment("");
     setConfirmingAdminMerge(false);
+    if (expectation.current && expectation.current.targetId !== summary.id) {
+      expectation.current = null;
+      window.clearTimeout(reconcileTimer.current);
+    }
     if (initialDetail?.summary.id === summary.id) {
       adoptDetail(initialDetail);
       setLoading(false);
@@ -377,6 +485,17 @@ export function PullRequestDetailPane({
       if (!targetIsActive(targetId)) return;
       if (result.success) {
         toast.success(result.message);
+        const expected = actionExpectation(action, hasMergeQueue);
+        if (expected) {
+          expectation.current = { targetId, retriesLeft: MAX_RECONCILE_RETRIES, ...expected };
+          const patched = expected.apply(current);
+          if (patched !== current) {
+            setDetail((value) =>
+              value ? { ...value, summary: expected.apply(value.summary) } : value,
+            );
+            onSummaryRef.current?.(patched);
+          }
+        }
       } else {
         const description = rerunOutcomeDescription(result, current.checks);
         toast.warning(
@@ -402,6 +521,36 @@ export function PullRequestDetailPane({
   const current = detail?.summary ?? summary;
   const lifecycle = pullRequestLifecycle(current);
   const counts = checkCounts(current);
+  const gate = prStatus(current).gate;
+  const liveSignature = pullRequestLiveSignature(summary);
+  const liveSignatureSeen = useRef(liveSignature);
+  useEffect(() => {
+    const previous = liveSignatureSeen.current;
+    liveSignatureSeen.current = liveSignature;
+    if (previous === liveSignature) return;
+    if (!detail || detail.summary.id !== summary.id || loading || busy) return;
+    if (liveSignature === pullRequestLiveSignature(detail.summary)) return;
+    const timer = window.setTimeout(() => void load(), LIVE_RELOAD_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSignature]);
+
+  const checkingKey = `${summary.id}:${current.head_sha ?? ""}`;
+  useEffect(() => {
+    if (checkingKeySeen.current !== checkingKey) {
+      checkingKeySeen.current = checkingKey;
+      checkingAttempts.current = 0;
+    }
+    if (gate !== "checking" || !detail || loading || busy) return;
+    if (checkingAttempts.current >= checkingPollDelaysMs.length) return;
+    const delay = checkingPollDelaysMs[checkingAttempts.current]!;
+    const timer = window.setTimeout(() => {
+      checkingAttempts.current += 1;
+      void load();
+    }, delay);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkingKey, gate, detail, loading, busy]);
   const workflowRunIds = useMemo(
     () => [
       ...new Set(
@@ -496,6 +645,15 @@ export function PullRequestDetailPane({
       }
       if (targetIsActive(targetId)) {
         toast.success("Stack merged.");
+        const merged = mergedExpectation();
+        expectation.current = { targetId, retriesLeft: MAX_RECONCILE_RETRIES, ...merged };
+        const patched = merged.apply(current);
+        if (patched !== current) {
+          setDetail((value) =>
+            value ? { ...value, summary: merged.apply(value.summary) } : value,
+          );
+          onSummaryRef.current?.(patched);
+        }
       }
     } catch (caught) {
       if (!targetIsActive(targetId)) return;
@@ -1089,6 +1247,18 @@ function freshAgentWorkspaceTitle(
  * It sits above the tabs rather than inside Conversation because it is the
  * reason the sheet is open. Reading the diff should not cost you the merge.
  */
+const BUSY_HEADLINES: Record<string, string> = {
+  merge: "Merging…",
+  "admin-merge": "Merging…",
+  "merge-stack": "Merging the stack…",
+  enable_auto_merge: "Enabling auto-merge…",
+  merge_when_ready: "Joining the merge queue…",
+  ready: "Marking ready…",
+  close: "Closing…",
+  reopen: "Reopening…",
+  "create-stack": "Registering the stack…",
+};
+
 function PrMergeBox({
   client,
   detail,
@@ -1201,6 +1371,10 @@ function PrMergeBox({
         : status.lifecycle === "draft"
           ? "Not ready for review"
           : status.headline.label;
+  const busyHeadline = busy ? BUSY_HEADLINES[busy] : undefined;
+  const headlineTone: StatusTone = busyHeadline
+    ? "pending"
+    : status.headline.tone;
   return (
     <section
       aria-label="Merge status and actions"
@@ -1208,17 +1382,12 @@ function PrMergeBox({
     >
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
         <div className="flex min-w-0 flex-1 items-start gap-2">
-          <GateMark tone={status.headline.tone} />
+          <GateMark tone={headlineTone} busy={Boolean(busyHeadline)} />
           <div className="flex min-w-0 flex-col gap-1">
-            <p
-              className={cn(
-                "text-sm font-medium",
-                STATUS_TEXT[status.headline.tone],
-              )}
-            >
-              {headline}
+            <p className={cn("text-sm font-medium", STATUS_TEXT[headlineTone])}>
+              {busyHeadline ?? headline}
             </p>
-            {blockers.length > 0 && (
+            {!busyHeadline && blockers.length > 0 && (
               <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground">
                 {blockers.map((reason) => (
                   <li key={reason}>{reason}</li>
@@ -1532,8 +1701,15 @@ function ConfirmStrip({
 }
 
 /** The mark that carries the gate on its own, ahead of the headline. */
-function GateMark({ tone }: { tone: StatusTone }) {
+function GateMark({
+  tone,
+  busy = false,
+}: {
+  tone: StatusTone;
+  busy?: boolean;
+}) {
   const shared = cn("mt-0.5 size-4 shrink-0", STATUS_MARK[tone]);
+  if (busy) return <Spinner className={shared} aria-hidden />;
   if (tone === "ready") return <CircleCheck className={shared} />;
   if (tone === "critical") return <CircleAlert className={shared} />;
   if (tone === "warning") return <CircleAlert className={shared} />;

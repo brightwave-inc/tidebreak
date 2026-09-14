@@ -555,6 +555,64 @@ describe("merge stack", () => {
   });
 });
 
+describe("live state transitions", () => {
+  const openSummary = summaryFor(2247);
+  const openDetail = deliveryPullRequestDetails[2247]!;
+  const mergedSummary = { ...openSummary, state: "merged", merged_at: "2026-08-20T15:00:00.000Z" };
+  const mergedDetail = { ...openDetail, summary: mergedSummary, merged_by: "devon" };
+
+  it("re-reads the pull request when the live row reports a change", async () => {
+    const pendingSummary = {
+      ...openSummary,
+      checks: [
+        { name: "workspace / tests", bucket: "pending" as const, workflow_run_id: 4392 },
+        { name: "desktop / build", bucket: "pass" as const, workflow_run_id: 4392 },
+      ],
+    };
+    const getDetail = vi.fn(async () =>
+      getDetail.mock.calls.length > 1 ? { ...openDetail, summary: pendingSummary } : openDetail,
+    );
+    const props = { client: client({ getCodeDeliveryPullRequestDetail: getDetail }), onClose: vi.fn(), onChanged: vi.fn(), onOpenWorkspace: vi.fn() };
+    const view = render(<PullRequestDetailSheet {...props} summary={openSummary} />);
+    expect(await screen.findByText("Ready to merge")).toBeInTheDocument();
+    view.rerender(<PullRequestDetailSheet {...props} summary={pendingSummary} />);
+    expect(await screen.findByText("Checks running")).toBeInTheDocument();
+    expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps polling while GitHub is still computing mergeability", async () => {
+    const checkingSummary = { ...openSummary, mergeable: "unknown", merge_state_status: "unknown" };
+    const getDetail = vi.fn(async () =>
+      getDetail.mock.calls.length > 1 ? openDetail : { ...openDetail, summary: checkingSummary },
+    );
+    render(<PullRequestDetailSheet client={client({ getCodeDeliveryPullRequestDetail: getDetail })} summary={checkingSummary} checkingPollDelaysMs={[10, 10, 10]} onClose={vi.fn()} onChanged={vi.fn()} onOpenWorkspace={vi.fn()} />);
+    expect(await screen.findByText("Checking status")).toBeInTheDocument();
+    expect(await screen.findByText("Ready to merge")).toBeInTheDocument();
+    expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("paints a merge at once and holds it over a stale host read", async () => {
+    const getDetail = vi.fn(async () => getDetail.mock.calls.length > 2 ? mergedDetail : openDetail);
+    render(<PullRequestDetailSheet client={client({ getCodeDeliveryPullRequestDetail: getDetail })} summary={openSummary} reconcileDelayMs={10} onClose={vi.fn()} onChanged={vi.fn()} onOpenWorkspace={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Merge" }));
+    expect(await screen.findByText("Merged into main")).toBeInTheDocument();
+    await waitFor(() => expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect(screen.getByText("Merged into main")).toBeInTheDocument();
+    expect(screen.queryByText("Ready to merge")).toBeNull();
+  });
+
+  it("says the merge is in flight instead of resting on the old gate", async () => {
+    let resolveAction!: (value: { success: boolean; message: string }) => void;
+    const runAction = vi.fn(() => new Promise<{ success: boolean; message: string }>((resolve) => { resolveAction = resolve; }));
+    await renderPanel(2247, client({ runCodeDeliveryPullRequestAction: runAction }));
+    await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+    expect(await screen.findByText("Merging…")).toBeInTheDocument();
+    expect(screen.queryByText("Ready to merge")).toBeNull();
+    resolveAction({ success: true, message: "Merged." });
+    await waitFor(() => expect(screen.queryByText("Merging…")).toBeNull());
+  });
+});
+
 describe("create stack", () => {
   async function renderUnregisteredPanel(number: number, api = client()) {
     const summary = unregisteredDeliveryPullRequests.find(
