@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
+  actorLabel,
   applyAcceptedTurn,
   applyCodeTurnSnapshot,
   applyStoredRewrites,
@@ -2333,5 +2334,58 @@ describe("stored recaps", () => {
       rewrite: "The recap.",
       rewriteState: "rewritten",
     });
+  });
+});
+
+describe("actorLabel", () => {
+  const PRINCIPAL = "user:019fc880-8c55-7c31-8d5c-980c6a98783a";
+
+  it("renders a display name as-is, even when everything else is set", () => {
+    expect(
+      actorLabel({
+        principal: PRINCIPAL,
+        display: "Ada Lovelace",
+        channel_kind: "slack",
+        external_identity: "U123",
+      }),
+    ).toBe("Ada Lovelace");
+  });
+
+  it("renders a generic origin label when only the channel kind is known", () => {
+    expect(
+      actorLabel({
+        principal: PRINCIPAL,
+        display: null,
+        channel_kind: "slack",
+        external_identity: "U123",
+      }),
+    ).toBe("Slack user");
+  });
+
+  it("never renders the principal: a principal-only actor has no label", () => {
+    expect(
+      actorLabel({
+        principal: PRINCIPAL,
+        display: null,
+        channel_kind: null,
+        external_identity: null,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("treats empty strings as absent", () => {
+    expect(
+      actorLabel({
+        principal: PRINCIPAL,
+        display: "",
+        channel_kind: "",
+        external_identity: null,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a missing actor", () => {
+    expect(actorLabel(null)).toBeUndefined();
+    expect(actorLabel(undefined)).toBeUndefined();
   });
 });

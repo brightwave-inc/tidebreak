@@ -739,15 +739,19 @@ function latestTurnUsage(
 }
 
 /**
- * The name to show for an actor: the channel's display name, falling back to
- * the principal. A turn with no actor renders as the session's owner, which
- * is what showing nothing means here.
+ * The name to show for an actor: the channel's display name, or a generic
+ * origin label ("Slack user") when an adapter sent no name. The principal is
+ * an internal key and must never reach the UI, and neither may the channel's
+ * `external_identity`. A turn with no label renders as the session's owner,
+ * which is what returning nothing means here.
  */
 export function actorLabel(
   actor: TurnActor | null | undefined,
 ): string | undefined {
-  const label = actor?.display ?? actor?.principal;
-  return label && label.length > 0 ? label : undefined;
+  if (actor?.display) return actor.display;
+  const kind = actor?.channel_kind;
+  if (kind) return `${kind.charAt(0).toUpperCase()}${kind.slice(1)} user`;
+  return undefined;
 }
 
 function upsertTurnPrompt(

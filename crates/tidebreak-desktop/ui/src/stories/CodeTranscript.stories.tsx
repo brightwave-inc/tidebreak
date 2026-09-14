@@ -104,12 +104,14 @@ type Story = StoryObj<typeof meta>;
 export const ProgressUpdates: Story = {};
 
 /**
- * One shared session driven by three actors: the owner on the desktop, a
- * teammate who only exists to this machine as a Slack identity, and a trigger
- * firing under the owner's key. A turn with no actor is the owner's, and
- * carries no name, which is what every unshared session looks like.
+ * One shared session driven by four actors: the owner on the desktop, a
+ * teammate whose channel sent a display name, a teammate whose channel sent
+ * none and renders as the generic "Slack user", and a trigger firing under
+ * the owner's key. A turn with no actor is the owner's, and carries no name,
+ * which is what every unshared session looks like. Raw principal keys never
+ * render.
  */
-export const ThreeActors: Story = {
+export const SharedSessionActors: Story = {
   args: {
     items: [
       {
@@ -141,6 +143,22 @@ export const ThreeActors: Story = {
         turnId: "turn-ines",
         parentCallId: null,
         text: "The grant supplies the channel identity; the adapter supplies the name.",
+        streaming: false,
+      },
+      {
+        kind: "user",
+        id: "actor-nameless-channel",
+        turnId: "turn-nameless-channel",
+        text: "Ship it once the checks settle.",
+        createdAt: "2026-09-04T09:03:00.000Z",
+        actorLabel: "Slack user",
+      },
+      {
+        kind: "assistant",
+        id: "actor-nameless-channel-reply",
+        turnId: "turn-nameless-channel",
+        parentCallId: null,
+        text: "Will do. The channel sent no display name, so the origin renders generically.",
         streaming: false,
       },
       {
