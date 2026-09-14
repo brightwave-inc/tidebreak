@@ -79,3 +79,19 @@ export function recoveryDigest(digest: CodeSessionDigest): CodeSessionDigest {
     ? { ...digest, attention: state.attention }
     : digest;
 }
+
+/** Shared contributors recover Slack sessions through the adapter's owner scope. */
+export function sessionRecoveryAccess(
+  session: CodeSessionSnapshot | null | undefined,
+) {
+  return {
+    allowRetry: Boolean(
+      session && session.access !== "view" && session.is_owner !== false,
+    ),
+    unavailableHint:
+      session?.access === "contribute" &&
+      session.external_origin?.channel_kind === "slack"
+        ? "To recover this session, open its Slack thread and select Clear fault."
+        : "Ask the session owner to recover this session.",
+  };
+}

@@ -1,7 +1,7 @@
 import { toast } from "sonner";
 import { useSessionDigest } from "./CodeUpdatesStore";
 import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
-import { sessionRecoveryState } from "./sessionRecovery";
+import { sessionRecoveryAccess, sessionRecoveryState } from "./sessionRecovery";
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useApp } from "@/AppContext";
@@ -146,7 +146,7 @@ export function CodeSessionContent({
             attention={recovery.attention}
             reason={recovery.reason}
             retrying={retrying}
-            allowRetry={session.access !== "view"}
+            {...sessionRecoveryAccess(session)}
             onRetry={() => void retryRecovery()}
           />
           <CodeSessionPane

@@ -191,3 +191,28 @@ it("requires consent for recovery when an older server omits the cause", () => {
   expect(screen.getByRole("alertdialog")).toBeInTheDocument();
   expect(retry).not.toHaveBeenCalled();
 });
+
+it("shows the shared-session recovery path without an owner-only action", () => {
+  const retry = vi.fn();
+  render(
+    <SessionRecoveryNotice
+      lifecycle="fenced"
+      attention={blocked}
+      reason={{
+        type: "terminal_flush_missing",
+        detail: "Final output missing",
+      }}
+      allowRetry={false}
+      unavailableHint="To recover this session, open its Slack thread and select Clear fault."
+      onRetry={retry}
+    />,
+  );
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "open its Slack thread and select Clear fault",
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "missing final output will not be recovered",
+  );
+  expect(retry).not.toHaveBeenCalled();
+});

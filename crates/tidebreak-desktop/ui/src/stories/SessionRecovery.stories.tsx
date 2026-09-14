@@ -4,7 +4,8 @@ import type { Attention, FenceReason } from "@/api/types";
 import { recoveryAttention } from "@/code/sessionRecovery";
 import { SessionRecoveryNotice } from "@/code/SessionRecoveryNotice";
 import { SessionLifecycleIndicator } from "@/code/SessionLifecycleIndicator";
-import { attentionFenced } from "./fixtures";
+import { attentionFenced, codeSession } from "./fixtures";
+import { sessionRecoveryAccess } from "@/code/sessionRecovery";
 
 const meta = {
   title: "Code/Session recovery",
@@ -115,5 +116,53 @@ export const States: Story = {
         ).toHaveLength(1),
       { timeout: 3000 },
     );
+  },
+};
+
+export const SlackContributor: Story = {
+  args: {
+    lifecycle: "fenced",
+    attention: {
+      state: {
+        type: "needs_you",
+        source: "lifecycle",
+        prompt:
+          "The previous sandbox stopped without sending its final output.",
+      },
+      source: "lifecycle",
+    },
+    reason: { type: "terminal_flush_missing", detail: "Final output missing" },
+    ...sessionRecoveryAccess({
+      ...codeSession,
+      is_owner: false,
+      access: "contribute",
+      external_origin: { channel_kind: "slack", external_key: "T1/C1/123" },
+    }),
+    onRetry: () => {},
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByRole("button")).not.toBeInTheDocument();
+    await expect(
+      canvas.getByText(/open its Slack thread and select Clear fault/),
+    ).toBeVisible();
+  },
+};
+
+export const SharedViewer: Story = {
+  args: {
+    ...SlackContributor.args,
+    ...sessionRecoveryAccess({
+      ...codeSession,
+      is_owner: false,
+      access: "view",
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByRole("button")).not.toBeInTheDocument();
+    await expect(
+      canvas.getByText("Ask the session owner to recover this session."),
+    ).toBeVisible();
   },
 };
