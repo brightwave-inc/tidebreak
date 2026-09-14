@@ -37,6 +37,12 @@ jobs:
           cache-dependency-path: mobile/pnpm-lock.yaml
       - name: Install locked dependencies
         run: pnpm --dir mobile install --frozen-lockfile
+      # Regenerates the gateway admin types from the committed OpenAPI snapshot
+      # and fails on any difference, so a hand-edited generated file or a
+      # snapshot that skipped the script cannot land. Snapshot-vs-live-gateway
+      # freshness stays manual by design: the snapshot is a pinned contract.
+      - name: Check generated gateway admin types
+        run: pnpm --dir mobile check-gateway-openapi
       - name: Typecheck
         run: pnpm --dir mobile typecheck
       - name: Lint
