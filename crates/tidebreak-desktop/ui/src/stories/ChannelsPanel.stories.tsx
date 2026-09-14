@@ -51,8 +51,10 @@ const stolen: CodeGrantSnapshot = {
 /**
  * The grants an external channel holds on this machine. The states that
  * matter: workspaces with live grants and their per-row and whole-workspace
- * revokes, a theft-revoked grant whose reason must stay visible, and the
- * empty install that says where connecting actually starts.
+ * revokes, a theft-revoked grant whose reason must stay visible, replaced
+ * connections collapsed behind their per-workspace disclosure, the member
+ * whose connect never stored a name, and the empty install that says where
+ * connecting actually starts.
  */
 const meta = {
   title: "Settings/Channels",
@@ -104,6 +106,78 @@ export const LoadFailed: Story = {
 /** Only the theft-revoked grant: the reason is the notification of record. */
 export const RevokedForTokenReuse: Story = {
   args: { client: stubClient([stolen]) },
+};
+
+const replaced = (
+  index: number,
+  overrides: Partial<CodeGrantSnapshot>,
+): CodeGrantSnapshot => ({
+  id: `6b1f9a34-0000-4000-8000-00000000001${index}`,
+  channel_kind: "slack",
+  external_identity: "U04CASEY",
+  workspace_identity: "T04ACME",
+  workspace_name: "Acme Corp",
+  created_at: "2026-06-01T10:00:00Z",
+  revoked_at: "2026-08-19T09:00:00Z",
+  // Must match the reason the connect flow writes on superseded grants.
+  revoked_reason: "replaced by a new connect approval",
+  ...overrides,
+});
+
+/**
+ * Routine history: three superseded connects sit behind the collapsed
+ * "3 replaced connections" disclosure so the live rows keep the space.
+ * The theft revoke in the second workspace stays inline.
+ */
+export const ReplacedHistoryCollapsed: Story = {
+  args: {
+    client: stubClient([
+      live,
+      replaced(0, {}),
+      replaced(1, { created_at: "2026-05-01T10:00:00Z" }),
+      replaced(2, {
+        external_identity: "U04SAM",
+        display_name: "Sam Okafor",
+        created_at: "2026-04-11T10:00:00Z",
+      }),
+      stolen,
+    ]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("button", { name: "3 replaced connections" }),
+    ).toBeVisible();
+    await expect(canvas.getByText(/treated as stolen/)).toBeVisible();
+    await expect(
+      canvas.queryByText(/replaced by a new connect approval/),
+    ).not.toBeInTheDocument();
+  },
+};
+
+/**
+ * A connect that never stored a display name, in a workspace no grant has
+ * ever named: the row falls back to "Slack member", and the raw member and
+ * workspace ids stay visible as metadata rather than becoming titles.
+ */
+export const NamelessMemberFallback: Story = {
+  args: {
+    client: stubClient([
+      {
+        ...live,
+        id: "6b1f9a34-0000-4000-8000-000000000020",
+        external_identity: "U072QAMTDCN",
+        display_name: undefined,
+        workspace_identity: "T05HVSSBGT1",
+        workspace_name: undefined,
+      },
+    ]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Slack member")).toBeVisible();
+    await expect(canvas.getByText("U072QAMTDCN")).toBeVisible();
+  },
 };
 
 const workspace: CodeGrantSnapshot = {
