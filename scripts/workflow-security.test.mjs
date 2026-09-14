@@ -1656,10 +1656,16 @@ test("release builds freeze a draft tag from the trusted main workflow", () => {
   assert.match(validateJob, /Mark the in-flight draft as a prerelease/);
   assert.match(
     validateJob,
-    /(?:-f draft=true[\s\S]*-f prerelease=true|\{draft: true, prerelease: true\})/,
+    /\{draft: true, prerelease: true\}/,
   );
-  assert.match(validateJob, /Failed to keep release \$RELEASE_ID as a draft after marking it in-flight| -f draft=true/);
-  assert.doesNotMatch(validateJob, /-f draft=false/);
+  assert.match(
+    validateJob,
+    /jq -e '\.draft == true and \.prerelease == true' <<<"\$release_json" >\/dev\/null \|\| \{\n[\s\S]*?Failed to keep release \$RELEASE_ID as a draft after marking it in-flight[\s\S]*?exit 1/,
+  );
+  assert.doesNotMatch(
+    release,
+    /(?:-f|--raw-field)\s+(?:draft|prerelease)=(?:true|false)/,
+  );
   assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
 });
 
