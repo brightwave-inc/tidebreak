@@ -24,7 +24,13 @@ import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
  * hostile workspace admin — one press cuts everything that workspace
  * holds.
  */
-export function ChannelsPanel({ client }: { client: ApiClient }) {
+export function ChannelsPanel({
+  client,
+  onOpenInferencePreferences,
+}: {
+  client: ApiClient;
+  onOpenInferencePreferences?: (grantId: string) => void;
+}) {
   const [grants, setGrants] = useState<CodeGrantSnapshot[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -176,6 +182,19 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
                         </p>
                       </div>
                     </div>
+                    {!grant.revoked_at &&
+                      grant.kind !== "workspace" &&
+                      onOpenInferencePreferences && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={disabled}
+                          onClick={() => onOpenInferencePreferences(grant.id)}
+                        >
+                          Subscription settings
+                        </Button>
+                      )}
                     {!grant.revoked_at && (
                       <Button
                         type="button"

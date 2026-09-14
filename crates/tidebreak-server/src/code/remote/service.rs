@@ -481,6 +481,7 @@ mod tests {
         spawn_errors: StdMutex<VecDeque<RemoteSandboxError>>,
         send_errors: StdMutex<VecDeque<RemoteSandboxError>>,
         sends: StdMutex<Vec<String>>,
+        send_interrupts: StdMutex<Vec<bool>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
         /// Every events read issued, scripted or not.
         event_reads_issued: StdMutex<usize>,
@@ -507,6 +508,7 @@ mod tests {
                 return Err(error);
             }
             Ok(SandboxLease {
+                inference_resolutions: Vec::new(),
                 sandbox_id,
                 state: SandboxState::Pending,
                 latest_event_seq: 0,
@@ -566,12 +568,17 @@ mod tests {
         ) -> Result<MessageReceipt, RemoteSandboxError> {
             wait_for_provision_gate(&self.send_gate).await;
             let super::super::wire::SupervisorMessageBody::Input(body) = &message.body;
-            self.sends.lock().unwrap().push(body.clone());
+            let seq = {
+                let mut sends = self.sends.lock().unwrap();
+                sends.push(body.clone());
+                sends.len() as i64
+            };
+            self.send_interrupts.lock().unwrap().push(message.interrupt);
             if let Some(error) = self.send_errors.lock().unwrap().pop_front() {
                 return Err(error);
             }
             Ok(MessageReceipt {
-                seq: 1,
+                seq,
                 interrupt: false,
                 pending_messages: 0,
             })
@@ -2462,6 +2469,97 @@ mod tests {
         assert_eq!(fake.sends.lock().unwrap().as_slice(), &["stop".to_owned()]);
     }
 
+    #[tokio::test]
+    async fn a_managed_stop_targets_the_reported_native_turn_without_model_input() {
+        use tidebreak_core::storage::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                None,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let open = tidebreak_core::db::code::get_open_turn(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let incarnation =
+            tidebreak_core::db::code::latest_incarnation(&runtime.db, &owner, session.id)
+                .await
+                .unwrap()
+                .unwrap();
+        let runtime_id = uuid::Uuid::new_v4();
+        runtime
+            .db
+            .set_setting(
+                &format!("code.incarnations.{}.steering_protocol", incarnation.id),
+                &serde_json::json!({
+                    "version": 1, "stop_protocol": 1, "turn_identity_protocol": 1,
+                    "sandbox_id": "sb-1", "runtime_id": runtime_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let error = runtime.interrupt(session.id).await.unwrap_err();
+        assert!(format!("{error:?}").contains("turn_not_ready"));
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        tidebreak_core::db::code::record_native_turn_input(
+            &runtime.db,
+            &owner,
+            session.id,
+            incarnation.id,
+            open.id,
+            None,
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::observe_native_turn(
+            &runtime.db,
+            &owner,
+            session.id,
+            incarnation.id,
+            runtime_id,
+            7,
+            "spawn_task",
+            &[],
+        )
+        .await
+        .unwrap();
+        runtime.interrupt(session.id).await.unwrap();
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let frame = tidebreak_core::code::supervisor_tools::decode_stop_frame(&sends[0]).unwrap();
+        assert_eq!(frame.sandbox_id, "sb-1");
+        assert_eq!(frame.runtime_id, runtime_id);
+        assert_eq!(
+            frame.native_turn, 7,
+            "Stop must not infer the native counter from hosted ordinals"
+        );
+        assert_eq!(*fake.send_interrupts.lock().unwrap(), [false]);
+    }
+
     /// Changing permission mode on a remote session does not launch a host
     /// harness against the empty worktree.
     #[tokio::test]
@@ -2784,6 +2882,8 @@ mod tests {
                 None,
                 None,
                 Some(tidebreak_core::db::code::ExternalSessionChannelContext {
+                    parent: None,
+                    inference: None,
                     channel_id: Some("C1"),
                     instructions: "Keep answers concise.",
                 }),

@@ -33,12 +33,14 @@ mod grant_kind;
 mod idens;
 mod managed_decision;
 mod native_tool_receipt;
+mod native_turn_identity;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
 mod session_access;
 mod session_acts_as;
 mod session_context;
+mod session_inference;
 mod session_owner_kind;
 mod turn_actor;
 mod workspace_setup_error;
@@ -115,6 +117,8 @@ impl MigratorTrait for Migrator {
             Box::new(external_steer_admission::ExternalSteerAdmission),
             Box::new(external_steer_recovery::ExternalSteerRecovery),
             Box::new(managed_decision::ManagedDecisions),
+            Box::new(session_inference::SessionInference),
+            Box::new(native_turn_identity::NativeTurnIdentity),
         ]
     }
 }

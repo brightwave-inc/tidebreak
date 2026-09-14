@@ -1283,3 +1283,62 @@ describe("CodeTranscript", () => {
     expect(screen.queryByText("Recap")).not.toBeInTheDocument();
   });
 });
+
+it("keeps an answer failure visible after the request finishes", async () => {
+  const approval: CodeApprovalSnapshot = {
+    id: "q-approval",
+    session_id: "s1",
+    turn_id: "t1",
+    kind: {
+      type: "questions",
+      questions: [
+        {
+          id: "q1",
+          header: "Choice",
+          question: "Which option?",
+          question_type: "single_select",
+          allow_free_form: false,
+          options: [
+            { id: "one", label: "Option one", description: "First option" },
+          ],
+        },
+      ],
+    },
+    harness_raw_json: "",
+    state: "pending",
+    requested_at: "2026-09-14T12:00:00Z",
+  };
+  const onDecide = vi.fn();
+  render(
+    <CodeTranscript
+      items={[
+        {
+          kind: "approval",
+          id: "approval:q-approval",
+          approvalId: "q-approval",
+          state: "pending",
+        },
+      ]}
+      approvals={{ "q-approval": approval }}
+      decidingId={null}
+      approvalErrorId="q-approval"
+      approvalError="Could not send the answer. Try again."
+      onDecide={onDecide}
+    />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Could not send the answer",
+  );
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("radio", { name: "Option one" }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(onDecide).toHaveBeenCalledWith(
+    "q-approval",
+    {
+      answers: {
+        answers: [{ question_id: "q1", selected_option_ids: ["one"] }],
+      },
+    },
+    undefined,
+  );
+});

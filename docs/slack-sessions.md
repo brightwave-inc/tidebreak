@@ -373,6 +373,15 @@ runs on the machine; they do not create a separate chat row.
 message. The machine's response names the interpretation ("Stopping the
 current turn", "Started a fresh session") so a mis-parse is visible.
 
+Managed runtimes send Stop as a control frame targeted to the active supervisor
+and native turn. The control never becomes a follow-up prompt. Supervisors that
+advertise `turn_identity_protocol: 1` report each turn's source and consumed inbox
+message sequences. Tidebreak binds those sequences to the acknowledged hosted
+input, so background turns cannot shift approval or completion onto another
+message. Input receipts, output, and terminal state survive cursor replay and
+server restarts. Existing supervisors without this protocol retain their legacy
+turn mapping until the sandbox ends.
+
 Engine-child park
 ([`0064`](decisions/0064-idle-engine-children-are-parked.md)) is not
 this. That park is invisible reclaim of a local process. Here the sandbox
@@ -1041,3 +1050,32 @@ Quiet leaves already accepted work running. Session creation returns the stored
 `harness` and `model`; a null model means no model has been pinned, rather than
 an inferred default presented as observed execution. The adapter should render
 these values and link to Configure without adding another status message.
+
+## Subscription preferences
+
+On a Gateway deployment that supports inference sponsorship, a new DM prefers
+an eligible subscription owned by its connected person. To use Gateway's
+ordinary policy instead, open **Settings > Channels**, select **Subscription settings** on your
+personal Slack connection, and change its DM subscription preference.
+
+A channel's default preference uses an eligible subscription owned by the
+person who starts the Tidebreak conversation. That person must connect their
+Slack account and explicitly allow channel sponsorship. The consent covers
+later replies in that conversation, including replies from teammates. Existing
+connections have sponsorship disabled until their owner enables it. To change
+the channel preference to Gateway defaults, open the channel's settings as a
+human administrator. A channel setting cannot opt another person into consent.
+
+Missing links, ambiguous Slack identities, missing consent, and absent eligible
+subscriptions select Gateway defaults when the conversation starts. The saved
+choice applies to its later turns and children. Linking an account afterward
+does not move an existing conversation onto that account. Disabling consent or
+revoking the chosen connection stops further sponsored inference. Restore
+consent when possible. After a full reconnect, start a new conversation to use
+the replacement connection.
+
+The channel keeps its bot GitHub identity, repositories, model permissions,
+tools, and execution limits. Subscription preferences do not grant access.
+Older Gateway deployments show the preference as unavailable and retain their
+ordinary behavior. Gateway must support `tidebreak_inference_sponsorship: 1`
+in `/api/v1/meta` before Tidebreak sends the private engine extension.

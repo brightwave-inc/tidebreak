@@ -2702,6 +2702,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "execution_location",
       "owner_kind",
       "acts_as",
+      "inference_resolutions",
     ]) ||
     (value.access !== undefined &&
       value.access !== "view" &&
@@ -2793,6 +2794,46 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       });
     }
   }
+  let inference_resolutions: CodeSessionSnapshot["inference_resolutions"];
+  if (value.inference_resolutions !== undefined) {
+    if (!Array.isArray(value.inference_resolutions)) return null;
+    inference_resolutions = [];
+    const seen = new Set<string>();
+    for (const resolution of value.inference_resolutions) {
+      if (
+        !isRecord(resolution) ||
+        !onlyKeys<
+          NonNullable<CodeSessionSnapshot["inference_resolutions"]>[number] & {
+            subscription_label?: string;
+          }
+        >(resolution, [
+          "scope_id",
+          "provider",
+          "source",
+          "reason",
+          "subscription_label",
+        ]) ||
+        !wireId(resolution.scope_id) ||
+        !nonEmptyLine(resolution.provider) ||
+        (resolution.source !== "owned_subscription" &&
+          resolution.source !== "execution_default") ||
+        !optionalLine(resolution.reason) ||
+        !optionalLine(resolution.subscription_label)
+      )
+        return null;
+      const key = JSON.stringify([resolution.scope_id, resolution.provider]);
+      if (seen.has(key)) return null;
+      seen.add(key);
+      inference_resolutions.push({
+        scope_id: resolution.scope_id,
+        provider: resolution.provider,
+        source: resolution.source,
+        ...(resolution.reason !== undefined
+          ? { reason: resolution.reason }
+          : {}),
+      });
+    }
+  }
   return {
     id: value.id,
     ...(value.access !== undefined ? { access: value.access } : {}),
@@ -2824,6 +2865,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     ...(fence_reason ? { fence_reason } : {}),
     ...(external_origin !== undefined ? { external_origin } : {}),
     ...(external_origins !== undefined ? { external_origins } : {}),
+    ...(inference_resolutions !== undefined ? { inference_resolutions } : {}),
     ...(value.owner_kind !== undefined ? { owner_kind: value.owner_kind } : {}),
     ...(value.acts_as !== undefined
       ? { acts_as: value.acts_as as "person" | "bot" }
@@ -4862,11 +4904,15 @@ export function parseCodeConnectPage(value: unknown): CodeConnectPage | null {
     !optionalLine(value.avatar_url) ||
     !nonEmptyLine(value.state) ||
     !wireId(value.csrf) ||
-    !timestamp(value.expires_at)
+    !timestamp(value.expires_at) ||
+    (value.inference_sponsorship_supported !== undefined &&
+      typeof value.inference_sponsorship_supported !== "boolean")
   ) {
     return null;
   }
   return {
+    inference_sponsorship_supported:
+      value.inference_sponsorship_supported === true,
     channel_kind: value.channel_kind,
     display_name: value.display_name,
     workspace_name: value.workspace_name,

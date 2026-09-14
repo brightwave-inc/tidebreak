@@ -488,8 +488,15 @@ impl SessionTool {
                 send(runtime, &auth, &child, task, key).await?;
                 return snapshot(runtime, &auth.parent.owner, child).await;
             }
+            let inherited = tidebreak_core::db::code::session_inference(
+                &runtime.db,
+                &auth.parent.owner,
+                auth.parent.id,
+            )
+            .await?
+            .map(tidebreak_core::code::inference::PreparedSessionInference::inherit);
             let (resolution, _) = runtime
-                .external_get_or_create(
+                .external_get_or_create_with_channel_context(
                     &auth.parent.owner,
                     auth.parent.owner_kind.as_deref(),
                     grant.id,
@@ -501,6 +508,12 @@ impl SessionTool {
                     settings,
                     requested_mode,
                     Some(auth.parent.acts_as()),
+                    Some(tidebreak_core::db::code::ExternalSessionChannelContext {
+                        parent: Some((auth.parent.id, key)),
+                        inference: inherited.as_ref(),
+                        channel_id: auth.parent_channel(),
+                        instructions: "",
+                    }),
                 )
                 .await?;
             let id = match resolution {
@@ -597,6 +610,13 @@ async fn send(
     message: &str,
     key: &str,
 ) -> Result<(), ServerError> {
+    tidebreak_core::db::code::inherit_session_inference(
+        &runtime.db,
+        &auth.parent.owner,
+        auth.parent.id,
+        child.id,
+    )
+    .await?;
     let actor = tidebreak_core::TurnActor {
         display: Some("Parent conversation".into()),
         ..Default::default()
@@ -1179,6 +1199,7 @@ mod tests {
             super::super::remote::RemoteSandboxError,
         > {
             Ok(super::super::remote::wire::SandboxLease {
+                inference_resolutions: Vec::new(),
                 sandbox_id: session.to_string(),
                 state: super::super::remote::wire::SandboxState::Pending,
                 latest_event_seq: 0,

@@ -80,19 +80,48 @@ fn installed_version(kind: HarnessKind, reported: &str) -> Option<&str> {
 }
 
 type TokenSlot = Arc<tokio::sync::Mutex<Option<CachedToken>>>;
-pub(super) type HarnessTokenSlots = HashMap<HarnessIdentity, TokenSlot>;
+pub(super) type HarnessTokenSlots = HashMap<
+    (
+        HarnessIdentity,
+        Option<tidebreak_core::code::inference::InferenceSponsor>,
+    ),
+    TokenSlot,
+>;
 
 impl OboGateway {
     /// Cache separately for each owner, session, engine, and installed version.
+    #[cfg(test)]
     pub(crate) async fn bearer_for_harness(
         &self,
         owner: &OwnerId,
         harness: &HarnessIdentity,
     ) -> Result<String> {
+        self.bearer_for_harness_with_sponsor(owner, harness, None)
+            .await
+            .map(|(token, _)| token)
+    }
+
+    pub(crate) async fn bearer_for_harness_with_sponsor(
+        &self,
+        owner: &OwnerId,
+        harness: &HarnessIdentity,
+        sponsor: Option<&tidebreak_core::code::inference::InferenceSponsor>,
+    ) -> Result<(
+        String,
+        Vec<tidebreak_core::code::inference::InferenceResolution>,
+    )> {
+        if sponsor.is_some() && self.machine_credentials.is_none() {
+            return Err(AgentError::InvalidTarget(
+                "subscription preferences require an authenticated host".into(),
+            ));
+        }
         // Older and standalone installations have no registered client secret.
         // They keep ordinary OBO; a refused authenticated exchange never retries here.
         if self.machine_credentials.is_none() {
-            return self.bearer_for(owner).await;
+            return self
+                .bearer_for(owner)
+                .await
+                .map(|token| (token, Vec::new()));
         }
         let user = self
             .users
@@ -112,12 +141,15 @@ impl OboGateway {
             .harness_tokens
             .lock()
             .map_err(|_| AgentError::msg("harness inference state is unavailable in this process"))?
-            .entry(harness.clone())
+            .entry((harness.clone(), sponsor.cloned()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
             .clone();
         let mut cached = slot.lock().await;
         if let Some(current) = cached.as_ref().filter(|token| token.is_fresh()) {
-            return Ok(current.token.to_string());
+            return Ok((
+                current.token.to_string(),
+                current.inference_resolutions.clone(),
+            ));
         }
         let subject = user
             .subject
@@ -127,11 +159,12 @@ impl OboGateway {
             })?
             .clone();
         let minted = self
-            .exchange_with_harness(&subject, INFERENCE_AUDIENCE, Some(harness))
+            .exchange_with_harness(&subject, INFERENCE_AUDIENCE, Some(harness), sponsor)
             .await?;
         let token = minted.token.to_string();
+        let resolutions = minted.inference_resolutions.clone();
         *cached = Some(minted);
-        Ok(token)
+        Ok((token, resolutions))
     }
 }
 
@@ -475,5 +508,52 @@ mod tests {
             );
             server.abort();
         }
+    }
+    #[tokio::test]
+    async fn sponsored_engine_exchange_preserves_executor_and_encodes_only_verified_scope() {
+        use tidebreak_core::code::inference::InferenceSponsor;
+        let owner = OwnerId::new("service:slack").unwrap();
+        let root = SessionId::new();
+        let harness = identity(SessionId::new(), HarnessKind::ClaudeCode, "2.1.234");
+        let sponsor = InferenceSponsor::PreferOwnedSubscription {
+            inference_scope_id: root.0,
+            external_delegation_id: uuid::Uuid::new_v4(),
+        };
+        let ack = serde_json::json!({
+            "engine":"claude_code","engine_version":"2.1.234","engine_session_id":harness.session,
+            "inference_resolutions":[{"scope_id":root,"provider":"anthropic","source":"owned_subscription","subscription_label":"Personal"}],
+        });
+        let (gateway, recorded, server) = gateway_with_ack(true, false, 3600, Some(ack)).await;
+        gateway.record_caller(&owner, "service-subject".into());
+        let (first, resolutions) = gateway
+            .bearer_for_harness_with_sponsor(&owner, &harness, Some(&sponsor))
+            .await
+            .unwrap();
+        assert_eq!(resolutions[0].scope_id, root.0);
+        assert_eq!(resolutions[0].source, "owned_subscription");
+        assert_eq!(
+            gateway
+                .bearer_for_harness_with_sponsor(&owner, &harness, Some(&sponsor))
+                .await
+                .unwrap()
+                .0,
+            first
+        );
+        let ordinary = gateway.bearer_for_harness(&owner, &harness).await.unwrap();
+        assert_ne!(
+            ordinary, first,
+            "cached capabilities cannot cross scope preferences"
+        );
+        let seen = recorded.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["subject_token"], "service-subject");
+        assert_eq!(seen[0]["engine_session_id"], harness.session.to_string());
+        assert_eq!(
+            serde_json::from_str::<InferenceSponsor>(&seen[0]["inference_sponsor"]).unwrap(),
+            sponsor
+        );
+        assert!(!seen[1].contains_key("inference_sponsor"));
+        assert!(!seen[0].contains_key("subscription"));
+        server.abort();
     }
 }

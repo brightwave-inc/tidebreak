@@ -56,6 +56,7 @@ beforeEach(() => {
   mocks.client.getCodeConnectPage.mockImplementation(
     async (nonce: string): Promise<CodeConnectPage> => ({
       channel_kind: "slack",
+      inference_sponsorship_supported: false,
       display_name: nonce,
       workspace_name: "Test workspace",
       state: "pending",

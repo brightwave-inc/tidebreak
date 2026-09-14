@@ -153,6 +153,8 @@ async fn existing_session_identity(
 // Older adapters still send `channel_id` and `set_by` (decision 0096 kept the
 // per-channel confirms for them), so this body tolerates unknown fields.
 pub struct ExternalSessionBody {
+    #[serde(default)]
+    pub starter: Option<crate::code::inference_preferences::ConversationStarter>,
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
     /// An optional repository workspace. With neither selector, create a
@@ -531,6 +533,14 @@ pub async fn external_get_or_create(
         None if repo_id.is_none() => HarnessKind::Internal,
         None => HarnessKind::ClaudeCode,
     };
+    let inference = crate::code::inference_preferences::prepare(
+        &runtime,
+        &grant,
+        body.starter.as_ref(),
+        harness,
+        preferences.subscription_preference,
+    )
+    .await?;
     let model =
         resolve_external_harness_model(&state, &grant, harness, preferences.model.as_deref())
             .await?;
@@ -556,6 +566,8 @@ pub async fn external_get_or_create(
             body.acts_as,
             (grant.channel_kind == "slack").then_some(
                 tidebreak_core::db::code::ExternalSessionChannelContext {
+                    parent: None,
+                    inference: Some(&inference),
                     channel_id: body.channel_id.as_deref(),
                     instructions: &preferences.instructions,
                 },
@@ -1098,6 +1110,8 @@ pub async fn external_events(
         tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
     let model_display_name = external_session_model_display_name(&state, &grant, &session).await;
     let mut session_snapshot = SessionSnapshot::from(session);
+    session_snapshot.inference_resolutions =
+        Some(tidebreak_core::db::code::inference_resolutions(&runtime.db, &grant.owner, id).await?);
     session_snapshot.set_external_origins(
         bindings
             .into_iter()
@@ -1188,6 +1202,8 @@ pub async fn external_reap(
     let bindings =
         tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &grant.owner, id).await?;
     let mut snapshot = SessionSnapshot::from(session);
+    snapshot.inference_resolutions =
+        Some(tidebreak_core::db::code::inference_resolutions(&runtime.db, &grant.owner, id).await?);
     snapshot.set_external_origins(
         bindings
             .into_iter()

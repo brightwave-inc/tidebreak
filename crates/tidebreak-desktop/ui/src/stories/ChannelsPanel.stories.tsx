@@ -57,7 +57,10 @@ const stolen: CodeGrantSnapshot = {
 const meta = {
   title: "Settings/Channels",
   component: ChannelsPanel,
-  args: { client: stubClient([live, rotated, stolen]) },
+  args: {
+    client: stubClient([live, rotated, stolen]),
+    onOpenInferencePreferences: () => {},
+  },
   decorators: [
     (Story) => (
       <div className="mx-auto max-w-2xl pt-8">

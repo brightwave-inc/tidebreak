@@ -11,6 +11,7 @@ import {
 
 const page: CodeConnectPage = {
   channel_kind: "slack",
+  inference_sponsorship_supported: false,
   display_name: "Casey Nakamura",
   workspace_name: "Acme Corp",
   avatar_url: "https://avatars.example/casey.png",
@@ -143,4 +144,41 @@ describe("ConnectApprovalView", () => {
       "unavailable",
     );
   });
+});
+
+it("requires an explicit channel sponsorship choice with visible consent", async () => {
+  const onApprove = vi.fn();
+  const user = userEvent.setup();
+  const supported = { ...page, inference_sponsorship_supported: true };
+  const view = render(
+    <ConnectApprovalView
+      page={supported}
+      phase="ready"
+      error={null}
+      onApprove={onApprove}
+      onRetry={() => {}}
+    />,
+  );
+  const checkbox = screen.getByRole("checkbox", {
+    name: /including teammates’ later replies/,
+  });
+  expect(checkbox).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Yes, this is me" }));
+  expect(onApprove).toHaveBeenLastCalledWith({ enabled: false });
+  await user.click(checkbox);
+  await user.click(screen.getByRole("button", { name: "Yes, this is me" }));
+  expect(onApprove).toHaveBeenLastCalledWith({
+    enabled: true,
+    consent_version: 1,
+  });
+  view.rerender(
+    <ConnectApprovalView
+      page={{ ...supported, csrf: "another-handshake" }}
+      phase="ready"
+      error={null}
+      onApprove={onApprove}
+      onRetry={() => {}}
+    />,
+  );
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
 });

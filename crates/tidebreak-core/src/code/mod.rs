@@ -19,6 +19,7 @@ pub use event::{
 };
 
 mod external_input;
+pub mod inference;
 pub use external_input::{ExternalContextMessage, ExternalThreadContext};
 
 use crate::attention::{Attention, FenceReason};

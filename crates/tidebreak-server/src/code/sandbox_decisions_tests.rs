@@ -570,6 +570,209 @@ async fn managed_plan_acceptance_and_rejection_return_the_exact_decision_without
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_plan_after_stop_uses_its_input_identity_despite_a_legacy_control_turn() {
+    let (dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Allow).await;
+    let (mut first, identity) = active_turn(&runtime, &session, incarnation).await;
+    runtime
+        .db
+        .set_setting(
+            &format!("code.incarnations.{incarnation}.steering_protocol"),
+            &serde_json::json!({
+                "version": 1, "turn_identity_protocol": 1,
+                "runtime_id": identity.runtime_id, "sandbox_id": "fixture-sandbox",
+            }),
+        )
+        .await
+        .unwrap();
+    record_native_turn_input(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        first.id,
+        None,
+    )
+    .await
+    .unwrap();
+    observe_native_turn(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        identity.runtime_id,
+        1,
+        "spawn_task",
+        &[],
+    )
+    .await
+    .unwrap();
+    first.status = TurnStatus::Interrupted;
+    save_turn(&runtime.db, &session.owner, &first)
+        .await
+        .unwrap();
+    record_native_turn_terminal(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        identity.runtime_id,
+        1,
+        TurnStatus::Interrupted,
+    )
+    .await
+    .unwrap();
+    // A legacy stop body created native turn 2 without a hosted user turn.
+    assert!(observe_native_turn(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        identity.runtime_id,
+        2,
+        "inbox",
+        &[999],
+    )
+    .await
+    .unwrap()
+    .is_none());
+    record_native_turn_terminal(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        identity.runtime_id,
+        2,
+        TurnStatus::Completed,
+    )
+    .await
+    .unwrap();
+    let next = Turn {
+        id: TurnId::new(),
+        ordinal: 2,
+        status: TurnStatus::Running,
+        user_input: "Prepare a plan".into(),
+        ..first
+    };
+    insert_turn(&runtime.db, &session.owner, &next)
+        .await
+        .unwrap();
+    record_native_turn_input(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        next.id,
+        Some(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        observe_native_turn(
+            &runtime.db,
+            &session.owner,
+            session.id,
+            incarnation,
+            identity.runtime_id,
+            3,
+            "inbox",
+            &[10],
+        )
+        .await
+        .unwrap(),
+        Some(next.id)
+    );
+    let executor = SandboxToolExecutor::new(Arc::downgrade(&runtime));
+    let mut stale = question_request("stale-control-turn");
+    stale.turn = Some(SupervisorToolTurn {
+        native_turn: 2,
+        runtime_id: identity.runtime_id,
+    });
+    assert!(executor
+        .enqueue(&session.owner, session.id, incarnation, &stale)
+        .await
+        .is_err());
+    assert!(
+        list_approvals(&runtime.db, &session.owner, None, Some(session.id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
+    bridge.begin_turn(SupervisorToolTurn {
+        native_turn: 3,
+        runtime_id: identity.runtime_id,
+    });
+    let request = SupervisorToolRequest {
+        cancelled: false,
+        request_id: "plan-after-stop".into(),
+        tool: "request_plan_approval".into(),
+        turn: None,
+        arguments: serde_json::json!({
+            "title": "Verify the follow-up",
+            "plan": "Inspect the requested change and run its focused tests before reporting completion.",
+        }),
+    };
+    let socket = bridge.socket_path();
+    let helper = tokio::spawn(async move { call(&socket, &request).await });
+    let request = admitted(&mut bridge).await;
+    executor
+        .enqueue(&session.owner, session.id, incarnation, &request)
+        .await
+        .unwrap();
+    let approval = only_approval(&runtime, &session).await;
+    assert_eq!(approval.turn_id, next.id);
+    assert_eq!(approval.state, ApprovalState::Pending);
+    runtime
+        .decide_approval(
+            &session.owner,
+            approval.id,
+            ApprovalDecisionRequest::PlanDecision {
+                approve: true,
+                feedback: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let results = executor
+        .service(&session.owner, session.id, incarnation)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]
+            .request
+            .as_ref()
+            .unwrap()
+            .turn
+            .as_ref()
+            .unwrap()
+            .native_turn,
+        3
+    );
+    for frame in encode_result_frames(&results[0]).unwrap() {
+        bridge.receive_frame(&frame).unwrap();
+    }
+    assert_eq!(
+        helper.await.unwrap().unwrap()["output"]["data"]["decision"],
+        "accepted"
+    );
+    assert!(hosted_turn_for_native(
+        &runtime.db,
+        &session.owner,
+        session.id,
+        incarnation,
+        identity.runtime_id,
+        2,
+    )
+    .await
+    .unwrap()
+    .is_none());
+}
+
 #[tokio::test]
 async fn managed_decisions_concurrent_clicks_preserve_the_first_actor_and_settled_response() {
     let (_dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Allow).await;

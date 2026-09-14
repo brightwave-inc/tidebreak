@@ -1,5 +1,9 @@
 import type { HarnessKind } from "../api/types";
+export type ChannelSubscriptionPreference =
+  | "prefer_starter_subscription"
+  | "gateway_default";
 export type ChannelPreferences = {
+  subscription_preference?: ChannelSubscriptionPreference;
   harness: HarnessKind | null;
   model: string | null;
   respond_automatically: boolean | null;
@@ -10,6 +14,7 @@ export type ChannelPreferencesSnapshot = ChannelPreferences & {
   workspace_identity: string;
   settings_path: string;
   can_edit: boolean;
+  inference_sponsorship_supported: boolean;
 };
 export function parseChannelPreferences(
   value: unknown,
@@ -37,7 +42,18 @@ export function parseChannelPreferences(
     typeof v.can_edit !== "boolean"
   )
     return null;
-  return v as ChannelPreferencesSnapshot;
+  if (
+    (v.subscription_preference !== undefined &&
+      v.subscription_preference !== "prefer_starter_subscription" &&
+      v.subscription_preference !== "gateway_default") ||
+    (v.inference_sponsorship_supported !== undefined &&
+      typeof v.inference_sponsorship_supported !== "boolean")
+  )
+    return null;
+  return {
+    ...v,
+    inference_sponsorship_supported: v.inference_sponsorship_supported ?? false,
+  } as ChannelPreferencesSnapshot;
 }
 
 export type ChannelHarnessCatalog = {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
@@ -6,6 +6,12 @@ import { HttpError, type CodeConnectPage } from "./api";
 import { Logomark } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  CHANNEL_SUBSCRIPTION_CONSENT,
+  SUBSCRIPTION_PREFERENCES_UNAVAILABLE,
+  type InferenceSponsorshipConsent,
+} from "./settings/inferencePreferences";
 
 type ConnectApprovalPhase =
   | "loading"
@@ -55,13 +61,17 @@ export function ConnectApprovalRoute() {
     };
   }, [client, loadAttempt, nonce]);
 
-  async function approve() {
+  async function approve(inferenceSponsorship?: InferenceSponsorshipConsent) {
     if (!page) return;
     const version = approvalVersion.current;
     setPhase("approving");
     setError(null);
     try {
-      await client.approveCodeConnect(nonce, page.csrf);
+      if (inferenceSponsorship && page.inference_sponsorship_supported) {
+        await client.approveCodeConnect(nonce, page.csrf, inferenceSponsorship);
+      } else {
+        await client.approveCodeConnect(nonce, page.csrf);
+      }
       if (approvalVersion.current !== version) return;
       setPhase("approved");
     } catch {
@@ -76,7 +86,7 @@ export function ConnectApprovalRoute() {
       page={page}
       phase={phase}
       error={error}
-      onApprove={() => void approve()}
+      onApprove={(consent) => void approve(consent)}
       onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
     />
   );
@@ -105,9 +115,12 @@ export function ConnectApprovalView({
   page: CodeConnectPage | null;
   phase: ConnectApprovalPhase;
   error: string | null;
-  onApprove: () => void;
+  onApprove: (inferenceSponsorship?: InferenceSponsorshipConsent) => void;
   onRetry: () => void;
 }) {
+  const consentId = useId();
+  const [sponsorChannels, setSponsorChannels] = useState(false);
+  useEffect(() => setSponsorChannels(false), [page?.csrf]);
   // The same shell as the hosted sign-in screen: a person arrives here
   // from a Slack card, often on a machine they have never opened, and the
   // page must say whose it is before it asks "is this you?".
@@ -173,11 +186,54 @@ export function ConnectApprovalView({
                   coding sessions on your machine. If you did not ask to
                   connect, close this page.
                 </p>
+                {page.inference_sponsorship_supported ? (
+                  <div className="flex flex-col gap-3 border-t pt-4">
+                    <p className="text-sm text-muted-foreground">
+                      New direct messages prefer your eligible subscriptions in
+                      Gateway. You can change this in Channels → Subscription
+                      settings.
+                    </p>
+                    <div className="flex items-start gap-2">
+                      <Checkbox
+                        id={consentId}
+                        checked={sponsorChannels}
+                        disabled={phase === "approving"}
+                        onCheckedChange={(checked) =>
+                          setSponsorChannels(checked === true)
+                        }
+                        className="mt-0.5"
+                      />
+                      <label
+                        htmlFor={consentId}
+                        className="text-sm leading-relaxed"
+                      >
+                        {CHANNEL_SUBSCRIPTION_CONSENT}
+                      </label>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      This is optional. You can enable or withdraw consent in
+                      your subscription settings. Repository and tool access
+                      stay with the channel’s connection.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {SUBSCRIPTION_PREFERENCES_UNAVAILABLE}
+                  </p>
+                )}
                 <div className="flex gap-2">
                   <Button
                     type="button"
                     disabled={phase === "approving"}
-                    onClick={onApprove}
+                    onClick={() =>
+                      page.inference_sponsorship_supported
+                        ? onApprove(
+                            sponsorChannels
+                              ? { enabled: true, consent_version: 1 }
+                              : { enabled: false },
+                          )
+                        : onApprove()
+                    }
                   >
                     {phase === "approving" ? "Approving…" : "Yes, this is me"}
                   </Button>

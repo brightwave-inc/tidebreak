@@ -39,6 +39,7 @@ import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 import { QuickActionsPanel } from "./QuickActionsPanel";
 import { ChannelsPanel } from "./ChannelsPanel";
+import { PersonalInferencePreferencesPanel } from "./PersonalInferencePreferencesPanel";
 import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
 import { MemoryPanel } from "./MemoryPanel";
@@ -199,9 +200,20 @@ function QuickActionsSection() {
 
 function ChannelsSection() {
   const { client } = useApp();
+  const navigate = useNavigate();
+  const channelsPath: string = "/settings/channels";
   const search = useRouterState({
     select: (state) => state.location.search,
   }) as Record<string, unknown>;
+  if (typeof search.grant === "string" && search.inference === "personal") {
+    return (
+      <PersonalInferencePreferencesPanel
+        client={client}
+        grantId={search.grant}
+        onBack={() => void navigate({ to: channelsPath, search: {} })}
+      />
+    );
+  }
   if (typeof search.grant === "string" && typeof search.channel === "string") {
     return (
       <ChannelPreferencesPanel
@@ -211,7 +223,17 @@ function ChannelsSection() {
       />
     );
   }
-  return <ChannelsPanel client={client} />;
+  return (
+    <ChannelsPanel
+      client={client}
+      onOpenInferencePreferences={(grant) =>
+        void navigate({
+          to: channelsPath,
+          search: { grant, inference: "personal" },
+        })
+      }
+    />
+  );
 }
 
 function GitSourceControlSection() {
@@ -350,6 +372,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     validateSearch: (search: Record<string, unknown>) => ({
       grant: typeof search.grant === "string" ? search.grant : undefined,
       channel: typeof search.channel === "string" ? search.channel : undefined,
+      inference: search.inference === "personal" ? "personal" : undefined,
     }),
   },
   {

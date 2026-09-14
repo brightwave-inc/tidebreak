@@ -255,3 +255,17 @@ describe("ChannelsPanel", () => {
     expect(listCodeGrants).toHaveBeenCalledTimes(2);
   });
 });
+
+it("offers personal subscription settings only for live person grants", async () => {
+  const open = vi.fn();
+  const client = {
+    listCodeGrants: async () => [live, stolen, workspace],
+  } as unknown as ApiClient;
+  render(<ChannelsPanel client={client} onOpenInferencePreferences={open} />);
+  const buttons = await screen.findAllByRole("button", {
+    name: "Subscription settings",
+  });
+  expect(buttons).toHaveLength(1);
+  await userEvent.setup().click(buttons[0]);
+  expect(open).toHaveBeenCalledExactlyOnceWith(live.id);
+});

@@ -72,6 +72,27 @@ Excluded: teams and roles (they wait on team ids from the gateway's
 principal read), transfer of ownership, and any access that outlives the
 session.
 
+## Amendment: subscription sponsorship does not change ownership
+
+Accepted September 14, 2026. Slack conversations may use an independently
+authorized subscription source, as described in decision 71's amendment.
+The session owner still determines model permissions, tool and repository
+access, runtime authority, lifecycle controls, and spending limits. A channel
+keeps the bot forge identity frozen by decision 90.
+
+A personal external delegation authorizes subscription use independently of
+session access. A viewer, contributor, channel administrator, or later
+participant cannot change the conversation's starter or frozen subscription
+choice. Personal channel-sponsorship consent requires that person's live,
+nondelegated browser lease and remains subject to Gateway enforcement.
+
+Gateway retains existing accounting: subscription usage remains Notional,
+prepaid overage remains Credits, and ordinary metered limits count Billed cost.
+This amendment adds no sponsor quota cap and does not change executor limits.
+Provider results exposed in shared session snapshots contain scope, provider,
+source, optional reason, and an optional safe label. They contain no account
+identifiers, personal email addresses, delegation identifiers, or credentials.
+
 ## Alternatives Considered
 
 **Ownership as a set.** Several owners, each an execution identity. Rejected:

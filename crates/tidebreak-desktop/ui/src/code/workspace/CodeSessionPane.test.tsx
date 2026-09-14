@@ -2,7 +2,11 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/api/client";
-import type { CodeSessionSnapshot } from "@/api/types";
+import type {
+  CodeApprovalSnapshot,
+  CodeApprovalDecision,
+  CodeSessionSnapshot,
+} from "@/api/types";
 import { codeSession } from "@/stories/fixtures";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { resetCodeSessionRegistry } from "../CodeSessionRegistry";
@@ -21,7 +25,24 @@ vi.mock("../CodeComposer", () => ({
     return null;
   },
 }));
-vi.mock("../CodeTranscript", () => ({ CodeTranscript: () => null }));
+const transcript = vi.hoisted(() => ({
+  props: null as null | {
+    onDecide?: (
+      approvalId: string,
+      decision: CodeApprovalDecision,
+      feedback?: string,
+    ) => Promise<void>;
+    approvalError?: string;
+    approvalErrorId?: string | null;
+    decidingId?: string | null;
+  },
+}));
+vi.mock("../CodeTranscript", () => ({
+  CodeTranscript: (props: typeof transcript.props) => {
+    transcript.props = props;
+    return null;
+  },
+}));
 vi.mock("@/QueueTray", () => ({
   QueueTray: () => null,
   useCodeQueueApi: () => ({}),
@@ -39,8 +60,10 @@ vi.mock("@/useTranscriptFollow", () => ({
 
 function setup(session: CodeSessionSnapshot) {
   const submitCodeTurn = vi.fn(async () => ({ kind: "queued" }));
+  const decideCodeApproval = vi.fn(async () => ({}) as CodeApprovalSnapshot);
   const client = {
     submitCodeTurn,
+    decideCodeApproval,
     listCodeSessionTurns: async () => [],
     listCodeApprovals: async () => [],
     openCodeEvents: () => ({
@@ -56,10 +79,16 @@ function setup(session: CodeSessionSnapshot) {
     defaultModelKey: null,
     disabled: false,
   };
-  return { submitCodeTurn, props, ...render(<CodeSessionPane {...props} />) };
+  return {
+    submitCodeTurn,
+    decideCodeApproval,
+    props,
+    ...render(<CodeSessionPane {...props} />),
+  };
 }
 beforeEach(() => {
   composer.props = null;
+  transcript.props = null;
   useCodeCatalogStore.getState().reset();
   useCodeCatalogStore.getState().rememberHarnessModels("claude_code", [
     {
@@ -137,4 +166,26 @@ it("keeps a deliberate owner model override", async () => {
     "owner-model",
     undefined,
   );
+});
+
+it("passes structured answers to the client and keeps failure attached after sending ends", async () => {
+  const { decideCodeApproval } = setup({
+    ...codeSession,
+    lifecycle: "idle",
+    is_owner: true,
+  });
+  decideCodeApproval.mockRejectedValue(new Error("Answer could not be saved."));
+  const decision: CodeApprovalDecision = {
+    answers: { answers: [{ question_id: "q1", selected_option_ids: ["one"] }] },
+  };
+  await act(async () => {
+    await transcript.props?.onDecide?.("approval-one", decision);
+  });
+  expect(decideCodeApproval).toHaveBeenCalledWith("approval-one", {
+    decision,
+    feedback: undefined,
+  });
+  expect(transcript.props?.decidingId).toBeNull();
+  expect(transcript.props?.approvalErrorId).toBe("approval-one");
+  expect(transcript.props?.approvalError).toBeTruthy();
 });

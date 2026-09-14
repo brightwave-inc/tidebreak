@@ -232,6 +232,7 @@ pub async fn connect_view(
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(CodeConnectPage {
+        inference_sponsorship_supported: code.inference_sponsorship_supported().await?,
         channel_kind: handshake.channel_kind,
         display_name: handshake.display_name,
         workspace_name: handshake.workspace_name,
@@ -246,6 +247,8 @@ pub async fn connect_view(
 #[serde(deny_unknown_fields)]
 pub struct ConnectApproveBody {
     pub csrf: String,
+    #[serde(default)]
+    pub inference_sponsorship: Option<crate::obo_gateway::external::InferenceSponsorshipConsent>,
 }
 
 /// `POST /external/connect/{nonce}/approve` — the owner's "is this you?".
@@ -256,9 +259,14 @@ pub async fn connect_approve(
     lease: Option<axum::Extension<crate::auth::GatewayAuthLease>>,
     Json(body): Json<ConnectApproveBody>,
 ) -> Result<StatusCode, ServerError> {
-    code.approve_connect_handshake(&nonce, &body.csrf, lease.as_ref().map(|lease| &lease.0))
-        .await?
-        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
+    code.approve_connect_handshake_with_consent(
+        &nonce,
+        &body.csrf,
+        lease.as_ref().map(|lease| &lease.0),
+        body.inference_sponsorship.as_ref(),
+    )
+    .await?
+    .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -373,6 +381,7 @@ pub async fn view_workspace_grant(
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(CodeConnectPage {
+        inference_sponsorship_supported: false,
         channel_kind: handshake.channel_kind,
         display_name: handshake.display_name,
         workspace_name: handshake.workspace_name,
