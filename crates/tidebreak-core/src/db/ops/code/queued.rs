@@ -255,7 +255,18 @@ pub async fn promote_moved_queued_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(false);
     }
-    if steer_owns_queued_turn(&transaction, owner, expected.session_id, expected.id).await? {
+    let promoted = promote_moved_queued_turn_on(&transaction, owner, expected, turn).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(promoted)
+}
+
+pub(super) async fn promote_moved_queued_turn_on<C: ConnectionTrait>(
+    conn: &C,
+    owner: &OwnerId,
+    expected: &QueuedTurn,
+    turn: &Turn,
+) -> Result<bool> {
+    if steer_owns_queued_turn(conn, owner, expected.session_id, expected.id).await? {
         return Ok(false);
     }
     let deleted = entities::code_queued_turn::Entity::delete_many()
@@ -263,15 +274,13 @@ pub async fn promote_moved_queued_turn(
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_queued_turn::Column::SessionId.eq(expected.session_id.0))
         .filter(entities::code_queued_turn::Column::UpdatedAt.eq(expected.updated_at))
-        .exec(&transaction)
+        .exec(conn)
         .await
         .map_err(store_err)?;
     if deleted.rows_affected != 1 {
-        transaction.commit().await.map_err(store_err)?;
         return Ok(false);
     }
-    super::turn::insert_turn_on(&transaction, owner, turn).await?;
-    transaction.commit().await.map_err(store_err)?;
+    super::turn::insert_turn_on(conn, owner, turn).await?;
     Ok(true)
 }
 

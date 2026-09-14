@@ -19,6 +19,7 @@ import {
 
 import type {
   CodeApprovalSnapshot,
+  CodeApprovalDecision,
   Diffstat,
   FileChangeKind,
   ToolDetail,
@@ -65,6 +66,7 @@ export function CodeTranscript({
   approvals = {},
   decidingId,
   approvalError,
+  approvalErrorId,
   onDecide,
   hydrated = true,
   busy = false,
@@ -85,9 +87,10 @@ export function CodeTranscript({
   approvals?: Record<string, CodeApprovalSnapshot>;
   decidingId?: string | null;
   approvalError?: string;
+  approvalErrorId?: string | null;
   onDecide?: (
     approvalId: string,
-    decision: "approve" | "deny",
+    decision: CodeApprovalDecision,
     feedback?: string,
   ) => void;
   /** False until the durable turn snapshot settles; drives the skeleton. */
@@ -243,7 +246,7 @@ export function CodeTranscript({
                   }
                   approvalError={
                     row.item.kind === "approval" &&
-                    decidingId === row.item.approvalId
+                    (approvalErrorId ?? decidingId) === row.item.approvalId
                       ? approvalError
                       : undefined
                   }
@@ -615,7 +618,7 @@ const TranscriptItem = memo(function TranscriptItem({
   approvalError?: string;
   onDecide?: (
     approvalId: string,
-    decision: "approve" | "deny",
+    decision: CodeApprovalDecision,
     feedback?: string,
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
@@ -709,6 +712,7 @@ const TranscriptItem = memo(function TranscriptItem({
         <CodeApprovalCard
           approval={approval}
           deciding={deciding}
+          canDecide={onDecide !== undefined}
           error={approvalError}
           onReveal={onReveal}
           onDecide={(decision, feedback) =>

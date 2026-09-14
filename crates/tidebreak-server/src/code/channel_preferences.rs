@@ -9,6 +9,8 @@ pub const MAX_CHANNEL_INSTRUCTIONS: usize = 8_192;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelPreferences {
+    #[serde(default)]
+    pub subscription_preference: super::inference_preferences::ChannelSubscriptionPreference,
     pub harness: Option<HarnessKind>,
     pub model: Option<String>,
     /// Applies only to replies in an established Tidebreak thread.

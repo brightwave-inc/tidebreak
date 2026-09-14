@@ -514,7 +514,8 @@ export type CodeUiStore = {
   takeOpenFilePath: () => string | null;
   /**
    * Ephemeral rail selection. Cmd/Ctrl-click and shift-click write it;
-   * unmodified click, Escape, and a bulk archive clear it. Not persisted.
+   * unmodified click and Escape clear it. Bulk archive removes successful IDs.
+   * Not persisted.
    */
   selectedWorkspaceIds: string[];
   selectionAnchorId: string | null;

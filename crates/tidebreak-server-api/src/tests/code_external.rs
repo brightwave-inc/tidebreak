@@ -47,6 +47,7 @@ impl SandboxProvisioner for FakeProvisioner {
     ) -> Result<SandboxLease, RemoteSandboxError> {
         self.spawns.lock().unwrap().push(arguments.clone());
         Ok(SandboxLease {
+            inference_resolutions: Vec::new(),
             sandbox_id: "sb-ext".to_owned(),
             state: SandboxState::Pending,
             latest_event_seq: 0,
@@ -5586,4 +5587,51 @@ async fn steering_recovery_requires_binding_and_preserves_receipt() {
             .status(),
         reqwest::StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn personal_inference_preferences_are_owner_only_and_negotiate_legacy_gateway() {
+    let (router, runtime, _repo, service, _dir) = workspace_grant_app().await;
+    let owner = OwnerId::new("user:bob").unwrap();
+    let (person, _) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-Bob", "T1")
+        .await
+        .unwrap();
+    let route = format!("/code/grants/{}/inference-preferences", person.id);
+    let (status, snapshot) = call_json(&router, "GET", &route, BOB_TOKEN, None).await;
+    assert_eq!(status, StatusCode::OK, "{snapshot}");
+    assert_eq!(
+        snapshot["dm_subscription_preference"],
+        "prefer_owned_subscription"
+    );
+    assert_eq!(snapshot["channel_sponsorship_enabled"], false);
+    assert_eq!(snapshot["inference_sponsorship_supported"], false);
+    assert!(snapshot["consent_version"].is_null());
+    let (status, _) = call_json(&router, "GET", &route, ALICE_TOKEN, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an administrator does not own another person's consent"
+    );
+    let (status, _) = call_json(&router, "GET", &route, CAROL_TOKEN, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let preferences = serde_json::json!({"dm_subscription_preference":"gateway_default","channel_sponsorship_enabled":false,"consent_version":null});
+    let (status, body) =
+        call_json(&router, "PUT", &route, BOB_TOKEN, Some(preferences.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["kind"], "inference_sponsorship_unsupported");
+    let (status, _) = call_json(&router, "PUT", &route, ALICE_TOKEN, Some(preferences)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let workspace =
+        repository_scope_workspace_grant(&runtime, &service, "T1", "personal-reject-workspace")
+            .await;
+    let (status, _) = call_json(
+        &router,
+        "GET",
+        &format!("/code/grants/{}/inference-preferences", workspace.id),
+        CAROL_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

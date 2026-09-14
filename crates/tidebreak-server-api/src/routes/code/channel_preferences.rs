@@ -10,6 +10,7 @@ use axum::extract::State;
 
 #[derive(serde::Serialize)]
 pub struct ChannelPreferencesSnapshot {
+    pub inference_sponsorship_supported: bool,
     #[serde(flatten)]
     pub preferences: ChannelPreferences,
     pub channel_id: String,
@@ -23,8 +24,10 @@ fn snapshot(
     channel: String,
     preferences: ChannelPreferences,
     can_edit: bool,
+    inference_sponsorship_supported: bool,
 ) -> ChannelPreferencesSnapshot {
     ChannelPreferencesSnapshot {
+        inference_sponsorship_supported,
         settings_path: channel_preferences::settings_path(grant, &channel),
         workspace_identity: grant.workspace_identity.clone(),
         channel_id: channel,
@@ -44,6 +47,7 @@ pub async fn get_channel_preferences(
         channel,
         preferences,
         code.is_admin() && !code.is_service(),
+        code.inference_sponsorship_supported().await?,
     )))
 }
 
@@ -55,7 +59,13 @@ pub async fn put_channel_preferences(
     let grant = code.channel_preferences_grant(id, true).await?;
     code.set_channel_preferences(id, &channel, &preferences)
         .await?;
-    Ok(Json(snapshot(&grant, channel, preferences, true)))
+    Ok(Json(snapshot(
+        &grant,
+        channel,
+        preferences,
+        true,
+        code.inference_sponsorship_supported().await?,
+    )))
 }
 
 pub async fn external_channel_preferences(
@@ -68,7 +78,13 @@ pub async fn external_channel_preferences(
         .as_ref()
         .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
     let preferences = channel_preferences::read(&runtime.db, &grant, &channel).await?;
-    Ok(Json(snapshot(&grant, channel, preferences, false)))
+    Ok(Json(snapshot(
+        &grant,
+        channel,
+        preferences,
+        false,
+        runtime.inference_sponsorship_supported().await?,
+    )))
 }
 
 #[derive(serde::Deserialize)]
@@ -185,4 +201,22 @@ pub async fn get_channel_harness_catalog(
             .collect();
     }
     Ok(Json(result))
+}
+
+pub async fn get_personal_inference_preferences(
+    code: ScopedCode,
+    Path(id): Path<tidebreak_core::CodeGrantId>,
+) -> Result<Json<crate::code::inference_preferences::PersonalInferenceSnapshot>, ServerError> {
+    Ok(Json(code.personal_inference_preferences(id).await?))
+}
+pub async fn put_personal_inference_preferences(
+    code: ScopedCode,
+    Path(id): Path<tidebreak_core::CodeGrantId>,
+    lease: Option<axum::Extension<crate::auth::GatewayAuthLease>>,
+    Json(preferences): Json<crate::code::inference_preferences::PersonalInferencePreferences>,
+) -> Result<Json<crate::code::inference_preferences::PersonalInferenceSnapshot>, ServerError> {
+    Ok(Json(
+        code.set_personal_inference_preferences(id, &preferences, lease.as_ref().map(|l| &l.0))
+            .await?,
+    ))
 }

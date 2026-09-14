@@ -135,6 +135,7 @@ pub(super) async fn snapshot_with_origin(
     let bindings = code.external_bindings_for_sessions(&[session.id]).await?;
     let access = code.session_access(session.id).await?;
     let mut snapshot = SessionSnapshot::from(session);
+    snapshot.inference_resolutions = Some(code.inference_resolutions(snapshot.id).await?);
     snapshot.access = Some(access.level);
     snapshot.is_owner = Some(access.owner);
     snapshot.set_external_origins(bindings);
@@ -319,10 +320,7 @@ pub async fn fork_session(
         StatusCode::CREATED,
         Json(CodeForkTranscript {
             path: written.path,
-            dir: written.dir,
-            byte_len: written.byte_len,
             turns: written.turns,
-            total_turns: written.total_turns,
             at_turn_ordinal: written.at_turn_ordinal,
             truncated: written.truncated,
         }),

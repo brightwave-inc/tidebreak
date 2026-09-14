@@ -6,8 +6,8 @@
 //! transition as an event. The ordering rules that matter live here:
 //!
 //! - The delivery cursor is acknowledged only *after* a message reached the
-//!   engine — steered into a running turn, or carried by a turn that
-//!   launched. A crash before the acknowledgement redelivers; acknowledging
+//!   engine, or a control was consumed — steered into a running turn, or
+//!   carried by a turn that launched. A crash before the acknowledgement redelivers; acknowledging
 //!   first would silently skip.
 //! - A named refusal from the endpoint ends the process loudly. A transient
 //!   fault retries on the poll cadence, but only up to a ceiling: an agent
@@ -29,7 +29,7 @@ use crate::wire::{EmbeddedEngineRegistration, SupervisorMessage, SupervisorPoll}
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 use tidebreak_core::code::supervisor_tools::is_result_frame;
 use tidebreak_core::code::supervisor_tools::{
-    decode_steer_frame, is_steer_frame, SupervisorSteerFrame,
+    decode_steer_frame, decode_stop_frame, is_steer_frame, is_stop_frame, SupervisorSteerFrame,
 };
 
 /// Consecutive retryable poll failures before the agent gives up.
@@ -221,6 +221,8 @@ impl<E: Engine> Driver<E> {
                 "harness": "custom",
                 "agent": "tidebreak-supervised-agent",
                 "steering_protocol": 1,
+                "stop_protocol": 1,
+                "turn_identity_protocol": 1,
                 "runtime_id": self.runtime_id.to_string(),
             }),
         );
@@ -290,6 +292,7 @@ impl<E: Engine> Driver<E> {
     /// Picks the next turn, or nothing.
     fn decide(&mut self) -> NextAction {
         self.consume_idle_steer_frames();
+        self.consume_stop_frames(false);
         if !self.budget_allows(self.turn) {
             // The budget is spent: park idle and keep polling, matching the
             // spawn contract. The endpoint decides what happens next.
@@ -330,8 +333,28 @@ impl<E: Engine> Driver<E> {
     async fn run_turn(&mut self, request: TurnRequest) -> Result<(), DriveError> {
         let turn = request.turn;
         let source = request.source;
-        self.outbox
-            .push("turn_started", serde_json::json!({ "turn": turn }));
+        let input_message_seqs: Vec<_> = if source == TurnSource::Inbox {
+            self.inbox
+                .iter()
+                .filter(|message| !self.processed_frames.contains(&message.seq))
+                .map(|message| message.seq)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.outbox.push(
+            "turn_started",
+            serde_json::json!({
+                "turn": turn,
+                "runtime_id": self.runtime_id,
+                "source": match source {
+                    TurnSource::SpawnTask => "spawn_task",
+                    TurnSource::Inbox => "inbox",
+                    TurnSource::GoalResume => "goal_resume",
+                },
+                "input_message_seqs": input_message_seqs,
+            }),
+        );
         if let Some(bridge) = &mut self.bridge {
             bridge.begin_turn(tidebreak_core::code::SupervisorToolTurn {
                 native_turn: turn,
@@ -396,8 +419,10 @@ impl<E: Engine> Driver<E> {
         let record = handle.assistant_record();
         match end {
             TurnEnd::Interrupted => {
-                self.outbox
-                    .push("turn_interrupted", serde_json::json!({ "turn": turn }));
+                self.outbox.push(
+                    "turn_interrupted",
+                    serde_json::json!({ "turn": turn, "runtime_id": self.runtime_id }),
+                );
                 self.last_turn_succeeded = false;
             }
             TurnEnd::Completed { success } => {
@@ -406,6 +431,7 @@ impl<E: Engine> Driver<E> {
                         "assistant_record",
                         serde_json::json!({
                             "turn": turn,
+                            "runtime_id": self.runtime_id,
                             "body": record.body,
                             "bytes": record.total_bytes,
                             "truncated": record.truncated,
@@ -425,6 +451,7 @@ impl<E: Engine> Driver<E> {
                         "turn_completed",
                         serde_json::json!({
                             "turn": turn,
+                            "runtime_id": self.runtime_id,
                             "exit_code": 0,
                             "may_resume": false,
                             "gate": "task_complete",
@@ -446,6 +473,7 @@ impl<E: Engine> Driver<E> {
                         && !self.acceptance_met;
                     let mut payload = serde_json::json!({
                         "turn": turn,
+                        "runtime_id": self.runtime_id,
                         "exit_code": if success { 0 } else { 1 },
                         "may_resume": may_resume,
                     });
@@ -465,6 +493,7 @@ impl<E: Engine> Driver<E> {
                     "turn_completed",
                     serde_json::json!({
                         "turn": turn,
+                        "runtime_id": self.runtime_id,
                         "exit_code": 1,
                         "may_resume": false,
                     }),
@@ -491,6 +520,11 @@ impl<E: Engine> Driver<E> {
 
     /// Delivers pending inbox messages into a running turn, in order.
     async fn steer_pending(&mut self, handle: &mut dyn TurnHandle) -> Option<TurnEnd> {
+        // A queued ordinary message must not prevent Stop from reaching the engine.
+        if self.consume_stop_frames(true) {
+            handle.interrupt().await;
+            return None;
+        }
         while let Some(message) = self.inbox.front() {
             if is_steer_frame(&message.body) {
                 let message = message.clone();
@@ -516,6 +550,40 @@ impl<E: Engine> Driver<E> {
             }
         }
         None
+    }
+
+    /// Consume stop controls without making them input for this or a later turn.
+    /// Keep out-of-order controls in the cursor gap until earlier input is delivered.
+    fn consume_stop_frames(&mut self, running: bool) -> bool {
+        let mut stop = false;
+        for message in &self.inbox {
+            if self.processed_frames.contains(&message.seq) || !is_stop_frame(&message.body) {
+                continue;
+            }
+            let frame = decode_stop_frame(&message.body);
+            let reason = match frame.as_ref() {
+                None => "malformed_stop_frame",
+                Some(_) if !running => "turn_not_running",
+                Some(frame)
+                    if self.sandbox_id.as_deref() != Some(frame.sandbox_id.as_str())
+                        || frame.runtime_id != self.runtime_id
+                        || frame.native_turn != self.turn =>
+                {
+                    "stale_turn"
+                }
+                Some(_) => {
+                    stop = true;
+                    "stop_requested"
+                }
+            };
+            self.outbox.push(
+                "turn_stop_control",
+                serde_json::json!({"seq": message.seq, "turn": self.turn, "reason": reason}),
+            );
+            self.processed_frames.insert(message.seq);
+        }
+        self.advance_acknowledged_frames();
+        stop
     }
 
     fn emit_steer_ack(&mut self, seq: i64, frame: &SupervisorSteerFrame) {
@@ -1900,6 +1968,170 @@ mod tests {
         })
         .await;
         state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    fn stop_message(seq: i64, native_turn: u32, runtime_id: uuid::Uuid) -> SupervisorMessage {
+        SupervisorMessage {
+            seq,
+            body: tidebreak_core::code::supervisor_tools::encode_stop_frame(
+                &tidebreak_core::code::supervisor_tools::SupervisorStopFrame {
+                    sandbox_id: "018f0000-0000-7000-8000-000000000000".into(),
+                    runtime_id,
+                    native_turn,
+                },
+            ),
+            interrupt: false,
+        }
+    }
+
+    #[test]
+    fn idle_stop_controls_never_start_a_turn() {
+        let engine = MockEngine::new();
+        let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        driver.ran_spawn_task = true;
+        driver
+            .inbox
+            .push_back(stop_message(1, 1, driver.runtime_id));
+        assert!(matches!(driver.decide(), NextAction::Wait));
+        assert_eq!(driver.delivered_through, Some(1));
+        assert!(engine.turns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_and_malformed_stop_controls_never_interrupt_or_steer() {
+        let engine = MockEngine::new();
+        let mut driver = driver(engine.clone(), "http://unused", &inputs("turn", None));
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        driver
+            .inbox
+            .push_back(stop_message(1, 1, uuid::Uuid::new_v4()));
+        driver
+            .inbox
+            .push_back(stop_message(2, 2, driver.runtime_id));
+        let mut wrong_sandbox = stop_message(3, 1, driver.runtime_id);
+        wrong_sandbox.body = wrong_sandbox
+            .body
+            .replace("018f0000-0000-7000-8000-000000000000", "another-sandbox");
+        driver.inbox.push_back(wrong_sandbox);
+        let mut malformed = stop_message(4, 1, driver.runtime_id);
+        malformed.body = format!(
+            "{}invalid",
+            tidebreak_core::code::supervisor_tools::STOP_PREFIX
+        );
+        driver.inbox.push_back(malformed);
+        let mut handle = MockTurnHandle {
+            state: Arc::clone(&engine.state),
+        };
+        assert!(driver.steer_pending(&mut handle).await.is_none());
+        assert!(engine.state.ends.lock().await.try_recv().is_err());
+        assert!(engine.state.steers.lock().unwrap().is_empty());
+        assert_eq!(driver.delivered_through, Some(4));
+        assert!(driver.inbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_managed_stop_parks_without_input_and_follow_up_keeps_its_turn_identity() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        let mut driver = driver(engine.clone(), &url, &inputs("turn", None));
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        let runtime_id = driver.runtime_id;
+        let stop = stop_message(1, 1, runtime_id);
+        let run = tokio::spawn(driver.run());
+        wait_for(&state, |_| engine.turns().len() == 1).await;
+        state
+            .lock()
+            .unwrap()
+            .messages
+            .push((stop.seq, stop.body, stop.interrupt));
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_interrupted")
+                && supervisor
+                    .polls
+                    .iter()
+                    .any(|poll| poll["delivered_through_seq"] == 1)
+        })
+        .await;
+        assert_eq!(
+            engine.turns().len(),
+            1,
+            "Stop must not create a synthetic turn"
+        );
+        assert!(engine.state.steers.lock().unwrap().is_empty());
+        let started = event_payload(&state, "supervisor_started", 0);
+        assert_eq!(started["stop_protocol"], 1);
+        assert_eq!(started["turn_identity_protocol"], 1);
+        let first = event_payload(&state, "turn_started", 0);
+        assert_eq!(first["source"], "spawn_task");
+        assert_eq!(first["runtime_id"], runtime_id.to_string());
+        assert_eq!(
+            event_payload(&state, "turn_interrupted", 0)["runtime_id"],
+            runtime_id.to_string()
+        );
+        assert_eq!(first["input_message_seqs"], serde_json::json!([]));
+
+        state
+            .lock()
+            .unwrap()
+            .messages
+            .push((2, "prepare a plan".into(), false));
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .filter(|(kind, _)| kind == "turn_started")
+                .count()
+                == 2
+        })
+        .await;
+        let turns = engine.turns();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].turn, 2);
+        assert_eq!(turns[1].input, "prepare a plan");
+        let second = event_payload(&state, "turn_started", 1);
+        assert_eq!(second["source"], "inbox");
+        assert_eq!(second["runtime_id"], runtime_id.to_string());
+        assert_eq!(second["input_message_seqs"], serde_json::json!([2]));
+        engine.finish(TurnEnd::Completed { success: true });
+        state.lock().unwrap().stop = Some("cancelled".into());
+        run.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stop_behind_queued_input_preempts_without_becoming_turn_input() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        engine.state.refuse_steer.store(true, Ordering::SeqCst);
+        let mut driver = driver(engine.clone(), &url, &inputs("turn", None));
+        driver.sandbox_id = Some("018f0000-0000-7000-8000-000000000000".into());
+        let stop = stop_message(2, 1, driver.runtime_id);
+        let run = tokio::spawn(driver.run());
+        wait_for(&state, |_| engine.turns().len() == 1).await;
+        state.lock().unwrap().messages.extend([
+            (1, "prepare a plan".into(), false),
+            (stop.seq, stop.body, stop.interrupt),
+        ]);
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .filter(|(kind, _)| kind == "turn_started")
+                .count()
+                == 2
+        })
+        .await;
+        assert_eq!(engine.turns()[1].input, "prepare a plan");
+        let second = event_payload(&state, "turn_started", 1);
+        assert_eq!(second["turn"], 2);
+        assert_eq!(second["input_message_seqs"], serde_json::json!([1]));
+        assert!(engine.state.steers.lock().unwrap().is_empty());
+        engine.finish(TurnEnd::Completed { success: true });
+        state.lock().unwrap().stop = Some("cancelled".into());
         run.await.unwrap().unwrap();
     }
 

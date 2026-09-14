@@ -259,10 +259,7 @@ const recoverySession: CodeSessionSnapshot = {
 
 const forkSource: CodeForkTranscript = {
   path: "/Users/sam/tidebreak/private/forks/sess-pane-redesign/turn-drag/transcript.md",
-  dir: "/Users/sam/tidebreak/private/forks/sess-pane-redesign/turn-drag",
-  byte_len: 3_842,
   turns: 2,
-  total_turns: 2,
   truncated: false,
 };
 
@@ -798,7 +795,6 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     getCodeSubscriptionUsage: async () => ({
       source: "local",
       providers: [],
-      diagnostics: [],
     }),
     getCodeCloneDefaults: async () => ({
       gh_found: true,

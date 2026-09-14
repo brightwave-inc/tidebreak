@@ -331,7 +331,24 @@ async fn apply_one(
     event: &SandboxEvent,
     outcome: &mut IngestOutcome,
 ) -> Result<bool, tidebreak_core::AgentError> {
-    let projection = project_event(binding, &event.kind, &event.payload);
+    // Exact native lifecycle projection waits for the matching input receipt.
+    // Its journal and hosted status commit together, even if receipt delivery races this page.
+    let native_lifecycle = matches!(
+        event.kind.as_str(),
+        "turn_started" | "assistant_record" | "turn_completed" | "turn_interrupted"
+    ) && tidebreak_core::db::code::native_turn_identity_runtime(
+        db,
+        &binding.owner,
+        binding.session_id,
+        binding.incarnation,
+    )
+    .await?
+    .is_some();
+    let projection = if native_lifecycle {
+        Projection::default()
+    } else {
+        project_event(binding, &event.kind, &event.payload)
+    };
     if projection.unrecognized {
         outcome.unrecognized += 1;
         warn!(

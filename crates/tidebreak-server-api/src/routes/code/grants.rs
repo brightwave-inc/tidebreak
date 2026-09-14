@@ -44,32 +44,6 @@ fn confirmation_token(headers: &HeaderMap) -> Result<&str, ServerError> {
 
 /// `GET /code/grants` — every grant the owner holds, revoked ones
 /// included so a theft-triggered revoke and its reason stay visible.
-async fn snapshot_grant(
-    code: &ScopedCode,
-    grant: tidebreak_core::CodeExternalGrant,
-    profile: Option<tidebreak_core::CodeGrantProfile>,
-) -> Result<CodeGrantSnapshot, ServerError> {
-    let mut snapshot = CodeGrantSnapshot::from_grant_and_profile(grant.clone(), profile);
-    if grant.kind.is_workspace() {
-        let channels = code
-            .list_channel_repository_confirms(&grant.owner, grant.id)
-            .await?
-            .into_iter()
-            .map(|row| crate::code::types::CodeGrantChannelSnapshot {
-                channel_id: row.channel_id,
-                repository: row.repository,
-                state: row.state.as_str().to_owned(),
-                set_by_identity: row.set_by_identity,
-                set_by_display: row.set_by_display,
-            })
-            .collect();
-        snapshot = snapshot.with_channels(channels);
-    }
-    Ok(snapshot)
-}
-
-/// `GET /code/grants` — every grant the owner holds, revoked ones
-/// included so a theft-triggered revoke and its reason stay visible.
 /// Admins also see workspace grants owned by the service principal.
 pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>>, ServerError> {
     let mut grants = code.list_adapter_grants().await?;
@@ -94,7 +68,7 @@ pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>
     let mut snapshots = Vec::new();
     for grant in grants {
         let profile = profiles.remove(&grant.id);
-        snapshots.push(snapshot_grant(&code, grant, profile).await?);
+        snapshots.push(CodeGrantSnapshot::from_grant_and_profile(grant, profile));
     }
     Ok(Json(snapshots))
 }
@@ -232,6 +206,7 @@ pub async fn connect_view(
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(CodeConnectPage {
+        inference_sponsorship_supported: code.inference_sponsorship_supported().await?,
         channel_kind: handshake.channel_kind,
         display_name: handshake.display_name,
         workspace_name: handshake.workspace_name,
@@ -246,6 +221,8 @@ pub async fn connect_view(
 #[serde(deny_unknown_fields)]
 pub struct ConnectApproveBody {
     pub csrf: String,
+    #[serde(default)]
+    pub inference_sponsorship: Option<crate::obo_gateway::external::InferenceSponsorshipConsent>,
 }
 
 /// `POST /external/connect/{nonce}/approve` — the owner's "is this you?".
@@ -256,9 +233,14 @@ pub async fn connect_approve(
     lease: Option<axum::Extension<crate::auth::GatewayAuthLease>>,
     Json(body): Json<ConnectApproveBody>,
 ) -> Result<StatusCode, ServerError> {
-    code.approve_connect_handshake(&nonce, &body.csrf, lease.as_ref().map(|lease| &lease.0))
-        .await?
-        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
+    code.approve_connect_handshake_with_consent(
+        &nonce,
+        &body.csrf,
+        lease.as_ref().map(|lease| &lease.0),
+        body.inference_sponsorship.as_ref(),
+    )
+    .await?
+    .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -373,6 +355,7 @@ pub async fn view_workspace_grant(
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(CodeConnectPage {
+        inference_sponsorship_supported: false,
         channel_kind: handshake.channel_kind,
         display_name: handshake.display_name,
         workspace_name: handshake.workspace_name,

@@ -1,6 +1,6 @@
 # 62. Per-caller gateway entitlements on hosted machines
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 - Owners: server
 - Related: [`0049-gateway-authenticated-hosted-machines.md`](0049-gateway-authenticated-hosted-machines.md),

@@ -259,10 +259,7 @@ export const ForkedFromAnotherAgent: Story = {
   args: {
     fork: {
       path: "/private/forks/9c1f4a2e/6a01/transcript.md",
-      dir: "/private/forks/9c1f4a2e/6a01",
-      byte_len: 48_120,
       turns: 14,
-      total_turns: 14,
       truncated: false,
     },
   },
@@ -276,10 +273,7 @@ export const ForkedFromAnEarlierTurn: Story = {
   args: {
     fork: {
       path: "/private/forks/9c1f4a2e/8b22/transcript.md",
-      dir: "/private/forks/9c1f4a2e/8b22",
-      byte_len: 21_004,
       turns: 7,
-      total_turns: 7,
       at_turn_ordinal: 7,
       truncated: false,
     },
@@ -291,10 +285,7 @@ export const ForkedFromALongSession: Story = {
   args: {
     fork: {
       path: "/private/forks/3b70de55/1c9d/transcript.md",
-      dir: "/private/forks/3b70de55/1c9d",
-      byte_len: 524_288,
       turns: 6,
-      total_turns: 41,
       truncated: true,
     },
   },

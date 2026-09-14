@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { CodeApprovalCard } from "@/code/CodeApprovalCard";
 import type { CodeApprovalSnapshot } from "@/api/types";
@@ -157,6 +157,127 @@ export const Plan: Story = {
       ...pending,
       kind: { type: "plan", proposed_mode: "auto" },
       harness_raw_json: "",
+    },
+  },
+};
+
+export const QuestionsSelected: Story = {
+  args: Questions.args,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("radio", { name: "us-east" }));
+    await expect(
+      canvas.getByRole("button", { name: "Continue" }),
+    ).toBeEnabled();
+  },
+};
+export const QuestionsSending: Story = {
+  args: { ...Questions.args, deciding: true },
+};
+export const QuestionsSaveFailed: Story = {
+  args: {
+    ...Questions.args,
+    error: "Your answer could not be saved. Try again.",
+  },
+  play: QuestionsSelected.play,
+};
+export const QuestionsReadOnly: Story = {
+  args: { ...Questions.args, canDecide: false },
+};
+export const QuestionsMultiSelect: Story = {
+  args: {
+    approval: {
+      ...pending,
+      harness_raw_json: "",
+      kind: {
+        type: "questions",
+        questions: [
+          {
+            id: "checks",
+            header: "Checks",
+            question: "Which checks should run before deployment?",
+            question_type: "multi_select",
+            allow_free_form: true,
+            options: [
+              {
+                id: "unit",
+                label: "Unit tests",
+                description: "Run the focused test suite.",
+              },
+              {
+                id: "browser",
+                label: "Browser tests",
+                description: "Check the complete user journey.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("checkbox", { name: "Unit tests" }));
+    await userEvent.click(
+      canvas.getByRole("checkbox", { name: "Browser tests" }),
+    );
+    await userEvent.type(
+      canvas.getByRole("textbox", { name: "Other answer" }),
+      "Check the service logs",
+    );
+  },
+};
+export const QuestionsSeveralPages: Story = {
+  args: {
+    approval: {
+      ...pending,
+      harness_raw_json: "",
+      kind: {
+        type: "questions",
+        questions: [
+          {
+            id: "environment",
+            header: "Environment",
+            question: "Which environment should receive this deployment?",
+            question_type: "single_select",
+            allow_free_form: false,
+            options: [
+              {
+                id: "staging",
+                label: "Staging",
+                description: "Verify the change before production.",
+              },
+              {
+                id: "production",
+                label: "Production",
+                description: "Deploy to the live environment.",
+              },
+            ],
+          },
+          {
+            id: "notes",
+            header: "Notes",
+            question: "What else should the agent verify?",
+            question_type: "single_select",
+            allow_free_form: true,
+            options: [],
+          },
+          {
+            id: "later",
+            header: "Follow-up",
+            question: "Which follow-up should the agent prepare?",
+            question_type: "single_select",
+            allow_free_form: false,
+            options: [
+              {
+                id: "release",
+                label: "Release notes",
+                description: "Write a short summary of the final changes.",
+              },
+            ],
+          },
+        ],
+      },
     },
   },
 };

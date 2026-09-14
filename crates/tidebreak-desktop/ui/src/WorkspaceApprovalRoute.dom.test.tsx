@@ -8,6 +8,7 @@ import { WorkspaceApprovalView } from "./WorkspaceApprovalRoute";
 
 const page: CodeConnectPage = {
   channel_kind: "slack",
+  inference_sponsorship_supported: false,
   display_name: "tidebreak-slack",
   workspace_name: "Acme Corp",
   state: "pending",

@@ -1,6 +1,6 @@
 # 68. Memory: One Record Vocabulary Behind a Backend Boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Owners: memory
 - Related: decisions 19, 21, 31, 33, 35, 48, 50, 53, 60, 61, 67;

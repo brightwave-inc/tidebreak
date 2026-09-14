@@ -373,12 +373,13 @@ fn user_message_digest(messages: &[Message]) -> Option<String> {
         .filter(|message| message.role == Role::User)
         .take(MAX_TITLE_SOURCE_MESSAGES)
     {
-        let text = head(message.content.trim(), MAX_TITLE_SOURCE_MESSAGE_BYTES);
+        let (text, _) =
+            tidebreak_core::truncate_utf8(message.content.trim(), MAX_TITLE_SOURCE_MESSAGE_BYTES);
         if text.is_empty() {
             continue;
         }
         digest.push_str("<message>\n");
-        digest.push_str(text);
+        digest.push_str(&text);
         digest.push_str("\n</message>\n");
     }
     (!digest.is_empty()).then_some(digest)
@@ -533,14 +534,12 @@ fn normalize_derived(proposed: &str, max_chars: usize) -> Option<String> {
 
 /// The leading `max_bytes` of `text`, cut on a character boundary.
 pub(crate) fn head(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
+    let (owned, truncated) = tidebreak_core::truncate_utf8(text, max_bytes);
+    if truncated {
+        &text[..owned.len()]
+    } else {
+        text
     }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 #[cfg(test)]

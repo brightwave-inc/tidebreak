@@ -361,6 +361,29 @@ impl super::runtime::CodeRuntime {
         csrf: &str,
         lease: Option<&crate::auth::GatewayAuthLease>,
     ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        self.approve_connect_handshake_with_consent(owner, nonce, csrf, lease, None)
+            .await
+    }
+
+    pub async fn approve_connect_handshake_with_consent(
+        &self,
+        owner: &OwnerId,
+        nonce: &str,
+        csrf: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
+        consent: Option<&crate::obo_gateway::external::InferenceSponsorshipConsent>,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        if consent.is_some()
+            && self
+                .harness_llm()
+                .and_then(|r| r.external_delegations().cloned())
+                .is_none()
+        {
+            return Err(ServerError::conflict_kind(
+                "inference_sponsorship_unsupported",
+                "This deployment does not support subscription preferences.",
+            ));
+        }
         if let Some(external) = self
             .harness_llm()
             .and_then(|relay| relay.external_delegations().cloned())
@@ -378,7 +401,7 @@ impl super::runtime::CodeRuntime {
                 ServerError::unauthorized("sign in again to approve this external connection")
             })?;
             lease
-                .enroll_external_delegation(&external, owner, handshake.id)
+                .enroll_external_delegation_with_consent(&external, owner, handshake.id, consent)
                 .await?;
         }
         Ok(

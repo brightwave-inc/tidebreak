@@ -1,5 +1,6 @@
 import type {
   CodeApprovalSnapshot,
+  CodeApprovalDecisionBody,
   CodeSessionSnapshot,
   CodeUpdateNotice,
   SequencedCodeEventFrame,
@@ -97,7 +98,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
 
     async decideCodeApproval(
       approvalId: string,
-      body: { decision: "approve" | "deny"; feedback?: string },
+      body: CodeApprovalDecisionBody,
     ): Promise<CodeApprovalSnapshot> {
       return requireParsed(
         parseCodeApproval(

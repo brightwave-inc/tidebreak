@@ -10,6 +10,7 @@ import {
   type AppViewSession,
   type ApprovalGrantRung,
   type ApprovalClass,
+  type ApprovalDecisionBody as WireApprovalDecisionBody,
   type AssistantCitationSnapshot,
   type CitationLocator as WireCitationLocator,
   type ChatMessageSnapshot,
@@ -215,6 +216,11 @@ import {
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   type CodeWorktreeRoot as WireCodeWorktreeRoot,
   type CodeForkTranscript as WireCodeForkTranscript,
+  type CodeSubscriptionUsage as WireCodeSubscriptionUsage,
+  type CodeSubscriptionUsageProvider as WireCodeSubscriptionUsageProvider,
+  type CodeSubscriptionUsageAccount as WireCodeSubscriptionUsageAccount,
+  type CodeSubscriptionUsageWindow as WireCodeSubscriptionUsageWindow,
+  type CodeSubscriptionUsageSource as WireCodeSubscriptionUsageSource,
   type CodeCheckLog as WireCodeCheckLog,
   type CodeCheckLogError as WireCodeCheckLogError,
   type CodeCheckLogsSnapshot as WireCodeCheckLogsSnapshot,
@@ -1280,6 +1286,8 @@ export type WorkspaceId = WireWorkspaceId;
 export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
 /** One durable conversation with an external coding engine. */
 export type CodeSessionSnapshot = WireCodeSessionSnapshot;
+export type CodeApprovalDecisionBody = WireApprovalDecisionBody;
+export type CodeApprovalDecision = WireApprovalDecisionBody["decision"];
 export type CodeGrantSnapshot = WireCodeGrantSnapshot;
 export type CodeConnectPage = WireCodeConnectPage;
 export type SessionId = WireCodeSessionId;
@@ -1359,35 +1367,11 @@ export type CodeCheckLogError = WireCodeCheckLogError;
 export type CodeCheckLogsSnapshot = WireCodeCheckLogsSnapshot;
 
 /** Subscription quota windows exposed by Model Gateway or a direct harness. */
-export type CodeSubscriptionUsage = {
-  source: "model_gateway" | "direct" | "unavailable";
-  providers: CodeSubscriptionUsageProvider[];
-  diagnostics: string[];
-};
-
-export type CodeSubscriptionUsageProvider = {
-  id: string;
-  label: string;
-  accounts: CodeSubscriptionUsageAccount[];
-};
-
-export type CodeSubscriptionUsageAccount = {
-  id: string;
-  label: string;
-  is_own: boolean;
-  state: string;
-  updated_at_unix_seconds?: number;
-  windows: CodeSubscriptionUsageWindow[];
-};
-
-export type CodeSubscriptionUsageWindow = {
-  key: string;
-  label: string;
-  used_percent: number;
-  resets_at_unix_seconds?: number;
-  status?: string;
-  model_scope?: string;
-};
+export type CodeSubscriptionUsage = WireCodeSubscriptionUsage;
+export type CodeSubscriptionUsageProvider = WireCodeSubscriptionUsageProvider;
+export type CodeSubscriptionUsageAccount = WireCodeSubscriptionUsageAccount;
+export type CodeSubscriptionUsageWindow = WireCodeSubscriptionUsageWindow;
+export type CodeSubscriptionUsageSource = WireCodeSubscriptionUsageSource;
 
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
 export type CodeApprovalSnapshot = WireCodeApprovalSnapshot;

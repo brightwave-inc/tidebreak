@@ -754,6 +754,14 @@ impl ScopedCode {
             .await
     }
 
+    pub async fn inference_resolutions(
+        &self,
+        id: SessionId,
+    ) -> Result<Vec<tidebreak_core::code::inference::InferenceResolution>, ServerError> {
+        let owner = self.session_owner_for_read(id).await?;
+        Ok(tidebreak_core::db::code::inference_resolutions(&self.runtime.db, &owner, id).await?)
+    }
+
     pub async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
         Ok(self.session_access(id).await?.session)
     }
@@ -1087,6 +1095,38 @@ impl ScopedCode {
         self.runtime.list_workspace_grants_all_owners().await
     }
 
+    pub async fn inference_sponsorship_supported(&self) -> Result<bool, ServerError> {
+        self.runtime.inference_sponsorship_supported().await
+    }
+    pub async fn personal_inference_preferences(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+    ) -> Result<super::inference_preferences::PersonalInferenceSnapshot, ServerError> {
+        if self.is_service() {
+            return Err(ServerError::forbidden(
+                "a person must manage their subscription preference",
+            ));
+        }
+        self.runtime
+            .personal_inference_preferences(&self.owner, id)
+            .await
+    }
+    pub async fn set_personal_inference_preferences(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        preferences: &super::inference_preferences::PersonalInferencePreferences,
+        lease: Option<&crate::auth::GatewayAuthLease>,
+    ) -> Result<super::inference_preferences::PersonalInferenceSnapshot, ServerError> {
+        if self.is_service() {
+            return Err(ServerError::forbidden(
+                "a person must manage their subscription preference",
+            ));
+        }
+        self.runtime
+            .set_personal_inference_preferences(&self.owner, id, preferences, lease)
+            .await
+    }
+
     pub async fn channel_preferences_grant(
         &self,
         id: tidebreak_core::CodeGrantId,
@@ -1283,6 +1323,18 @@ impl ScopedCode {
     ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
         self.runtime
             .approve_connect_handshake(&self.owner, nonce, csrf, lease)
+            .await
+    }
+
+    pub async fn approve_connect_handshake_with_consent(
+        &self,
+        nonce: &str,
+        csrf: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
+        consent: Option<&crate::obo_gateway::external::InferenceSponsorshipConsent>,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        self.runtime
+            .approve_connect_handshake_with_consent(&self.owner, nonce, csrf, lease, consent)
             .await
     }
 

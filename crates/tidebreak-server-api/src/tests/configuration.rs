@@ -2798,7 +2798,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
     .await
     .unwrap();
 
-    let resolver = resolver::KeyedResolver::new(
+    let resolver = resolver::ConfiguredResolver::new(
         store.clone(),
         secrets.clone(),
         crate::gateway_runtime::GatewayRuntime::new(
@@ -2900,7 +2900,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
 
-        let resolver = resolver::KeyedResolver::new(
+        let resolver = resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
             crate::gateway_runtime::GatewayRuntime::new(
@@ -3537,7 +3537,7 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
     let provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource> = Arc::new(
         crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
     );
-    let resolver = resolver::KeyedResolver::new(
+    let resolver = resolver::ConfiguredResolver::new(
         store.clone(),
         secrets.clone(),
         crate::gateway_runtime::GatewayRuntime::new(

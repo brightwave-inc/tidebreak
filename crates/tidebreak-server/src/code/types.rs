@@ -70,20 +70,6 @@ pub struct CodeGrantSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revoked_reason: Option<String>,
-    /// Channels and repositories a workspace grant covers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub channels: Option<Vec<CodeGrantChannelSnapshot>>,
-}
-
-/// One channel and repository a workspace grant has named.
-#[derive(Debug, Clone, Serialize, TS)]
-pub struct CodeGrantChannelSnapshot {
-    pub channel_id: String,
-    pub repository: String,
-    pub state: String,
-    pub set_by_identity: String,
-    pub set_by_display: String,
 }
 
 impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
@@ -101,7 +87,6 @@ impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
             created_at: grant.created_at,
             revoked_at: grant.revoked_at,
             revoked_reason: grant.revoked_reason,
-            channels: None,
         }
     }
 }
@@ -124,21 +109,14 @@ impl CodeGrantSnapshot {
             None => snapshot,
         }
     }
-
-    pub fn with_channels(mut self, channels: Vec<CodeGrantChannelSnapshot>) -> Self {
-        self.channels = if channels.is_empty() {
-            None
-        } else {
-            Some(channels)
-        };
-        self
-    }
 }
 
 /// What the connect approval page renders: the identity being linked and
 /// the CSRF token its "is this you?" POST must echo.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct CodeConnectPage {
+    #[serde(default)]
+    pub inference_sponsorship_supported: bool,
     /// Which channel family is linking (for example `slack`).
     pub channel_kind: String,
     /// The person's display name in the channel.
@@ -275,6 +253,10 @@ pub struct SessionExternalOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    /// Gateway reports provider choices only after resolving a model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inference_resolutions: Option<Vec<tidebreak_core::code::inference::InferenceResolution>>,
     /// The authenticated caller's access. Event frames omit caller-specific fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -357,6 +339,7 @@ impl From<Session> for SessionSnapshot {
     fn from(session: Session) -> Self {
         let acts_as = session.acts_as();
         Self {
+            inference_resolutions: None,
             access: None,
             is_owner: None,
             id: session.id,
@@ -890,18 +873,12 @@ pub struct CodeRepoSource {
 /// A written fork handoff: `POST /sessions/{id}/fork`.
 ///
 /// `path` is the condensed transcript, absolute under private storage so a
-/// child agent of any engine can read it without Git ever indexing it. `dir`
-/// is the fork's own directory, which also holds one full per-turn record —
-/// `turn-0007.md` for turn 7 — and any retained image attachments.
+/// child agent of any engine can read it without Git ever indexing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeForkTranscript {
     pub path: String,
-    pub dir: String,
-    pub byte_len: u64,
     /// Complete turn histories the condensed transcript renders in full.
     pub turns: u32,
-    /// Turns the fork covers, up to and including the fork point.
-    pub total_turns: u32,
     /// The fork point's turn ordinal, present when the conversation
     /// continued past it — later turns are excluded from the handoff.
     #[serde(skip_serializing_if = "Option::is_none")]

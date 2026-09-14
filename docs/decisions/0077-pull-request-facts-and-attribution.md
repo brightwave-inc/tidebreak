@@ -1,6 +1,6 @@
 # 77. Pull Request Facts And Attribution
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 - Owners: code mode
 - Related: [`0042-user-initiated-pr-merge.md`](0042-user-initiated-pr-merge.md),

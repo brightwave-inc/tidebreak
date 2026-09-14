@@ -43,43 +43,6 @@ const workspace: CodeGrantSnapshot = {
   workspace_identity: "T-ACME",
   workspace_name: "Acme Corp",
   created_at: "2026-09-08T10:00:00Z",
-  channels: [
-    {
-      channel_id: "C1",
-      repository: "acme/tools",
-      state: "confirmed",
-      set_by_identity: "U1",
-      set_by_display: "Casey",
-    },
-    {
-      channel_id: "C1",
-      repository: "acme/web",
-      state: "pending",
-      set_by_identity: "U1",
-      set_by_display: "Casey",
-    },
-    {
-      channel_id: "C1",
-      repository: "acme/api",
-      state: "pending",
-      set_by_identity: "U1",
-      set_by_display: "Casey",
-    },
-    {
-      channel_id: "C1",
-      repository: "acme/legacy",
-      state: "superseded",
-      set_by_identity: "U1",
-      set_by_display: "Casey",
-    },
-    {
-      channel_id: "C2",
-      repository: "acme/private",
-      state: "pending",
-      set_by_identity: "U2",
-      set_by_display: "Sam",
-    },
-  ],
 };
 
 afterEach(cleanup);
@@ -152,17 +115,12 @@ describe("ChannelsPanel", () => {
         name: /Approve|Add channel|Add repositories/,
       }),
     ).toBeNull();
-    // Old approval records do not define or display the instance's access.
-    for (const entry of workspace.channels ?? []) {
-      expect(screen.queryByText(entry.repository)).toBeNull();
-      expect(screen.queryByText(entry.channel_id)).toBeNull();
-    }
     expect(screen.queryByText("Pending approval")).toBeNull();
   });
 
   it("lets a workspace start using GitHub App access before its first task", async () => {
     const client = {
-      listCodeGrants: vi.fn(async () => [{ ...workspace, channels: [] }]),
+      listCodeGrants: vi.fn(async () => [workspace]),
     } as unknown as ApiClient;
     render(<ChannelsPanel client={client} />);
     await screen.findByText("Workspace Acme Corp");
@@ -254,4 +212,18 @@ describe("ChannelsPanel", () => {
     expect(await screen.findByText("No channels connected")).toBeTruthy();
     expect(listCodeGrants).toHaveBeenCalledTimes(2);
   });
+});
+
+it("offers personal subscription settings only for live person grants", async () => {
+  const open = vi.fn();
+  const client = {
+    listCodeGrants: async () => [live, stolen, workspace],
+  } as unknown as ApiClient;
+  render(<ChannelsPanel client={client} onOpenInferencePreferences={open} />);
+  const buttons = await screen.findAllByRole("button", {
+    name: "Subscription settings",
+  });
+  expect(buttons).toHaveLength(1);
+  await userEvent.setup().click(buttons[0]);
+  expect(open).toHaveBeenCalledExactlyOnceWith(live.id);
 });

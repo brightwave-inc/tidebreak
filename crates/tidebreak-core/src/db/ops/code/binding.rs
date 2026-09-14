@@ -130,6 +130,8 @@ where
 /// session's model and harness. The binding transaction freezes it once.
 #[derive(Debug, Clone, Copy)]
 pub struct ExternalSessionChannelContext<'a> {
+    pub parent: Option<(SessionId, &'a str)>,
+    pub inference: Option<&'a crate::code::inference::PreparedSessionInference>,
     pub channel_id: Option<&'a str>,
     pub instructions: &'a str,
 }
@@ -239,6 +241,21 @@ async fn resolve_external_session_inner(
         return Ok(resolution);
     }
     if let Some(context) = context {
+        if let Some((parent, key)) = context.parent {
+            if parent == session.id
+                || key.is_empty()
+                || key.len() > 128
+                || entities::session::Entity::find_by_id(parent.0)
+                    .one(&transaction)
+                    .await
+                    .map_err(store_err)?
+                    .is_none_or(|row| row.owner != owner.as_str())
+            {
+                return Err(crate::AgentError::InvalidTarget(
+                    "invalid parent conversation".into(),
+                ));
+            }
+        }
         if context.instructions.len() > 8_192 || context.instructions.contains('\0') {
             return Err(crate::AgentError::InvalidTarget(
                 "channel instructions exceed their limit".into(),
@@ -261,6 +278,14 @@ async fn resolve_external_session_inner(
     }
     super::session::insert_session_on(&transaction, session).await?;
     if let Some(context) = context {
+        if let Some(selection) = context.inference {
+            super::inference::insert_inference_on(
+                &transaction,
+                session.id,
+                &selection.freeze(session.id),
+            )
+            .await?;
+        }
         entities::setting::ActiveModel {
             key: Set(format!("code.session.{}.channel_instructions", session.id)),
             value_json: Set(serde_json::json!(context.instructions)),
@@ -271,8 +296,8 @@ async fn resolve_external_session_inner(
         entities::code_session_context::ActiveModel {
             session_id: Set(session.id.0),
             channel_id: Set(context.channel_id.map(str::to_owned)),
-            parent_session_id: Set(None),
-            request_key: Set(None),
+            parent_session_id: Set(context.parent.map(|p| p.0 .0)),
+            request_key: Set(context.parent.map(|p| p.1.to_owned())),
         }
         .insert(&transaction)
         .await

@@ -11,7 +11,7 @@ use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::code::{RepoId, WorkspaceId};
+use crate::code::RepoId;
 use crate::id::{MessageId, SessionId, TurnId};
 use crate::model::OwnerId;
 
@@ -247,12 +247,6 @@ pub struct MemoryOrigin {
     /// Originating code session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_session_id: Option<SessionId>,
-    /// Originating code turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_turn_id: Option<TurnId>,
-    /// Workspace attached to the originating code session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<WorkspaceId>,
 }
 
 /// One exact source that justifies a model-authored record.

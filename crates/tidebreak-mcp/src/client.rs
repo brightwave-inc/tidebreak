@@ -1123,12 +1123,12 @@ struct CallToolResponse {
 /// complete one.
 fn clamp_call_result(mut content: String, data: Option<Value>) -> (String, Option<Value>) {
     if content.len() > MAX_CALL_RESULT_BYTES {
-        let mut cut = MAX_CALL_RESULT_BYTES - CALL_RESULT_TRUNCATION_MARKER.len();
-        while cut > 0 && !content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        content.truncate(cut);
-        content.push_str(CALL_RESULT_TRUNCATION_MARKER);
+        let (mut truncated, _) = tidebreak_core::truncate_utf8(
+            &content,
+            MAX_CALL_RESULT_BYTES - CALL_RESULT_TRUNCATION_MARKER.len(),
+        );
+        truncated.push_str(CALL_RESULT_TRUNCATION_MARKER);
+        content = truncated;
     }
     let oversized_data = data.as_ref().is_some_and(|data| {
         serde_json::to_vec(data).is_ok_and(|bytes| bytes.len() > MAX_CALL_RESULT_BYTES)

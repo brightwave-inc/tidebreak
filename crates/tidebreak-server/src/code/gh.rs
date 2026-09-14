@@ -17,14 +17,15 @@ use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
 use tidebreak_harness::{
-    filter_child_env, probe_shell, spawn_process_tree, BoundedProcessOutput, HostEnv, OutputBudget,
+    filter_child_env, probe_shell, BoundedProcessOutput, HostEnv, OutputBudget,
 };
 
+use super::git_runner;
 use super::setup_script::{missing_image_toolchain_notice, spawn_workspace_script};
 use crate::code::types::CodeGitHubRepositoryTarget;
 use crate::obo_gateway::GitCredential;
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_TIMEOUT: Duration = git_runner::GIT_TIMEOUT;
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,10 +33,10 @@ const MAX_OUTPUT_CHARS: usize = 4_096;
 const MAX_UNTRACKED_DIFFSTAT_BYTES: u64 = 1024 * 1024;
 const MAX_ACTION_OUTPUT_BYTES: usize = 4_096;
 const MAX_ACTION_OUTPUT_LINES: usize = 256;
-const GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const GIT_OUTPUT_LINES: usize = 200_000;
-const GIT_ERROR_BYTES: usize = 64 * 1024;
-const GIT_ERROR_LINES: usize = 2_048;
+const GIT_OUTPUT_BYTES: usize = git_runner::STDOUT_BYTES;
+const GIT_OUTPUT_LINES: usize = git_runner::STDOUT_LINES;
+const GIT_ERROR_BYTES: usize = git_runner::STDERR_BYTES;
+const GIT_ERROR_LINES: usize = git_runner::STDERR_LINES;
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 pub const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
 pub const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
@@ -1129,8 +1130,9 @@ fn parse_workspace_file_status(status: &str) -> super::types::CodeWorkspaceGitSt
 }
 
 async fn has_uncommitted_work(worktree: &Path) -> Result<bool, GhError> {
-    let status = git(worktree, &["status", "--porcelain"], GIT_TIMEOUT).await?;
-    Ok(!status.is_empty())
+    git_runner::has_uncommitted_work(worktree)
+        .await
+        .map_err(GhError::from)
 }
 
 async fn cached_diffstat(worktree: &Path) -> Result<Diffstat, GhError> {
@@ -1749,50 +1751,21 @@ pub(crate) async fn wait_command_bounded(
     stderr_budget: OutputBudget,
     description: &str,
 ) -> Result<BoundedProcessOutput, String> {
-    let child = spawn_process_tree(command)
-        .map_err(|err| format!("failed to spawn {description}: {err}"))?;
-    timeout(
-        limit,
-        child.wait_with_bounded_output(stdout_budget, stderr_budget, true),
-    )
-    .await
-    .map_err(|_| format!("{description} timed out"))?
-    .map_err(|err| format!("{description} failed: {err}"))
+    git_runner::wait_command_bounded(command, limit, stdout_budget, stderr_budget, description)
+        .await
+        .map_err(|err| err.into_message(description))
 }
 
 fn finish_bounded_command(
     output: BoundedProcessOutput,
     accept_truncated_stdout: bool,
 ) -> Result<(Vec<u8>, bool), String> {
-    let stdout_truncated = output.stdout.truncated;
-    let stderr_truncated = output.stderr.truncated;
-    let stderr_empty = output.stderr.bytes.is_empty();
-    if output.status.success() && !output.terminated_for_output {
-        return if stdout_truncated && !accept_truncated_stdout {
-            Err("git output exceeded its limit".into())
-        } else {
-            Ok((output.stdout.bytes, stdout_truncated))
-        };
-    }
-    if output.terminated_for_output
-        && stdout_truncated
-        && !stderr_truncated
-        && stderr_empty
-        && accept_truncated_stdout
-    {
-        return Ok((output.stdout.bytes, true));
-    }
-    let stdout = output.stdout.into_marked_text().trim().to_owned();
-    let stderr = output.stderr.into_marked_text().trim().to_owned();
-    if output.terminated_for_output {
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(if detail.is_empty() {
-            "git output exceeded its limit".into()
-        } else {
-            detail
-        });
-    }
-    Err(if stderr.is_empty() { stdout } else { stderr })
+    git_runner::finish_bounded_command(
+        output,
+        accept_truncated_stdout,
+        "git output exceeded its limit",
+        false,
+    )
 }
 
 async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
@@ -1807,15 +1780,8 @@ async fn git_with_credential(
     limit: Duration,
     credential: Option<&GitCredential>,
 ) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut command = git_runner::git_command(Some(cwd));
+    command.args(args);
     if let Some(credential) = credential {
         command
             .env(GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
@@ -1825,8 +1791,8 @@ async fn git_with_credential(
     let output = wait_command_bounded(
         &mut command,
         limit,
-        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
-        OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
+        git_runner::default_stdout_budget(),
+        git_runner::default_stderr_budget(),
         &format!("git {}", args.join(" ")),
     )
     .await?;
@@ -2721,45 +2687,6 @@ mod tests {
         assert_eq!(
             generate_commit_message("first change", &stat),
             generate_commit_message("first change", &stat)
-        );
-    }
-
-    async fn oversized_head_output() -> BoundedProcessOutput {
-        let mut command = Command::new("head");
-        command
-            .args(["-c", "4096", "/dev/zero"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        wait_command_bounded(
-            &mut command,
-            Duration::from_secs(5),
-            OutputBudget::head(64, 8),
-            OutputBudget::tail(64, 8),
-            "head",
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn git_output_beyond_the_cap_is_truncated() {
-        let output = oversized_head_output().await;
-        assert!(output.stdout.truncated);
-        assert!(output.stdout.bytes.len() <= 64);
-        let marked = output.stdout.into_marked_text();
-        assert!(marked.contains("[output truncated]"));
-        let accepted = oversized_head_output().await;
-        let (finished, truncated) = finish_bounded_command(accepted, true).unwrap();
-        assert!(truncated);
-        assert!(
-            !String::from_utf8_lossy(&finished).contains("[output truncated]"),
-            "callers parse raw bytes; the marker must not be spliced in"
-        );
-        let refused = finish_bounded_command(oversized_head_output().await, false).unwrap_err();
-        assert!(
-            refused.contains("exceeded its limit") || refused.contains("[output truncated]"),
-            "{refused}"
         );
     }
 

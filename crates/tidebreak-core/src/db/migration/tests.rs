@@ -105,6 +105,8 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260911_000001_external_steer_admission",
             "m20260911_000002_external_steer_recovery",
             "m20260912_000001_managed_decisions",
+            "m20260914_000001_session_inference",
+            "m20260914_000002_native_turn_identity",
         ]
     );
     assert!(db

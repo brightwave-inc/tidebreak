@@ -190,7 +190,6 @@ describe("parseCodeSubscriptionUsage", () => {
   it("accepts normalized personal and shared provider windows", () => {
     const usage = {
       source: "model_gateway",
-      diagnostics: [],
       providers: [
         {
           id: "anthropic",
@@ -200,15 +199,11 @@ describe("parseCodeSubscriptionUsage", () => {
               id: "personal",
               label: "Personal",
               is_own: true,
-              state: "available",
-              updated_at_unix_seconds: 1_776_000_000,
               windows: [
                 {
                   key: "weekly",
                   label: "Weekly (7d)",
                   used_percent: 58,
-                  resets_at_unix_seconds: 1_776_086_400,
-                  status: "allowed",
                 },
               ],
             },
@@ -223,7 +218,6 @@ describe("parseCodeSubscriptionUsage", () => {
     const unavailable = {
       source: "unavailable",
       providers: [],
-      diagnostics: ["No machine-readable usage source was found."],
     };
     expect(parseCodeSubscriptionUsage(unavailable)).toEqual(unavailable);
     expect(
@@ -232,7 +226,6 @@ describe("parseCodeSubscriptionUsage", () => {
     expect(
       parseCodeSubscriptionUsage({
         source: "direct",
-        diagnostics: [],
         providers: [
           {
             id: "openai",
@@ -242,7 +235,6 @@ describe("parseCodeSubscriptionUsage", () => {
                 id: "codex",
                 label: "Codex Pro",
                 is_own: true,
-                state: "available",
                 windows: [
                   {
                     key: "session",
@@ -2231,4 +2223,57 @@ it("preserves Slack provenance in snapshots and live digests", () => {
       external_origin: { channel_kind: "slack", external_key: "" },
     }),
   ).toBeNull();
+});
+
+describe("parseCodeSession inference resolutions", () => {
+  const owned = {
+    scope_id: "scope-1",
+    provider: "anthropic",
+    source: "owned_subscription",
+  };
+  const fallback = {
+    scope_id: "scope-1",
+    provider: "openai",
+    source: "execution_default",
+    reason: "no_eligible_owned_subscription",
+  };
+  it("preserves resolved providers without inventing a result for older snapshots", () => {
+    expect(parseCodeSession(SESSION)).not.toHaveProperty(
+      "inference_resolutions",
+    );
+    expect(
+      parseCodeSession({ ...SESSION, inference_resolutions: [] })
+        ?.inference_resolutions,
+    ).toEqual([]);
+    expect(
+      parseCodeSession({ ...SESSION, inference_resolutions: [owned, fallback] })
+        ?.inference_resolutions,
+    ).toEqual([owned, fallback]);
+  });
+  it("discards legacy account labels from shared snapshots", () => {
+    expect(
+      parseCodeSession({
+        ...SESSION,
+        inference_resolutions: [
+          { ...owned, subscription_label: "private-account@example.test" },
+        ],
+      })?.inference_resolutions,
+    ).toEqual([owned]);
+  });
+  it("rejects malformed or conflicting provider resolutions", () => {
+    for (const inference_resolutions of [
+      null,
+      {},
+      [owned, owned],
+      [{ ...owned, scope_id: "" }],
+      [{ ...owned, source: "pending" }],
+      [{ ...owned, provider: "" }],
+      [{ ...owned, subscription_label: 17 }],
+      [{ ...owned, binding_id: "private" }],
+    ]) {
+      expect(
+        parseCodeSession({ ...SESSION, inference_resolutions }),
+      ).toBeNull();
+    }
+  });
 });

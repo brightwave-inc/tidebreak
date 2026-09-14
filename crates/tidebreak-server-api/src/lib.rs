@@ -950,6 +950,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/code/grants", get(routes::code::list_grants))
         .route(
+            "/code/grants/{id}/inference-preferences",
+            get(routes::code::get_personal_inference_preferences)
+                .put(routes::code::put_personal_inference_preferences),
+        )
+        .route(
             "/code/grants/{id}/channels/{channel_id}/preferences",
             get(routes::code::get_channel_preferences).put(routes::code::put_channel_preferences),
         )
@@ -1145,9 +1150,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/workspaces/{id}/terminals",
-            post(routes::code::create_terminal)
-                .get(routes::code::list_terminals)
-                .delete(routes::code::close_workspace_terminals),
+            post(routes::code::create_terminal).get(routes::code::list_terminals),
         )
         .route(
             "/code/workspaces/{id}/terminals/{tid}",

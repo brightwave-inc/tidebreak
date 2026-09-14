@@ -7831,6 +7831,8 @@ async fn external_channel_snapshot_commits_with_session_and_survives_replay() {
             session.harness_kind = HarnessKind::Internal;
         }
         let context = ExternalSessionChannelContext {
+            parent: None,
+            inference: None,
             channel_id: Some("C1"),
             instructions: "Original channel instructions.",
         };
@@ -7876,6 +7878,8 @@ async fn external_channel_snapshot_commits_with_session_and_survives_replay() {
             next_session.workspace_id = None;
         }
         let changed = ExternalSessionChannelContext {
+            parent: None,
+            inference: None,
             channel_id: Some("C2"),
             instructions: "Changed instructions.",
         };
@@ -7967,6 +7971,8 @@ async fn external_channel_snapshot_failure_rolls_back_session_and_binding() {
         Some(&workspace),
         &session,
         Some(ExternalSessionChannelContext {
+            parent: None,
+            inference: None,
             channel_id: Some("C1"),
             instructions: "Do not expose a partial session.",
         }),
@@ -9160,3 +9166,9 @@ async fn grant_revocation_waits_for_sqlite_writer() {
 async fn admin_grant_revocation_waits_for_sqlite_writer() {
     external_mutation_waits_for_sqlite_writer("admin-revoke").await;
 }
+
+#[path = "code_inference.rs"]
+mod inference;
+
+#[path = "code_native_turn_identity.rs"]
+mod native_turn_identity;

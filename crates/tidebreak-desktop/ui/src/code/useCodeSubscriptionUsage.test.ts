@@ -19,7 +19,6 @@ function deferred<T>() {
 function usage(providerId: string): CodeSubscriptionUsage {
   return {
     source: "model_gateway",
-    diagnostics: [],
     providers: [
       {
         id: providerId,

@@ -2418,3 +2418,73 @@ pub mod code_managed_decision {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// A frozen inference selection. The execution owner remains on the session.
+pub mod code_session_inference {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_session_inference")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        pub selection: Json,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Provider choices reported by Gateway, keyed by the conversation root.
+pub mod code_inference_resolution {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_inference_resolution")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub root_session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub provider: String,
+        pub resolution: Json,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_native_turn_input {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_native_turn_input")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub turn_id: Uuid,
+        pub incarnation_id: Uuid,
+        pub message_seq: Option<i64>,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+pub mod code_native_turn_observation {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_native_turn_observation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub incarnation_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub runtime_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub native_turn: i64,
+        pub source: String,
+        pub input_sequences: Json,
+        pub turn_id: Option<Uuid>,
+        pub terminal_status: Option<String>,
+        pub assistant_record: Option<Json>,
+        pub start_journaled: bool,
+        pub output_journaled: bool,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

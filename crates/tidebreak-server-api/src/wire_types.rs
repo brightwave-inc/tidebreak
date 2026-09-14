@@ -476,6 +476,7 @@ mod tests {
         generate::collect_from::<crate::routes::code::SetSessionVisibilityBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::TurnSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeAnalyticsSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::usage::CodeSubscriptionUsage>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::QueuedTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SequencedEventFrame>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessDoctorReport>(&cfg, &mut out);

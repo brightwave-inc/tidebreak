@@ -57,7 +57,10 @@ const stolen: CodeGrantSnapshot = {
 const meta = {
   title: "Settings/Channels",
   component: ChannelsPanel,
-  args: { client: stubClient([live, rotated, stolen]) },
+  args: {
+    client: stubClient([live, rotated, stolen]),
+    onOpenInferencePreferences: () => {},
+  },
   decorators: [
     (Story) => (
       <div className="mx-auto max-w-2xl pt-8">
@@ -109,43 +112,6 @@ const workspace: CodeGrantSnapshot = {
   kind: "workspace",
   external_identity: "T04ACME",
   display_name: "tidebreak-slack",
-  channels: [
-    {
-      channel_id: "C04ENGINEERING",
-      repository: "acme/service",
-      state: "confirmed",
-      set_by_identity: "U04CASEY",
-      set_by_display: "Casey Nakamura",
-    },
-    {
-      channel_id: "C04ENGINEERING",
-      repository: "acme/web",
-      state: "pending",
-      set_by_identity: "U04SAM",
-      set_by_display: "Sam Okafor",
-    },
-    {
-      channel_id: "C04ENGINEERING",
-      repository: "acme/infrastructure",
-      state: "pending",
-      set_by_identity: "U04SAM",
-      set_by_display: "Sam Okafor",
-    },
-    {
-      channel_id: "C04ENGINEERING",
-      repository: "acme/legacy",
-      state: "superseded",
-      set_by_identity: "U04CASEY",
-      set_by_display: "Casey Nakamura",
-    },
-    {
-      channel_id: "C04DESIGN",
-      repository: "acme/design-system",
-      state: "confirmed",
-      set_by_identity: "U04CASEY",
-      set_by_display: "Casey Nakamura",
-    },
-  ],
 };
 
 export const WorkspaceGitHubAccess: Story = {
@@ -166,7 +132,7 @@ export const WorkspaceGitHubAccess: Story = {
 };
 
 export const BeforeFirstTask: Story = {
-  args: { client: stubClient([{ ...workspace, channels: [] }]) },
+  args: { client: stubClient([workspace]) },
 };
 
 export const LongWorkspaceName: Story = {

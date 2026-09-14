@@ -1,6 +1,6 @@
 # 39. Allow Is a First-Class Code Permission Mode
 
-- Status: Proposed (amended 2026-08-18, see [Amendment](#amendment-2026-08-18))
+- Status: Accepted (amended 2026-08-18, see [Amendment](#amendment-2026-08-18))
 - Date: 2026-08-17
 - Owners: code mode, approvals
 - Related: [`0033-code-mode-approvals.md`](0033-code-mode-approvals.md),
