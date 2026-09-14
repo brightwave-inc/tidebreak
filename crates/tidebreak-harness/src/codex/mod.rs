@@ -271,6 +271,9 @@ fn capture_command_popup(
     let mut sent_slash = false;
     let mut chunk = [0_u8; 4096];
     while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
         match master.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
@@ -307,7 +310,13 @@ fn capture_command_popup(
         }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    let wait_deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < wait_deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     parse_command_popup(&captured)
 }
 
@@ -959,6 +968,27 @@ mod tests {
                     .into(),
             }]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_popup_capture_returns_when_the_child_exits() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        std::fs::write(&binary, "#!/bin/sh\nexec /bin/false\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let commands = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || capture_command_popup(&binary, &[])),
+        )
+        .await
+        .expect("command-list capture must not wait out a dead child")
+        .unwrap();
+        assert!(commands.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

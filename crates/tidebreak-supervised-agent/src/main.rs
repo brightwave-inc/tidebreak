@@ -258,6 +258,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tidebreak_core::{HarnessKind, SessionId};
 
+    fn is_engine_probe_invocation(line: &str) -> bool {
+        line == "--version"
+            || line == "login status"
+            || line.split_whitespace().next() == Some("--no-alt-screen")
+    }
+
     #[tokio::test]
     async fn missing_registration_acknowledgment_stops_before_catalog_bootstrap_and_launch() {
         let dir = tempfile::tempdir().unwrap();
@@ -315,9 +321,7 @@ mod tests {
         );
         let calls = std::fs::read_to_string(calls).unwrap();
         assert!(
-            calls
-                .lines()
-                .all(|line| line == "--version" || line == "login status"),
+            calls.lines().all(is_engine_probe_invocation),
             "only probe commands may run: {calls}"
         );
         let received = received.lock().unwrap();
