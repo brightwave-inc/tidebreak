@@ -408,10 +408,12 @@ rule per child, so the cascade cannot hang on a provider call.
 
 ## Credential separation
 
-The invariant for third-party (connected-app) credentials: a third-party
-credential never enters the agent's address space.
+The intended invariant for third-party (connected-app) credentials is that a
+third-party credential never enters the agent's address space. That invariant
+is not yet enforced: Tidebreak does not currently have a credential proxy in
+the sandbox supervisor.
 
-The mechanism is process separation inside the sandbox. The sandbox
+The planned mechanism is process separation inside the sandbox. The sandbox
 supervisor — the same non-agent process that owns the transport listener —
 holds credentials and fronts egress. The agent addresses a connected service
 with an opaque placeholder; the supervisor substitutes the real credential
@@ -419,7 +421,14 @@ at its own boundary and strips agent-supplied authentication. The
 placeholder is ergonomics; the separation is the guarantee, and a credential
 holder inside the agent process provides no separation at all.
 
-Stated honestly, what this does and does not give:
+What currently holds instead is narrower: sandbox-resident runs are parked,
+opt-in, and attached-only; the host proxies model requests, no connected-app
+tools are available to the sandbox agent, and no third-party credential is
+delivered to the sandbox. The existing supervisor owns only the authenticated
+transport listener. Credential-bearing sandbox-resident work remains blocked
+until a real proxy and its egress enforcement exist.
+
+Stated honestly, what the planned proxy does and does not give:
 
 - It protects credential bytes from an agent compromised at its own
   privilege level. In-container separation (process, and UID where the
@@ -437,16 +446,16 @@ Stated honestly, what this does and does not give:
   bound the blast radius; nothing eliminates it.
 
 The credential path for background work is designed around this indirection
-from the start, even though the supervisor ships late in the sequence —
+from the start, even though the credential proxy ships late in the sequence —
 retrofitting the inversion after a host-holds-everything path ships is much
 harder. Connected apps inside sandbox-resident runs are blocked on the
 supervisor existing; there is no interim mode where the agent holds a real
 credential.
 
-While attached the host remains the model proxy for attached-only runs —
-the request that crosses the execution seam today is already credential-free
-— and detached-admitted runs use the scoped gateway token described above,
-held by the supervisor, never the agent.
+While attached the host remains the model proxy for attached-only runs, so the
+request that crosses the execution seam today is credential-free. Detached
+admission and supervisor-held scoped gateway tokens remain target-state design,
+not current behavior.
 
 ## Egress policy
 

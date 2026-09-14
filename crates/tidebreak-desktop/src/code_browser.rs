@@ -428,7 +428,7 @@ pub(crate) async fn code_browser_command(
                 return Err("browser session is not open".to_owned());
             }
             registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
-            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            #[cfg(target_os = "macos")]
             if let Some(webview) = existing.as_ref() {
                 crate::agent_browser_host::begin_human_takeover(webview, &request.workspace_id)?;
             }
@@ -436,7 +436,7 @@ pub(crate) async fn code_browser_command(
                 .take_human_control(&request.browser_id, &request.workspace_id)
                 .await?;
             let _ = crate::browser_semantics::clear_browser_ghost_cursor(&app, &request.browser_id);
-            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            #[cfg(target_os = "macos")]
             if let Some(webview) = existing.as_ref() {
                 crate::agent_browser_host::take_human_control(webview)?;
             }
@@ -461,12 +461,12 @@ pub(crate) async fn code_browser_command(
                     | CodeBrowserAction::Back
                     | CodeBrowserAction::Forward
             ) {
-                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                #[cfg(target_os = "macos")]
                 crate::agent_browser_host::begin_human_takeover(&webview, &request.workspace_id)?;
                 let snapshot = registry
                     .take_human_control(&request.browser_id, &request.workspace_id)
                     .await?;
-                #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+                #[cfg(target_os = "macos")]
                 crate::agent_browser_host::take_human_control(&webview)?;
                 emit_controller_event(&app, &snapshot);
             }
@@ -650,7 +650,7 @@ pub(crate) async fn open_browser_for_agent(
         registry.authorize_agent_open(capability_id, &OwnerId::local(), &destination_origin)?;
     let browser_id = format!("agent-{}", Uuid::new_v4().simple());
     browser_label(&browser_id)?;
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let open_lease = crate::agent_browser_host::reserve_open(
         app,
         registry,
@@ -704,7 +704,7 @@ pub(crate) async fn open_browser_for_agent(
         || app.get_webview(&label).is_some(),
     )
     .await?;
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     open_lease.finish();
     emit_controller_event(app, &snapshot);
     Ok(BrowserOpenResult {
@@ -949,7 +949,7 @@ fn create_browser(
         },
     )?;
 
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let agent_host = {
         let origin = BrowserOrigin::from_url(target.as_str())
             .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
@@ -970,15 +970,15 @@ fn create_browser(
             }
         }
     };
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let window = agent_host.as_ref().unwrap_or(&window).clone();
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let child_origin = if agent_host.is_some() {
         LogicalPosition::new(0.0, 0.0)
     } else {
         LogicalPosition::new(safe_bounds.x, safe_bounds.y)
     };
-    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(not(target_os = "macos"))]
     let child_origin = LogicalPosition::new(safe_bounds.x, safe_bounds.y);
 
     let navigation_main = main.clone();
@@ -1008,9 +1008,9 @@ fn create_browser(
     let download_registry = registry.clone();
     let download_store = downloads.clone();
 
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let guarded_initial_load = agent_host.is_some();
-    #[cfg(not(all(target_os = "macos", feature = "independent-wk-host")))]
+    #[cfg(not(target_os = "macos"))]
     let guarded_initial_load = false;
     let initial_target = initial_browser_url(&target, guarded_initial_load);
     let initial_navigation_pending =
@@ -1267,7 +1267,7 @@ fn create_browser(
     ) {
         Ok(webview) => webview,
         Err(error) => {
-            #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+            #[cfg(target_os = "macos")]
             crate::agent_browser_host::close_empty_host(app, &window);
             registry.remove_instance(browser_id, workspace_id, instance_id);
             return Err(browser_error(error));
@@ -1289,7 +1289,7 @@ fn create_browser(
         registry.remove_instance(browser_id, workspace_id, instance_id);
         return Err(error);
     }
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     if guarded_initial_load {
         let dialog_main = main.clone();
         let dialog_browser = browser_id.to_owned();
@@ -1345,7 +1345,7 @@ fn create_browser(
         registry.remove_instance(browser_id, workspace_id, instance_id);
         return Err(error);
     }
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     if agent_host.is_some() {
         if let Err(error) =
             registry.mark_independent_host_ready(browser_id, workspace_id, instance_id)
@@ -1377,10 +1377,10 @@ fn take_initial_navigation(pending: &std::sync::atomic::AtomicBool) -> bool {
 pub(crate) fn close_browser_webview(webview: &Webview) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = stop_observing_browser_url(webview);
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     let host_window = webview.window();
     webview.close().map_err(browser_error)?;
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     crate::agent_browser_host::close_empty_host(webview.app_handle(), &host_window);
     Ok(())
 }
@@ -2133,7 +2133,7 @@ fn run_action(
 
 fn set_bounds(webview: &Webview, bounds: CodeBrowserBounds) -> Result<(), String> {
     let bounds = validated_bounds(bounds)?;
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     if crate::agent_browser_host::set_bounds(webview, bounds)? {
         return Ok(());
     }
@@ -2146,7 +2146,7 @@ fn set_bounds(webview: &Webview, bounds: CodeBrowserBounds) -> Result<(), String
 }
 
 fn set_visible(webview: &Webview, visible: bool) -> Result<(), String> {
-    #[cfg(all(target_os = "macos", feature = "independent-wk-host"))]
+    #[cfg(target_os = "macos")]
     if crate::agent_browser_host::set_visible(webview, visible)? {
         return Ok(());
     }
