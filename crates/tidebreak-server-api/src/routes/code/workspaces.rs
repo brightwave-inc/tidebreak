@@ -134,7 +134,7 @@ pub async fn patch_workspace(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<PatchWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let mut workspace = code.get_workspace(id).await?;
+    let mut workspace = code.require_workspace_owner(id).await?;
     if let Some(title) = body.title {
         let title = title.trim().to_owned();
         if title.is_empty() {
