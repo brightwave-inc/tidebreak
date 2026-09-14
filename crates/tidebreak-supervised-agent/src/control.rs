@@ -116,6 +116,7 @@ impl Control {
     pub fn new(control_url: &str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .no_proxy()
             .build()
             .unwrap_or_default();
         let base = control_url.trim_end_matches('/');

@@ -301,13 +301,22 @@ mod tests {
             ..RawInputs::default()
         })
         .unwrap();
-        let host = HostEnv::from_process().with_declared_env(vec![
-            (
-                OsString::from("PATH"),
-                OsString::from(format!("{}:/usr/bin:/bin", dir.path().display())),
-            ),
-            (OsString::from("HOME"), dir.path().as_os_str().to_owned()),
-        ]);
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            harness_versions: Vec::new(),
+            declared_binaries: Vec::new(),
+            declared_env: Some(vec![
+                (
+                    OsString::from("PATH"),
+                    OsString::from(format!("{}:/usr/bin:/bin", dir.path().display())),
+                ),
+                (OsString::from("HOME"), dir.path().as_os_str().to_owned()),
+            ]),
+        };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             run_inputs(inputs, None, host),
