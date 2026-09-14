@@ -6,7 +6,7 @@ import { ExternalEditorSection } from "@/settings/ExternalEditorSection";
 import { SettingsPanel } from "@/settings/primitives";
 
 /**
- * Settings → Coding harnesses → External editor.
+ * Settings → Coding engines → External editor.
  *
  * The reader picks one editor and every "Open in …" in the product starts
  * naming it. The rows below the picker answer the doctor's question about
@@ -26,7 +26,7 @@ function EditorShowcase({
 }) {
   return (
     <SettingsPanel
-      title="Coding harnesses"
+      title="Coding engines"
       description="Coding engines on this computer, and the editor Tidebreak hands files to."
     >
       <ExternalEditorSection

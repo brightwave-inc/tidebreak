@@ -198,8 +198,8 @@ function CodexLoginRecovery() {
       </div>
       <p>
         Then open{" "}
-        <CodingHarnessesLink>Settings → Coding harnesses</CodingHarnessesLink>{" "}
-        and select <strong>Re-check</strong>.
+        <CodingHarnessesLink>Settings → Coding engines</CodingHarnessesLink> and
+        select <strong>Re-check</strong>.
       </p>
     </div>
   );
@@ -218,7 +218,7 @@ function HarnessVersionRecovery({ required }: { required: string }) {
       </p>
       <p>
         Open{" "}
-        <CodingHarnessesLink>Settings → Coding harnesses</CodingHarnessesLink>,
+        <CodingHarnessesLink>Settings → Coding engines</CodingHarnessesLink>,
         set <strong>Engine versions</strong> to <strong>Latest</strong>, select{" "}
         <strong>Check for updates</strong>, then <strong>Update</strong> the
         engine.

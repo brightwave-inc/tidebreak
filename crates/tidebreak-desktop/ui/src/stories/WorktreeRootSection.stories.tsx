@@ -5,8 +5,9 @@ import { WorktreeRootSection } from "@/settings/WorktreeRootSection";
 
 /**
  * Where new workspaces put their worktrees. The states that matter are whether
- * the folder is the default or one the user chose, and whether a save is in
+ * the folder is the default or one the user chose, and whether a write is in
  * flight — a reader has to be able to tell an inherited path from a decision.
+ * The path commits on blur; there is no Save button.
  */
 const meta = {
   title: "Settings/Workspace folder",
@@ -20,7 +21,7 @@ const meta = {
     canBrowse: true,
     onChange: fn(),
     onBrowse: fn(),
-    onSave: fn(),
+    onCommit: fn(),
     onReset: fn(),
   },
   decorators: [
@@ -42,15 +43,6 @@ export const Default: Story = {};
 export const CustomFolder: Story = {
   args: {
     value: "/Volumes/work/trees",
-    effectiveRoot: "/Volumes/work/trees",
-    inherited: false,
-  },
-};
-
-/** An edited draft, before it is saved. */
-export const Edited: Story = {
-  args: {
-    value: "/Volumes/work/trees-2",
     effectiveRoot: "/Volumes/work/trees",
     inherited: false,
   },

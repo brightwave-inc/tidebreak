@@ -17,7 +17,7 @@ deliberately parked scope recorded in [`docs/deferred.md`](deferred.md).
 Code mode is Tidebreak's second product surface and is available without an
 experimental opt-in: pick a local git repository,
 spin up isolated **workspaces** (one worktree + branch each), and run
-**sessions** — durable conversations with external coding-agent harnesses
+**sessions** — durable conversations with external coding-agent engines
 (Claude Code as the reference tier, plus Codex CLI, opencode, and Grok CLI) —
 supervised through a structured UI: conversation, tool activity, approvals,
 per-turn diffs, and a pull-request flow. The two-mode split is a delivery
@@ -33,9 +33,9 @@ eventually including Tidebreak's own internal loop, sits behind
 |---|---|
 | repo | A registered local git repository: root path, default base ref, branch prefix, setup/archive scripts, quick actions. |
 | workspace | One isolated unit of work on a repo. Owns exactly one git worktree and one branch for life; carries PR state. |
-| session | One durable conversation with one harness inside a workspace. A workspace holds several, plus at most one watch session; their turns are serialized on the shared worktree ([`0055`](decisions/0055-multiple-sessions-per-workspace.md)). |
+| session | One durable conversation with one engine inside a workspace. A workspace holds several, plus at most one watch session; their turns are serialized on the shared worktree ([`0055`](decisions/0055-multiple-sessions-per-workspace.md)). |
 | turn | One user→agent cycle in a session, ending in a checkpoint. |
-| harness | The external coding-agent CLI being driven (never "provider"). |
+| engine | The external coding-agent CLI being driven (never "provider"). Internally this is still a `harness`. |
 
 Repository registrations can be exported with MCP server definitions as a
 portable workspace configuration. See [Portable workspace configuration](mcp-servers.md#portable-workspace-configuration).
@@ -651,7 +651,7 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   `FileViewer` (Monaco in read-only mode over the tree/search/blob routes),
   `TerminalPane` (ephemeral renderer over the cursor-read
   API; replays recent bytes on mount; chunked writes on a frame budget).
-- Settings: one new section, "Coding harnesses" — the doctor.
+- Settings: one new section, "Coding engines" — the doctor.
 - Wire: generated types plus hand-written validators in
   `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
 

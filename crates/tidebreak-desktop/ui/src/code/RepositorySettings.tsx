@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { SettingsField, SettingsSection } from "@/settings/primitives";
 
 type RepoSettingsClient = Pick<ApiClient, "getCodeRepo" | "patchCodeRepo">;
 
@@ -212,21 +213,15 @@ export function RepositorySettings({
   };
 
   return (
-    <div className="rounded-lg border border-border-subtle bg-background p-4">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-xs font-medium text-muted-foreground">
-            {repoLabel}
-          </p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Scripts run in the worktree. A failing setup script leaves the
-            checkout in place and marks the workspace Setup failed.
-          </p>
-        </div>
+    <SettingsSection
+      title={repoLabel}
+      description="Scripts run in the worktree. A failing setup script leaves the checkout in place and marks the workspace Setup failed."
+    >
+      <div className="flex items-start justify-end">
         {(loading || busy) && <Spinner className="size-3.5" />}
       </div>
       {error && (
-        <div className="notice-surface notice-critical mb-4 flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
+        <div className="notice-surface notice-critical flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
           <span className="flex min-w-0 items-start gap-2">
             <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
             <span className="min-w-0">{error}</span>
@@ -244,84 +239,64 @@ export function RepositorySettings({
         </div>
       )}
       {!loading && draft && (
-        <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 gap-3 min-[520px]:grid-cols-2">
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs text-muted-foreground">Base ref</span>
-              <Input
-                className="font-mono"
-                value={draft.default_base_ref}
-                placeholder="main"
-                onChange={(event) =>
-                  setDraft({ ...draft, default_base_ref: event.target.value })
-                }
-                onBlur={() => void commit(draft)}
-              />
-            </label>
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs text-muted-foreground">
-                Branch prefix
-              </span>
-              <Input
-                className="font-mono"
-                value={draft.branch_prefix}
-                placeholder="tidebreak/"
-                onChange={(event) =>
-                  setDraft({ ...draft, branch_prefix: event.target.value })
-                }
-                onBlur={() => void commit(draft)}
-              />
-            </label>
-          </div>
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs text-muted-foreground">
-                Setup script
-              </span>
-              <Textarea
-                className="min-h-16 font-mono"
-                rows={3}
-                value={draft.setup_script}
-                placeholder="pnpm install"
-                onChange={(event) =>
-                  setDraft({ ...draft, setup_script: event.target.value })
-                }
-                onBlur={() => void commit(draft)}
-              />
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Runs after a worktree is created or restored. Tidebreak sets
-              TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME. A failure leaves
-              the workspace in Setup failed. Fix the script, then pick Retry
-              setup; the checkout is kept.
-            </p>
-          </div>
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs text-muted-foreground">
-                Archive script
-              </span>
-              <Textarea
-                className="min-h-16 font-mono"
-                rows={3}
-                value={draft.archive_script}
-                placeholder="./scripts/back-up.sh"
-                onChange={(event) =>
-                  setDraft({ ...draft, archive_script: event.target.value })
-                }
-                onBlur={() => void commit(draft)}
-              />
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Runs before the worktree is removed. A failure stops the archive.
-              Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME.
-            </p>
-          </div>
+        <>
+          <SettingsField label="Base ref">
+            <Input
+              className="font-mono"
+              value={draft.default_base_ref}
+              placeholder="main"
+              onChange={(event) =>
+                setDraft({ ...draft, default_base_ref: event.target.value })
+              }
+              onBlur={() => void commit(draft)}
+            />
+          </SettingsField>
+          <SettingsField label="Branch prefix">
+            <Input
+              className="font-mono"
+              value={draft.branch_prefix}
+              placeholder="tidebreak/"
+              onChange={(event) =>
+                setDraft({ ...draft, branch_prefix: event.target.value })
+              }
+              onBlur={() => void commit(draft)}
+            />
+          </SettingsField>
+          <SettingsField
+            label="Setup script"
+            hint="Runs after a worktree is created or restored. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME. A failure leaves the workspace in Setup failed. Fix the script, then pick Retry setup; the checkout is kept."
+          >
+            <Textarea
+              className="min-h-16 font-mono"
+              rows={3}
+              aria-label="Setup script"
+              value={draft.setup_script}
+              placeholder="pnpm install"
+              onChange={(event) =>
+                setDraft({ ...draft, setup_script: event.target.value })
+              }
+              onBlur={() => void commit(draft)}
+            />
+          </SettingsField>
+          <SettingsField
+            label="Archive script"
+            hint="Runs before the worktree is removed. A failure stops the archive. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME."
+          >
+            <Textarea
+              className="min-h-16 font-mono"
+              rows={3}
+              aria-label="Archive script"
+              value={draft.archive_script}
+              placeholder="./scripts/back-up.sh"
+              onChange={(event) =>
+                setDraft({ ...draft, archive_script: event.target.value })
+              }
+              onBlur={() => void commit(draft)}
+            />
+          </SettingsField>
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">
-                Quick actions
-              </span>
+              <span className="settings-field-label">Quick actions</span>
               <Button
                 type="button"
                 size="xs"
@@ -342,12 +317,12 @@ export function RepositorySettings({
               </Button>
             </div>
             {draft.quick_actions.length >= MAX_QUICK_ACTIONS && (
-              <p className="text-xs text-muted-foreground">
+              <p className="settings-field-hint">
                 A repository takes at most {MAX_QUICK_ACTIONS} quick actions.
               </p>
             )}
             {draft.quick_actions.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="settings-field-hint">
                 No quick actions yet. Add one to run a named command in any
                 workspace of this repo.
               </p>
@@ -435,8 +410,8 @@ export function RepositorySettings({
               </div>
             )}
           </div>
-        </div>
+        </>
       )}
-    </div>
+    </SettingsSection>
   );
 }

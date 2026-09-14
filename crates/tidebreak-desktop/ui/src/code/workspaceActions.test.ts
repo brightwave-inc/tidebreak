@@ -86,6 +86,19 @@ describe("workspace worktree actions", () => {
     ).toEqual({ id: "copy-worktree", label: "Copy worktree path" });
   });
 
+  it("offers repository settings from the workspace header overflow", () => {
+    const commands = workspaceHeaderCommands({
+      archived: false,
+      hasSession: false,
+      attentionPinned: false,
+      quickActions: [],
+    });
+    expect(commands).toContainEqual({
+      id: "repo-settings",
+      label: "Repository settings",
+    });
+  });
+
   it("offers Uneff me next to Copy debug JSON on every session", () => {
     const commands = workspaceCommands({
       hasPr: false,
@@ -209,7 +222,7 @@ describe("workspace worktree actions", () => {
     ).toEqual({
       title: "Could not open that file in your editor",
       description:
-        "Tidebreak could not find that editor on this computer. Pick another one in Settings, Coding harnesses.",
+        "Tidebreak could not find that editor on this computer. Pick another one in Settings, Coding engines.",
     });
   });
 

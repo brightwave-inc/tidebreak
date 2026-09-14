@@ -36,8 +36,8 @@ function client(repo: CodeRepoSnapshot | null, delayMs = 0) {
 /**
  * The only surface that writes a repo's lifecycle hooks: the base a workspace
  * branches from, its branch prefix, the setup and archive scripts, and the
- * named commands a workspace can run. Fields commit on blur; switches commit
- * on change.
+ * named commands a workspace can run. Fields use SettingsField and commit on
+ * blur; switches commit on change.
  */
 const meta = {
   title: "Code/Repository settings",

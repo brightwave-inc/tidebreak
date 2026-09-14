@@ -326,7 +326,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   },
   {
     path: "coding-harnesses",
-    label: "Coding harnesses",
+    label: "Coding engines",
     group: "capabilities",
     icon: Terminal,
     iconClass: "text-icon-amber",

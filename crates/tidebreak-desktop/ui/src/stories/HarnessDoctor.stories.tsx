@@ -62,7 +62,10 @@ export const Downloading: Story = {
   },
 };
 
-/** Nothing a download fixes: one unverified engine and one signed-out engine. */
+/**
+ * Nothing a download fixes: one unverified engine and one signed-out engine.
+ * Each row names the engine's own sign-in command.
+ */
 export const NeedsYou: Story = {
   args: { report: harnessDoctorDegraded },
 };
