@@ -22,7 +22,7 @@ import {
 } from "../src/lib/deliveryApi";
 import { fetchIdentity } from "../src/lib/gateway";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
-import { sectionsFor } from "../src/lib/sections";
+import { consoleSectionsFor, sectionsFor } from "../src/lib/sections";
 import { attentionSessionCount } from "../src/lib/updates";
 import { connections } from "../src/session/runtime";
 import { useActiveConnection } from "../src/session/store";
@@ -223,6 +223,14 @@ export default function HomeScreen() {
   // Which surfaces this connection can show at all: its kind and what it has
   // attached, not a fixed list per screen.
   const sections = sectionsFor(connection);
+  // The gateway's member surfaces this session can reach. Separate from
+  // `sections` because they are gated on two different authorities: the
+  // `control`-backed ones answer for any pairing, the console reads only for a
+  // session that consented to them (`sections.ts`).
+  const consoleSections = consoleSectionsFor(connection);
+  const gatewayHost = connection.gatewayUrl
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
 
   const activeSessionCount = hasSnapshot
     ? sessions.filter((digest) => digest.lifecycle !== "ended").length
@@ -314,6 +322,32 @@ export default function HomeScreen() {
             ) : null}
           </View>
         </View>
+
+        {/* The gateway's own surfaces, reachable from the machine hub rather
+            than folded into it: the console has its own identity card, live
+            strip, and stat grid, and duplicating them here would put two
+            answers to "who am I and what is running" on one screen. #3314
+            settles which hub wins the first screen; this slice keeps both
+            packs reachable. */}
+        {consoleSections.length > 0 ? (
+          <View className="gap-2">
+            <SectionLabel>Gateway</SectionLabel>
+            <View className="rounded-xl border border-border bg-background px-4">
+              <SectionRow
+                label="Gateway console"
+                detail={gatewayHost}
+                first
+                onPress={() => router.push("/console")}
+              />
+              {consoleSections.includes("sandboxes") ? (
+                <SectionRow
+                  label="Sandboxes"
+                  onPress={() => router.push("/sandboxes")}
+                />
+              ) : null}
+            </View>
+          </View>
+        ) : null}
 
         <View className="gap-2">
           <SectionLabel>Machine</SectionLabel>
