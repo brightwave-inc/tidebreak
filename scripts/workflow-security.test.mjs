@@ -1662,6 +1662,14 @@ test("release builds freeze a draft tag from the trusted main workflow", () => {
     validateJob,
     /jq -e '\.draft == true and \.prerelease == true' <<<"\$release_json" >\/dev\/null \|\| \{\n[\s\S]*?Failed to keep release \$RELEASE_ID as a draft after marking it in-flight[\s\S]*?exit 1/,
   );
+  assert.match(validateJob, /target_commitish: \$sha/);
+  assert.match(validateJob, /RELEASE_TAG: \$\{\{ steps\.release\.outputs\.tag \}\}/);
+  assert.match(validateJob, /RELEASE_SHA: \$\{\{ steps\.release\.outputs\.sha \}\}/);
+  assert.match(validateJob, /\{tag_name: \$tag, target_commitish: \$sha\}/);
+  assert.match(
+    validateJob,
+    /'\.tag_name == \$tag and \.target_commitish == \$sha'[\s\S]*?GitHub changed the frozen identity[\s\S]*?exit 1/,
+  );
   assert.doesNotMatch(
     release,
     /(?:-f|--raw-field)\s+(?:draft|prerelease)=(?:true|false)/,

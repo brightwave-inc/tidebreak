@@ -683,6 +683,24 @@ const mutations = [
     ),
   },
   {
+    name: "in-flight release retains the explicit tag",
+    file: ".github/workflows/release.yml",
+    expected: "release builds freeze a draft tag from the trusted main workflow",
+    mutate: (source) => source.replace(
+      "{tag_name: $tag, target_commitish: $sha}",
+      "{target_commitish: $sha}",
+    ),
+  },
+  {
+    name: "in-flight release rejects a changed source",
+    file: ".github/workflows/release.yml",
+    expected: "release builds freeze a draft tag from the trusted main workflow",
+    mutate: (source) => source.replace(
+      ".tag_name == $tag and .target_commitish == $sha",
+      ".tag_name == $tag",
+    ),
+  },
+  {
     name: "README macOS download matches an uploaded asset",
     file: "README.md",
     expected: "GitHub release assets are attached before immutable publication",
