@@ -176,11 +176,12 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
+    // The picker states the mode alone; no posture subtext under it.
     expect(
-      screen.getByText(
+      screen.queryByText(
         "This engine's permission system is off; every action runs without asking",
       ),
-    ).toBeVisible();
+    ).toBeNull();
     expect(
       screen.getByRole("combobox", { name: "Harness" }).closest("form"),
     ).toHaveClass("chat-composer");

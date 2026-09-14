@@ -252,7 +252,7 @@ describe("NewWorkspaceDialog", () => {
     );
 
     expect(screen.getByRole("dialog")).toHaveClass(
-      "max-w-4xl",
+      "max-w-5xl",
       "max-h-[calc(100dvh-1rem)]",
     );
     expect(screen.getByRole("textbox", { name: "First message" })).toHaveClass(
@@ -791,11 +791,12 @@ describe("NewWorkspaceDialog", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeEnabled();
+    // The picker states the mode alone; no posture subtext under it.
     expect(
-      screen.getByText(
+      screen.queryByText(
         "This engine's permission system is off; every action runs without asking",
       ),
-    ).toBeVisible();
+    ).toBeNull();
 
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",

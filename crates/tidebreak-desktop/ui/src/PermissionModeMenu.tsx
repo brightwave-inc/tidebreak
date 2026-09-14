@@ -120,8 +120,8 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * the posted value themselves (`clampPermissionMode`) so the label and
  * the request agree without relying on this display remap.
  *
- * The rows carry no posture descriptions. What an unsupervised mode will do
- * is stated once, under the control, by the surface that offers it.
+ * The rows carry no posture descriptions. What a mode does is stated in the
+ * session header chip's tooltip, not repeated under every picker.
  */
 export function PermissionModeMenu({
   scopeKey,
