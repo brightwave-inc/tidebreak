@@ -1,0 +1,805 @@
+From 49877da88d4327238e7ace0ece3c74a69c8a4e09 Mon Sep 17 00:00:00 2001
+From: Thet Naing <thet@brightwave.io>
+Date: Mon, 14 Sep 2026 16:40:03 -0400
+Subject: [PATCH] fix(code): keep pull request state live on the PR page
+
+The detail pane loaded once and then ignored the live summary row, so
+checks finishing, merges landing, and new comments never appeared
+without a manual refresh. "Checking status" never resolved on its own:
+GitHub computes mergeability lazily and nothing ever asked again.
+Actions repainted only after a full round trip, and a merge could
+repaint backwards off a stale read replica.
+
+The pane now re-reads when the row's live signature moves, polls on a
+short backoff while mergeability is unknown, paints a settled action's
+outcome immediately and holds it over stale host reads, and names the
+in-flight action in the gate headline. The workspace PR read kicks one
+detached host refresh when the stored digest still answers unknown, so
+the workspace chip clears in seconds instead of a hot-tier tick.
+---
+ .../src/code/PullRequestDetail.dom.test.tsx   | 131 ++++++++
+ .../ui/src/code/PullRequestDetail.tsx         | 292 +++++++++++++++++-
+ .../ui/src/code/prState.test.ts               |  25 ++
+ .../tidebreak-desktop/ui/src/code/prState.ts  |  49 +++
+ crates/tidebreak-server/src/code/scoped.rs    |  85 ++++-
+ 5 files changed, 568 insertions(+), 14 deletions(-)
+
+diff --git a/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.dom.test.tsx b/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.dom.test.tsx
+index 0253832e4..4bd33da5b 100644
+--- a/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.dom.test.tsx
++++ b/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.dom.test.tsx
+@@ -555,6 +555,137 @@ describe("merge stack", () => {
+   });
+ });
+ 
++describe("live state transitions", () => {
++  const openSummary = summaryFor(2247);
++  const openDetail = deliveryPullRequestDetails[2247]!;
++  const mergedSummary = {
++    ...openSummary,
++    state: "merged",
++    merged_at: "2026-08-20T15:00:00.000Z",
++  };
++  const mergedDetail = {
++    ...openDetail,
++    summary: mergedSummary,
++    merged_by: "devon",
++  };
++
++  it("re-reads the pull request when the live row reports a change", async () => {
++    const pendingSummary = {
++      ...openSummary,
++      checks: [
++        {
++          name: "workspace / tests",
++          bucket: "pending" as const,
++          workflow_run_id: 4392,
++        },
++        {
++          name: "desktop / build",
++          bucket: "pass" as const,
++          workflow_run_id: 4392,
++        },
++      ],
++    };
++    const getDetail = vi.fn(async () =>
++      getDetail.mock.calls.length > 1
++        ? { ...openDetail, summary: pendingSummary }
++        : openDetail,
++    );
++    const props = {
++      client: client({ getCodeDeliveryPullRequestDetail: getDetail }),
++      onClose: vi.fn(),
++      onChanged: vi.fn(),
++      onOpenWorkspace: vi.fn(),
++    };
++    const view = render(
++      <PullRequestDetailSheet {...props} summary={openSummary} />,
++    );
++    expect(await screen.findByText("Ready to merge")).toBeInTheDocument();
++
++    // The row behind the pane moved (a check went back to pending). The pane
++    // must follow on its own instead of waiting for a manual refresh.
++    view.rerender(
++      <PullRequestDetailSheet {...props} summary={pendingSummary} />,
++    );
++    expect(await screen.findByText("Checks running")).toBeInTheDocument();
++    expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(2);
++  });
++
++  it("keeps polling while GitHub is still computing mergeability", async () => {
++    const checkingSummary = {
++      ...openSummary,
++      mergeable: "unknown",
++      merge_state_status: "unknown",
++    };
++    const getDetail = vi.fn(async () =>
++      getDetail.mock.calls.length > 1
++        ? openDetail
++        : { ...openDetail, summary: checkingSummary },
++    );
++    render(
++      <PullRequestDetailSheet
++        client={client({ getCodeDeliveryPullRequestDetail: getDetail })}
++        summary={checkingSummary}
++        checkingPollDelaysMs={[10, 10, 10]}
++        onClose={vi.fn()}
++        onChanged={vi.fn()}
++        onOpenWorkspace={vi.fn()}
++      />,
++    );
++    expect(await screen.findByText("Checking status")).toBeInTheDocument();
++    // No user action: the pane re-reads on its own until the host answers.
++    expect(await screen.findByText("Ready to merge")).toBeInTheDocument();
++    expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(2);
++  });
++
++  it("paints a merge at once and holds it over a stale host read", async () => {
++    // The host merges synchronously but its read replicas lag: the re-read
++    // after the action still answers "open". The pane must keep the known
++    // outcome and re-read instead of flicking back to "Ready to merge".
++    const getDetail = vi.fn(async () =>
++      getDetail.mock.calls.length > 2 ? mergedDetail : openDetail,
++    );
++    render(
++      <PullRequestDetailSheet
++        client={client({ getCodeDeliveryPullRequestDetail: getDetail })}
++        summary={openSummary}
++        reconcileDelayMs={10}
++        onClose={vi.fn()}
++        onChanged={vi.fn()}
++        onOpenWorkspace={vi.fn()}
++      />,
++    );
++    await userEvent.click(await screen.findByRole("button", { name: "Merge" }));
++
++    expect(await screen.findByText("Merged into main")).toBeInTheDocument();
++    // The reconcile re-read runs until the host agrees; the pane never shows
++    // the pre-merge state again.
++    await waitFor(() =>
++      expect(getDetail.mock.calls.length).toBeGreaterThanOrEqual(3),
++    );
++    expect(screen.getByText("Merged into main")).toBeInTheDocument();
++    expect(screen.queryByText("Ready to merge")).toBeNull();
++  });
++
++  it("says the merge is in flight instead of resting on the old gate", async () => {
++    let resolveAction!: (value: { success: boolean; message: string }) => void;
++    const runAction = vi.fn(
++      () =>
++        new Promise<{ success: boolean; message: string }>((resolve) => {
++          resolveAction = resolve;
++        }),
++    );
++    await renderPanel(
++      2247,
++      client({ runCodeDeliveryPullRequestAction: runAction }),
++    );
++    await userEvent.click(screen.getByRole("button", { name: "Merge" }));
++    expect(await screen.findByText("Merging…")).toBeInTheDocument();
++    expect(screen.queryByText("Ready to merge")).toBeNull();
++    resolveAction({ success: true, message: "Merged." });
++    await waitFor(() => expect(screen.queryByText("Merging…")).toBeNull());
++  });
++});
++
+ describe("create stack", () => {
+   async function renderUnregisteredPanel(number: number, api = client()) {
+     const summary = unregisteredDeliveryPullRequests.find(
+diff --git a/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.tsx b/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.tsx
+index 32d3c44c0..0012fc0ad 100644
+--- a/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.tsx
++++ b/crates/tidebreak-desktop/ui/src/code/PullRequestDetail.tsx
+@@ -97,6 +97,7 @@ import {
+   mergeBlockedReasons,
+   prStatus,
+   pullRequestLifecycle,
++  pullRequestLiveSignature,
+   pullRequestSettledAt,
+   type PullRequestLifecycle,
+ } from "./prState";
+@@ -105,6 +106,121 @@ import { STATUS_MARK, STATUS_TEXT, type StatusTone } from "./statusTone";
+ type MergeMethod = "squash" | "merge" | "rebase";
+ type DetailTab = "conversation" | "files" | "checks";
+ 
++/**
++ * Re-read delays while the gate says "Checking status".
++ *
++ * GitHub computes mergeability lazily: the first read after a push or a base
++ * change answers "unknown", and only a follow-up read returns the computed
++ * value. Without these polls the pane shows "Checking status" until someone
++ * clicks Refresh. The sequence is short and backs off, so a pull request
++ * GitHub genuinely cannot classify stops costing reads after half a minute.
++ */
++const CHECKING_POLL_DELAYS_MS = [1_500, 3_000, 6_000, 10_000, 15_000];
++
++/** How long a settled action waits before re-reading a host that answered stale. */
++const RECONCILE_DELAY_MS = 1_500;
++
++/** Stale re-reads a settled action tolerates before the host's answer wins. */
++const MAX_RECONCILE_RETRIES = 3;
++
++/** Coalesce bursts of live summary updates into one background re-read. */
++const LIVE_RELOAD_DEBOUNCE_MS = 300;
++
++/**
++ * A state change this pane performed and the host has confirmed, held while
++ * GitHub's read replicas catch up. `apply` paints the known outcome over a
++ * summary that still reports the pre-action state; `isMet` says the host now
++ * agrees and the overlay can retire.
++ */
++type ActionExpectation = {
++  targetId: string;
++  retriesLeft: number;
++  apply: (
++    summary: CodeDeliveryPullRequestSummary,
++  ) => CodeDeliveryPullRequestSummary;
++  isMet: (summary: CodeDeliveryPullRequestSummary) => boolean;
++};
++
++function mergedExpectation(): Pick<ActionExpectation, "apply" | "isMet"> {
++  return {
++    apply: (summary) =>
++      pullRequestLifecycle(summary) === "merged"
++        ? summary
++        : { ...summary, state: "merged", merged_at: new Date().toISOString() },
++    isMet: (summary) => pullRequestLifecycle(summary) === "merged",
++  };
++}
++
++/**
++ * What a successful action means the next host read must show.
++ *
++ * The action endpoint returning success is the ground truth — GitHub merged,
++ * closed, reopened, or readied the pull request synchronously — so the pane
++ * may paint that outcome at once. A follow-up read still answering with the
++ * pre-action state is a stale replica, not a contradiction, and must not
++ * repaint the pane backwards.
++ */
+function actionExpectation(
++  action: CodeDeliveryPullRequestAction,
++  hasMergeQueue: boolean,
++): Pick<ActionExpectation, "apply" | "isMet"> | null {
++  switch (action.type) {
++    case "merge":
++      if (!action.auto) return mergedExpectation();
++      return {
++        apply: (summary) =>
++          hasMergeQueue
++            ? { ...summary, in_merge_queue: true }
++            : { ...summary, auto_merge_enabled: true },
++        isMet: (summary) =>
++          pullRequestLifecycle(summary) === "merged" ||
++          summary.in_merge_queue === true ||
++          summary.auto_merge_enabled,
++      };
++    case "mark_ready":
++      return {
++        apply: (summary) => ({ ...summary, draft: false }),
++        isMet: (summary) => !summary.draft,
++      };
++    case "close":
++      return {
++        apply: (summary) =>
++          pullRequestLifecycle(summary) === "closed"
++            ? summary
++            : {
++                ...summary,
++                state: "closed",
++                closed_at: new Date().toISOString(),
++              },
++        isMet: (summary) => pullRequestLifecycle(summary) === "closed",
++      };
++    case "reopen":
++      return {
++        apply: ({ closed_at: _closedAt, ...summary }) => ({
++          ...summary,
++          state: "open",
++        }),
++        isMet: (summary) => {
++          const lifecycle = pullRequestLifecycle(summary);
++          return lifecycle === "open" || lifecycle === "draft";
++        },
++      };
++    case "rerun_failed":
++      // Nothing to paint — the reruns queue on GitHub's side — but the first
++      // re-read usually still shows the old failures, so keep asking until a
++      // check goes back to pending.
++      return {
++        apply: (summary) => summary,
++        isMet: (summary) => {
++          const counts = checkCounts(summary);
++          return counts.pending > 0 || counts.failing === 0;
++        },
++      };
++    default:
++      return null;
++  }
++}
++
+ /**
+  * The sheet's tabs, in the vocabulary the Delivery page already uses for a
+  * band of peer views: an underline under the active one, no fill.
+@@ -178,6 +294,8 @@ export function PullRequestDetailSheet({
+   initialDetail,
+   loadDelayMs = 0,
+   hasMergeQueue = false,
++  reconcileDelayMs,
++  checkingPollDelaysMs,
+   onClose,
+   onChanged,
+   onDetail,
+@@ -195,6 +313,8 @@ export function PullRequestDetailSheet({
+   hasMergeQueue?: boolean;
+   initialDetail?: CodeDeliveryPullRequestDetail;
+   loadDelayMs?: number;
++  reconcileDelayMs?: number;
++  checkingPollDelaysMs?: readonly number[];
+   onClose: () => void;
+   onChanged: () => void;
+   onDetail?: (detail: CodeDeliveryPullRequestDetail) => void;
+@@ -212,6 +332,8 @@ export function PullRequestDetailSheet({
+         initialDetail={initialDetail}
+         loadDelayMs={loadDelayMs}
+         hasMergeQueue={hasMergeQueue}
++        reconcileDelayMs={reconcileDelayMs}
++        checkingPollDelaysMs={checkingPollDelaysMs}
+         onClose={onClose}
+         onChanged={onChanged}
+         onDetail={onDetail}
+@@ -235,6 +357,8 @@ export function PullRequestDetailPane({
+   initialDetail,
+   loadDelayMs = 0,
+   hasMergeQueue = false,
++  reconcileDelayMs = RECONCILE_DELAY_MS,
++  checkingPollDelaysMs = CHECKING_POLL_DELAYS_MS,
+   onClose,
+   onChanged,
+   onDetail,
+@@ -254,6 +378,10 @@ export function PullRequestDetailPane({
+   initialDetail?: CodeDeliveryPullRequestDetail;
+   /** Delay an uncached read while keyboard selection is still moving. */
+   loadDelayMs?: number;
++  /** Wait between stale-replica re-reads after a settled action. */
++  reconcileDelayMs?: number;
++  /** Re-read schedule while GitHub is still computing mergeability. */
++  checkingPollDelaysMs?: readonly number[];
+   onClose?: () => void;
+   onChanged: () => void;
+   /** Keep loaded detail available when the reader returns to this row. */
+@@ -283,6 +411,10 @@ export function PullRequestDetailPane({
+   const mounted = useRef(true);
+   const onDetailRef = useRef(onDetail);
+   const onSummaryRef = useRef(onSummary);
++  const expectation = useRef<ActionExpectation | null>(null);
++  const reconcileTimer = useRef<number | undefined>(undefined);
++  const checkingAttempts = useRef(0);
++  const checkingKeySeen = useRef<string | null>(null);
+   onDetailRef.current = onDetail;
+   onSummaryRef.current = onSummary;
+   activeTarget.current = summary.id;
+@@ -291,17 +423,45 @@ export function PullRequestDetailPane({
+     mounted.current = true;
+     return () => {
+       mounted.current = false;
++      window.clearTimeout(reconcileTimer.current);
+     };
+   }, []);
+ 
+   const targetIsActive = (targetId: string) =>
+     mounted.current && activeTarget.current === targetId;
+ 
+-  const adoptDetail = (next: CodeDeliveryPullRequestDetail) => {
+-    const adoptedSummary = preservePullRequestStackMetadata(
++  const adoptDetail = (
++    next: CodeDeliveryPullRequestDetail,
++    fromHost = false,
++  ) => {
++    let adoptedSummary = preservePullRequestStackMetadata(
+       summary,
+       next.summary,
+     );
++    // A host read landing right after a settled action can still answer with
++    // the pre-action state — GitHub's read replicas lag its writes. The
++    // action's success is the ground truth, so keep the known outcome on
++    // screen and re-read until the host agrees or the retries run out. Only
++    // a host read may settle the expectation; a cached detail re-adopted by
++    // the parent proves nothing about the replica.
++    const pending = expectation.current;
++    if (pending && pending.targetId === summary.id) {
++      if (fromHost && pending.isMet(adoptedSummary)) {
++        expectation.current = null;
++      } else if (!fromHost || pending.retriesLeft > 0) {
++        if (fromHost) pending.retriesLeft -= 1;
++        adoptedSummary = pending.apply(adoptedSummary);
++        if (fromHost) {
++          window.clearTimeout(reconcileTimer.current);
++          reconcileTimer.current = window.setTimeout(
++            () => void load(),
++            reconcileDelayMs,
++          );
++        }
++      } else {
++        expectation.current = null;
++      }
++    }
+     const adopted =
+       adoptedSummary === next.summary
+         ? next
+@@ -322,7 +482,7 @@ export function PullRequestDetailPane({
+         number: summary.number,
+       });
+       if (token === generation.current && targetIsActive(targetId)) {
+-        adoptDetail(next);
++        adoptDetail(next, true);
+       }
+     } catch (caught) {
+       if (token === generation.current && targetIsActive(targetId)) {
+@@ -342,6 +502,13 @@ export function PullRequestDetailPane({
+     setCommentOrder("newest");
+     setDraftComment("");
+     setConfirmingAdminMerge(false);
++    // A pending expectation belongs to the pull request that ran the action.
++    // Re-running for the same pull request (a fresher `initialDetail`) must
++    // not cancel its reconcile re-reads.
++    if (expectation.current && expectation.current.targetId !== summary.id) {
++      expectation.current = null;
++      window.clearTimeout(reconcileTimer.current);
++    }
+     if (initialDetail?.summary.id === summary.id) {
+       adoptDetail(initialDetail);
+       setLoading(false);
+@@ -377,6 +544,27 @@ export function PullRequestDetailPane({
+       if (!targetIsActive(targetId)) return;
+       if (result.success) {
+         toast.success(result.message);
++        // The endpoint's success is the outcome — GitHub merged, closed,
++        // reopened, or readied the pull request synchronously. Paint it now
++        // rather than waiting a round trip, and hold it against a stale
++        // follow-up read.
++        const expected = actionExpectation(action, hasMergeQueue);
++        if (expected) {
++          expectation.current = {
++            targetId,
++            retriesLeft: MAX_RECONCILE_RETRIES,
++            ...expected,
++          };
++          const patched = expected.apply(current);
++          if (patched !== current) {
++            setDetail((value) =>
++              value
++                ? { ...value, summary: expected.apply(value.summary) }
++                : value,
++            );
++            onSummaryRef.current?.(patched);
++          }
++        }
+       } else {
+         const description = rerunOutcomeDescription(result, current.checks);
+         toast.warning(
+@@ -402,6 +590,48 @@ export function PullRequestDetailPane({
+   const current = detail?.summary ?? summary;
+   const lifecycle = pullRequestLifecycle(current);
+   const counts = checkCounts(current);
++  const gate = prStatus(current).gate;
++
++  // Follow the live row. The workspace digest sweeps and the delivery nudges
++  // keep the `summary` prop moving while this pane is open; without this the
++  // pane freezes on whatever its own last read returned and the reader has
++  // to click Refresh to see a check finish or a merge land. A change in the
++  // prop's live signature that the loaded detail does not already show means
++  // the host moved: re-read once, debounced against bursts.
++  const liveSignature = pullRequestLiveSignature(summary);
++  const liveSignatureSeen = useRef(liveSignature);
++  useEffect(() => {
++    const previous = liveSignatureSeen.current;
++    liveSignatureSeen.current = liveSignature;
++    if (previous === liveSignature) return;
++    if (!detail || detail.summary.id !== summary.id || loading || busy) return;
++    if (liveSignature === pullRequestLiveSignature(detail.summary)) return;
++    const timer = window.setTimeout(() => void load(), LIVE_RELOAD_DEBOUNCE_MS);
++    return () => window.clearTimeout(timer);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSignature]);
++
++  // Resolve "Checking status" instead of waiting for the reader. GitHub only
++  // computes mergeability when something reads the pull request, so a pane
++  // sitting on an unknown answer has to ask again — a short, backed-off
++  // schedule that resets whenever the head moves.
++  const checkingKey = `${summary.id}:${current.head_sha ?? ""}`;
++  useEffect(() => {
++    if (checkingKeySeen.current !== checkingKey) {
++      checkingKeySeen.current = checkingKey;
++      checkingAttempts.current = 0;
++    }
++    if (gate !== "checking" || !detail || loading || busy) return;
++    if (checkingAttempts.current >= checkingPollDelaysMs.length) return;
++    const delay = checkingPollDelaysMs[checkingAttempts.current]!;
++    const timer = window.setTimeout(() => {
++      checkingAttempts.current += 1;
++      void load();
++    }, delay);
++    return () => window.clearTimeout(timer);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [checkingKey, gate, detail, loading, busy]);
++
+   const workflowRunIds = useMemo(
+     () => [
+       ...new Set(
+@@ -496,6 +726,19 @@ export function PullRequestDetailPane({
+       }
+       if (targetIsActive(targetId)) {
+         toast.success("Stack merged.");
++        const merged = mergedExpectation();
++        expectation.current = {
++          targetId,
++          retriesLeft: MAX_RECONCILE_RETRIES,
++          ...merged,
++        };
++        const patched = merged.apply(current);
++        if (patched !== current) {
++          setDetail((value) =>
++            value ? { ...value, summary: merged.apply(value.summary) } : value,
++          );
++          onSummaryRef.current?.(patched);
++        }
+       }
+     } catch (caught) {
+       if (!targetIsActive(targetId)) return;
+@@ -1089,6 +1332,23 @@ function freshAgentWorkspaceTitle(
+  * It sits above the tabs rather than inside Conversation because it is the
+  * reason the sheet is open. Reading the diff should not cost you the merge.
+  */
++/**
++ * What the gate headline says while the named action is in flight. The
++ * pending tone plus a spinner replaces the resting state — "Ready to merge"
++ * beside a running merge reads as a button that did nothing.
++ */
++const BUSY_HEADLINES: Record<string, string> = {
++  merge: "Merging…",
++  "admin-merge": "Merging…",
++  "merge-stack": "Merging the stack…",
++  enable_auto_merge: "Enabling auto-merge…",
++  merge_when_ready: "Joining the merge queue…",
++  ready: "Marking ready…",
++  close: "Closing…",
++  reopen: "Reopening…",
++  "create-stack": "Registering the stack…",
++};
++
+ function PrMergeBox({
+   client,
+   detail,
+@@ -1201,6 +1461,10 @@ function PrMergeBox({
+         : status.lifecycle === "draft"
+           ? "Not ready for review"
+           : status.headline.label;
++  const busyHeadline = busy ? BUSY_HEADLINES[busy] : undefined;
++  const headlineTone: StatusTone = busyHeadline
++    ? "pending"
++    : status.headline.tone;
+   return (
+     <section
+       aria-label="Merge status and actions"
+@@ -1208,17 +1472,12 @@ function PrMergeBox({
+     >
+       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
+         <div className="flex min-w-0 flex-1 items-start gap-2">
+-          <GateMark tone={status.headline.tone} />
++          <GateMark tone={headlineTone} busy={Boolean(busyHeadline)} />
+           <div className="flex min-w-0 flex-col gap-1">
+-            <p
+-              className={cn(
+-                "text-sm font-medium",
+-                STATUS_TEXT[status.headline.tone],
+-              )}
+-            >
+-              {headline}
++            <p className={cn("text-sm font-medium", STATUS_TEXT[headlineTone])}>
++              {busyHeadline ?? headline}
+             </p>
+-            {blockers.length > 0 && (
++            {!busyHeadline && blockers.length > 0 && (
+               <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+                 {blockers.map((reason) => (
+                   <li key={reason}>{reason}</li>
+@@ -1532,8 +1791,15 @@ function ConfirmStrip({
+ }
+ 
+ /** The mark that carries the gate on its own, ahead of the headline. */
+-function GateMark({ tone }: { tone: StatusTone }) {
++function GateMark({
++  tone,
++  busy = false,
++}: {
++  tone: StatusTone;
++  busy?: boolean;
++}) {
+   const shared = cn("mt-0.5 size-4 shrink-0", STATUS_MARK[tone]);
++  if (busy) return <Spinner className={shared} aria-hidden />;
+   if (tone === "ready") return <CircleCheck className={shared} />;
+   if (tone === "critical") return <CircleAlert className={shared} />;
+   if (tone === "warning") return <CircleAlert className={shared} />;
+diff --git a/crates/tidebreak-desktop/ui/src/code/prState.test.ts b/crates/tidebreak-desktop/ui/src/code/prState.test.ts
+index 542655e4a..9944c5e52 100644
+--- a/crates/tidebreak-desktop/ui/src/code/prState.test.ts
++++ b/crates/tidebreak-desktop/ui/src/code/prState.test.ts
+@@ -16,6 +16,7 @@ import {
+   prStateChips,
+   prStatus,
+   pullRequestLifecycle,
++  pullRequestLiveSignature,
+   pullRequestReviewSummary,
+   pullRequestSettledAt,
+   type PrGate,
+@@ -446,3 +447,27 @@ describe("prCompactStatusLabel", () => {
+     expect(prCompactStatusLabel(pr({ state: "merged" }))).toBe("Merged");
+  });
+ });
++
++describe("pullRequestLiveSignature", () => {
++  it("moves only when a live field moves", () => {
++    const base = pr();
++    expect(pullRequestLiveSignature(base)).toBe(pullRequestLiveSignature(pr()));
++    // Identity churn without a state change is not a change.
++    expect(pullRequestLiveSignature({ ...base })).toBe(
++      pullRequestLiveSignature(base),
++    );
++    for (const moved of [
++      pr({ state: "merged" }),
++      pr({ merge_state_status: "blocked" }),
++      pr({ mergeable: "unknown" }),
++      pr({ head_sha: "beefcafe" }),
++      pr({ auto_merge_enabled: true }),
++      pr({ comment_count: 3 }),
++      pr({ checks: [{ name: "ci", bucket: "pending" }] }),
++    ]) {
++      expect(pullRequestLiveSignature(moved)).not.toBe(
++        pullRequestLiveSignature(base),
++      );
++    }
++  });
++});
+diff --git a/crates/tidebreak-desktop/ui/src/code/prState.ts b/crates/tidebreak-desktop/ui/src/code/prState.ts
+index 20126668f..e60a72597 100644
+--- a/crates/tidebreak-desktop/ui/src/code/prState.ts
++++ b/crates/tidebreak-desktop/ui/src/code/prState.ts
+@@ -401,6 +401,55 @@ export function prStatus(pr: PrStateInput): PrStatus {
+   };
+ }
+ 
++// ---------------------------------------------------------------------------
++// Live signature
++// ---------------------------------------------------------------------------
++
++export type PrLiveSignatureInput = PrStateInput & {
++  title?: string | null;
++  head_sha?: string | null;
++  comment_count?: number | null;
++};
++
++/**
++ * Every live field of a pull request, folded into one comparable token.
++ *
++ * A surface holding a loaded snapshot compares the token of an incoming
++ * summary against the token it last saw to decide whether the pull request
++ * actually moved — state, head, checks, review, queue, or conversation — and
++ * only then re-reads the host. Comparing tokens instead of objects keeps the
++ * decision cheap and keeps identity churn (a re-rendered but unchanged row)
++ * from triggering reads.
++ */
++export function pullRequestLiveSignature(pr: PrLiveSignatureInput): string {
++  return JSON.stringify([
++    hostToken(pr.state),
++    pr.draft ?? null,
++    pr.merged ?? null,
++    pr.merged_at ?? null,
++    pr.closed_at ?? null,
++    pr.review_decision ?? null,
++    pr.mergeable ?? null,
++    pr.merge_state_status ?? null,
++    pr.auto_merge_enabled ?? null,
++    pr.in_merge_queue ?? null,
++    pr.title ?? null,
++    pr.head_sha ?? null,
++    pr.comment_count ?? null,
++    pr.checks?.map((check) => [check.name ?? null, hostToken(check.bucket)]) ??
++      null,
++    pr.check_counts
++      ? [
++          pr.check_counts.passing,
++          pr.check_counts.pending,
++          pr.check_counts.failing,
++          pr.check_counts.skipped,
++        ]
++      : null,
++    pr.checks_summary ?? null,
++  ]);
++}
++
+ // ---------------------------------------------------------------------------
+ // Blockers
+ // ---------------------------------------------------------------------------
+diff --git a/crates/tidebreak-server/src/code/scoped.rs b/crates/tidebreak-server/src/code/scoped.rs
+index 97085674b..afcb42b78 100644
+--- a/crates/tidebreak-server/src/code/scoped.rs
++++ b/crates/tidebreak-server/src/code/scoped.rs
+@@ -600,7 +600,25 @@ impl ScopedCode {
+     }
+ 
+     pub async fn workspace_pr(&self, id: WorkspaceId) -> Result<WorkspaceGitStatus, ServerError> {
+-        self.runtime.workspace_pr(&self.owner, id).await
++        let status = self.runtime.workspace_pr(&self.owner, id).await?;
++        // GitHub computes mergeability lazily: after a push or a base change
++        // the stored digest answers "unknown" until something reads the pull
++        // request from the host again. Being read is that ask — kick one
++        // detached conditional refresh so the UI's "Checking status" clears
++        // in seconds instead of waiting for the next hot-tier tick. The
++        // response never waits on it.
++        if status
++            .pr
++            .as_ref()
++            .is_some_and(pull_request_mergeability_unknown)
++        {
++            let runtime = Arc::clone(&self.runtime);
++            let owner = self.owner.clone();
++            tokio::spawn(async move {
++                runtime.refresh_workspace_pr_row(&owner, id).await;
++            });
++        }
++        Ok(status)
+     }
+ 
+     pub async fn workspace_pull_requests(
+@@ -1494,3 +1512,68 @@ impl FromRequestParts<AppState> for ScopedCode {
+         Self::new(state, &auth)
+     }
+ }
++
++/// True while the host has not yet said whether this open pull request can
++/// merge — the state the UI renders as "Checking status". Drafts are
++/// excluded: their gate never reads mergeability, so re-asking buys nothing.
++fn pull_request_mergeability_unknown(pr: &tidebreak_core::PullRequestDigest) -> bool {
++    if !pr.state.eq_ignore_ascii_case("open") || pr.merged == Some(true) || pr.draft == Some(true) {
++        return false;
++    }
++    let unknown = |value: Option<&str>| {
++        !value.is_some_and(|token| !token.is_empty() && !token.eq_ignore_ascii_case("unknown"))
++    };
++    unknown(pr.mergeable.as_deref()) || unknown(pr.merge_state_status.as_deref())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::pull_request_mergeability_unknown;
+    use tidebreak_core::PullRequestDigest;
++
++    fn digest(state: &str) -> PullRequestDigest {
++        PullRequestDigest {
++            number: 7,
++            url: None,
++            state: state.into(),
++            title: None,
++            checks_summary: None,
++            check_counts: None,
++            checks: None,
++            draft: None,
++            merged: None,
++            review_decision: None,
++            mergeable: None,
++            merge_state_status: None,
++            head_branch: None,
++            base_branch: None,
++            head_sha: None,
++            auto_merge_enabled: None,
++            in_merge_queue: None,
++        }
++    }
++
++    #[test]
++    fn open_pull_request_without_mergeability_needs_a_recheck() {
++        assert!(pull_request_mergeability_unknown(&digest("open")));
++        let mut unknown = digest("open");
++        unknown.mergeable = Some("unknown".into());
++        unknown.merge_state_status = Some("unknown".into());
++        assert!(pull_request_mergeability_unknown(&unknown));
++        let mut half = digest("open");
++        half.mergeable = Some("mergeable".into());
++        assert!(pull_request_mergeability_unknown(&half));
++    }
++
++    #[test]
++    fn settled_computed_and_draft_pull_requests_do_not_recheck() {
++        let mut computed = digest("open");
++        computed.mergeable = Some("mergeable".into());
++        computed.merge_state_status = Some("clean".into());
++        assert!(!pull_request_mergeability_unknown(&computed));
++        assert!(!pull_request_mergeability_unknown(&digest("merged")));
++        let mut draft = digest("open");
++        draft.draft = Some(true);
++        assert!(!pull_request_mergeability_unknown(&draft));
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+
