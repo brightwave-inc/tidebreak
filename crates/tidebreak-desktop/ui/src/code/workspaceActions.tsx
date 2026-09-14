@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useRef, useState, type ReactElement } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
@@ -57,6 +57,7 @@ import {
   uneffPreparationSteps,
   uneffSessionSettings,
 } from "./uneffMe";
+import { bulkArchiveWorkspaces } from "./bulkWorkspaceArchive";
 import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 
 /**
@@ -439,6 +440,7 @@ export function useWorkspaceCardCommands(): {
   const forgetWorkspaceSession = useCodeCatalogStore(
     (state) => state.forgetWorkspaceSession,
   );
+  const bulkArchiving = useRef(false);
   const [rename, setRename] = useState<{ id: string; title: string } | null>(
     null,
   );
@@ -520,67 +522,101 @@ export function useWorkspaceCardCommands(): {
     force: boolean,
   ) {
     const count = workspaces.length;
-    if (count === 0) return;
-    const ok = await confirm(
-      force
-        ? {
-            title: `Discard changes and archive ${count} workspaces?`,
-            description:
-              "Uncommitted and unpushed work is lost and a running session is stopped. Tidebreak saves the branch's commits in a bundle, then drops the branch.",
-            confirmLabel: "Discard and archive",
-            destructive: true,
+    if (count === 0 || bulkArchiving.current) return;
+    bulkArchiving.current = true;
+    let progressToast: string | number | undefined;
+    try {
+      const ok = await confirm(
+        force
+          ? {
+              title: `Discard changes and archive ${count} workspaces?`,
+              description:
+                "Uncommitted and unpushed work is lost and a running session is stopped. Tidebreak saves the branch's commits in a bundle, then drops the branch.",
+              confirmLabel: "Discard and archive",
+              destructive: true,
+            }
+          : {
+              title: `Archive ${count} workspaces?`,
+              description:
+                "They leave the rail and collect in Archive. Worktrees and branches go away; Tidebreak saves a bundle so restore still rebuilds the work.",
+              confirmLabel: "Archive",
+              destructive: false,
+            },
+      );
+      if (!ok) return;
+      const liveIds = railWorkspaceIds();
+      const viewing = codeWorkspaceIdFromPath(pathname);
+      const { archivedIds, failed } = await bulkArchiveWorkspaces({
+        client,
+        workspaces,
+        force,
+        confirm,
+        onArchived: (archived) => {
+          upsertWorkspace(archived);
+          forgetWorkspaceSession(archived.id);
+        },
+        onProgress: (completed, total) => {
+          if (completed === total) {
+            if (progressToast !== undefined) toast.dismiss(progressToast);
+            progressToast = undefined;
+          } else {
+            progressToast = toast.loading(
+              `Archiving workspace ${completed + 1} of ${total}…`,
+              {
+                id: progressToast,
+              },
+            );
           }
-        : {
-            title: `Archive ${count} workspaces?`,
-            description:
-              "They leave the rail and collect in Archive. Worktrees and branches go away; Tidebreak saves a bundle so restore still rebuilds the work.",
-            confirmLabel: "Archive",
-            destructive: false,
-          },
-    );
-    if (!ok) return;
-    const liveIds = railWorkspaceIds();
-    const viewing = codeWorkspaceIdFromPath(pathname);
-    const archivedIds = new Set<string>();
-    const failed: string[] = [];
-
-    for (const workspace of workspaces) {
-      try {
-        const archived = await client.archiveCodeWorkspace(workspace.id, force);
-        upsertWorkspace(archived);
-        forgetWorkspaceSession(workspace.id);
-        archivedIds.add(workspace.id);
-      } catch {
-        failed.push(workspace.title);
-      }
-    }
-
-    useCodeUiStore.getState().clearWorkspaceSelection();
-    if (archivedIds.size > 0) {
-      toast.success(
-        archivedIds.size === 1
-          ? "Workspace archived"
-          : `${archivedIds.size} workspaces archived`,
-      );
-    }
-    if (failed.length > 0) {
-      toast.error(
-        failed.length === 1
-          ? `Could not archive ${failed[0]}`
-          : `Could not archive ${failed.length} workspaces`,
-      );
-    }
-    if (viewing === undefined || !archivedIds.has(viewing)) return;
-    const nextId = nextWorkspaceAfterLeaving(liveIds, viewing, archivedIds);
-    if (nextId) {
-      await navigate({
-        to: "/code/w/$workspaceId",
-        params: { workspaceId: nextId },
-        replace: true,
+        },
       });
-      return;
+
+      const selection = useCodeUiStore.getState();
+      const remaining = selection.selectedWorkspaceIds.filter(
+        (id) => !archivedIds.has(id),
+      );
+      selection.replaceWorkspaceSelection(
+        remaining,
+        remaining.includes(selection.selectionAnchorId ?? "")
+          ? selection.selectionAnchorId
+          : (remaining[0] ?? null),
+      );
+      if (archivedIds.size > 0) {
+        toast.success(
+          archivedIds.size === 1
+            ? "Workspace archived"
+            : `${archivedIds.size} workspaces archived`,
+        );
+      }
+      if (failed.length > 0) {
+        toast.error(
+          failed.length === 1
+            ? `Could not archive ${failed[0]!.workspace.title}`
+            : `Could not archive ${failed.length} workspaces`,
+          {
+            description: failed
+              .map(
+                ({ workspace, error }) =>
+                  `${workspace.title}: ${friendlyErrorMessage(error, "Archive failed")}`,
+              )
+              .join("\n"),
+          },
+        );
+      }
+      if (viewing === undefined || !archivedIds.has(viewing)) return;
+      const nextId = nextWorkspaceAfterLeaving(liveIds, viewing, archivedIds);
+      if (nextId) {
+        await navigate({
+          to: "/code/w/$workspaceId",
+          params: { workspaceId: nextId },
+          replace: true,
+        });
+        return;
+      }
+      await navigate({ to: "/code", replace: true });
+    } finally {
+      if (progressToast !== undefined) toast.dismiss(progressToast);
+      bulkArchiving.current = false;
     }
-    await navigate({ to: "/code", replace: true });
   }
 
   async function runForceArchive(workspace: CodeWorkspaceSnapshot) {
