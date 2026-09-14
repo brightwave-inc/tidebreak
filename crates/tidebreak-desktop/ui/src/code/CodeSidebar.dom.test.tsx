@@ -9,6 +9,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { toast } from "sonner";
+import { HttpError } from "../api/client";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -19,7 +21,13 @@ import { CodeSidebar } from "./CodeSidebar";
 import { writeBrowserTabLayout } from "./workspace/browserTabLayout";
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    message: vi.fn(),
+    loading: vi.fn(),
+    dismiss: vi.fn(),
+  },
 }));
 
 /**
@@ -926,6 +934,85 @@ describe("CodeSidebar", () => {
     ]);
     expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([]);
   });
+
+  it.each([true, false])(
+    "handles a partial bulk archive when discard confirmation is %s",
+    async (discard) => {
+      const workspaces = ["clean", "dirty", "failed"].map((id) => ({
+        id,
+        repo_id: "repo-1",
+        title: id,
+        worktree_path: `/tmp/app/${id}`,
+        branch_name: `tidebreak/${id}`,
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-09-14T00:00:00Z",
+      }));
+      client.listCodeWorkspaces.mockResolvedValueOnce(workspaces);
+      const archiveCodeWorkspace = vi.fn(async (id: string, force: boolean) => {
+        if (id === "dirty" && !force)
+          throw new HttpError(409, "409: Uncommitted work", "uncommitted");
+        if (id === "failed")
+          throw new HttpError(
+            409,
+            "409: Terminal did not stop",
+            "terminal_shutdown_timeout",
+          );
+        return {
+          ...workspaces.find((workspace) => workspace.id === id)!,
+          status: "released" as const,
+        };
+      });
+      const { router } = await renderWithRouter(
+        <AppContextProvider
+          value={{
+            ...app,
+            client: { ...client, archiveCodeWorkspace } as never,
+          }}
+        >
+          <CodeSidebar />
+        </AppContextProvider>,
+        { initialUrl: "/code/w/clean" },
+      );
+      await screen.findByRole("button", { name: /^clean/ });
+      act(() => {
+        useCodeUiStore
+          .getState()
+          .replaceWorkspaceSelection(["clean", "dirty", "failed"], "clean");
+        useCodeUiStore.getState().requestArchiveSelection();
+      });
+      let dialog = await screen.findByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Archive" }));
+      await screen.findByText("Discard leftover work in 1 workspace?");
+      dialog = screen.getByRole("alertdialog");
+      expect(within(dialog).getByText("dirty")).toBeInTheDocument();
+      expect(within(dialog).getByText("Uncommitted work")).toBeInTheDocument();
+      expect(archiveCodeWorkspace).toHaveBeenCalledTimes(3);
+      // Repeating the keyboard action must not open another batch while awaiting consent.
+      act(() => useCodeUiStore.getState().requestArchiveSelection());
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: discard ? "Discard and archive" : "Cancel",
+        }),
+      );
+      await waitFor(() =>
+        expect(router.state.location.pathname).not.toBe("/code/w/clean"),
+      );
+      expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual(
+        discard ? ["failed"] : ["dirty", "failed"],
+      );
+      expect(archiveCodeWorkspace.mock.calls).toEqual([
+        ["clean", false],
+        ["dirty", false],
+        ["failed", false],
+        ...(discard ? [["dirty", true]] : []),
+      ]);
+      expect(toast.error).toHaveBeenCalledWith("Could not archive failed", {
+        description: "failed: Terminal did not stop",
+      });
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    },
+  );
 
   it("opens and clears selection on an unmodified click", async () => {
     const { router } = await renderWithRouter(
