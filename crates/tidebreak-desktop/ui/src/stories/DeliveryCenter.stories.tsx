@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -525,31 +526,6 @@ type Story = StoryObj<typeof meta>;
 export const PullRequests: Story = {};
 
 /**
- * The default grouping answers the page's main question: which pull requests
- * still need the reader, and which ones have already been handed to GitHub.
- */
-export const PullRequestAttentionGroups: Story = {};
-
-/** A running check stays blue and in Waiting instead of becoming a failure. */
-export const PullRequestRunningCheck: Story = {};
-
-/** A running check on a merge-queue repo offers merge when ready, not a blocked Merge. */
-export const PullRequestRunningCheckDetail: Story = {};
-
-/** Auto-merge and queue membership live on the PR mark and in one handoff group. */
-export const PullRequestMergeHandoffs: Story = {};
-
-/** Repository grouping makes a many-repository queue scannable by ownership. */
-export const PullRequestsByRepository: Story = {};
-
-/**
- * The list carries every lifecycle at once. A merged or closed row used to
- * read "Review Pending", because GitHub drops the review decision the moment
- * a pull request settles.
- */
-export const PullRequestLifecycles: Story = {};
-
-/**
  * Stack lanes (decision 77): children indent under their parent in fact
  * order, and a child whose parent is not loaded stays flat with a
  * "stacked on" chip instead of a hidden edge.
@@ -565,6 +541,10 @@ export const PullRequestStacks: Story = {
  */
 export const PullRequestStackDetail: Story = {
   args: { scenario: "pull-requests-stacked" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Stack base: extract the fact store"));
+  },
 };
 
 /**
@@ -574,9 +554,11 @@ export const PullRequestStackDetail: Story = {
  */
 export const PullRequestStackDetailWithoutAutoMerge: Story = {
   args: { scenario: "pull-requests-stacked-auto-merge-unavailable" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Stack base: extract the fact store"));
+  },
 };
-
-export const PullRequestDetail: Story = {};
 
 /** Opening stale list data adopts the merged state and moves the row to Done. */
 export const PullRequestStateChangedOnOpen: Story = {
@@ -594,58 +576,29 @@ export const PullRequestUnregisteredStack: Story = {
 };
 
 /** The full GitHub-shaped sheet: lifecycle, diffstat, reviewers, Markdown. */
-export const PullRequestDetailConversation: Story = {};
 
-/**
- * Newest first is the default: the reason a reader opens a busy pull request
- * is the latest verdict. The select flips back to the host's chronology.
- */
-export const PullRequestCommentOrdering: Story = {};
+export const PullRequestDetailConversation: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Build the delivery center"));
+  },
+};
 
-/**
- * Admin merge stays behind the overflow and an inline confirmation: it
- * bypasses the branch protection that is otherwise disabling the plain merge
- * button. Inline rather than a dialog — the sheet is already a modal, and a
- * second stacked modal shares its dismiss layer.
- */
-export const PullRequestAdminMerge: Story = {};
+export const PullRequestDetailFiles: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Build the delivery center"));
+    await userEvent.click(await canvas.findByRole("tab", { name: /Files/ }));
+  },
+};
 
-/**
- * A pull request with a linked active workspace routes its chores there; the
- * menu names the workspace before anything starts.
- */
-export const PullRequestAgentActions: Story = {};
-
-/**
- * Without a linked workspace the same menu cuts a fresh one from the pull
- * request's head branch, queues the prompt, and lands on the new workspace.
- */
-export const PullRequestFreshAgent: Story = {};
-
-export const PullRequestDetailFiles: Story = {};
-
-export const PullRequestDetailChecks: Story = {};
-
-/** Skipped checks are terminal, so a settled run reads complete in the tab. */
-export const PullRequestTerminalChecks: Story = {};
-
-/** Merged: no merge controls, a reopen-free sheet, and who merged it. */
-export const MergedPullRequestDetail: Story = {};
-
-/** Closed without merging: the only action left is to reopen it. */
-export const ClosedPullRequestDetail: Story = {};
-
-/** Draft: mark ready is offered, merge is not. */
-export const DraftPullRequestDetail: Story = {};
-
-/** Conflicting: no host merge action, and the card says why. */
-export const BlockedMergePullRequestDetail: Story = {};
-
-/**
- * The default view: your own open pull requests, drafts included. The author
- * comes from the login `gh` is signed in as, so "Yours" needs no typing.
- */
-export const PullRequestsYours: Story = {};
+export const PullRequestDetailChecks: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Build the delivery center"));
+    await userEvent.click(await canvas.findByRole("tab", { name: /Checks/ }));
+  },
+};
 
 /**
  * No login to filter on, so "Yours" is not offered and Delivery opens on the
@@ -685,8 +638,6 @@ export const RunDetail: Story = {
   },
 };
 
-export const PullRequestKeyboard: Story = {};
-
 export const ArchivePopulated: Story = {
   args: {
     scenario: "archive",
@@ -710,10 +661,8 @@ export const ArchiveEmpty: Story = {
 
 export const NarrowPullRequestDetail: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText("Build the delivery center"));
+  },
 };
-
-/**
- * The author filter is a lookup over logins Delivery has seen — avatars and
- * checkboxes — with typing kept as the fallback for a login it has not.
- */
-export const PullRequestAuthorFilter: Story = {};

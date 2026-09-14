@@ -140,12 +140,16 @@ describe("CodeApprovalCard", () => {
       screen.getByText("Which region should the deploy target?"),
     ).toBeInTheDocument();
     expect(screen.getByText("us-east · us-west")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
   });
 
   it("names the mode a plan approval would move the session to", () => {
     render(<CodeApprovalCard approval={pendingPlan} onDecide={vi.fn()} />);
     expect(screen.getByText("Approve this plan?")).toBeInTheDocument();
     expect(screen.getByText("auto")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
   });
 
   it("leads with the command and keeps the harness payload collapsed", () => {

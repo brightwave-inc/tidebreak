@@ -386,12 +386,8 @@ function CodeArchiveBody() {
             </EmptyHeader>
           </Empty>
         ) : (
-          <div
-            role="list"
-            aria-label="Archived workspaces"
-            className="min-w-[760px]"
-          >
-            <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur">
+          <div role="list" aria-label="Archived workspaces" className="@container min-w-0">
+            <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,1fr)_auto] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur [&>*:nth-child(2)]:hidden [&>*:nth-child(3)]:hidden @[46rem]:grid-cols-[minmax(260px,1fr)_150px_130px_180px] @[46rem]:[&>*:nth-child(2)]:flex @[46rem]:[&>*:nth-child(3)]:flex">
               <span>Workspace</span>
               <span>Repository</span>
               <span>Archived</span>
@@ -407,7 +403,7 @@ function CodeArchiveBody() {
                 <div
                   key={workspace.id}
                   role="listitem"
-                  className="grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] items-start gap-4 border-b border-border-subtle px-5 py-3"
+                  className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 border-b border-border-subtle px-5 py-3 [&>*:nth-child(2)]:hidden [&>*:nth-child(3)]:hidden @[46rem]:grid-cols-[minmax(260px,1fr)_150px_130px_180px] @[46rem]:[&>*:nth-child(2)]:flex @[46rem]:[&>*:nth-child(3)]:flex"
                 >
                   <div className="min-w-0">
                     <button
