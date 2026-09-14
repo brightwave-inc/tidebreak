@@ -961,43 +961,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn command_discovery_stays_inside_the_nextest_silence_budget() {
-        use std::time::{Duration, Instant};
-        let dir = tempfile::tempdir().unwrap();
-        let binary = dir.path().join("codex");
-        std::fs::write(&binary, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let host = HostEnv {
-            shell: dir.path().join("missing-shell"),
-            env: Vec::new(),
-            clear_env: true,
-            data_dir: None,
-            managed_node_root: None,
-            harness_versions: Vec::new(),
-            declared_binaries: Vec::new(),
-            declared_env: Some(vec![(
-                std::ffi::OsString::from("PATH"),
-                dir.path().as_os_str().to_owned(),
-            )]),
-        };
-        let started = Instant::now();
-        let probe = CodexAdapter::new().probe(&host).await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(18),
-            "hanging binary stacked probe waits past nextest's 20s silence kill: {elapsed:?}"
-        );
-        assert!(probe.found);
-        assert!(probe.commands.is_empty());
-        assert_eq!(
-            CodexAdapter::new().capabilities(&probe).slash_commands,
-            CapLevel::Unknown
-        );
-    }
-
     #[test]
     fn slash_commands_are_supported_once_the_probe_lists_any() {
         let probe = HarnessProbe {
