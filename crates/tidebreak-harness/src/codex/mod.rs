@@ -65,8 +65,10 @@ impl HarnessAdapter for CodexAdapter {
                         .ok()
                         .map(|version| normalize_codex_version(&version)),
                 };
-                let authenticated = observe_login(&capture.binary, &capture.env).await;
-                let commands = observe_commands(&capture.binary, &capture.env).await;
+                let (authenticated, commands) = tokio::join!(
+                    observe_login(&capture.binary, &capture.env),
+                    observe_commands(&capture.binary, &capture.env),
+                );
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),

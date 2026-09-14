@@ -190,8 +190,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                     Some(declared) => Some(declared.to_owned()),
                     None => observe_version(&capture.binary, &capture.env).await.ok(),
                 };
-                let authenticated = observe_auth(&capture.binary, &capture.env).await;
-                let commands = observe_commands(&capture.binary, &capture.env).await;
+                let (authenticated, commands) = tokio::join!(
+                    observe_auth(&capture.binary, &capture.env),
+                    observe_commands(&capture.binary, &capture.env),
+                );
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
