@@ -644,7 +644,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/katharostech/cfg_aliases
 - License text: `LICENSE` ([L-48513346d335](#l-48513346d335))
 
-### chacha20 0.10.1
+### chacha20 0.10.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/stream-ciphers
