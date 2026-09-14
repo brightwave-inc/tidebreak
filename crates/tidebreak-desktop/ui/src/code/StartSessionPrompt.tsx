@@ -29,7 +29,6 @@ import {
   CREATE_PERMISSION_MODE_FIXED,
   HARNESS_LABELS,
   createPermissionModes,
-  createPermissionModePosture,
   defaultCreatePermissionMode,
   effortLadder,
   gatewayCodeModels,
@@ -440,11 +439,6 @@ export function StartSessionPrompt({
           disabled={starting || !selected || !installed || policyBlocksStart}
           running={starting}
           permissionMode={mode}
-          permissionPosture={
-            selected
-              ? createPermissionModePosture(mode, selected.caps)
-              : undefined
-          }
           availableModes={availableModes}
           unavailableReason={
             policyBlocksStart ? PERMISSION_MODE_POLICY_BLOCKED : undefined
