@@ -7,12 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  ExternalLink,
-  Globe2,
-  RefreshCw,
-  TriangleAlert,
-} from "lucide-react";
+import { ExternalLink, Globe2, RefreshCw, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {

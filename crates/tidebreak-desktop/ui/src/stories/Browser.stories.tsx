@@ -7,10 +7,7 @@ import {
   BrowserToolbar,
 } from "@/code/browser/BrowserToolbar";
 import { BrowserViewportControl } from "@/code/browser/BrowserViewportControl";
-import {
-  BrowserFallback,
-  CodeBrowserTab,
-} from "@/code/browser/CodeBrowserTab";
+import { BrowserFallback, CodeBrowserTab } from "@/code/browser/CodeBrowserTab";
 import type { BrowserViewport } from "@/code/browser/browserViewport";
 import type {
   BrowserAgentAccess,
