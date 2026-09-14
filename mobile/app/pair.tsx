@@ -13,6 +13,7 @@ import {
   parseOAuthCallback,
 } from "../src/lib/gateway";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
+import { grantedScopeFrom } from "../src/lib/scope";
 import { validatedBaseUrl } from "../src/lib/url";
 import { connections } from "../src/session/runtime";
 
@@ -56,6 +57,7 @@ export default function PairScreen() {
         verifier: request.verifier,
         redirectUri: request.redirectUri,
       });
+      const granted = grantedScopeFrom(tokens);
       await connections.addGateway({
         gatewayUrl,
         refreshToken: tokens.refresh_token,
@@ -65,10 +67,9 @@ export default function PairScreen() {
         ...(meta.tidebreak_machine_url
           ? { machinePrefillUrl: meta.tidebreak_machine_url }
           : {}),
-        // What the session was actually granted, from the exchange that
-        // answers about the session. A gateway that echoes nothing leaves it
-        // unrecorded, which reads as the baseline authority.
-        grantedScope: tokens.scope ?? request.scope,
+        // Only what the gateway named as granted. A response that omits the
+        // scope leaves it unrecorded, which reads as the baseline authority.
+        ...(granted ? { grantedScope: granted } : {}),
       });
       const tokenStore = connections.activeTokens();
       try {

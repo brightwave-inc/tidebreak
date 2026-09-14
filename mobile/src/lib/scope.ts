@@ -20,7 +20,7 @@
  * every one of them.
  */
 
-import type { GatewayMeta } from "./types";
+import type { GatewayMeta, TokenResponse } from "./types";
 
 /** Pairing and machine supervision: what every session has always asked for. */
 export const BASELINE_SCOPE = "openid profile offline_access";
@@ -66,6 +66,27 @@ export function scopeGrants(
     return false;
   }
   return granted.split(/\s+/).includes(scope);
+}
+
+/**
+ * The grant to record for a new session, taken from the authorization-code
+ * exchange — the one response that answers about the session rather than about
+ * a resource.
+ *
+ * Only what the gateway actually returned is recorded. RFC 6749 §5.1 lets a
+ * server omit `scope` to mean "identical to the scope requested", and reading
+ * the omission that way would be defensible in general; it is not defensible
+ * here, because this value gates console and runtime surfaces. Recording the
+ * request would let a gateway that silently narrowed (or never understood) the
+ * request light up authority it never granted. Unknown reads as baseline
+ * instead. Model Gateway's token endpoint always returns `scope`, so a real
+ * pairing records its true grant and loses nothing to this conservatism.
+ */
+export function grantedScopeFrom(
+  tokens: Pick<TokenResponse, "scope">,
+): string | undefined {
+  const granted = tokens.scope?.trim();
+  return granted ? granted : undefined;
 }
 
 /**

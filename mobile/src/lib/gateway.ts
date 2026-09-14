@@ -17,14 +17,15 @@ export type AuthorizeRequest = {
   redirectUri: string;
   state: string;
   verifier: string;
-  /** The scope actually asked for, so the caller can record what was granted. */
-  scope: string;
 };
 
 /**
  * `meta` is the unauthenticated metadata pairing already read. It decides the
  * scope: the gateway refuses a scope it does not advertise rather than
- * ignoring it, so anything not advertised is not requested (`scope.ts`).
+ * ignoring it (`scope.ts`).
+ *
+ * The requested scope is deliberately not returned. What a session may do is
+ * read from the grant the exchange reports, never from what was asked for.
  */
 export function buildAuthorizeRequest(
   gatewayUrl: string,
@@ -34,12 +35,11 @@ export function buildAuthorizeRequest(
   const base = validatedBaseUrl(gatewayUrl);
   const pkce = createPkcePair();
   const state = randomUrlSafe(24);
-  const scope = requestedScope(meta);
   const url = new URL(`${base}/oauth/authorize`);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", CLIENT_ID);
   url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("scope", scope);
+  url.searchParams.set("scope", requestedScope(meta));
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
@@ -48,7 +48,6 @@ export function buildAuthorizeRequest(
     redirectUri,
     state,
     verifier: pkce.verifier,
-    scope,
   };
 }
 

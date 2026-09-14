@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_SCOPE,
+  grantedScopeFrom,
   grantsConsoleRead,
   grantsConsoleWrite,
   grantsRuntimeExecute,
@@ -45,6 +46,33 @@ describe("requestedScope", () => {
     ).toBe(
       "openid profile offline_access control_plane:read runtime:execute control_plane:write",
     );
+  });
+});
+
+describe("grantedScopeFrom", () => {
+  it("records what the gateway said it granted", () => {
+    expect(
+      grantedScopeFrom({
+        scope: "openid profile offline_access control_plane:read",
+      }),
+    ).toBe("openid profile offline_access control_plane:read");
+  });
+
+  it("records nothing when the response omits the scope", () => {
+    // RFC 6749 lets a server omit `scope` to mean "as requested". Recording
+    // the request on that reading would hand the UI console authority the
+    // gateway never named, so the omission stays unknown — and unknown is
+    // baseline.
+    expect(grantedScopeFrom({})).toBeUndefined();
+    expect(grantedScopeFrom({ scope: "" })).toBeUndefined();
+    expect(grantedScopeFrom({ scope: "   " })).toBeUndefined();
+  });
+
+  it("gates the console off for a session whose grant was never returned", () => {
+    const granted = grantedScopeFrom({});
+    expect(grantsConsoleRead(granted)).toBe(false);
+    expect(grantsRuntimeExecute(granted)).toBe(false);
+    expect(grantsConsoleWrite(granted)).toBe(false);
   });
 });
 
