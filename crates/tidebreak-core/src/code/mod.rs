@@ -27,6 +27,7 @@ use crate::image::ImageRef;
 use crate::PermissionMode;
 pub use crate::{ApprovalId, SessionId, TurnId};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -1496,6 +1497,10 @@ impl ActsAs {
 /// when the channel sent one. A trigger knows its own name and nothing else.
 /// A row written before this field existed carries nothing and renders as the
 /// session's owner.
+///
+/// The principal is an internal key (`user:<uuid>`) and must never reach the
+/// UI; the same goes for `external_identity`. Only `display`, or a generic
+/// label derived from `channel_kind`, may render.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct TurnActor {
     /// Principal key, when the submitter holds one on this machine.
@@ -1526,13 +1531,25 @@ impl TurnActor {
         }
     }
 
-    /// The name to render, falling back to the principal when the channel
-    /// sent no display name.
-    pub fn label(&self) -> Option<&str> {
-        self.display
+    /// The name to render: the display name as-is, or a generic origin label
+    /// ("Slack user") when an adapter sent no name. The principal is an
+    /// internal key and must never reach the UI, and neither may
+    /// `external_identity`. `None` renders as the session's owner.
+    pub fn label(&self) -> Option<Cow<'_, str>> {
+        if let Some(display) = self.display.as_deref().filter(|name| !name.is_empty()) {
+            return Some(Cow::Borrowed(display));
+        }
+        let kind = self
+            .channel_kind
             .as_deref()
-            .or(self.principal.as_deref())
-            .filter(|label| !label.is_empty())
+            .filter(|kind| !kind.is_empty())?;
+        let mut chars = kind.chars();
+        let first = chars.next()?;
+        Some(Cow::Owned(format!(
+            "{}{} user",
+            first.to_uppercase(),
+            chars.as_str()
+        )))
     }
 }
 
@@ -2897,6 +2914,38 @@ mod tests {
         assert_eq!(HarnessKind::ClaudeCode.as_str(), "claude_code");
         assert_eq!(HarnessKind::from_str("grok"), Some(HarnessKind::Grok));
         assert_eq!(HarnessKind::ClaudeCode.tier(), HarnessTier::Reference);
+    }
+
+    #[test]
+    fn turn_actor_label_never_exposes_the_principal() {
+        let display = TurnActor {
+            principal: Some("user:019fc880-8c55-7c31-8d5c-980c6a98783a".to_owned()),
+            display: Some("Ada Lovelace".to_owned()),
+            channel_kind: Some("slack".to_owned()),
+            external_identity: Some("U123".to_owned()),
+        };
+        assert_eq!(display.label().as_deref(), Some("Ada Lovelace"));
+
+        let channel_only = TurnActor {
+            principal: Some("user:019fc880-8c55-7c31-8d5c-980c6a98783a".to_owned()),
+            channel_kind: Some("slack".to_owned()),
+            external_identity: Some("U123".to_owned()),
+            ..TurnActor::default()
+        };
+        assert_eq!(channel_only.label().as_deref(), Some("Slack user"));
+
+        let owner =
+            crate::OwnerId::new("user:019fc880-8c55-7c31-8d5c-980c6a98783a").expect("valid owner");
+        let principal_only = TurnActor::principal(&owner);
+        assert_eq!(principal_only.label(), None);
+
+        let empty_strings = TurnActor {
+            principal: Some("user:019fc880-8c55-7c31-8d5c-980c6a98783a".to_owned()),
+            display: Some(String::new()),
+            channel_kind: Some(String::new()),
+            external_identity: None,
+        };
+        assert_eq!(empty_strings.label(), None);
     }
 
     fn digest() -> PullRequestDigest {
