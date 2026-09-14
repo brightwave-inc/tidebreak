@@ -45,6 +45,32 @@ const workspace: CodeGrantSnapshot = {
   created_at: "2026-09-08T10:00:00Z",
 };
 
+const REPLACED_REASON = "replaced by a new connect approval";
+
+/** An older connect for the same person as `live`, revoked by the newer one. */
+const replacedNameless: CodeGrantSnapshot = {
+  id: "6b1f9a34-0000-4000-8000-000000000004",
+  channel_kind: "slack",
+  external_identity: "U-CASEY",
+  workspace_identity: "T-ACME",
+  workspace_name: "Acme Corp",
+  created_at: "2026-07-01T10:00:00Z",
+  revoked_at: "2026-08-19T09:00:00Z",
+  revoked_reason: REPLACED_REASON,
+};
+
+const replacedOther: CodeGrantSnapshot = {
+  id: "6b1f9a34-0000-4000-8000-000000000005",
+  channel_kind: "slack",
+  external_identity: "U-ROBIN",
+  display_name: "Robin",
+  workspace_identity: "T-ACME",
+  workspace_name: "Acme Corp",
+  created_at: "2026-06-01T10:00:00Z",
+  revoked_at: "2026-08-10T09:00:00Z",
+  revoked_reason: REPLACED_REASON,
+};
+
 afterEach(cleanup);
 
 describe("ChannelsPanel", () => {
@@ -177,6 +203,131 @@ describe("ChannelsPanel", () => {
     expect(listCodeGrants).toHaveBeenCalledTimes(3);
     expect(revokeCodeGrant).toHaveBeenCalledExactlyOnceWith(workspace.id);
     expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+  });
+
+  it("collapses replaced-connection history behind a per-workspace disclosure", async () => {
+    const client = {
+      listCodeGrants: vi.fn(async () => [
+        live,
+        replacedNameless,
+        replacedOther,
+      ]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+    await screen.findByText("Casey");
+
+    // Collapsed by default: no replaced row leaks into the list.
+    expect(screen.queryByText(new RegExp(REPLACED_REASON))).toBeNull();
+    expect(screen.queryByText("Robin")).toBeNull();
+
+    const disclosure = screen.getByRole("button", {
+      name: "2 replaced connections",
+    });
+    await userEvent.setup().click(disclosure);
+
+    expect(screen.getAllByText(new RegExp(REPLACED_REASON))).toHaveLength(2);
+    expect(screen.getByText("Robin")).toBeTruthy();
+  });
+
+  it("keeps a non-replacement revocation inline, never behind the disclosure", async () => {
+    const client = {
+      listCodeGrants: vi.fn(async () => [stolen]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+    await screen.findByText("Jordan");
+
+    // The theft reason is readable without any click.
+    expect(screen.getByText(/treated as stolen/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /replaced connection/ }),
+    ).toBeNull();
+  });
+
+  it("borrows the display name another grant stored for the same identity", async () => {
+    const client = {
+      listCodeGrants: vi.fn(async () => [live, replacedNameless]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+    await screen.findByText("Casey");
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "1 replaced connection" }));
+
+    // The nameless replaced grant is titled with the live grant's name, and
+    // the member id stays visible as each row's metadata line.
+    expect(screen.getAllByText("Casey")).toHaveLength(2);
+    expect(screen.getAllByText("U-CASEY")).toHaveLength(2);
+  });
+
+  it("falls back to a generic member label, showing the raw id exactly once", async () => {
+    const nameless: CodeGrantSnapshot = {
+      ...live,
+      id: "6b1f9a34-0000-4000-8000-000000000006",
+      external_identity: "U072QAMTDCN",
+      display_name: undefined,
+    };
+    const client = {
+      listCodeGrants: vi.fn(async () => [nameless]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+
+    await screen.findByText("Slack member");
+    expect(screen.getAllByText("U072QAMTDCN")).toHaveLength(1);
+  });
+
+  it("drops the metadata line when it would repeat the title", async () => {
+    const idAsName: CodeGrantSnapshot = {
+      ...live,
+      id: "6b1f9a34-0000-4000-8000-000000000007",
+      external_identity: "U-SELF",
+      display_name: "U-SELF",
+    };
+    const client = {
+      listCodeGrants: vi.fn(async () => [idAsName]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+
+    await screen.findByText("U-SELF");
+    expect(screen.getAllByText("U-SELF")).toHaveLength(1);
+  });
+
+  it("names the workspace from any grant with a real team name", async () => {
+    const namelessWorkspaceGrant: CodeGrantSnapshot = {
+      ...live,
+      id: "6b1f9a34-0000-4000-8000-000000000008",
+      workspace_name: undefined,
+    };
+    const echoedIdentity: CodeGrantSnapshot = {
+      ...workspace,
+      id: "6b1f9a34-0000-4000-8000-00000000000a",
+      workspace_name: "T-ACME",
+    };
+    const client = {
+      listCodeGrants: vi.fn(async () => [
+        namelessWorkspaceGrant,
+        echoedIdentity,
+      ]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={client} />);
+
+    // The workspace grant echoed the identity as its name; the person grant
+    // has none at all — the group still keeps the identity, not a fake name.
+    await screen.findByText("Slack · T-ACME");
+    expect(screen.getByText("Workspace T-ACME")).toBeTruthy();
+
+    cleanup();
+    const named = {
+      listCodeGrants: vi.fn(async () => [
+        { ...echoedIdentity, workspace_name: undefined },
+        live,
+      ]),
+    } as unknown as ApiClient;
+    render(<ChannelsPanel client={named} />);
+
+    // Any grant in the group holding a real name names the header and rows.
+    await screen.findByText("Slack · Acme Corp");
+    expect(screen.getByText("Workspace Acme Corp")).toBeTruthy();
   });
 
   it("says where connecting starts when nothing is connected", async () => {
