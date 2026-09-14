@@ -1,7 +1,10 @@
 import { Platform } from "react-native";
 import * as Application from "expo-application";
 import * as SecureStore from "expo-secure-store";
-import { ConnectionRegistry } from "../lib/connectionRegistry";
+import {
+  ConnectionRegistry,
+  type RegistrySnapshot,
+} from "../lib/connectionRegistry";
 import { fetchTokenHttp } from "../lib/gateway";
 import { storageForOs, type SecureStorage } from "../lib/storage";
 
@@ -30,11 +33,31 @@ async function installTimeMs(): Promise<number | null> {
   }
 }
 
+export const secureStorage: SecureStorage = storageForOs(
+  Platform.OS,
+  expoStorage,
+);
+
 export const connections = new ConnectionRegistry({
-  storage: storageForOs(Platform.OS, expoStorage),
+  storage: secureStorage,
   http: fetchTokenHttp(),
   installTimeMs,
 });
+
+/**
+ * Hydrates the registry once per process, whatever reached it first.
+ *
+ * The root layout does this on mount, but a notification action pressed while
+ * the app is killed launches the bundle with no React tree at all — so the
+ * background executor has to be able to ask for the same thing and get the
+ * same single hydrate rather than a second, racing one.
+ */
+let hydration: Promise<RegistrySnapshot> | null = null;
+
+export function hydrateConnections(): Promise<RegistrySnapshot> {
+  hydration ??= connections.hydrate();
+  return hydration;
+}
 
 /**
  * The active connection's credential core. Every screen mints through this

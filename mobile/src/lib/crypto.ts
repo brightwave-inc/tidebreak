@@ -27,6 +27,15 @@ export function sha256Hex(input: string): string {
   return sha256(input);
 }
 
+/**
+ * The raw digest bytes. Exported so a caller that needs bits rather than an
+ * encoding (the pairing match code reads the first 20) never has to decode
+ * hex or base64 back — `atob` is banned here and Hermes may not have it.
+ */
+export function sha256Bytes(input: string): number[] {
+  return sha256.array(input);
+}
+
 export function sha256Base64Url(input: string): string {
   return base64UrlEncode(sha256.array(input));
 }

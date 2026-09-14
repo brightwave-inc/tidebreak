@@ -32,6 +32,21 @@ pnpm test
 
 Shipping to TestFlight: see [`DEPLOYING.md`](DEPLOYING.md).
 
+## Generated types
+
+`src/generated/` is committed output. Do not hand-edit it; CI regenerates and
+fails on any difference.
+
+| File | Source | Regenerate |
+| --- | --- | --- |
+| `wire.ts` | the desktop UI's generated wire types, byte-identical | `pnpm sync-wire` |
+| `gatewayAdmin.ts` | `schemas/gateway-admin-openapi.json`, via `openapi-typescript` | `pnpm sync-gateway-openapi` |
+
+The gateway admin snapshot is a pinned contract refreshed on demand, not on
+every gateway deploy — see [`schemas/README.md`](schemas/README.md) for where it
+comes from and how to refresh it. `src/lib/gatewayAdmin.ts` holds the named
+aliases screens should import instead of indexing the generated file directly.
+
 ## Pairing
 
 1. Enter the gateway public base URL.
@@ -48,6 +63,54 @@ Shipping to TestFlight: see [`DEPLOYING.md`](DEPLOYING.md).
    automatically and lands on the hub. There is no confirm step: attach
    validation refuses any machine but the paired deployment's own, so
    confirming a prefilled field decides nothing.
+
+### QR / console pairing
+
+An alternative to steps 1–4 for a gateway whose console shows a pairing code
+(mg ADR 0086). Scan it, or open a `tidebreak://provision?gateway=…&session=…`
+link:
+
+1. The payload carries a gateway URL and a pairing-session handle. Neither is
+   a credential, so an intercepted code yields only a claim the console user
+   can see and refuse. `src/lib/provision.ts` is the allowlist: this app's own
+   three schemes, host `provision`, an `mg_ps_` handle, and a gateway URL that
+   passes the same validation a typed one does.
+2. The phone claims the session with a fresh PKCE challenge, declaring
+   `client_id=tidebreak-mobile` — omitting it would mean `tidewatch`, whose
+   registered redirects are not this app's.
+3. Both screens show the same four-character match code, derived from the
+   challenge exactly as the gateway derives it. If they differ, deny at the
+   console.
+4. On approval a single poll receives an authorization code, redeemed through
+   the same grant as the browser path — so both paths produce one identical
+   connection.
+
+## Notifications
+
+Push rides the gateway (mg ADR 0093) and is offered only where
+`GET /api/v1/meta` advertises `surfaces.push`.
+
+- Registration is per connection: each paired gateway holds its own push
+  address for this phone, minted with that connection's own `control` bearer
+  and reconciled on every return to the foreground.
+- Per-kind toggles live in Settings. They are per *account*, not per device —
+  suppression happens at the gateway's enqueue site.
+- Signing out deregisters the device **before** clearing the credential; the
+  DELETE needs a bearer the connection is about to stop being able to mint.
+- Decision kinds carry action buttons (Nudge / Cancel / Accept & stop). They
+  use the owner-scoped runtime verbs, so a session whose grant lacks
+  `runtime:execute` degrades to a tray message pointing back at the app rather
+  than firing a request the gateway would refuse. The `runtime:<slug>` audience
+  is resolved through `runtimeSlug.ts`, so a member on an installation that
+  serves no MCP endpoint can still cancel and steer their own runs from the
+  tray. A run that ended between the push and the press reads as "Already
+  finished" rather than as a failure.
+- **Android is display-form only today.** This repository ships no
+  `google-services.json`, so an Android build has no FCM registration, never
+  claims `renders_data_messages`, and therefore receives ordinary tap-only
+  notifications. The background renderer that attaches the buttons is present
+  and arms itself; it stays silent until the Firebase config lands. iOS is
+  unaffected — its buttons come from the OS-native category match.
 
 ## Connections
 

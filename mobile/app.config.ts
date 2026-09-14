@@ -90,12 +90,37 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         data: [{ scheme: SCHEME[VARIANT], host: "callback" }],
         category: ["BROWSABLE", "DEFAULT"],
       },
+      // The gateway console's pairing link. Carries a gateway URL and a
+      // claimable pairing-session handle, never a credential (mg ADR 0086),
+      // so it is safe to accept from any source — `src/lib/provision.ts` is
+      // what decides whether a given payload is one of ours.
+      {
+        action: "VIEW",
+        autoVerify: false,
+        data: [{ scheme: SCHEME[VARIANT], host: "provision" }],
+        category: ["BROWSABLE", "DEFAULT"],
+      },
     ],
   },
   plugins: [
     "expo-router",
     "expo-secure-store",
     "expo-web-browser",
+    // Scanning the console's pairing QR. The permission string is what the OS
+    // shows in the prompt, so it names the one thing the camera is for.
+    [
+      "expo-camera",
+      {
+        cameraPermission:
+          "Tidebreak uses the camera only to scan the pairing code your gateway console shows.",
+        recordAudioAndroid: false,
+      },
+    ],
+    // Push. No `googleServicesFile` yet: without a Firebase config an Android
+    // build has no FCM registration, so it registers its Expo token, never
+    // claims it can render data-only messages, and receives ordinary
+    // display-form notifications. iOS is unaffected.
+    "expo-notifications",
   ],
   extra: {
     appVariant: VARIANT,

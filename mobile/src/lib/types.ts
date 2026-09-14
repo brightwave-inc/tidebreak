@@ -58,6 +58,12 @@ export type GatewayMeta = {
  */
 export type GatewaySurfaces = {
   /**
+   * Whether this installation delivers mobile push notifications (mg ADR
+   * 0093). A client must not offer push registration when this is absent: a
+   * dark installation answers the device and preference routes with 404.
+   */
+  push?: boolean;
+  /**
    * Whether this installation's `tidebreak-mobile` client may hold the gateway
    * console resources (`control_plane`, `runtime:<slug>`) — the widening in
    * brightwave-inc/model-gateway#2044. Absent on every gateway deployed today.

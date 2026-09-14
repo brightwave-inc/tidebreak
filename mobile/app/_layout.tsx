@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { connections } from "../src/session/runtime";
+import { PushSync } from "../src/push/registration";
+import { connections, hydrateConnections } from "../src/session/runtime";
 import { useConnectionStore } from "../src/session/store";
 
 const queryClient = new QueryClient();
@@ -19,7 +20,7 @@ export default function RootLayout() {
     // signing out of one connection, and a gateway revoking one session's
     // refresh family.
     const stop = connections.onChange(apply);
-    void connections.hydrate().then((snapshot) => {
+    void hydrateConnections().then((snapshot) => {
       setHydrated(snapshot);
       setReady(true);
     });
@@ -34,6 +35,7 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <QueryClientProvider client={queryClient}>
         <StatusBar style="auto" />
+        <PushSync />
         <Stack
           screenOptions={{
             headerShadowVisible: false,
@@ -46,6 +48,7 @@ export default function RootLayout() {
         >
           <Stack.Screen name="index" options={{ headerShown: false, title: "Tidebreak" }} />
           <Stack.Screen name="pair" options={{ title: "Gateway" }} />
+          <Stack.Screen name="scan" options={{ title: "Scan to pair" }} />
           <Stack.Screen name="attach" options={{ title: "Machine" }} />
           <Stack.Screen name="home" options={{ title: "Home" }} />
           <Stack.Screen
@@ -60,6 +63,28 @@ export default function RootLayout() {
           <Stack.Screen name="approvals" options={{ title: "Approvals" }} />
           <Stack.Screen name="settings" options={{ title: "Settings" }} />
           <Stack.Screen name="connections" options={{ title: "Connections" }} />
+          <Stack.Screen name="console" options={{ title: "Gateway" }} />
+          <Stack.Screen name="sandboxes" options={{ title: "Sandboxes" }} />
+          <Stack.Screen name="sandbox/[id]" options={{ title: "Sandbox" }} />
+          <Stack.Screen name="activity" options={{ title: "Activity" }} />
+          <Stack.Screen name="catalog" options={{ title: "Models & apps" }} />
+          <Stack.Screen name="limits" options={{ title: "My limits" }} />
+          <Stack.Screen
+            name="subscriptions"
+            options={{ title: "Subscriptions" }}
+          />
+          <Stack.Screen
+            name="shared-apps/index"
+            options={{ title: "Shared apps" }}
+          />
+          <Stack.Screen
+            name="shared-apps/[id]"
+            options={{ title: "Shared app" }}
+          />
+          <Stack.Screen
+            name="conversation/[id]"
+            options={{ title: "Conversation" }}
+          />
         </Stack>
       </QueryClientProvider>
     </GestureHandlerRootView>

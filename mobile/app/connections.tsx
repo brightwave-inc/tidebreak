@@ -8,6 +8,7 @@ import {
   type GatewayConnection,
 } from "../src/lib/connections";
 import { connections } from "../src/session/runtime";
+import { signOutConnection } from "../src/session/signOut";
 import { useConnectionStore } from "../src/session/store";
 
 /**
@@ -89,7 +90,9 @@ export default function ConnectionsScreen() {
   async function remove(id: string) {
     setBusy(true);
     try {
-      await connections.remove(id);
+      // Drops this phone's push address at that gateway before the credential
+      // that authorizes the drop goes away.
+      await signOutConnection(id);
       const next = connections.active();
       router.replace(next?.machine ? "/home" : next ? "/attach" : "/");
     } finally {

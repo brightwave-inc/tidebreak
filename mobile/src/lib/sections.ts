@@ -58,6 +58,56 @@ export function hasSection(
   return sectionsFor(connection).includes(section);
 }
 
+/** The gateway console's member surfaces, in navigation order. */
+export type ConsoleSectionId =
+  | "sandboxes"
+  | "activity"
+  | "limits"
+  | "catalog"
+  | "subscriptions"
+  | "shared-apps";
+
+/**
+ * Which console surfaces one connection can show.
+ *
+ * Two authorities are at work, and conflating them would either hide working
+ * surfaces or offer broken ones.
+ *
+ * The **`control`** resource is in every `tidebreak-mobile` session's
+ * confinement — it is what pairing already mints — so the surfaces that ride
+ * it answer for any gateway connection, console grant or not: the member
+ * catalog, provider subscriptions, and shared apps.
+ *
+ * The **`control_plane`** resource is the widening this session may or may not
+ * have consented to (`scope.ts`). Sandboxes, usage, and cost limits ride it,
+ * so they appear only when the recorded grant carries `control_plane:read` —
+ * the same seam `sectionsFor` uses for the `console` section, asked at the
+ * finer grain the screens need.
+ *
+ * The runtime verbs are not a section: steering and cancel are affordances
+ * *inside* the sandbox detail, gated there on `grantsRuntimeExecute`.
+ */
+export function consoleSectionsFor(
+  connection: Connection | null,
+): ConsoleSectionId[] {
+  if (!isGatewayConnection(connection)) {
+    return [];
+  }
+  const sections: ConsoleSectionId[] = [];
+  if (grantsConsoleRead(connection.grantedScope)) {
+    sections.push("sandboxes", "activity", "limits");
+  }
+  sections.push("catalog", "subscriptions", "shared-apps");
+  return sections;
+}
+
+export function hasConsoleSection(
+  connection: Connection | null,
+  section: ConsoleSectionId,
+): boolean {
+  return consoleSectionsFor(connection).includes(section);
+}
+
 /** Where the app belongs when it opens with this connection active. */
 export function landingRoute(connection: Connection | null): string {
   if (!connection) {
