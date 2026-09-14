@@ -13,8 +13,8 @@ a capture.
 
 | Engine | Install pin | Checked-in coverage |
 | --- | --- | --- |
-| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. No complete 2.1.259 capture. |
-| Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. No complete 0.153.4 capture. |
+| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls and a per-server timeout check. No complete 2.1.259 capture. |
+| Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. 0.153.4 adds managed human MCP discovery and a 130-second human wait. No complete 0.153.4 capture. |
 | opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. No complete 1.18.27 capture. |
 | Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume plus tool-image transport. The 1.0.13 capture uses a scripted local provider, not a live model. |
 

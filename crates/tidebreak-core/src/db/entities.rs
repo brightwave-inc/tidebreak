@@ -2389,3 +2389,32 @@ pub mod code_native_tool_receipt {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// Human decisions bound to one managed turn and supervisor process.
+pub mod code_managed_decision {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_managed_decision")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub approval_id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub turn_id: Uuid,
+        pub incarnation_id: Uuid,
+        pub grant_id: Uuid,
+        pub runtime_id: Uuid,
+        pub native_turn: i64,
+        pub request_id: String,
+        pub tool: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result: Option<Json>,
+        pub abandoned: bool,
+        pub delivered: bool,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

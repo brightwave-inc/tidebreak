@@ -68,7 +68,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { RouteFrame } from "@/RouteFrame";
-import { sessionRecoveryState } from "./sessionRecovery";
+import { sessionRecoveryAccess, sessionRecoveryState } from "./sessionRecovery";
 import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
@@ -663,7 +663,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             <div className="chat-pane" hidden={!visible || !showingChat}>
               <SessionRecoveryNotice
                 showProgress={false}
-                allowRetry={session?.access !== "view"}
+                {...sessionRecoveryAccess(session)}
                 lifecycle={lifecycle}
                 attention={attention}
                 reason={reason}

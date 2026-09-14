@@ -48,6 +48,15 @@ async fn run() -> i32 {
             }
         };
     }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("human-mcp")) {
+        return match tidebreak_supervised_agent::human_mcp::run().await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                EXIT_CONTROL_FATAL
+            }
+        };
+    }
     let inputs = match resolve(RawInputs::from_env()) {
         Ok(inputs) => inputs,
         Err(error) => {

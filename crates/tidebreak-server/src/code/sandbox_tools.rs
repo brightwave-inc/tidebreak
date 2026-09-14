@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tidebreak_core::code::supervisor_tools::{
-    validate_request, SupervisorArtifact, SupervisorToolResult, TOOLS,
+    human_decision_spec, is_human_decision, validate_request, SupervisorArtifact,
+    SupervisorToolResult, TOOLS,
 };
 use tidebreak_core::code::SupervisorToolRequest;
 use tidebreak_core::db::code::{
@@ -103,6 +104,8 @@ impl SandboxToolExecutor {
                 return;
             };
             let request = SupervisorToolRequest {
+                cancelled: false,
+                turn: None,
                 request_id: receipt.request_id.clone(),
                 tool: receipt.tool.clone(),
                 arguments: receipt.arguments.clone(),
@@ -214,6 +217,9 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         let specs = TOOLS
             .iter()
             .map(|name| {
+                if let Some(spec) = human_decision_spec(name) {
+                    return Ok(spec);
+                }
                 tools
                     .server_tool(name)
                     .map(|tool| tool.spec())
@@ -229,7 +235,7 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         let mut context = String::new();
         super::channel_preferences::append_instructions(&mut context, &instructions);
         context.push_str(&format!(
-            "\n\nNative tools: send one JSON object containing request_id, tool, and arguments on stdin to \"$TIDEBREAK_TOOL_HELPER\" tool-call. Use a unique request_id for each logical call and keep it unchanged when retrying that call. A pending conversation result has its own request_id inside output; to resume that conversation read, make a new helper call whose arguments contain only that conversation request_id. The helper prints output and artifact metadata after writing the artifacts relative to the engine working directory.\n\n{}\n\nAvailable native tool schemas:\n{}",
+            "\n\nNative tools: send one JSON object containing request_id, tool, and arguments on stdin to \"$TIDEBREAK_TOOL_HELPER\" tool-call. Use a unique request_id for each logical call and keep it unchanged when retrying that call. A pending conversation result has its own request_id inside output; to resume that conversation read, make a new helper call whose arguments contain only that conversation request_id. The helper prints output and artifact metadata after writing the artifacts relative to the engine working directory. For structured questions, call the tb-human MCP tool ask_user_questions. For plan decisions, call its request_plan_approval tool. Call human tools through MCP, never through the shell helper or in the background. Wait for the explicit human result; never treat a timeout, an error, a missing answer, or a pending card as consent. A plan decision preserves the session's existing Allow permissions.\n\n{}\n\nAvailable native tool schemas:\n{}",
             super::conversation_tools::CONVERSATION_GUIDANCE,
             serde_json::to_string(&specs)?,
         ));
@@ -251,6 +257,33 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         validate_request(request).map_err(AgentError::InvalidTarget)?;
         let runtime = self.runtime()?;
         require_session(&runtime, owner, session_id).await?;
+        if is_human_decision(&request.tool) {
+            let event = if request.cancelled {
+                tidebreak_core::db::code::cancel_managed_decision(
+                    &runtime.db,
+                    owner,
+                    session_id,
+                    incarnation,
+                    request,
+                )
+                .await?
+            } else {
+                tidebreak_core::db::code::enqueue_managed_decision(
+                    &runtime.db,
+                    owner,
+                    session_id,
+                    incarnation,
+                    request,
+                )
+                .await?
+                .1
+            };
+            if let Some(event) = event {
+                runtime.bus.publish(session_id, event);
+            }
+            runtime.refresh_approval_attention(owner, session_id).await;
+            return Ok(());
+        }
         enqueue_native_tool_request(
             &runtime.db,
             owner,
@@ -280,7 +313,20 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         require_session(&runtime, owner, session_id).await?;
         let receipts =
             list_native_tool_requests(&runtime.db, owner, session_id, incarnation).await?;
-        let mut results = Vec::new();
+        for event in
+            tidebreak_core::db::code::reconcile_managed_decisions(&runtime.db, owner, session_id)
+                .await?
+        {
+            runtime.bus.publish(session_id, event);
+        }
+        runtime.refresh_approval_attention(owner, session_id).await;
+        let mut results = tidebreak_core::db::code::managed_decision_results(
+            &runtime.db,
+            owner,
+            session_id,
+            incarnation,
+        )
+        .await?;
         for receipt in receipts {
             if receipt.status == NativeToolStatus::Completed {
                 results.push(decode_result(&receipt)?);
@@ -330,6 +376,19 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         incarnation: CodeIncarnationId,
         request_id: &str,
     ) -> Result<(), AgentError> {
+        let runtime = self.runtime()?;
+        if tidebreak_core::db::code::authorize_managed_decision_delivery(
+            &runtime.db,
+            owner,
+            session_id,
+            incarnation,
+            request_id,
+            false,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         self.delivery_receipt(owner, session_id, incarnation, request_id)
             .await?;
         Ok(())
@@ -342,6 +401,19 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         incarnation: CodeIncarnationId,
         request_id: &str,
     ) -> Result<(), AgentError> {
+        let runtime = self.runtime()?;
+        if tidebreak_core::db::code::authorize_managed_decision_delivery(
+            &runtime.db,
+            owner,
+            session_id,
+            incarnation,
+            request_id,
+            true,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         let (runtime, receipt) = self
             .delivery_receipt(owner, session_id, incarnation, request_id)
             .await?;
@@ -511,6 +583,7 @@ impl CodeRuntime {
             )
         };
         let result = SupervisorToolResult {
+            request: None,
             request_id: request.request_id.clone(),
             output: output_value(output),
             artifacts,
@@ -541,8 +614,8 @@ mod tests {
     use tidebreak_core::{ApprovalClass, Session, Tool, ToolSpec};
 
     #[derive(Default)]
-    struct Calls {
-        count: AtomicUsize,
+    pub(super) struct Calls {
+        pub(super) count: AtomicUsize,
         completed: AtomicUsize,
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
@@ -577,7 +650,7 @@ mod tests {
         }
     }
 
-    async fn fixture(
+    pub(super) async fn fixture(
         bound: bool,
         mode: PermissionMode,
     ) -> (
@@ -668,6 +741,8 @@ mod tests {
 
     fn request() -> SupervisorToolRequest {
         SupervisorToolRequest {
+            cancelled: false,
+            turn: None,
             request_id: "call-1".into(),
             tool: "code_wait".into(),
             arguments: serde_json::json!({"session_ids":[]}),
@@ -902,3 +977,7 @@ mod tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "sandbox_decisions_tests.rs"]
+mod decision_tests;

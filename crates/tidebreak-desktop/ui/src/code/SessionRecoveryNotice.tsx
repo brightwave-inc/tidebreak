@@ -16,6 +16,7 @@ export function SessionRecoveryNotice({
   retrying = false,
   showProgress = true,
   allowRetry = true,
+  unavailableHint,
   onRetry,
 }: {
   lifecycle: CodeSessionLifecycle | undefined;
@@ -24,6 +25,7 @@ export function SessionRecoveryNotice({
   retrying?: boolean;
   showProgress?: boolean;
   allowRetry?: boolean;
+  unavailableHint?: string;
   onRetry: () => void;
 }) {
   attention = recoveryAttention(lifecycle, attention, reason);
@@ -84,6 +86,7 @@ export function SessionRecoveryNotice({
           not be recovered.
         </p>
       )}
+      {!canRetry && unavailableHint && <p>{unavailableHint}</p>}
       {canRetry && (
         <Button
           type="button"

@@ -104,6 +104,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260910_000027_workspace_setup_error",
             "m20260911_000001_external_steer_admission",
             "m20260911_000002_external_steer_recovery",
+            "m20260912_000001_managed_decisions",
         ]
     );
     assert!(db

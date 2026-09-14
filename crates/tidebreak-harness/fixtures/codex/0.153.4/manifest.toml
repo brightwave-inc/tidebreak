@@ -1,0 +1,13 @@
+version = "0.153.4"
+protocol = "stdio MCP over the pinned Codex CLI"
+captured = "2026-09-14"
+scenarios = ["managed-human-mcp"]
+
+[managed_human_mcp]
+provider = "Scripted localhost Responses provider; no paid inference"
+command = "codex exec --json --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check -s read-only; isolated configuration registers tb-human over stdio, required=true, tool_timeout_sec=2147000"
+helper = "Locally built tidebreak-supervised-agent human-mcp"
+wait_seconds = 130
+result = "The actual helper advertises both schemas, waits on its Unix socket, and returns the exact supplied answer to the next model request."
+limits = "The fixture covers MCP discovery and tool calls through the compiled helper. The Unix socket answer is scripted; server authority and Slack clicks have separate integration and live acceptance gates. This is not native requestUserInput callback support."
+redactions = "Absolute paths stay outside the protocol capture. Wall-clock timestamps become elapsed milliseconds; the isolated fixture has no credentials."

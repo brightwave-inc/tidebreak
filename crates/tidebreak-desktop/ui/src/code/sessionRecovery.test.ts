@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { CodeSessionDigest, CodeSessionSnapshot } from "../api/types";
-import { sessionRecoveryState } from "./sessionRecovery";
+import { sessionRecoveryAccess, sessionRecoveryState } from "./sessionRecovery";
 
 const snapshot = {
   id: "selected",
@@ -143,4 +143,33 @@ it("ignores a healthy sibling digest when the selected session is fenced", () =>
     reason: snapshot.fence_reason,
     blocksTurn: true,
   });
+});
+
+it("offers recovery only to owners and directs Slack contributors to the thread", () => {
+  const shared = {
+    ...snapshot,
+    is_owner: false,
+    access: "contribute" as const,
+    external_origin: { channel_kind: "slack", external_key: "T1/C1/123" },
+  };
+  expect(sessionRecoveryAccess(shared)).toEqual({
+    allowRetry: false,
+    unavailableHint:
+      "To recover this session, open its Slack thread and select Clear fault.",
+  });
+  expect(sessionRecoveryAccess({ ...shared, access: "view" })).toEqual({
+    allowRetry: false,
+    unavailableHint: "Ask the session owner to recover this session.",
+  });
+  expect(
+    sessionRecoveryAccess({ ...shared, external_origin: undefined }).allowRetry,
+  ).toBe(false);
+  expect(sessionRecoveryAccess({ ...shared, is_owner: true }).allowRetry).toBe(
+    true,
+  );
+  expect(sessionRecoveryAccess(snapshot).allowRetry).toBe(true);
+  expect(
+    sessionRecoveryAccess({ ...snapshot, access: "view" }).allowRetry,
+  ).toBe(false);
+  expect(sessionRecoveryAccess(null).allowRetry).toBe(false);
 });

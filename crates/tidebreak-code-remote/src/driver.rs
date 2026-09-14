@@ -1161,45 +1161,6 @@ impl RemoteDriver<'_> {
             harness_kind: session.harness_kind,
             turn_id: running_turn.as_ref().map(|turn| turn.id),
         };
-        // Requests must survive a cursor commit or process crash. The host
-        // receipt store pins the request to this authenticated incarnation.
-        if let Some(host) = self
-            .host_tool
-            .filter(|_| row.state == IncarnationState::Active && !read.state.is_terminal())
-        {
-            let mut accepted_prefix = read.events.len();
-            for (index, event) in read.events.iter().enumerate() {
-                if event.kind != "host_tool_request" {
-                    continue;
-                }
-                let request: tidebreak_core::code::SupervisorToolRequest =
-                    match serde_json::from_value(event.payload.clone()) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            warn!(session = %session.id, %error, "malformed host tool request");
-                            continue;
-                        }
-                    };
-                match host.enqueue(&owner, session.id, row.id, &request).await {
-                    Ok(()) => (),
-                    Err(tidebreak_core::AgentError::InvalidTarget(message))
-                        if message == tidebreak_core::db::code::NATIVE_TOOL_QUEUE_FULL =>
-                    {
-                        // Keep this event and its suffix behind the cursor. Service
-                        // the accepted prefix below so pending calls can free space.
-                        accepted_prefix = index;
-                        break;
-                    }
-                    Err(tidebreak_core::AgentError::InvalidTarget(error)) => {
-                        // Invalid arguments and changed replay payloads cannot
-                        // become valid on retry. Preserve any earlier receipt.
-                        warn!(session = %session.id, %error, "discarded invalid host tool request");
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            read.events.truncate(accepted_prefix);
-        }
         for event in &read.events {
             if event.kind == "supervisor_started" {
                 use tidebreak_core::storage::Store;
@@ -1231,12 +1192,99 @@ impl RemoteDriver<'_> {
                 .await?;
             }
         }
+        // Requests must survive a cursor commit or process crash. The host
+        // receipt store pins the request to this authenticated incarnation.
+        if let Some(host) = self
+            .host_tool
+            .filter(|_| row.state == IncarnationState::Active && !read.state.is_terminal())
+        {
+            let mut accepted_prefix = read.events.len();
+            for (index, event) in read.events.iter().enumerate() {
+                if event.kind != "host_tool_request" {
+                    continue;
+                }
+                let request: tidebreak_core::code::SupervisorToolRequest =
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            warn!(session = %session.id, %error, "malformed host tool request");
+                            continue;
+                        }
+                    };
+                match host.enqueue(&owner, session.id, row.id, &request).await {
+                    Ok(()) => (),
+                    Err(tidebreak_core::AgentError::InvalidTarget(message))
+                        if message == tidebreak_core::db::code::NATIVE_TOOL_QUEUE_FULL
+                            && !tidebreak_core::code::supervisor_tools::is_human_decision(
+                                &request.tool,
+                            ) =>
+                    {
+                        // Keep this event and its suffix behind the cursor. Service
+                        // the accepted prefix below so pending calls can free space.
+                        accepted_prefix = index;
+                        break;
+                    }
+                    Err(tidebreak_core::AgentError::InvalidTarget(error))
+                        if tidebreak_core::code::supervisor_tools::is_human_decision(
+                            &request.tool,
+                        ) =>
+                    {
+                        // The durable source event retries an admission error until transport
+                        // accepts it. Exact request binding prevents a stale error from releasing
+                        // a different active waiter with the same request id.
+                        let result = tidebreak_core::code::supervisor_tools::SupervisorToolResult::failed_request(
+                            &request, &error.chars().take(2048).collect::<String>(),
+                        );
+                        let frames =
+                            tidebreak_core::code::supervisor_tools::encode_result_frames(&result)
+                                .map_err(tidebreak_core::AgentError::config)?;
+                        let mut delivered = true;
+                        for frame in frames {
+                            let message = SandboxMessage {
+                                body: SupervisorMessageBody::Input(frame),
+                                interrupt: false,
+                            };
+                            if let Err(error) = provisioner
+                                .send(&owner, session.id, &sandbox_id, &message)
+                                .await
+                            {
+                                warn!(session = %session.id, %error, "human admission error delivery will retry");
+                                delivered = false;
+                                break;
+                            }
+                        }
+                        if !delivered {
+                            accepted_prefix = index;
+                            break;
+                        }
+                    }
+                    Err(tidebreak_core::AgentError::InvalidTarget(error)) => {
+                        // Invalid arguments and changed replay payloads cannot
+                        // become valid on retry. Preserve any earlier receipt.
+                        warn!(session = %session.id, %error, "discarded invalid host tool request");
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            read.events.truncate(accepted_prefix);
+        }
         // Commit native admission before advancing the event cursor. A failed
         // ingest can replay this idempotently; the inverse order loses ACKs.
         settle_sandbox_steer_admissions(db, bus, &owner, session.id, &sandbox_id, &read.events)
             .await?;
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
+
+        let turn_settled =
+            settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
+        if !read.state.is_terminal() {
+            for event in
+                tidebreak_core::db::code::reconcile_managed_decisions(db, &owner, session.id)
+                    .await?
+            {
+                bus.publish(session.id, event);
+            }
+        }
 
         if let Some(host) = self
             .host_tool
@@ -1283,9 +1331,6 @@ impl RemoteDriver<'_> {
             }
         }
 
-        let turn_settled =
-            settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
-
         if read.state.is_terminal() && row.state == IncarnationState::Active {
             stop_incarnation(
                 db,
@@ -1295,6 +1340,11 @@ impl RemoteDriver<'_> {
             )
             .await?;
             report.incarnation_stopped = true;
+        }
+        for event in
+            tidebreak_core::db::code::reconcile_managed_decisions(db, &owner, session.id).await?
+        {
+            bus.publish(session.id, event);
         }
         if read.state.is_terminal() {
             // A turn the dying incarnation never settled — one delivered in
@@ -1856,6 +1906,13 @@ mod tests {
             _: CodeIncarnationId,
             request: &tidebreak_core::code::SupervisorToolRequest,
         ) -> Result<(), tidebreak_core::AgentError> {
+            if request.cancelled {
+                self.accepted
+                    .lock()
+                    .unwrap()
+                    .push(request.request_id.clone());
+                return Ok(());
+            }
             if request.request_id == "invalid" {
                 return Err(tidebreak_core::AgentError::InvalidTarget(
                     "changed request arguments".into(),
@@ -2392,6 +2449,73 @@ mod tests {
         );
         assert_eq!(*host.accepted.lock().unwrap(), ["valid"]);
         assert_eq!(*host.serviced.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_human_requests_release_the_exact_waiter_and_keep_cancellation_reachable() {
+        use tidebreak_core::code::supervisor_tools::ResultAssembler;
+        for full in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, bus, mut session, _, _) = seed(dir.path()).await;
+            super::super::fixtures::seeded_incarnation(&db, &session).await;
+            let fake = FakeProvisioner::default();
+            let host = BoundedHost::default();
+            *host.queued.lock().unwrap() = usize::from(full);
+            let settings = settings();
+            let driver = RemoteDriver {
+                db: &db,
+                bus: &bus,
+                provisioner: &fake,
+                settings: &settings,
+                host_tool: Some(&host),
+            };
+            let request = tidebreak_core::code::SupervisorToolRequest {
+                cancelled: false,
+                request_id: if full { "full" } else { "invalid" }.into(),
+                tool: "ask_user_questions".into(),
+                arguments: json!({"questions":[{"id":"target","header":"Target","question":"Which target?","allow_free_form":true}]}),
+                turn: Some(tidebreak_core::code::SupervisorToolTurn {
+                    native_turn: 1,
+                    runtime_id: uuid::Uuid::new_v4(),
+                }),
+            };
+            let mut cancellation = request.clone();
+            cancellation.cancelled = true;
+            fake.event_reads.lock().unwrap().push_back(read(
+                SandboxState::Running,
+                3,
+                vec![
+                    event(
+                        1,
+                        "host_tool_request",
+                        serde_json::to_value(&request).unwrap(),
+                    ),
+                    event(
+                        2,
+                        "host_tool_request",
+                        serde_json::to_value(&cancellation).unwrap(),
+                    ),
+                    event(3, "running", json!({})),
+                ],
+            ));
+            assert_eq!(driver.pump(&mut session, 0).await.unwrap().ingested, 3);
+            assert_eq!(
+                *host.accepted.lock().unwrap(),
+                vec![request.request_id.clone()]
+            );
+            let mut assembler = ResultAssembler::default();
+            let mut result = None;
+            for (_, frame) in fake.sends.lock().unwrap().iter() {
+                if let Some(value) = assembler.push(&request.request_id, frame).unwrap() {
+                    result = Some(value);
+                }
+            }
+            let result = result.expect("bound rejection response");
+            assert_eq!(result.request, Some(request));
+            assert_eq!(result.output["is_error"], true);
+            assert!(fake.cancels.lock().unwrap().is_empty());
+            assert_eq!(session.lifecycle, SessionLifecycle::Running);
+        }
     }
 
     #[tokio::test]

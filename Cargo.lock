@@ -7580,6 +7580,7 @@ dependencies = [
  "tidebreak-sandbox-agent",
  "tidebreak-sandbox-runtime",
  "tidebreak-shell-policy",
+ "tidebreak-supervised-agent",
  "tidebreak-worker-runtime",
  "tokio",
  "tokio-tungstenite 0.30.0",

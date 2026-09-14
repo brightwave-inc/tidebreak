@@ -33,6 +33,15 @@ async fn seed_owner(
     owner: &OwnerId,
     label: &str,
 ) -> (RepoId, WorkspaceId, SessionId, TurnId) {
+    seed_owner_with_execution(store, owner, label, false).await
+}
+
+async fn seed_owner_with_execution(
+    store: &DbStore,
+    owner: &OwnerId,
+    label: &str,
+    managed: bool,
+) -> (RepoId, WorkspaceId, SessionId, TurnId) {
     let repo_id = RepoId::new();
     insert_repo(
         store,
@@ -92,11 +101,19 @@ async fn seed_owner(
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: PermissionMode::Ask,
+            permission_mode: if managed {
+                PermissionMode::Allow
+            } else {
+                PermissionMode::Ask
+            },
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: SessionLifecycle::Idle,
+            lifecycle: if managed {
+                SessionLifecycle::Running
+            } else {
+                SessionLifecycle::Idle
+            },
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -105,7 +122,11 @@ async fn seed_owner(
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
-            execution_location: tidebreak_core::ExecutionLocation::Machine,
+            execution_location: if managed {
+                tidebreak_core::ExecutionLocation::Sandbox
+            } else {
+                tidebreak_core::ExecutionLocation::Machine
+            },
             acts_as: None,
         },
     )
@@ -492,4 +513,151 @@ async fn postgres_native_tool_receipts_claim_once_and_replay() {
     assert!(claim_native_tool_request(&store, &owner, &receipt)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn postgres_managed_human_decisions_serialize_answers_and_cancellation() {
+    use tidebreak_core::code::{SupervisorToolRequest, SupervisorToolTurn};
+    use tidebreak_core::db::code::*;
+    use tidebreak_core::storage::Store;
+    use tidebreak_core::{ApprovalDecisionKind, TurnActor, UserQuestionAnswer};
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Ok(url) = std::env::var("TIDEBREAK_POSTGRES_TEST_URL") else {
+        assert!(
+            std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_none(),
+            "TIDEBREAK_POSTGRES_TEST_URL is required"
+        );
+        return;
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let label = format!("human-{}", uuid::Uuid::new_v4());
+    let owner = OwnerId::new(&label).unwrap();
+    let (_, _, session_id, _) = seed_owner_with_execution(&store, &owner, &label, true).await;
+    let grant = mint_external_grant(
+        &store,
+        &owner,
+        MintGrantSubject {
+            channel_kind: "slack",
+            external_identity: &label,
+            workspace_identity: "human-test",
+            kind: tidebreak_core::code::CodeGrantKind::Person,
+        },
+        &uuid::Uuid::new_v4().simple().to_string().repeat(2),
+        &uuid::Uuid::new_v4().simple().to_string().repeat(2),
+    )
+    .await
+    .unwrap();
+    bind_external_session(&store, &owner, grant.id, "slack", &label, session_id)
+        .await
+        .unwrap();
+    let tidebreak_core::IncarnationAdmission::Admitted(inc) =
+        create_incarnation_intent(&store, &owner, session_id, 1, 10)
+            .await
+            .unwrap()
+    else {
+        panic!("expected admission")
+    };
+    activate_incarnation(&store, &owner, inc.id, "human-fixture")
+        .await
+        .unwrap();
+    let identity = SupervisorToolTurn {
+        native_turn: 1,
+        runtime_id: uuid::Uuid::new_v4(),
+    };
+    store.set_setting(&format!("code.incarnations.{}.steering_protocol",inc.id),&serde_json::json!({"version":1,"runtime_id":identity.runtime_id,"sandbox_id":"human-fixture"})).await.unwrap();
+    let mut request = SupervisorToolRequest {
+        request_id: "human".into(),
+        tool: "ask_user_questions".into(),
+        arguments: serde_json::json!({"questions":[{"id":"target","header":"Target","question":"Which target?","allow_free_form":true}]}),
+        turn: Some(identity),
+        cancelled: false,
+    };
+    let (approval, _) = enqueue_managed_decision(&store, &owner, session_id, inc.id, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        enqueue_managed_decision(&store, &owner, session_id, inc.id, &request)
+            .await
+            .unwrap(),
+        (approval, None)
+    );
+    let response = |text: &str| ApprovalDecisionKind::Answered {
+        answers: vec![UserQuestionAnswer {
+            question_id: "target".into(),
+            selected_option_ids: vec![],
+            custom_answer: Some(text.into()),
+        }],
+    };
+    let (a, b) = tokio::join!(
+        settle_managed_decision(
+            &store,
+            &owner,
+            approval,
+            response("first"),
+            Some(TurnActor {
+                display: Some("Alex".into()),
+                ..Default::default()
+            })
+        ),
+        settle_managed_decision(
+            &store,
+            &owner,
+            approval,
+            response("second"),
+            Some(TurnActor {
+                display: Some("Blair".into()),
+                ..Default::default()
+            })
+        ),
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    let actor = get_approval(&store, &owner, approval)
+        .await
+        .unwrap()
+        .unwrap()
+        .actor;
+    assert!(actor.is_some());
+    assert_eq!(
+        managed_decision_results(&store, &owner, session_id, inc.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    request.cancelled = true;
+    assert!(
+        cancel_managed_decision(&store, &owner, session_id, inc.id, &request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        get_approval(&store, &owner, approval)
+            .await
+            .unwrap()
+            .unwrap()
+            .actor,
+        actor
+    );
+    assert!(managed_decision_results(&store, &owner, session_id, inc.id)
+        .await
+        .unwrap()
+        .is_empty());
+    request.request_id = "never-admitted".into();
+    cancel_managed_decision(&store, &owner, session_id, inc.id, &request)
+        .await
+        .unwrap();
+    request.cancelled = false;
+    assert!(
+        enqueue_managed_decision(&store, &owner, session_id, inc.id, &request)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        list_approvals(&store, &owner, None, Some(session_id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

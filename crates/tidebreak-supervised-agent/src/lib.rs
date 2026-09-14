@@ -22,6 +22,7 @@ pub mod drive;
 pub mod effort;
 pub mod engine;
 pub mod harness_engine;
+pub mod human_mcp;
 pub mod inputs;
 pub mod registration;
 pub mod scratch;

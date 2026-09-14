@@ -1,0 +1,15 @@
+version = "2.1.259"
+protocol = "stdio MCP over the pinned Claude Code CLI"
+captured = "2026-09-14"
+scenarios = ["managed-human-mcp"]
+
+[managed_human_mcp]
+provider = "Scripted localhost Messages provider; no paid inference"
+command = "claude --bare -p --output-format stream-json --verbose --mcp-config fixture --strict-mcp-config --setting-sources '' --permission-mode bypassPermissions --no-session-persistence"
+helper = "Locally built tidebreak-supervised-agent human-mcp"
+wait_seconds = 12
+human_server_timeout_ms = 2147000000
+ordinary_timeout_ms = 1000
+result = "The actual human helper waits 12 seconds and returns the exact supplied answer. In the same native run, the ordinary MCP tool times out at one second and receives cancellation."
+limits = "The fixture covers MCP discovery and tool calls through the compiled helper. The Unix socket answer is scripted; server authority and Slack clicks have separate integration and live acceptance gates. This is not native AskUserQuestion callback support."
+redactions = "Absolute paths stay outside the protocol capture. Wall-clock timestamps become elapsed milliseconds; the isolated fixture has no credentials."

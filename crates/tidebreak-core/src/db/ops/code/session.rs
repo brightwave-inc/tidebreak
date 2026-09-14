@@ -167,6 +167,16 @@ where
             .map_err(store_err)?,
     );
 
+    entities::code_managed_decision::Entity::delete_many()
+        .filter(entities::code_managed_decision::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_native_tool_receipt::Entity::delete_many()
+        .filter(entities::code_native_tool_receipt::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
     entities::approval::Entity::delete_many()
         .filter(entities::approval::Column::SessionId.eq(id.0))
         .exec(connection)

@@ -2341,6 +2341,89 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
     assert!(store.get_chat(chat.id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn deleting_a_chat_removes_only_its_managed_decisions_and_native_receipts() {
+    use sea_orm::{ActiveModelTrait, PaginatorTrait, Set};
+
+    let (_dir, store) = temp_store().await;
+    let doomed = super::sample_chat();
+    let kept = super::sample_chat();
+    for chat in [&doomed, &kept] {
+        store.create_chat(chat).await.unwrap();
+        entities::code_native_tool_receipt::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            owner: Set(OwnerId::local().to_string()),
+            session_id: Set(chat.id.0),
+            incarnation_id: Set(uuid::Uuid::new_v4()),
+            grant_id: Set(uuid::Uuid::new_v4()),
+            request_id: Set("ordinary-call".into()),
+            call_id: Set(uuid::Uuid::new_v4()),
+            tool: Set("conversation_read".into()),
+            arguments: Set(serde_json::json!({"request_id":"history"})),
+            result: Set(Some(serde_json::json!({"content":"private result"}))),
+            status: Set("completed".into()),
+            claimed_at: Set(None),
+            delivered: Set(true),
+        }
+        .insert(&store.conn)
+        .await
+        .unwrap();
+        for (request_id, abandoned, delivered) in [
+            ("pending", false, false),
+            ("answered", false, true),
+            ("cancelled", true, false),
+        ] {
+            entities::code_managed_decision::ActiveModel {
+                approval_id: Set(uuid::Uuid::new_v4()),
+                owner: Set(OwnerId::local().to_string()),
+                session_id: Set(chat.id.0),
+                turn_id: Set(uuid::Uuid::new_v4()),
+                incarnation_id: Set(uuid::Uuid::new_v4()),
+                grant_id: Set(uuid::Uuid::new_v4()),
+                runtime_id: Set(uuid::Uuid::new_v4()),
+                native_turn: Set(1),
+                request_id: Set(request_id.into()),
+                tool: Set("ask_user_questions".into()),
+                arguments: Set(serde_json::json!({"questions":[{
+                    "id":"target", "header":"Target", "question":"Which target?",
+                    "allow_free_form":true
+                }]})),
+                result: Set(delivered.then(|| serde_json::json!({"answer":"private answer"}))),
+                abandoned: Set(abandoned),
+                delivered: Set(delivered),
+            }
+            .insert(&store.conn)
+            .await
+            .unwrap();
+        }
+    }
+
+    assert!(matches!(
+        store.delete_chat(doomed.id).await.unwrap(),
+        crate::storage::DeleteChatOutcome::Deleted { .. }
+    ));
+    for (chat, expected) in [(&doomed, 0), (&kept, 1)] {
+        assert_eq!(
+            entities::code_native_tool_receipt::Entity::find()
+                .filter(entities::code_native_tool_receipt::Column::SessionId.eq(chat.id.0))
+                .count(&store.conn)
+                .await
+                .unwrap(),
+            expected,
+            "conversation deletion must remove only its native receipts"
+        );
+        assert_eq!(
+            entities::code_managed_decision::Entity::find()
+                .filter(entities::code_managed_decision::Column::SessionId.eq(chat.id.0))
+                .count(&store.conn)
+                .await
+                .unwrap(),
+            expected * 3,
+            "conversation deletion must remove its pending, answered, and cancelled decisions"
+        );
+    }
+}
+
 /// Decision 0048 step 5: one id resolves in one space. A conversation is a
 /// session row, so the chat store and the session store read the same row
 /// by the same id. A chat the code runtime has never driven is not one of
