@@ -1222,7 +1222,7 @@ export function NewWorkspaceDialog({
                         onSelect={() => void navigate({ to: harnessesPath })}
                         className="text-muted-foreground text-sm"
                       >
-                        Coding harnesses…
+                        Coding engines…
                       </DropdownMenuItem>
                     </>
                   )}

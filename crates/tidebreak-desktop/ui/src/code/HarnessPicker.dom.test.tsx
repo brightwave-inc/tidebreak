@@ -157,7 +157,7 @@ describe("HarnessPicker", () => {
     );
 
     expect(
-      screen.queryByRole("button", { name: "Coding harnesses" }),
+      screen.queryByRole("button", { name: "Coding engines" }),
     ).not.toBeInTheDocument();
   });
 
