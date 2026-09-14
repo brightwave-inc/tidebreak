@@ -28,7 +28,7 @@ pub use tidebreak_server::wire::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodePushSnapshot, CodeRepoSnapshot,
     CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
     HarnessAuthMode, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
-    SessionDigest, SessionSnapshot, TurnSnapshot, UpdateNotice,
+    SessionAccessSnapshot, SessionDigest, SessionSnapshot, TurnSnapshot, UpdateNotice,
 };
 
 use super::client::{Client, EventSocket};
@@ -45,6 +45,29 @@ use super::client::{Client, EventSocket};
 pub enum SubmitTurnResponse {
     Ran(Box<TurnSnapshot>),
     Queued(QueuedTurn),
+}
+
+fn session_access_path(session: SessionId) -> String {
+    format!("/sessions/{session}/access")
+}
+
+fn revoke_session_access_path(session: SessionId, subject: &str) -> String {
+    format!("{}/{}", session_access_path(session), urlencode(subject))
+}
+
+fn session_visibility_path(session: SessionId) -> String {
+    format!("/sessions/{session}/visibility")
+}
+
+fn grant_session_access_body(
+    subject: &str,
+    level: tidebreak_core::SessionAccessLevel,
+) -> serde_json::Value {
+    serde_json::json!({ "subject": subject, "level": level })
+}
+
+fn set_session_visibility_body(visibility: tidebreak_core::SessionVisibility) -> serde_json::Value {
+    serde_json::json!({ "visibility": visibility })
 }
 
 impl Client {
@@ -224,6 +247,52 @@ impl Client {
         self.post_json(
             format!("{}/sessions/{session}/mode", self.base_url()),
             &serde_json::json!({ "permission_mode": mode }),
+        )
+        .await
+    }
+
+    pub async fn grant_session_access(
+        &self,
+        session: SessionId,
+        subject: &str,
+        level: tidebreak_core::SessionAccessLevel,
+    ) -> Result<SessionAccessSnapshot> {
+        self.post_json(
+            format!("{}{}", self.base_url(), session_access_path(session)),
+            &grant_session_access_body(subject, level),
+        )
+        .await
+    }
+
+    pub async fn list_session_access(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<SessionAccessSnapshot>> {
+        self.get_json(format!(
+            "{}{}",
+            self.base_url(),
+            session_access_path(session)
+        ))
+        .await
+    }
+
+    pub async fn revoke_session_access(&self, session: SessionId, subject: &str) -> Result<()> {
+        self.delete_ok(format!(
+            "{}{}",
+            self.base_url(),
+            revoke_session_access_path(session, subject)
+        ))
+        .await
+    }
+
+    pub async fn set_session_visibility(
+        &self,
+        session: SessionId,
+        visibility: tidebreak_core::SessionVisibility,
+    ) -> Result<SessionSnapshot> {
+        self.post_json(
+            format!("{}{}", self.base_url(), session_visibility_path(session)),
+            &set_session_visibility_body(visibility),
         )
         .await
     }
@@ -460,7 +529,37 @@ pub fn decode_update_notice(text: &str) -> Result<UpdateNotice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{AttentionSource, AttentionState, SessionLifecycle};
+    use tidebreak_core::{
+        AttentionSource, AttentionState, SessionAccessLevel, SessionLifecycle, SessionVisibility,
+    };
+
+    #[test]
+    fn session_share_requests_match_the_server_routes_and_wire_shape() {
+        let session = SessionId::from(uuid::Uuid::nil());
+        assert_eq!(
+            session_access_path(session),
+            format!("/sessions/{session}/access")
+        );
+        assert_eq!(
+            revoke_session_access_path(session, "principal:user:bob"),
+            format!("/sessions/{session}/access/principal%3Auser%3Abob")
+        );
+        assert_eq!(
+            grant_session_access_body("principal:user:bob", SessionAccessLevel::Contribute),
+            serde_json::json!({
+                "subject": "principal:user:bob",
+                "level": "contribute"
+            })
+        );
+        assert_eq!(
+            session_visibility_path(session),
+            format!("/sessions/{session}/visibility")
+        );
+        assert_eq!(
+            set_session_visibility_body(SessionVisibility::Deployment),
+            serde_json::json!({ "visibility": "deployment" })
+        );
+    }
 
     #[test]
     fn a_sequenced_frame_round_trips_the_fields_agents_script_against() {
