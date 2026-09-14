@@ -156,7 +156,7 @@ fn build_snapshot(
         day.total_tokens = day.total_tokens.saturating_add(tokens.total);
 
         let canonical_model = turn.model.as_deref().and_then(canonical_model_id);
-        let rate = canonical_model.and_then(price_for_canonical);
+        let rate = canonical_model.and_then(|model| price_for_canonical(model, turn.fast_mode));
         let cost_millimicrousd = rate
             .map(|rate| rate.cost_millimicrousd(tokens))
             .unwrap_or(0);
@@ -543,7 +543,10 @@ fn model_has_dated_suffix(value: &str, id: &str) -> bool {
         .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn price_for_canonical(model: &str) -> Option<PriceRate> {
+fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
+    if fast_mode {
+        return fast_price_for_canonical(model);
+    }
     match model {
         // OpenAI short-context (up to 272K) rates. Longer Astra prompts use
         // multipliers that this canonical table does not model. The GPT-5.6
@@ -676,6 +679,22 @@ fn price_for_canonical(model: &str) -> Option<PriceRate> {
             output: 15_000,
             cache_read: 300,
             cache_write: 3_750,
+        }),
+        _ => None,
+    }
+}
+
+/// Fast-tier rates exist only where the vendor published a distinct pair.
+/// Guessing a multiplier is the same class of error as pricing fast traffic
+/// at the standard rate.
+fn fast_price_for_canonical(model: &str) -> Option<PriceRate> {
+    match model {
+        // Anthropic bills Claude Opus 5 fast at double the standard pair.
+        "claude-opus-5" => Some(PriceRate {
+            input: 10_000,
+            output: 50_000,
+            cache_read: 1_000,
+            cache_write: 12_500,
         }),
         _ => None,
     }
@@ -825,7 +844,7 @@ mod tests {
                 let canonical = canonical_model_id(spec.id)
                     .unwrap_or_else(|| panic!("{} has no canonical price id", spec.id));
                 assert!(
-                    price_for_canonical(canonical).is_some(),
+                    price_for_canonical(canonical, false).is_some(),
                     "{} canonicalizes to {canonical}, which has no price",
                     spec.id
                 );
@@ -854,7 +873,7 @@ mod tests {
 
     #[test]
     fn price_math_uses_integer_microdollars() {
-        let rate = price_for_canonical("claude-sonnet-5").unwrap();
+        let rate = price_for_canonical("claude-sonnet-5", false).unwrap();
         let cost = rate.cost_millimicrousd(UsageTotals {
             input: 1_000_000,
             output: 100_000,
@@ -867,7 +886,7 @@ mod tests {
 
     #[test]
     fn gpt_6_astra_uses_the_published_short_context_rates() {
-        let rate = price_for_canonical("gpt-6-astra").unwrap();
+        let rate = price_for_canonical("gpt-6-astra", false).unwrap();
         assert_eq!(
             rate,
             PriceRate {
@@ -889,50 +908,58 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_turn_uses_the_canonical_rate_and_is_priced() {
-        let now = Utc::now();
-        let session = sample_session(None, now);
-        let usage = tidebreak_core::TurnUsage {
-            input_tokens: 1_000,
-            output_tokens: 500,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            context_tokens: 0,
-            first_call_context_tokens: None,
-        };
-        let turn = tidebreak_core::db::code::TurnMetric {
-            session_id: session.id,
-            status: TurnStatus::Completed,
-            model: Some("claude-sonnet-5".into()),
-            fast_mode: true,
-            usage: Some(usage.clone()),
-            started_at: now,
-        };
-        let snapshot = build_snapshot(
-            CodeAnalyticsRange::All,
-            None,
-            now,
-            None,
-            Vec::new(),
-            Vec::new(),
-            vec![session],
-            vec![turn],
-            Vec::new(),
-            Vec::new(),
-        );
+    fn fast_opus_5_turn_uses_the_published_fast_rate() {
+        let usage = sample_turn_usage();
+        let snapshot = snapshot_for_completed_turn("claude-opus-5", true, usage.clone());
         let tokens = UsageTotals::from_usage(&usage);
         let expected = microusd(
-            price_for_canonical("claude-sonnet-5")
+            price_for_canonical("claude-opus-5", true)
                 .unwrap()
                 .cost_millimicrousd(tokens),
         );
-        assert!(expected > 0);
+        let standard = microusd(
+            price_for_canonical("claude-opus-5", false)
+                .unwrap()
+                .cost_millimicrousd(tokens),
+        );
+        assert_eq!(expected, 35_000);
+        assert_eq!(expected, standard.saturating_mul(2));
         assert_eq!(snapshot.totals.estimated_cost_microusd, expected);
         assert_eq!(snapshot.pricing.priced_turns, 1);
         assert_eq!(snapshot.pricing.unpriced_turns, 0);
         assert!(snapshot.models[0].fast_mode);
         assert!(snapshot.models[0].priced);
         assert_eq!(snapshot.models[0].estimated_cost_microusd, expected);
+    }
+
+    #[test]
+    fn standard_opus_5_turn_keeps_the_standard_rate() {
+        let usage = sample_turn_usage();
+        let snapshot = snapshot_for_completed_turn("claude-opus-5", false, usage.clone());
+        let tokens = UsageTotals::from_usage(&usage);
+        let expected = microusd(
+            price_for_canonical("claude-opus-5", false)
+                .unwrap()
+                .cost_millimicrousd(tokens),
+        );
+        assert_eq!(expected, 17_500);
+        assert_eq!(snapshot.totals.estimated_cost_microusd, expected);
+        assert_eq!(snapshot.pricing.priced_turns, 1);
+        assert_eq!(snapshot.pricing.unpriced_turns, 0);
+        assert!(!snapshot.models[0].fast_mode);
+        assert!(snapshot.models[0].priced);
+        assert_eq!(snapshot.models[0].estimated_cost_microusd, expected);
+    }
+
+    #[test]
+    fn fast_turn_without_published_fast_rate_is_unpriced() {
+        let snapshot = snapshot_for_completed_turn("claude-sonnet-5", true, sample_turn_usage());
+        assert_eq!(snapshot.totals.estimated_cost_microusd, 0);
+        assert_eq!(snapshot.pricing.priced_turns, 0);
+        assert_eq!(snapshot.pricing.unpriced_turns, 1);
+        assert!(snapshot.models[0].fast_mode);
+        assert!(!snapshot.models[0].priced);
+        assert_eq!(snapshot.models[0].estimated_cost_microusd, 0);
     }
 
     #[test]
@@ -983,6 +1010,46 @@ mod tests {
         let err = require_known_repo(&[], Some(RepoId::from(uuid::Uuid::nil())))
             .expect_err("nil UUID is not a selectable repository");
         assert_eq!(err.kind(), "not_found");
+    }
+
+    fn sample_turn_usage() -> tidebreak_core::TurnUsage {
+        tidebreak_core::TurnUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            context_tokens: 0,
+            first_call_context_tokens: None,
+        }
+    }
+
+    fn snapshot_for_completed_turn(
+        model: &str,
+        fast_mode: bool,
+        usage: tidebreak_core::TurnUsage,
+    ) -> CodeAnalyticsSnapshot {
+        let now = Utc::now();
+        let session = sample_session(None, now);
+        let turn = tidebreak_core::db::code::TurnMetric {
+            session_id: session.id,
+            status: TurnStatus::Completed,
+            model: Some(model.into()),
+            fast_mode,
+            usage: Some(usage),
+            started_at: now,
+        };
+        build_snapshot(
+            CodeAnalyticsRange::All,
+            None,
+            now,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![session],
+            vec![turn],
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     fn sample_session(
