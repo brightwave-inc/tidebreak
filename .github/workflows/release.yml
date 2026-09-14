@@ -134,11 +134,14 @@ jobs:
           # later asset uploads fail. Release Drafter only updates
           # non-prerelease drafts, so this shape freezes the notes and
           # lets the next merge start a new draft.
-          gh api --method PATCH \
+          release_json="$(jq -n '{draft: true, prerelease: true}' | gh api \
+            --method PATCH \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -f draft=true \
-            -f prerelease=true \
-            >/dev/null
+            --input -)"
+          jq -e '.draft == true and .prerelease == true' <<<"$release_json" >/dev/null || {
+            echo "Failed to keep release $RELEASE_ID as a draft after marking it in-flight." >&2
+            exit 1
+          }
       - name: Require a commit from main
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
