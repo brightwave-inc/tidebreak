@@ -119,6 +119,33 @@ pub(crate) async fn abandon_for_restart(
     if parks_are_durable(db, owner, session_id).await {
         return;
     }
+    if matches!(get_session(db, owner, session_id).await, Ok(Some(session)) if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox)
+    {
+        match tidebreak_core::db::code::reconcile_managed_decisions(db, owner, session_id).await {
+            Ok(events) => {
+                for event in events {
+                    bus.publish(session_id, event);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "could not reconcile managed decisions after restart");
+                return;
+            }
+        }
+        let mut ordinary = Vec::new();
+        for approval in pending(db, owner, session_id).await {
+            match tidebreak_core::db::code::is_managed_decision(db, owner, approval.id).await {
+                Ok(false) => ordinary.push(approval),
+                Ok(true) => (),
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "could not identify managed decision during restart");
+                    return;
+                }
+            }
+        }
+        abandon(db, bus, owner, session_id, spawn_epoch, ordinary).await;
+        return;
+    }
     let now = chrono::Utc::now();
     let abandoned =
         abandon_pending_approvals_for_stopped_session(db, owner, session_id, spawn_epoch, now)

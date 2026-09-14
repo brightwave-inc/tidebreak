@@ -91,7 +91,7 @@ fn bounded(value: &Value, cap: usize) -> Result<()> {
     Ok(())
 }
 /// Lock authority rows before reading so revocation and stop serialize with admission.
-async fn scope<C: sea_orm::ConnectionTrait>(
+pub(super) async fn scope<C: sea_orm::ConnectionTrait>(
     conn: &C,
     owner: &OwnerId,
     session: SessionId,
@@ -223,6 +223,17 @@ pub async fn enqueue_native_tool_request(
     bounded(arguments, 65_536)?;
     let tx = store.conn.begin().await.map_err(store_err)?;
     let grant = scope(&tx, owner, session, incarnation).await?;
+    let human = entities::code_managed_decision::Entity::find()
+        .filter(entities::code_managed_decision::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_managed_decision::Column::SessionId.eq(session.0))
+        .filter(entities::code_managed_decision::Column::IncarnationId.eq(incarnation.0))
+        .filter(entities::code_managed_decision::Column::RequestId.eq(request_id))
+        .count(&tx)
+        .await
+        .map_err(store_err)?;
+    if human != 0 {
+        return Err(invalid("request_id already belongs to a human decision"));
+    }
     let prior = receipt::Entity::find()
         .filter(receipt::Column::Owner.eq(owner.as_str()))
         .filter(receipt::Column::SessionId.eq(session.0))

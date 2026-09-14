@@ -332,11 +332,20 @@ impl<E: Engine> Driver<E> {
         let source = request.source;
         self.outbox
             .push("turn_started", serde_json::json!({ "turn": turn }));
+        if let Some(bridge) = &mut self.bridge {
+            bridge.begin_turn(tidebreak_core::code::SupervisorToolTurn {
+                native_turn: turn,
+                runtime_id: self.runtime_id,
+            });
+        }
         let mut handle = match self.engine.start_turn(request).await {
             Ok(handle) => handle,
             Err(error) => {
                 // The inbox stays unacknowledged, so whatever this turn was
                 // going to carry redelivers to the next incarnation.
+                if let Some(bridge) = &mut self.bridge {
+                    bridge.end_turn();
+                }
                 return self.engine_failed(&error.to_string()).await;
             }
         };
@@ -374,6 +383,10 @@ impl<E: Engine> Driver<E> {
                 }
             }
         };
+
+        if let Some(bridge) = &mut self.bridge {
+            bridge.end_turn();
+        }
 
         // The native stream can acknowledge steering while its terminal result arrives.
         // Flush that evidence before reporting completion, then forget unresolved targets.
@@ -674,7 +687,12 @@ impl<E: Engine> Driver<E> {
             }
         }
         let batch = self.outbox.take_batch();
-        let mut poll = SupervisorPoll::new(idle, self.delivered_through);
+        // Human waits remain running. Endpoint stop, wall-time, and spend limits still apply.
+        let waiting_for_human = self
+            .bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.waiting_for_human());
+        let mut poll = SupervisorPoll::new(idle && !waiting_for_human, self.delivered_through);
         poll.embedded_engine.clone_from(&self.embedded_engine);
         poll.events.clone_from(&batch);
         match self.control.poll(&poll).await {
@@ -1571,6 +1589,8 @@ mod tests {
         let bridge = LocalToolBridge::start(root.path()).unwrap();
         let socket = bridge.socket_path();
         let request = SupervisorToolRequest {
+            cancelled: false,
+            turn: None,
             request_id: "call-1".into(),
             tool: "conversation_export".into(),
             arguments: serde_json::json!({}),
@@ -1599,6 +1619,7 @@ mod tests {
         })
         .await;
         let result = SupervisorToolResult {
+            request: None,
             request_id: "call-1".into(),
             output: serde_json::json!({"content":"ready"}),
             artifacts: vec![SupervisorArtifact {

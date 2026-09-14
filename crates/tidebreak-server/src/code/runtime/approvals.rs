@@ -206,7 +206,7 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(super) async fn refresh_approval_attention(&self, owner: &OwnerId, session_id: SessionId) {
+    pub(crate) async fn refresh_approval_attention(&self, owner: &OwnerId, session_id: SessionId) {
         let Ok(Some(session)) = get_session(&self.db, owner, session_id).await else {
             return;
         };
@@ -318,6 +318,43 @@ impl CodeRuntime {
                 "approval_decision_in_progress",
                 format!("approval {id} already has a decision in progress"),
             ));
+        }
+        if tidebreak_core::db::code::is_managed_decision(&self.db, owner, id).await? {
+            let decision = match request {
+                ApprovalDecisionRequest::Answers { answers } => {
+                    ApprovalDecisionKind::Answered { answers }
+                }
+                ApprovalDecisionRequest::PlanDecision { approve, feedback } => {
+                    ApprovalDecisionKind::PlanDecided { approve, feedback }
+                }
+                ApprovalDecisionRequest::Deny { feedback } => {
+                    ApprovalDecisionKind::Deny { feedback }
+                }
+                _ => {
+                    return Err(ServerError::unprocessable_kind(
+                        "approval_decision_mismatch",
+                        "this approval requires explicit answers or a plan decision",
+                    ))
+                }
+            };
+            let settlement = match tidebreak_core::db::code::settle_managed_decision(
+                &self.db, owner, id, decision, actor,
+            )
+            .await
+            {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    let current = self.get_approval(owner, id).await?;
+                    if !current.state.is_pending() {
+                        return Err(already_settled_error(&current));
+                    }
+                    return Err(error.into());
+                }
+            };
+            self.bus.publish(initial.session_id, settlement.event);
+            self.refresh_approval_attention(owner, initial.session_id)
+                .await;
+            return Ok(settlement.approval);
         }
         let handle = self.require_worker(initial.session_id)?;
         let _decision_guard = handle.approval_decisions.clone().lock_owned().await;

@@ -137,7 +137,32 @@ pub fn launch_args_for_mcp_channels(
     native: Option<&NativeChannelSpec>,
     apps: Option<&crate::AppsChannelSpec>,
 ) -> Result<Option<Vec<String>>, crate::HarnessError> {
-    let Some(config) = merged_mcp_config_json(approval, browser, native, apps)? else {
+    launch_args_for_mcp_channels_and_tools(approval, browser, native, apps, None)
+}
+
+/// Register durable human helpers alongside the existing channels.
+pub fn launch_args_for_mcp_channels_and_tools(
+    approval: Option<&crate::ApprovalChannelSpec>,
+    browser: Option<&BrowserChannelSpec>,
+    native: Option<&NativeChannelSpec>,
+    apps: Option<&crate::AppsChannelSpec>,
+    tools: Option<&crate::ToolBridgeSpec>,
+) -> Result<Option<Vec<String>>, crate::HarnessError> {
+    let config = merged_mcp_config_json(approval, browser, native, apps)?;
+    let config = if let Some(tools) = tools {
+        let mut value: serde_json::Value = config
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| {
+                crate::HarnessError::Other(format!("invalid MCP configuration: {error}"))
+            })?
+            .unwrap_or_else(|| serde_json::json!({"mcpServers":{}}));
+        value["mcpServers"]["tb-human"] = tools.claude_mcp_config_entry()?;
+        value.to_string()
+    } else if let Some(config) = config {
+        config
+    } else {
         return Ok(None);
     };
     let mut flags = vec!["--mcp-config".into(), config];

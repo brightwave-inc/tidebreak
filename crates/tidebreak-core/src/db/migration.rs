@@ -31,6 +31,7 @@ mod external_steer_recovery;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
+mod managed_decision;
 mod native_tool_receipt;
 mod one_approval_surface;
 mod one_journal;
@@ -113,6 +114,7 @@ impl MigratorTrait for Migrator {
             Box::new(workspace_setup_error::WorkspaceSetupError),
             Box::new(external_steer_admission::ExternalSteerAdmission),
             Box::new(external_steer_recovery::ExternalSteerRecovery),
+            Box::new(managed_decision::ManagedDecisions),
         ]
     }
 }

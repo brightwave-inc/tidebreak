@@ -946,9 +946,14 @@ impl CodexSession {
             *self.stdin.lock().expect("codex stdin") = None;
             *self.stdout.lock().expect("codex stdout") = None;
         }
+        let mut extra_argv = self.spec.extra_argv.clone();
+        if let Some(bridge) = &self.spec.tool_bridge {
+            extra_argv.push("-c".into());
+            extra_argv.push(bridge.codex_config_override()?);
+        }
         let plan = compose_app_server_plan(
             self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
-            &self.spec.extra_argv,
+            &extra_argv,
             &self.spec.worktree,
             &self.spec.extra_env,
             self.spec.browser.as_ref(),

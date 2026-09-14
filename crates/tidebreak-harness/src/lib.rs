@@ -813,6 +813,37 @@ pub struct ToolBridgeSpec {
 }
 
 impl ToolBridgeSpec {
+    /// Human calls outlive shell deadlines; the sandbox still owns stop and budget limits.
+    pub const HUMAN_TIMEOUT_MS: u32 = 2_147_000_000;
+
+    fn helper_text(&self) -> Result<&str, HarnessError> {
+        self.helper
+            .to_str()
+            .filter(|path| self.helper.is_absolute() && !path.contains('\0'))
+            .ok_or_else(|| HarnessError::Other("human helper path must be absolute UTF-8".into()))
+    }
+
+    /// Register the managed human tools in Claude Code's MCP configuration.
+    pub fn claude_mcp_config_entry(&self) -> Result<serde_json::Value, HarnessError> {
+        Ok(
+            serde_json::json!({"type":"stdio","command":self.helper_text()?,"args":["human-mcp"],"timeout":Self::HUMAN_TIMEOUT_MS,
+            "env":{"TIDEBREAK_TOOL_SOCKET":self.socket.to_str().ok_or_else(|| HarnessError::Other("human helper socket must be UTF-8".into()))?}}),
+        )
+    }
+
+    /// Register the managed human tools with an explicit MCP call deadline.
+    pub fn codex_config_override(&self) -> Result<String, HarnessError> {
+        let command = serde_json::to_string(self.helper_text()?)
+            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        let socket = serde_json::to_string(
+            self.socket
+                .to_str()
+                .ok_or_else(|| HarnessError::Other("human helper socket must be UTF-8".into()))?,
+        )
+        .map_err(|error| HarnessError::Other(error.to_string()))?;
+        Ok(format!("mcp_servers.tb-human={{command={command},args=[\"human-mcp\"],env={{TIDEBREAK_TOOL_SOCKET={socket}}},tool_timeout_sec={},required=true}}", Self::HUMAN_TIMEOUT_MS / 1000))
+    }
+
     /// Inject runtime-owned paths after ambient environment filtering.
     pub fn inject_env_tokio(&self, command: &mut tokio::process::Command) {
         command.env("TIDEBREAK_TOOL_HELPER", &self.helper);
@@ -1351,6 +1382,34 @@ impl SessionSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_human_codex_configuration_keeps_paths_literal_and_requires_startup() {
+        let spec = ToolBridgeSpec {
+            helper: PathBuf::from("/workspace/tools with spaces/helper"),
+            socket: PathBuf::from("/tmp/socket \"quoted\".sock"),
+        };
+        let config: toml::Value = toml::from_str(&spec.codex_config_override().unwrap()).unwrap();
+        let human = &config["mcp_servers"]["tb-human"];
+        assert_eq!(human["command"].as_str(), spec.helper.to_str());
+        assert_eq!(
+            human["env"]["TIDEBREAK_TOOL_SOCKET"].as_str(),
+            spec.socket.to_str()
+        );
+        assert_eq!(
+            human["args"].as_array().unwrap()[0].as_str(),
+            Some("human-mcp")
+        );
+        assert_eq!(
+            human["tool_timeout_sec"].as_integer(),
+            Some(i64::from(ToolBridgeSpec::HUMAN_TIMEOUT_MS / 1000))
+        );
+        assert_eq!(human["required"].as_bool(), Some(true));
+        assert!(!config["mcp_servers"]
+            .as_table()
+            .unwrap()
+            .contains_key("tb-apps"));
+    }
 
     /// The decision and park-wait shapes ride `HarnessEvent` payloads and the
     /// scripted-harness script variable, so their tags are a contract.

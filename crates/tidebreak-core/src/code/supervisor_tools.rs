@@ -14,7 +14,111 @@ pub const TOOLS: &[&str] = &[
     "conversation_read",
     "conversation_export",
     "conversation_attachment",
+    "ask_user_questions",
+    "request_plan_approval",
 ];
+/// Human decisions never enter ordinary tool execution or its timeout.
+pub fn is_human_decision(tool: &str) -> bool {
+    matches!(tool, "ask_user_questions" | "request_plan_approval")
+}
+
+/// Canonical schemas for the human helpers, independent of a harness callback.
+pub fn human_decision_spec(tool: &str) -> Option<crate::ToolSpec> {
+    match tool {
+        "ask_user_questions" => Some(crate::ToolSpec::for_args::<crate::AskUserQuestionsArgs>(
+            tool,
+            "Ask up to three structured questions and wait for the user's explicit answer. Use stable question and option IDs. Select single_select for mutually exclusive choices and multi_select for independent choices. Enable allow_free_form for custom answers. A user may omit questions when answering. Run this helper in the foreground and wait for its result before continuing.",
+        )),
+        "request_plan_approval" => Some(crate::ToolSpec::for_args::<crate::ExitPlanModeArgs>(
+            tool,
+            "Present a concrete plan and wait for the user's explicit decision. Supply its title and full Markdown plan. Acceptance authorizes this plan and preserves the session's Allow permissions. Rejection requires you to revise the plan using the feedback. Run this helper in the foreground and wait for its result before continuing.",
+        )),
+        _ => None,
+    }
+}
+
+/// Validate the stored proposal before creating an approval.
+pub fn human_decision_kind(
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Result<super::ApprovalKind, String> {
+    match tool {
+        "ask_user_questions" => {
+            let args: crate::AskUserQuestionsArgs = serde_json::from_value(arguments.clone())
+                .map_err(|_| "invalid structured questions")?;
+            if !args.is_well_formed() {
+                return Err("invalid structured questions".into());
+            }
+            Ok(super::ApprovalKind::Questions {
+                questions: args.questions,
+            })
+        }
+        "request_plan_approval" => {
+            let args: crate::ExitPlanModeArgs =
+                serde_json::from_value(arguments.clone()).map_err(|_| "invalid plan proposal")?;
+            if !args.is_well_formed() {
+                return Err("invalid plan proposal".into());
+            }
+            Ok(super::ApprovalKind::Plan {
+                proposed_mode: crate::PermissionMode::Allow,
+            })
+        }
+        _ => Err("this helper does not request a human decision".into()),
+    }
+}
+
+/// Refuse answers the stored card did not offer. Omitted questions stay omitted.
+pub fn validate_human_decision(
+    kind: &super::ApprovalKind,
+    decision: &super::ApprovalDecisionKind,
+) -> Result<(), String> {
+    use super::{ApprovalDecisionKind as Decision, ApprovalKind as Kind};
+    let feedback_valid = |feedback: &Option<String>| {
+        feedback.as_ref().is_none_or(|text| {
+            !text.trim().is_empty()
+                && text.chars().count() <= crate::plan_mode::MAX_PLAN_FEEDBACK_CHARS
+                && !text
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        })
+    };
+    match (kind, decision) {
+        (Kind::Questions { questions }, Decision::Answered { answers }) => {
+            let mut seen = std::collections::HashSet::new();
+            if answers.is_empty()
+                || answers.len() > questions.len()
+                || !answers.iter().all(|answer| {
+                    let Some(question) = questions.iter().find(|q| q.id == answer.question_id)
+                    else {
+                        return false;
+                    };
+                    answer.shape_is_well_formed()
+                        && seen.insert(&answer.question_id)
+                        && (answer.custom_answer.is_none() || question.allow_free_form)
+                        && (question.question_type != crate::UserQuestionType::SingleSelect
+                            || answer.selected_option_ids.len()
+                                + usize::from(answer.custom_answer.is_some())
+                                <= 1)
+                        && answer
+                            .selected_option_ids
+                            .iter()
+                            .all(|id| question.options.iter().any(|option| &option.id == id))
+                })
+            {
+                return Err("the answers do not match the questions this approval asked".into());
+            }
+            Ok(())
+        }
+        (Kind::Plan { .. }, Decision::PlanDecided { feedback, .. })
+        | (Kind::Questions { .. } | Kind::Plan { .. }, Decision::Deny { feedback })
+            if feedback_valid(feedback) =>
+        {
+            Ok(())
+        }
+        _ => Err("this approval requires explicit answers or a plan decision".into()),
+    }
+}
+
 /// Maximum decoded artifact bytes across one result.
 pub const MAX_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum complete serialized result, including base64 artifacts.
@@ -33,6 +137,9 @@ const PREFIX: &str = "tidebreak-tool-result-v1\n";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorToolResult {
+    /// Human results name the exact proposal and supervisor turn they settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<super::SupervisorToolRequest>,
     pub request_id: String,
     pub output: serde_json::Value,
     #[serde(default)]
@@ -71,6 +178,9 @@ mod base64_bytes {
 
 pub fn validate_request(request: &super::SupervisorToolRequest) -> Result<(), String> {
     validate_request_id(&request.request_id)?;
+    if request.cancelled && !is_human_decision(&request.tool) {
+        return Err("only human decisions can be cancelled".into());
+    }
     if !TOOLS.contains(&request.tool.as_str()) {
         return Err("this native tool is unavailable".into());
     }
@@ -105,14 +215,27 @@ fn validate_request_id(id: &str) -> Result<(), String> {
 impl SupervisorToolResult {
     pub fn failed(request_id: String, message: &str) -> Self {
         Self {
+            request: None,
             request_id,
             output: serde_json::json!({"content":message,"is_error":true}),
             artifacts: Vec::new(),
         }
     }
 
+    pub fn failed_request(request: &super::SupervisorToolRequest, message: &str) -> Self {
+        let mut result = Self::failed(request.request_id.clone(), message);
+        result.request = Some(request.clone());
+        result
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         validate_request_id(&self.request_id)?;
+        if let Some(request) = &self.request {
+            validate_request(request)?;
+            if request.request_id != self.request_id {
+                return Err("human result names another request".into());
+            }
+        }
         if serde_json::to_vec(&self.output)
             .map_err(|e| e.to_string())?
             .len()
@@ -303,6 +426,7 @@ mod tests {
     #[test]
     fn large_artifacts_round_trip_as_bounded_strings_with_duplicate_frames() {
         let result = SupervisorToolResult {
+            request: None,
             request_id: "request-1".into(),
             output: serde_json::json!({"path":"conversation/export.txt"}),
             artifacts: vec![SupervisorArtifact {

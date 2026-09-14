@@ -1734,12 +1734,26 @@ impl QueuedTurn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorToolRequest {
+    /// Cancel this exact human request without changing its owning turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     /// Stable request id, repeated on agent retries.
     pub request_id: String,
     /// Registered server-side tool name.
     pub tool: String,
     /// Tool arguments validated by the server's authoritative registry.
     pub arguments: serde_json::Value,
+    /// Supervisor-owned identity of the turn awaiting a human decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<SupervisorToolTurn>,
+}
+
+/// The supervisor stamps this identity before forwarding a human request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorToolTurn {
+    pub native_turn: u32,
+    pub runtime_id: uuid::Uuid,
 }
 
 /// Lifecycle of one sandbox lifetime within a remote session.

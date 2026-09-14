@@ -578,11 +578,12 @@ impl ClaudeSession {
             self.spec.fast_mode,
             self.resolved_model(turn_model).as_deref(),
         )?);
-        if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
+        if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels_and_tools(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
             self.spec.native.as_ref(),
             self.spec.apps.as_ref(),
+            self.spec.tool_bridge.as_ref(),
         )? {
             argv.extend(flags);
         }
@@ -601,6 +602,11 @@ impl ClaudeSession {
             !BrowserChannelSpec::is_reserved_env_key_except(key, self.spec.relay_key_env.as_deref())
                 && key != "PWD"
         });
+        if self.spec.tool_bridge.is_some() {
+            // Managed human tools must remain in the foreground of the native turn.
+            env.retain(|(name, _)| name != "CLAUDE_AUTO_BACKGROUND_TASKS");
+            env.push(("CLAUDE_AUTO_BACKGROUND_TASKS".into(), "0".into()));
+        }
         let plan = LaunchPlan {
             argv,
             cwd: self.spec.worktree.clone(),
@@ -1930,6 +1936,65 @@ done
                 .count(),
             1,
             "both channels keep exactly one permission-prompt-tool flag"
+        );
+    }
+
+    #[test]
+    fn managed_human_mcp_keeps_existing_servers_and_does_not_extend_other_timeouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with_mode(
+            dir.path().join("claude"),
+            dir.path(),
+            Arc::new(Discard),
+            PermissionMode::Allow,
+        );
+        session.spec.tool_bridge = Some(crate::ToolBridgeSpec {
+            helper: PathBuf::from("/workspace/tools/tidebreak-supervised-agent"),
+            socket: PathBuf::from("/tmp/managed tools.sock"),
+        });
+        session.spec.apps = Some(crate::AppsChannelSpec {
+            mcp_endpoint_url: "http://localhost:9999/apps".into(),
+            token: "fixture".into(),
+        });
+        session.spec.extra_env = vec![
+            ("MCP_TOOL_TIMEOUT".into(), "5000".into()),
+            ("CLAUDE_AUTO_BACKGROUND_TASKS".into(), "1".into()),
+        ];
+        let plan = session.compose_plan_for(None, None).unwrap();
+        let position = plan
+            .argv
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&plan.argv[position + 1]).unwrap();
+        assert!(config["mcpServers"].get("tb-apps").is_some());
+        assert!(config["mcpServers"]["tb-apps"].get("timeout").is_none());
+        let human = &config["mcpServers"]["tb-human"];
+        assert_eq!(
+            human["command"],
+            "/workspace/tools/tidebreak-supervised-agent"
+        );
+        assert_eq!(human["args"], serde_json::json!(["human-mcp"]));
+        assert_eq!(human["timeout"], crate::ToolBridgeSpec::HUMAN_TIMEOUT_MS);
+        assert_eq!(
+            human["env"]["TIDEBREAK_TOOL_SOCKET"],
+            "/tmp/managed tools.sock"
+        );
+        assert_eq!(
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == "MCP_TOOL_TIMEOUT")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["5000"]
+        );
+        assert_eq!(
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == "CLAUDE_AUTO_BACKGROUND_TASKS")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0"]
         );
     }
 

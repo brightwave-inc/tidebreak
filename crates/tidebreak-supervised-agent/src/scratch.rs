@@ -27,6 +27,7 @@ impl Scratch {
     /// Validate the whole batch, then publish each artifact once. Exact retries succeed.
     pub fn materialize(&self, artifacts: &[SupervisorArtifact]) -> Result<usize, String> {
         SupervisorToolResult {
+            request: None,
             request_id: "scratch-validation".into(),
             output: serde_json::Value::Null,
             artifacts: artifacts.to_vec(),
