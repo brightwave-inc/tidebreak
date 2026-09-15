@@ -74,9 +74,12 @@ this preference only to its authenticated engine inference exchange. Git and
 other exchanges continue to use the execution owner's delegation.
 
 A DM prefers its connected person's subscription. A channel prefers the person
-whose verified request creates the conversation, when that person opts into
-channel sponsorship. A channel administrator cannot provide that personal
-consent. The person can disable sponsorship from their connection settings;
+whose verified request creates the conversation, when that person allows
+channel sponsorship. Connection approval selects sponsorship by default and
+shows its scope before the person approves. The person can clear the selection.
+Existing connections keep their saved choice, including disabled sponsorship.
+A channel administrator cannot provide that personal consent. The person can
+disable sponsorship from their connection settings;
 Gateway checks consent on every use. Preferences apply to new conversations.
 
 The binding transaction saves the root inference scope, starter, and delegation

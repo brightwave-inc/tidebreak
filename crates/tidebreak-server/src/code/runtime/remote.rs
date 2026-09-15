@@ -1139,7 +1139,10 @@ impl CodeRuntime {
             }
             Ok(Outcome::CapExhausted { .. }) => {
                 remote.clear_startup_failure(session.id);
-                remote.hold_promotion(session.id);
+                // Capacity admission only reads the local ledger. Retry on the
+                // next sweep so a drained sandbox wakes its waiting messages
+                // immediately; the driver deduplicates the durable notice.
+                remote.clear_promotion_hold(session.id);
             }
             // Busy shapes: the row stays queued for the next idle.
             Ok(_) => {}

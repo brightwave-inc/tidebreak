@@ -84,8 +84,15 @@ export const SponsorshipSelected: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const consent = canvas.getByRole("checkbox");
-    await userEvent.click(consent);
     await expect(consent).toBeChecked();
+  },
+};
+export const SponsorshipDisabled: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const consent = canvas.getByRole("checkbox");
+    await userEvent.click(consent);
+    await expect(consent).not.toBeChecked();
   },
 };
 export const SubscriptionsUnavailable: Story = {

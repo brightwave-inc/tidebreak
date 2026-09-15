@@ -385,9 +385,11 @@ turn mapping until the sandbox ends.
 Engine-child park
 ([`0064`](decisions/0064-idle-engine-children-are-parked.md)) is not
 this. That park is invisible reclaim of a local process. Here the sandbox
-is the child: stop it after a post-turn idle window. The session row
-stays; the next message reincarnates. Sandbox lifetime and session
-lifetime are different clocks.
+is the child: stop it after a post-turn idle window. Supervised sessions request
+an idle ceiling of 60 seconds after a turn finishes. Pending human questions
+and plans keep the sandbox non-idle. The session row stays; the next message
+reincarnates only after the prior sandbox's terminal events and checkpoints
+permit it. Sandbox lifetime and session lifetime are different clocks.
 
 ## Ingestion
 
@@ -1060,11 +1062,13 @@ personal Slack connection, and change its DM subscription preference.
 
 A channel's default preference uses an eligible subscription owned by the
 person who starts the Tidebreak conversation. That person must connect their
-Slack account and explicitly allow channel sponsorship. The consent covers
-later replies in that conversation, including replies from teammates. Existing
-connections have sponsorship disabled until their owner enables it. To change
-the channel preference to Gateway defaults, open the channel's settings as a
-human administrator. A channel setting cannot opt another person into consent.
+Slack account. The connection approval selects channel sponsorship by default
+and explains that it covers later replies, including replies from teammates.
+Clear the checkbox before approving to disable sponsorship. Existing connections
+keep their saved choice; connections created without sponsorship stay off until
+their owner enables it in Subscription settings. To use Gateway defaults for a
+channel, open its settings as a human administrator. A channel setting cannot
+change another person's sponsorship choice.
 
 Missing links, ambiguous Slack identities, missing consent, and absent eligible
 subscriptions select Gateway defaults when the conversation starts. The saved
