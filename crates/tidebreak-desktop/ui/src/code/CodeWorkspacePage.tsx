@@ -958,6 +958,10 @@ function CodeWorkspaceBody({
         client={client}
         workspaceId={workspaceId}
         contentRevision={contentRevision}
+        enabled={
+          workspace?.worktree_path !== "" &&
+          !workspace?.worktree_path?.startsWith("remote:")
+        }
         onOpenFile={(path) => openFile(path, undefined, quickOpenTarget)}
         openRequest={quickOpenRequest}
       />
