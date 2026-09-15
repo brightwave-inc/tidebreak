@@ -517,7 +517,6 @@ test("PR lanes are scope-gated, never label-gated", () => {
     [workflowJob(ci, "lint"), "rust"],
     [workflowJob(ci, "desktop"), "rust"],
     [workflowJob(ci, "windows-check"), "rust"],
-    [workflowJob(ci, "windows-native"), "windows_native"],
     [workflowJob(ci, "macos-sandbox"), "workspace"],
     [testPartitions, "workspace"],
     [postgres, "workspace"],
@@ -659,10 +658,9 @@ function skipsSupersededPush(job) {
   );
 }
 
-test("Windows cargo check and native tests run in parallel scoped jobs", () => {
+test("Windows cargo check is rust-scoped and skips superseded main pushes", () => {
   const ci = workflows["ci.yml"];
   const windowsCheck = workflowJob(ci, "windows-check");
-  const windowsNative = workflowJob(ci, "windows-native");
   const changes = workflowJob(ci, "changes");
   assert.match(windowsCheck, /name: Windows cargo check/);
   assert.match(windowsCheck, /Check the Windows installer crates/);
@@ -697,42 +695,6 @@ test("Windows cargo check and native tests run in parallel scoped jobs", () => {
   assert.match(
     windowsCheck,
     /uses: \.\/\.github\/actions\/setup-sccache-s3/,
-  );
-
-  assert.match(windowsNative, /name: Windows native tests/);
-  assert.match(windowsNative, /needs: changes/);
-  assert.match(
-    windowsNative,
-    /if: \$\{\{ needs\.changes\.outputs\.windows_native == 'true' \}\}/,
-  );
-  assert.match(windowsNative, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
-  assert.match(windowsNative, /id-token: write/);
-  assert.match(windowsNative, /RUSTC_WRAPPER: sccache/);
-  assert.match(
-    windowsNative,
-    /uses: \.\/\.github\/actions\/setup-sccache-s3/,
-  );
-  assert.match(windowsNative, /uses: Swatinem\/rust-cache@[0-9a-f]{40}/);
-  assert.match(windowsNative, /Host broker Windows tests/);
-  assert.match(windowsNative, /Code mode Windows lifecycle tests/);
-  assert.match(windowsNative, /SQLite profile open and migrations/);
-  assert.match(windowsNative, /Credential Manager round trip/);
-  assert.match(windowsNative, /\$attempts = 3/);
-  assert.match(windowsNative, /tidebreak-server", "--lib", "code::"/);
-  assert.match(
-    windowsNative,
-    /cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked/,
-  );
-  assert.match(windowsNative, /-p tidebreak-server --lib desktop_schema --locked/);
-  assert.match(windowsNative, /-p tidebreak-core --lib keychain --locked -- --ignored/);
-  assert.match(
-    changes,
-    /windows_native: \$\{\{ steps\.scope\.outputs\.windows_native \}\}/,
-  );
-  assert.match(changes, /echo "windows_native=\$windows_native"/);
-  assert.match(
-    changes,
-    /if \[\[ "\$windows_native" == true && "\$rust" != true \]\]; then/,
   );
 });
 
@@ -781,7 +743,9 @@ test("macOS CI exercises Seatbelt and the egress broker without signing setup", 
   assert.match(sandbox, /test -x \/usr\/bin\/sandbox-exec/);
   assert.match(sandbox, /\/usr\/bin\/sandbox-exec -p/);
   assert.match(sandbox, /\/usr\/bin\/python3 -c/);
-  assert.match(sandbox, /uses: actions\/setup-python@[a-f0-9]{40} # v6/);
+  // Admit v6 (main) and v7.0.0 (Dependabot #3448). This file is copied from
+  // the base branch, so a pin bump cannot land until both comments match.
+  assert.match(sandbox, /uses: actions\/setup-python@[a-f0-9]{40} # v(6|7\.0\.0)/);
   assert.match(sandbox, /python-version: "3\.12\.10"/);
   assert.match(sandbox, /python3 -I -c .*pip.*is_relative_to.*sys\.prefix/);
   for (const suite of ["local", "network", "sbpl"]) {
@@ -799,7 +763,6 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "lint",
     "desktop",
     "windows-check",
-    "windows-native",
     "macos-sandbox",
     "test",
     "postgres",
