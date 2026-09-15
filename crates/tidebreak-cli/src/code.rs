@@ -14,8 +14,8 @@ use std::str::FromStr;
 use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, ApprovalDecisionKind, ApprovalId, ApprovalKind, Attention, AttentionState,
-    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId, Result, SessionAccessLevel,
-    SessionId, SessionLifecycle, SessionVisibility, TurnId, WorkspaceId,
+    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, ReasoningEffort, RepoId, Result,
+    SessionAccessLevel, SessionId, SessionLifecycle, SessionVisibility, TurnId, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -48,7 +48,7 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code ws list [--repo <id|path>]
        tidebreak code ws show <id>
        tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow] [--model <id>] [--reasoning <level>] [--fast]
        tidebreak code session show <id>
        tidebreak code session mode <id> plan|ask|auto|allow
        tidebreak code session reap <id>
@@ -143,6 +143,9 @@ pub enum Command {
         /// structured approvals are Supported, otherwise plan. An explicit
         /// `--mode` is passed through verbatim.
         mode: Option<PermissionMode>,
+        model: Option<String>,
+        reasoning_effort: Option<ReasoningEffort>,
+        fast_mode: bool,
         format: OutputFormat,
     },
     SessionShow {
@@ -465,10 +468,22 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
             workspace,
             harness,
             mode,
+            model,
+            reasoning_effort,
+            fast_mode,
             format,
         } => {
             let (mode, fallback_note) = resolve_start_mode(client, harness, mode).await?;
-            let session = client.create_session(workspace, harness, mode).await?;
+            let session = client
+                .create_session_with_settings(
+                    workspace,
+                    harness,
+                    mode,
+                    model.as_deref(),
+                    reasoning_effort,
+                    fast_mode,
+                )
+                .await?;
             if format == OutputFormat::Json {
                 return emit_ok(&session);
             }
@@ -2156,6 +2171,9 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
             let mut workspace = None;
             let mut harness = None;
             let mut mode = None;
+            let mut model = None;
+            let mut reasoning_effort = None;
+            let mut fast_mode = false;
             let mut flags = SharedFlags {
                 format: OutputFormat::Text,
             };
@@ -2164,6 +2182,13 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
                     "--ws" => workspace = Some(parse_workspace_id(&cursor.value("--ws")?)?),
                     "--harness" => harness = Some(parse_harness(&cursor.value("--harness")?)?),
                     "--mode" => mode = Some(parse_mode(&cursor.value("--mode")?)?),
+                    "--model" => model = Some(cursor.value("--model")?),
+                    "--reasoning" => {
+                        let raw = cursor.value("--reasoning")?;
+                        reasoning_effort = ReasoningEffort::from_str(&raw)
+                            .ok_or_else(|| format!("unknown reasoning effort {raw:?}"))?;
+                    }
+                    "--fast" => fast_mode = true,
                     other => take_format(&mut flags, cursor, other)?,
                 }
             }
@@ -2175,6 +2200,9 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
                 workspace,
                 harness,
                 mode,
+                model,
+                reasoning_effort,
+                fast_mode,
                 format: flags.format,
             })
         }
@@ -2770,12 +2798,27 @@ mod tests {
             "grok",
             "--mode",
             "ask",
+            "--model",
+            "grok-4.6",
+            "--reasoning",
+            "high",
+            "--fast",
         ]))
         .unwrap()
         {
-            Command::SessionStart { mode, harness, .. } => {
+            Command::SessionStart {
+                mode,
+                harness,
+                model,
+                reasoning_effort,
+                fast_mode,
+                ..
+            } => {
                 assert_eq!(harness, HarnessKind::Grok);
                 assert_eq!(mode, Some(PermissionMode::Ask));
+                assert_eq!(model.as_deref(), Some("grok-4.6"));
+                assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
+                assert!(fast_mode);
             }
             other => panic!("{other:?}"),
         }

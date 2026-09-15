@@ -245,7 +245,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         if (cancelled) return;
         updateSession((session) => ({
           ...session,
-          busy: true,
+          busy: false,
           messages: [
             {
               id: nextId(),
@@ -254,6 +254,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             },
           ],
         }));
+        setHydrated(true);
       }
     })();
     return () => {

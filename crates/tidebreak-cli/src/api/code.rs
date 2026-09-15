@@ -176,7 +176,7 @@ impl Client {
         harness: HarnessKind,
         permission_mode: PermissionMode,
     ) -> Result<SessionSnapshot> {
-        self.create_session_with(workspace, harness, permission_mode, None)
+        self.create_session_with_settings(workspace, harness, permission_mode, None, None, false)
             .await
     }
 
@@ -187,12 +187,29 @@ impl Client {
         permission_mode: PermissionMode,
         model: Option<&str>,
     ) -> Result<SessionSnapshot> {
+        self.create_session_with_settings(workspace, harness, permission_mode, model, None, false)
+            .await
+    }
+
+    pub async fn create_session_with_settings(
+        &self,
+        workspace: WorkspaceId,
+        harness: HarnessKind,
+        permission_mode: PermissionMode,
+        model: Option<&str>,
+        reasoning_effort: Option<tidebreak_core::model::ReasoningEffort>,
+        fast_mode: bool,
+    ) -> Result<SessionSnapshot> {
         let mut body = serde_json::json!({
             "harness": harness,
             "permission_mode": permission_mode,
+            "fast_mode": fast_mode,
         });
         if let Some(model) = model {
             body["model"] = model.into();
+        }
+        if let Some(effort) = reasoning_effort {
+            body["reasoning_effort"] = effort.into();
         }
         self.post_json(
             format!("{}/code/workspaces/{workspace}/sessions", self.base_url()),
