@@ -295,6 +295,34 @@ describe("ConnectionRegistry", () => {
     );
   });
 
+  it("never lets a re-pair inherit the previous account's administrator role", async () => {
+    // The id is derived from the installation, so signing in as somebody else
+    // lands on the same record. A cached `isAdmin` that survived that would
+    // show a member the administration group until the first usage read
+    // corrected it.
+    const storage = memoryStorage();
+    const store = registry(storage);
+    await store.hydrate();
+    const paired = await store.addGateway({
+      gatewayUrl: "https://one.example.test",
+      refreshToken: "mg_rt_one",
+      installationId: "inst-one",
+      grantedScope: "openid profile offline_access control_plane:read",
+    });
+    await store.updateActive({ isAdmin: true });
+    expect(store.active()?.isAdmin).toBe(true);
+
+    const again = await store.addGateway({
+      gatewayUrl: "https://one.example.test",
+      refreshToken: "mg_rt_two",
+      installationId: "inst-one",
+      grantedScope: "openid profile offline_access control_plane:read",
+    });
+
+    expect(again.id).toBe(paired.id);
+    expect(store.active()?.isAdmin).toBeUndefined();
+  });
+
   it("publishes every change to its listeners", async () => {
     const storage = memoryStorage();
     const store = registry(storage);

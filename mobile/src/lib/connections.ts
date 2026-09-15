@@ -50,6 +50,18 @@ export type GatewayConnection = ConnectionBase & {
    * never the session.
    */
   grantedScope?: string;
+  /**
+   * Whether this account administers the gateway, learned from the unfiltered
+   * usage read's `scope` (`admin.ts`) and cached here so the administration
+   * surfaces gate on first paint rather than resolving into view.
+   *
+   * A cached convenience, never an authority: every administrator read is
+   * refused server-side for a member regardless of what this says. Undefined
+   * means "not yet learned", which reads as member — the group appears when
+   * the gateway confirms it, and signing out of the connection deletes the
+   * record along with the answer.
+   */
+  isAdmin?: boolean;
 };
 
 /**

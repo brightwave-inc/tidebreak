@@ -85,6 +85,27 @@ export default function RootLayout() {
             name="conversation/[id]"
             options={{ title: "Conversation" }}
           />
+          {/* Administration. Registered unconditionally — the routes exist for
+              every session and `AdminGate` is what answers a member who
+              reaches one, so navigation never has to be rebuilt when the
+              gateway confirms the role. */}
+          <Stack.Screen name="admin/usage" options={{ title: "Usage" }} />
+          <Stack.Screen
+            name="admin/models"
+            options={{ title: "Models & providers" }}
+          />
+          <Stack.Screen name="admin/people" options={{ title: "People" }} />
+          <Stack.Screen name="admin/teams" options={{ title: "Teams" }} />
+          <Stack.Screen name="admin/limits" options={{ title: "Limits" }} />
+          <Stack.Screen
+            name="admin/guardrails"
+            options={{ title: "Guardrails" }}
+          />
+          <Stack.Screen name="admin/audit" options={{ title: "Audit log" }} />
+          <Stack.Screen
+            name="admin/configuration"
+            options={{ title: "Configuration" }}
+          />
         </Stack>
       </QueryClientProvider>
     </GestureHandlerRootView>
