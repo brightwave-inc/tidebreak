@@ -593,6 +593,13 @@ body {
     inset-inline-start: -1.5rem;
   }
 
+  /* Nested tool rows stay inside the expanded body's clipping boundary. Only
+   * the outer row borrows the transcript gutter. */
+  .messages-column .tool-card-shell .tool-card-shell .tool-card-icon {
+    position: static;
+    inset-inline-start: auto;
+  }
+
   .messages-column .tool-card-shell {
     width: 100%;
     min-width: 0;
