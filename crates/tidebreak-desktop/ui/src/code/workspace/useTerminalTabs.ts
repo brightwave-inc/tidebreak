@@ -29,11 +29,13 @@ import { useCodeUiStore } from "../CodeUiStore";
  */
 export function useTerminalTabs({
   workspaceId,
+  enabled = true,
   client,
   layout,
   setLayout,
 }: {
   workspaceId: string;
+  enabled?: boolean;
   client: Pick<ApiClient, "createCodeTerminal" | "deleteCodeTerminal">;
   layout: LayoutState;
   setLayout: (next: LayoutState) => void;
@@ -60,6 +62,7 @@ export function useTerminalTabs({
    */
   const closeTerminalPanels = useCallback(
     (terminalIds: readonly string[]) => {
+      if (!enabled) return;
       for (const terminalId of terminalIds) {
         if (closedTerminalIdsRef.current.has(terminalId)) continue;
         closedTerminalIdsRef.current.add(terminalId);
@@ -68,7 +71,7 @@ export function useTerminalTabs({
         });
       }
     },
-    [client, workspaceId],
+    [client, workspaceId, enabled],
   );
 
   useEffect(() => {
@@ -88,6 +91,7 @@ export function useTerminalTabs({
    * meanwhile is not lost to a stale snapshot.
    */
   async function openTerminal(preferredRegion?: CodeEditorRegion) {
+    if (!enabled) return;
     try {
       const snap = await client.createCodeTerminal(workspaceId);
       setTerminalLabels((current) => nameTerminals(current, [snap.id]));
@@ -111,6 +115,7 @@ export function useTerminalTabs({
    * the flick there and back a drawer gave, without a second kind of surface.
    */
   function toggleTerminal() {
+    if (!enabled) return;
     const found = findCodeTerminalTab(layoutRef.current);
     if (!found) {
       beforeTerminalRef.current = focusedEditorPosition(layoutRef.current);
@@ -151,7 +156,7 @@ export function useTerminalTabs({
 
   const openTerminalCount = codeTerminalIds(layout).length;
   const hasTerminal = findCodeTerminalTab(layout) !== null;
-  const canNewTerminal = openTerminalCount < MAX_WORKSPACE_TERMINALS;
+  const canNewTerminal = enabled && openTerminalCount < MAX_WORKSPACE_TERMINALS;
 
   return {
     terminalLabels,

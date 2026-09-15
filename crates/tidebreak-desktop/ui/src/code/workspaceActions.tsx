@@ -1,3 +1,4 @@
+import { workspaceCommandsForAccess } from "./workspaceAccess";
 import { useRef, useState, type ReactElement } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
@@ -888,6 +889,12 @@ export function useWorkspaceCardCommands(): {
     command: WorkspaceCommandId,
     context: WorkspaceCommandContext,
   ): void | Promise<void> {
+    if (
+      !workspaceCommandsForAccess(context.workspace, [
+        { id: command, label: command },
+      ]).length
+    )
+      return;
     switch (command) {
       case "open":
       case "new-session":

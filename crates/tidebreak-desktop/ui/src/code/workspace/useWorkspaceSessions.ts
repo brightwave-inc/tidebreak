@@ -250,6 +250,7 @@ export function useWorkspaceSessions({
         // remembers the first — the one the workspace was started with.
         const first = liveCodeSessions(listed)[0];
         if (first) catalogState.rememberSession(first);
+        if (next.is_owner === false) return;
         const nextRepo = await client.getCodeRepo(next.repo_id);
         if (!cancelled) setRepo(nextRepo);
       } catch (err) {

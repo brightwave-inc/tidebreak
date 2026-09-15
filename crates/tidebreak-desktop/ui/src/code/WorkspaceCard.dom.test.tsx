@@ -1019,3 +1019,46 @@ it("opens a shared workspace without selection or mutation actions", async () =>
   ).not.toBeInTheDocument();
   expect(onCommand).not.toHaveBeenCalled();
 });
+
+it("offers management commands without host or session-owner commands", async () => {
+  const { onCommand } = renderCard({
+    workspace: { read_only: false, is_owner: false },
+    canOpenWorktree: true,
+  });
+  fireEvent.contextMenu(screen.getByRole("button", { name: /^Fix login/ }));
+  expect(
+    await screen.findByRole("menuitem", { name: /^Archive$/ }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Rename…" })).toBeInTheDocument();
+  for (const name of [
+    "Toggle terminal",
+    "Open worktree folder",
+    "New session",
+    "Repository settings…",
+  ]) {
+    expect(screen.queryByRole("menuitem", { name })).not.toBeInTheDocument();
+  }
+  fireEvent.click(screen.getByRole("menuitem", { name: /^Archive$/ }));
+  expect(onCommand).toHaveBeenCalledWith("archive");
+});
+
+it("does not offer restore or a host path for a remote managed workspace", async () => {
+  renderCard({
+    workspace: {
+      read_only: false,
+      is_owner: false,
+      status: "archived",
+      worktree_path: "remote:ws-1",
+    },
+  });
+  fireEvent.contextMenu(screen.getByRole("button", { name: /^Fix login/ }));
+  expect(
+    await screen.findByRole("menuitem", { name: "Open workspace" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("menuitem", { name: /Restore/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("menuitem", { name: /Copy worktree/ }),
+  ).not.toBeInTheDocument();
+});

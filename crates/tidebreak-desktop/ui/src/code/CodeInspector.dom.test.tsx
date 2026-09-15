@@ -15,7 +15,11 @@ import type {
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
-import { CodeInspector, inspectorTurnLabel } from "./CodeInspector";
+import {
+  CodeInspector,
+  WorkspaceDeliveryPrTab,
+  inspectorTurnLabel,
+} from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
@@ -789,6 +793,55 @@ it("keeps pull request review available for sandbox workspaces", async () => {
     .setup()
     .click(screen.getByRole("button", { name: "Review pull request" }));
   await screen.findByText("Fix login flow");
+  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
+  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+});
+
+it("keeps a managed workspace PR on the workspace API and hides remote merge", async () => {
+  const client = makeClient();
+  const pr = {
+    ...OPEN_PR,
+    mergeable: "mergeable",
+    merge_state_status: "clean",
+    review_decision: "approved",
+    checks: [{ name: "ci", bucket: "pass" }],
+  } as PullRequestDigest;
+  render(
+    <WorkspaceDeliveryPrTab
+      client={client as ApiClient}
+      workspaceId="ws-1"
+      pr={pr}
+      workspaceOnly
+      allowMerge={false}
+    />,
+  );
+  await waitFor(() =>
+    expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1"),
+  );
+  expect(
+    screen.queryByRole("button", { name: "Squash and merge" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Enable auto-merge" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps remote Files accurate when its external connection cannot load PR status", () => {
+  const client = makeClient();
+  render(
+    <CodeInspector
+      client={client as ApiClient}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, worktree_path: "remote:ws-1" }}
+      contentRevision={0}
+      prResource={{
+        ...workspaceResource(CLEAN_PR_SNAPSHOT),
+        data: null,
+        error: "Reconnect Slack",
+      }}
+    />,
+  );
+  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
   expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
   expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
 });

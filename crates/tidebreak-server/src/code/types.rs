@@ -173,10 +173,14 @@ impl From<CodeRepo> for CodeRepoSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceSnapshot {
-    /// True when the caller reads this workspace through a shared session.
+    /// True when the caller cannot manage the workspace.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub read_only: Option<bool>,
+    /// Ownership remains necessary for host terminals and owner-only session actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub is_owner: Option<bool>,
     /// Present only on creation when the base refresh could not complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -217,6 +221,7 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
     fn from(workspace: CodeWorkspace) -> Self {
         Self {
             read_only: None,
+            is_owner: None,
             base_refresh_warning: None,
             id: workspace.id,
             repo_id: workspace.repo_id,

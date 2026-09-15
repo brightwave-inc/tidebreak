@@ -105,17 +105,11 @@ pub async fn list_workspaces(
     Query(query): Query<ListWorkspacesQuery>,
 ) -> Result<Json<Vec<CodeWorkspaceSnapshot>>, ServerError> {
     let workspaces = code.list_readable_workspaces(query.repo_id).await?;
-    Ok(Json(
-        workspaces
-            .into_iter()
-            .map(|workspace| {
-                let read_only = workspace.owner != *code.owner();
-                let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
-                snapshot.read_only = Some(read_only);
-                snapshot
-            })
-            .collect(),
-    ))
+    let mut snapshots = Vec::with_capacity(workspaces.len());
+    for workspace in workspaces {
+        snapshots.push(workspace_snapshot(&code, workspace).await?);
+    }
+    Ok(Json(snapshots))
 }
 
 pub async fn get_workspace(
@@ -123,10 +117,7 @@ pub async fn get_workspace(
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
     let workspace = code.read_workspace(id).await?;
-    let read_only = workspace.owner != *code.owner();
-    let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
-    snapshot.read_only = Some(read_only);
-    Ok(Json(snapshot))
+    Ok(Json(workspace_snapshot(&code, workspace).await?))
 }
 
 pub async fn patch_workspace(
@@ -134,7 +125,7 @@ pub async fn patch_workspace(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<PatchWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let mut workspace = code.require_workspace_owner(id).await?;
+    let mut workspace = code.require_workspace_management(id).await?;
     if let Some(title) = body.title {
         let title = title.trim().to_owned();
         if title.is_empty() {
@@ -143,7 +134,7 @@ pub async fn patch_workspace(
         workspace.title = title;
         code.save_workspace(&workspace).await?;
     }
-    Ok(Json(CodeWorkspaceSnapshot::from(workspace)))
+    Ok(Json(workspace_snapshot(&code, workspace).await?))
 }
 
 pub async fn archive_workspace(
@@ -155,7 +146,7 @@ pub async fn archive_workspace(
     let archived = code
         .archive_workspace(id, body.force, state.terminals.as_ref())
         .await?;
-    Ok(Json(CodeWorkspaceSnapshot::from(archived)))
+    Ok(Json(workspace_snapshot(&code, archived).await?))
 }
 
 /// `POST /code/workspaces/{id}/restore` — reactivate an archived workspace.
@@ -172,7 +163,7 @@ pub async fn restore_workspace(
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
     let restored = code.restore_workspace(id).await?;
-    Ok(Json(CodeWorkspaceSnapshot::from(restored)))
+    Ok(Json(workspace_snapshot(&code, restored).await?))
 }
 
 /// `POST /code/workspaces/{id}/retry-setup` — run the setup script again on the
@@ -185,7 +176,7 @@ pub async fn retry_workspace_setup(
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
     let workspace = code.retry_workspace_setup(id).await?;
-    Ok(Json(CodeWorkspaceSnapshot::from(workspace)))
+    Ok(Json(workspace_snapshot(&code, workspace).await?))
 }
 
 pub async fn list_workspace_tree(
@@ -374,4 +365,16 @@ mod tests {
         );
         assert_eq!(exact_diff_file(Some(String::new())), None);
     }
+}
+
+async fn workspace_snapshot(
+    code: &ScopedCode,
+    workspace: tidebreak_core::CodeWorkspace,
+) -> Result<CodeWorkspaceSnapshot, ServerError> {
+    let is_owner = workspace.owner == *code.owner();
+    let read_only = !code.can_manage_workspace(&workspace).await?;
+    let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
+    snapshot.read_only = Some(read_only);
+    snapshot.is_owner = Some(is_owner);
+    Ok(snapshot)
 }

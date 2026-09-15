@@ -144,8 +144,11 @@ export function CodeInspector({
   );
   const [file, setFile] = useState<string | undefined>();
   const turnId = scope?.turnId;
-  const remote = prResource?.data?.remote === true;
-  const worktreeReady = !prResource || (prResource.data !== null && !remote);
+  const remote =
+    prResource?.data?.remote === true ||
+    workspace?.worktree_path === "" ||
+    workspace?.worktree_path?.startsWith("remote:") === true;
+  const worktreeReady = !remote && (!prResource || prResource.data !== null);
   const changedFiles = useChangedFilesResource({
     client,
     workspaceId,
@@ -316,6 +319,7 @@ export function CodeInspector({
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <WorkspacePrTab
+            allowMerge={!remote}
             client={client}
             workspaceId={workspaceId}
             pr={pr}
@@ -329,7 +333,7 @@ export function CodeInspector({
   );
 }
 
-function WorkspaceFilesUnavailable({
+export function WorkspaceFilesUnavailable({
   remote,
   error,
   hasPr,
@@ -451,6 +455,7 @@ function WorkspacePrTab({
   pr,
   branch,
   prResource,
+  allowMerge = true,
   prCount,
 }: {
   client: ApiClient;
@@ -458,6 +463,7 @@ function WorkspacePrTab({
   pr?: PullRequestDigest;
   branch?: string;
   prResource?: CodeWorkspacePrResource;
+  allowMerge?: boolean;
   prCount?: number;
 }) {
   const attributed = useWorkspacePullRequests(client, workspaceId, prCount, pr);
@@ -496,6 +502,7 @@ function WorkspacePrTab({
         />
       )}
       <PrTab
+        allowMerge={allowMerge}
         client={client}
         workspaceId={workspaceId}
         pr={shownPr}
@@ -516,15 +523,19 @@ export function WorkspaceDeliveryPrTab({
   pr,
   branch,
   prResource,
+  allowMerge = true,
+  workspaceOnly = false,
 }: {
   client: ApiClient;
   workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
   prResource?: CodeWorkspacePrResource;
+  allowMerge?: boolean;
+  workspaceOnly?: boolean;
 }) {
   const target = pr ? workspacePullRequestTarget(pr) : null;
-  if (pr && target) {
+  if (pr && target && !workspaceOnly) {
     return (
       <PullRequestDetailPane
         client={client}
@@ -538,6 +549,7 @@ export function WorkspaceDeliveryPrTab({
   }
   return (
     <PrTab
+      allowMerge={allowMerge}
       client={client}
       workspaceId={workspaceId}
       pr={pr}
@@ -559,12 +571,14 @@ export function PrTab({
   pr,
   branch,
   prResource,
+  allowMerge = true,
 }: {
   client: ApiClient;
   workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
   prResource?: CodeWorkspacePrResource;
+  allowMerge?: boolean;
 }) {
   const { confirm, dialog } = useConfirm();
   const [localRefreshing, setLocalRefreshing] = useState(false);
@@ -657,7 +671,7 @@ export function PrTab({
   }
 
   async function merge(auto: boolean) {
-    if (!pr) return;
+    if (!pr || !allowMerge || prResource?.data?.remote) return;
     const action = prDirectMergeAction(pr);
     if (!action || action.auto !== auto) return;
     if (!auto) {
@@ -708,7 +722,8 @@ export function PrTab({
   const lifecycle = pullRequestLifecycle(pr);
   const workflow = prWorkflowStatus(pr);
   const mergeControls = prMergeControls(workflow.state);
-  const directMerge = prDirectMergeAction(pr);
+  const directMerge =
+    !allowMerge || prResource?.data?.remote ? null : prDirectMergeAction(pr);
   const showMergeMethod = directMerge !== null;
   const counts = checkCounts(pr);
   const blockers = mergeBlockedReasons(pr);

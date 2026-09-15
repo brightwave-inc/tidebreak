@@ -21,7 +21,7 @@ function withTerminal(layout: LayoutState, terminalId: string) {
   return openCodeEditor(layout, { type: "terminal", terminalId });
 }
 
-function setup(initial: LayoutState) {
+function setup(initial: LayoutState, enabled = true) {
   let created = 0;
   const client = {
     createCodeTerminal: vi.fn(async () => ({ id: `term-${++created}` })),
@@ -32,6 +32,7 @@ function setup(initial: LayoutState) {
     ({ layout }: { layout: LayoutState }) =>
       useTerminalTabs({
         workspaceId: "ws-1",
+        enabled,
         client: client as never,
         layout,
         setLayout,
@@ -50,6 +51,22 @@ afterEach(() => {
 });
 
 describe("useTerminalTabs", () => {
+  it("does not touch host terminals when workspace access excludes them", async () => {
+    const { result, rerender, client, setLayout } = setup(
+      withTerminal(EMPTY, "t1"),
+      false,
+    );
+    await act(async () => {
+      await result.current.openTerminal();
+      result.current.toggleTerminal();
+    });
+    rerender({ layout: EMPTY });
+    expect(client.createCodeTerminal).not.toHaveBeenCalled();
+    expect(client.deleteCodeTerminal).not.toHaveBeenCalled();
+    expect(setLayout).not.toHaveBeenCalled();
+    expect(result.current.canNewTerminal).toBe(false);
+  });
+
   it("numbers shells by the lowest free ordinal and keeps names across a close", () => {
     const one = withTerminal(EMPTY, "t1");
     const two = withTerminal(one, "t2");

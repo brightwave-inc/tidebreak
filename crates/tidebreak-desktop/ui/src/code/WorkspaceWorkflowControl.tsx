@@ -72,6 +72,7 @@ export function WorkspaceWorkflowControl({
   onArchive,
   onOpenPr,
   onOpenWatchTask,
+  allowWatch = true,
 }: {
   client: Pick<
     ApiClient,
@@ -94,6 +95,7 @@ export function WorkspaceWorkflowControl({
   onOpenPr?: () => void;
   /** Open the watch task's transcript; the segment is a link to the fork. */
   onOpenWatchTask?: () => void;
+  allowWatch?: boolean;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [pushFailureDetail, setPushFailureDetail] = useState<string | null>(
@@ -122,7 +124,10 @@ export function WorkspaceWorkflowControl({
       watch.state === "fixing" ||
       watch.state === "blocked");
   const primary =
-    watchActive || resource.error || (model.primary === "archive" && !onArchive)
+    watchActive ||
+    resource.error ||
+    (!allowWatch && model.primary === "watch_and_fix") ||
+    (model.primary === "archive" && !onArchive)
       ? undefined
       : model.primary;
   const busy = resource.busy;
@@ -176,7 +181,9 @@ export function WorkspaceWorkflowControl({
           action === "push" ||
           action === "create_pr",
       )
-    : model.secondary;
+    : model.secondary.filter(
+        (action) => allowWatch || action !== "watch_and_fix",
+      );
 
   /**
    * Carry out a Ship chord raised by the shell.
@@ -382,6 +389,7 @@ export function WorkspaceWorkflowControl({
   }
 
   async function run(action: WorkspaceWorkflowAction) {
+    if (!allowWatch && action === "watch_and_fix") return;
     switch (action) {
       case "archive":
         onArchive?.();
@@ -612,7 +620,7 @@ export function WorkspaceWorkflowControl({
                   Open on GitHub
                 </Button>
               )}
-              {watchActive && (
+              {allowWatch && watchActive && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -625,7 +633,7 @@ export function WorkspaceWorkflowControl({
             </div>
           </PopoverContent>
         </Popover>
-        {watchActive && watch ? (
+        {allowWatch && watchActive && watch ? (
           <Button
             variant="ghost"
             size="sm"

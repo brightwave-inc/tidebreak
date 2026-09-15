@@ -1,3 +1,4 @@
+import { workspaceCommandsForAccess } from "./workspaceAccess";
 import { CodeEditorGroups } from "./CodeEditorGroups";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +32,11 @@ import type {
   CodeSessionSnapshot,
   PermissionMode,
 } from "../api/types";
-import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
+import {
+  CodeInspector,
+  WorkspaceDeliveryPrTab,
+  WorkspaceFilesUnavailable,
+} from "./CodeInspector";
 import { CodeQuickOpen } from "./CodeQuickOpen";
 import { CodeSessionContent } from "./CodeSessionPage";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
@@ -186,7 +191,12 @@ function CodeWorkspaceAccess({ workspaceId }: { workspaceId: string }) {
     );
   if (workspace.read_only)
     return <SharedWorkspaceSession workspace={workspace} />;
-  return <CodeWorkspaceBody workspaceId={workspaceId} />;
+  return (
+    <CodeWorkspaceBody
+      workspaceId={workspaceId}
+      hostAccess={workspace.is_owner !== false}
+    />
+  );
 }
 
 function SharedWorkspaceSession({
@@ -236,7 +246,13 @@ function SharedWorkspaceSession({
   );
 }
 
-function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
+function CodeWorkspaceBody({
+  workspaceId,
+  hostAccess,
+}: {
+  workspaceId: string;
+  hostAccess: boolean;
+}) {
   const { client, models, defaultModelKey } = useApp();
   const catalog = useCodeCatalogStore();
   const { run, dialogs } = useWorkspaceCardCommands();
@@ -365,7 +381,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     openBrowser,
     setBrowserTitle,
     canNewBrowser,
-  } = useBrowserTabs({ workspaceId, layout, setLayout: setWorkspaceLayout });
+  } = useBrowserTabs({
+    workspaceId,
+    enabled: hostAccess,
+    layout,
+    setLayout: setWorkspaceLayout,
+  });
   const {
     terminalLabels,
     openTerminal,
@@ -375,6 +396,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     canNewTerminal,
   } = useTerminalTabs({
     workspaceId,
+    enabled: hostAccess,
     client,
     layout,
     setLayout: setWorkspaceLayout,
@@ -405,17 +427,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const repoName = repo?.display_name;
   const pr = digest?.pr_state ?? workspace?.pr;
   const headerCommands = workspace
-    ? workspaceHeaderCommands({
-        archived: isPutAway(workspace),
-        hasSession: Boolean(session),
-        attentionPinned:
-          (digest?.attention ?? session?.attention)?.state.type === "manual",
-        // A watch child is the harness's own run, not a conversation to
-        // continue, so only an interactive agent offers a fork.
-        canFork: session?.kind === "interactive",
-        quickActions: repo?.quick_actions ?? [],
-        setupFailed: workspace.status === "setup_failed",
-      })
+    ? workspaceCommandsForAccess(
+        workspace,
+        workspaceHeaderCommands({
+          archived: isPutAway(workspace),
+          hasSession: Boolean(session),
+          attentionPinned:
+            (digest?.attention ?? session?.attention)?.state.type === "manual",
+          // A watch child is the harness's own run, not a conversation to
+          // continue, so only an interactive agent offers a fork.
+          canFork: session?.kind === "interactive",
+          quickActions: repo?.quick_actions ?? [],
+          setupFailed: workspace.status === "setup_failed",
+        }),
+      )
     : [];
 
   /**
@@ -464,7 +489,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         role="tabpanel"
         aria-labelledby={centerEditorTabId(index, region)}
       >
-        {panel.type === "file" ? (
+        {(panel.type === "file" ||
+          panel.type === "diff" ||
+          panel.type === "source_control") &&
+        (workspace?.worktree_path?.startsWith("remote:") ||
+          workspace?.worktree_path === "") ? (
+          <WorkspaceFilesUnavailable
+            remote
+            hasPr={Boolean(pr)}
+            onReview={() =>
+              setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, region))
+            }
+          />
+        ) : panel.type === "file" ? (
           <Suspense fallback={<Skeleton className="h-full w-full" />}>
             <FileViewer
               client={client}
@@ -476,7 +513,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               }
               revealRevision={fileReveal?.revision}
               onOpenInEditor={
-                canOpenInExternalEditor()
+                hostAccess && canOpenInExternalEditor()
                   ? (path, line) =>
                       openWorkspaceFileInEditor({
                         workspaceId,
@@ -496,7 +533,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             contentRevision={contentRevision}
             onOpenFile={(path) => openFile(path, undefined, region)}
             onOpenInEditor={
-              canOpenInExternalEditor()
+              hostAccess && canOpenInExternalEditor()
                 ? (path) =>
                     openWorkspaceFileInEditor({
                       workspaceId,
@@ -505,6 +542,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 : undefined
             }
           />
+        ) : (panel.type === "browser" || panel.type === "terminal") &&
+          !hostAccess ? (
+          <p className="p-4 text-muted-foreground">
+            Host tools are available only to the workspace owner.
+          </p>
         ) : panel.type === "browser" ? (
           <Suspense fallback={<Skeleton className="h-full w-full" />}>
             <CodeBrowserTab
@@ -545,6 +587,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             data-testid="pr-details-panel"
           >
             <WorkspaceDeliveryPrTab
+              workspaceOnly={!hostAccess}
+              allowMerge={
+                workspace?.worktree_path !== "" &&
+                !workspace?.worktree_path?.startsWith("remote:")
+              }
               client={client}
               workspaceId={workspaceId}
               pr={prResource.data === null ? pr : prResource.data.pr}
@@ -571,9 +618,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         conversations={conversationTabs}
         activeConversationId={activeConversationId}
         onSelectConversation={selectConversation}
-        onNewConversation={newConversation}
+        onNewConversation={hostAccess ? newConversation : undefined}
         onCloseConversation={closeConversation}
-        onForkConversation={(sessionId) => void forkConversation(sessionId)}
+        onForkConversation={
+          hostAccess
+            ? (sessionId) => void forkConversation(sessionId)
+            : undefined
+        }
         onSelectEditor={(index) =>
           setWorkspaceLayout(focusEditorTab(layout, index, "primary"))
         }
@@ -616,7 +667,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 )
             : undefined
         }
-        onNewTerminal={() => void openTerminal("primary")}
+        onNewTerminal={
+          hostAccess ? () => void openTerminal("primary") : undefined
+        }
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(
@@ -666,7 +719,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 retrying={retryingRecovery}
                 onRetry={() => void retryRecovery()}
               />
-              {workspace?.status === "setup_failed" && (
+              {hostAccess && workspace?.status === "setup_failed" && (
                 <SetupFailedBanner
                   output={workspace.setup_error}
                   retrying={retryingSetup}
@@ -739,7 +792,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   disabled={blocksTurn || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
                   onForkFromTurn={
-                    session.kind === "interactive"
+                    hostAccess && session.kind === "interactive"
                       ? (turnId) => void forkConversation(session.id, turnId)
                       : undefined
                   }
@@ -838,7 +891,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 )
             : undefined
         }
-        onNewTerminal={() => void openTerminal("secondary")}
+        onNewTerminal={
+          hostAccess ? () => void openTerminal("secondary") : undefined
+        }
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(
@@ -915,6 +970,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         workflow={
           workspace && !isPutAway(workspace) ? (
             <WorkspaceWorkflowControl
+              allowWatch={hostAccess}
               client={client}
               workspaceId={workspaceId}
               branchName={workspace.branch_name}
@@ -990,7 +1046,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         terminalShortcut={shortcutHints.terminal}
         reviewShortcut={shortcutHints.review}
-        onToggleTerminal={toggleTerminal}
+        onToggleTerminal={hostAccess ? toggleTerminal : undefined}
         onToggleReview={toggleReviewSidebar}
         overflowAction={
           workspace ? (

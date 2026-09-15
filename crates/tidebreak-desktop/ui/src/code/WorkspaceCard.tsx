@@ -1,3 +1,4 @@
+import { workspaceCommandsForAccess } from "./workspaceAccess";
 import { recoveryDigest } from "./sessionRecovery";
 import { useRecoveryDelay } from "./useRecoveryDelay";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -221,11 +222,17 @@ export function WorkspaceCard({
     pr?: PullRequestDigest,
   ) => void;
 }) {
+  commands = workspaceCommandsForAccess(workspace, commands);
   if (workspace.read_only) {
-    commands = [];
     onSelectPointer = undefined;
     onMenuOpen = undefined;
     onWorkflowAction = undefined;
+  }
+  if (workspace.is_owner === false && onWorkflowAction) {
+    const handleAction = onWorkflowAction;
+    onWorkflowAction = (action, pr) => {
+      if (action !== "watch_and_fix") handleAction(action, pr);
+    };
   }
   const title = digest?.title ?? workspace.title;
   const pr = prResource?.data
@@ -620,6 +627,7 @@ function WorkspaceDetailPanel({
   const primary =
     model?.primary &&
     !prResource?.error &&
+    !(workspace.is_owner === false && model.primary === "watch_and_fix") &&
     !(watchActive && model.primary !== "open_pr")
       ? model.primary
       : undefined;

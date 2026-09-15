@@ -357,6 +357,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace",
             &CodeWorkspaceSnapshot {
                 read_only: Some(true),
+                is_owner: Some(false),
                 base_refresh_warning: None,
                 id: workspace_id(),
                 repo_id: repo_id(),
@@ -379,6 +380,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace",
             &CodeWorkspaceSnapshot {
                 read_only: Some(true),
+                is_owner: Some(false),
                 base_refresh_warning: None,
                 id: WorkspaceId(id(0x12)),
                 repo_id: repo_id(),
