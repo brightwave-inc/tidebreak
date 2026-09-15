@@ -1,7 +1,13 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionRegistry } from "./connectionRegistry";
-import { consoleCacheScope, gatewayConnectionId } from "./connections";
+import {
+  consoleCacheScope,
+  gatewayConnectionId,
+  isGatewayConnection,
+  type Connection,
+  type GatewayConnection,
+} from "./connections";
 import {
   CONNECTION_INDEX_KEY,
   SESSION_STORAGE_KEY,
@@ -11,6 +17,14 @@ import {
 } from "./storage";
 import type { TokenHttp } from "./tokenStore";
 import type { PersistedSession } from "./types";
+
+/** Narrows a connection the test knows is a gateway pairing. */
+function gatewayOf(connection: Connection | null | undefined): GatewayConnection {
+  if (!isGatewayConnection(connection)) {
+    throw new Error("expected a gateway connection");
+  }
+  return connection;
+}
 
 function silentHttp(): TokenHttp {
   return {
@@ -106,7 +120,9 @@ describe("ConnectionRegistry", () => {
     const snapshot = await relaunched.hydrate();
     expect(snapshot.connections).toHaveLength(2);
     expect(snapshot.activeId).toBe(second.id);
-    expect(relaunched.active()?.gatewayUrl).toBe("https://two.example.test");
+    expect(gatewayOf(relaunched.active()).gatewayUrl).toBe(
+      "https://two.example.test",
+    );
   });
 
   it("signs out of one connection and leaves the other signed in", async () => {
@@ -195,10 +211,10 @@ describe("ConnectionRegistry", () => {
 
     const id = gatewayConnectionId("https://one.example.test", "inst-one");
     expect(snapshot.activeId).toBe(id);
-    const migrated = snapshot.connections[0];
-    expect(migrated?.gatewayUrl).toBe("https://one.example.test");
-    expect(migrated?.machine?.resource).toBe("tidebreak:one");
-    expect(migrated?.identity?.user_id).toBe("user-1");
+    const migrated = gatewayOf(snapshot.connections[0]);
+    expect(migrated.gatewayUrl).toBe("https://one.example.test");
+    expect(migrated.machine?.resource).toBe("tidebreak:one");
+    expect(migrated.identity?.user_id).toBe("user-1");
     // The rotating refresh token comes along, so the upgrade does not sign the
     // install out, and the old blob is gone.
     expect((await credential(storage, id))?.refreshToken).toBe("mg_rt_legacy");
@@ -291,7 +307,7 @@ describe("ConnectionRegistry", () => {
     expect((await credential(storage, first.id))?.refreshToken).toBe(
       "mg_rt_two",
     );
-    expect(store.active()?.grantedScope).toBe(
+    expect(gatewayOf(store.active()).grantedScope).toBe(
       "openid profile offline_access control_plane:read",
     );
   });
@@ -311,7 +327,7 @@ describe("ConnectionRegistry", () => {
       grantedScope: "openid profile offline_access control_plane:read",
     });
     await store.updateActive({ isAdmin: true });
-    expect(store.active()?.isAdmin).toBe(true);
+    expect(gatewayOf(store.active()).isAdmin).toBe(true);
 
     const again = await store.addGateway({
       gatewayUrl: "https://one.example.test",
@@ -321,7 +337,7 @@ describe("ConnectionRegistry", () => {
     });
 
     expect(again.id).toBe(paired.id);
-    expect(store.active()?.isAdmin).toBeUndefined();
+    expect(gatewayOf(store.active()).isAdmin).toBeUndefined();
   });
 
   it("never lets a re-pair read the previous account's cached answers", async () => {
@@ -375,7 +391,7 @@ describe("ConnectionRegistry", () => {
       // Nothing to learn a role from until this account's own read answers, so
       // `adminFromUsageScope(undefined)` leaves the cleared role cleared.
       expect(cache.getQueryData(memberKey)).toBeUndefined();
-      expect(store.active()?.isAdmin).toBeUndefined();
+      expect(gatewayOf(store.active()).isAdmin).toBeUndefined();
     }
   });
 

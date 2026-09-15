@@ -14,6 +14,16 @@ export const WS_TOKEN_PREFIX = "tidebreak-token.";
 
 export type TokenSource = {
   getAccessToken: (resource: string) => Promise<string>;
+  /**
+   * The machine answered this status to a credential this source issued.
+   *
+   * Only a credential that cannot learn of its own revocation elsewhere
+   * implements it. A gateway connection finds out at the token endpoint, where
+   * a refused refresh is unambiguous; a standalone machine's static token has
+   * no such moment, and a `401` from the machine is the only evidence it ever
+   * gets (`machineTokenStore.ts`).
+   */
+  reportStatus?: (status: number) => void;
 };
 
 export type MachineClientOptions = {
@@ -131,6 +141,9 @@ export class MachineClient {
     );
     const text = await response.text();
     if (!response.ok) {
+      // Told before it is thrown, so a revoked standalone token signs its own
+      // connection out even when the caller swallows the error.
+      this.options.tokens.reportStatus?.(response.status);
       const error = parseErrorBody(text);
       throw new MachineRequestError(
         response.status,
@@ -152,6 +165,12 @@ export class MachineClient {
   /**
    * Open a machine WebSocket. The token is reminted on every connect because
    * access tokens expire in ~10 minutes and the server revalidates every 60s.
+   *
+   * A refused upgrade is not distinguishable here: the server's auth
+   * middleware answers `401` before the upgrade, and the browser API surfaces
+   * that only as a close, so `reportStatus` cannot fire from this path. A
+   * revoked credential is detected by the HTTP calls that run alongside every
+   * live surface; the socket then unmounts with them.
    */
   async openSocket(path: string): Promise<WebSocket> {
     const token = await this.options.tokens.getAccessToken(

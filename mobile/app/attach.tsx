@@ -10,7 +10,7 @@ import {
   type AttachStage,
 } from "../src/lib/autoAttach";
 import { connections } from "../src/session/runtime";
-import { useActiveConnection } from "../src/session/store";
+import { useActiveGatewayConnection } from "../src/session/store";
 
 type Stage = "idle" | AttachStage;
 
@@ -20,7 +20,7 @@ export default function AttachScreen() {
     failure?: string | string[];
     detail?: string | string[];
   }>();
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const [url, setUrl] = useState(connection?.machinePrefillUrl ?? "");
   const [stage, setStage] = useState<Stage>("idle");
   // Auto-attach hands its failure over in route params. Read once: a retry

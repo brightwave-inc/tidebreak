@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { Connection, GatewayConnection } from "./connections";
 import {
+  adminSectionUnavailableReason,
   adminSectionsFor,
   administers,
   canAdminCancel,
+  consoleSectionUnavailableReason,
   consoleSectionsFor,
   hasAdminSection,
   hasConsoleSection,
   landingRoute,
+  sectionUnavailableReason,
   sectionsFor,
+  supportsPush,
 } from "./sections";
 
 const MACHINE = {
@@ -23,6 +27,15 @@ function gateway(over: Partial<GatewayConnection> = {}): GatewayConnection {
     addedAt: "2026-01-01T00:00:00.000Z",
     gatewayUrl: "https://gateway.example.test",
     ...over,
+  };
+}
+
+function machineConnection(): Connection {
+  return {
+    id: "mc_one",
+    kind: "machine",
+    addedAt: "2026-01-01T00:00:00.000Z",
+    machine: MACHINE,
   };
 }
 
@@ -57,12 +70,7 @@ describe("sectionsFor", () => {
   });
 
   it("never offers the console to a kind that has no gateway", () => {
-    const direct: Connection = {
-      id: "m_one",
-      kind: "machine",
-      addedAt: "2026-01-01T00:00:00.000Z",
-      machine: MACHINE,
-    };
+    const direct = machineConnection();
     expect(sectionsFor(direct)).toEqual([
       "sessions",
       "delivery",
@@ -128,12 +136,7 @@ describe("consoleSectionsFor", () => {
   });
 
   it("never offers the console to a kind that has no gateway", () => {
-    const direct: Connection = {
-      id: "m_one",
-      kind: "machine",
-      addedAt: "2026-01-01T00:00:00.000Z",
-      machine: MACHINE,
-    };
+    const direct = machineConnection();
     expect(consoleSectionsFor(direct)).toEqual([]);
     expect(consoleSectionsFor(null)).toEqual([]);
   });
@@ -143,6 +146,97 @@ describe("landingRoute", () => {  it("routes by what the connection has, not by 
     expect(landingRoute(null)).toBe("/pair");
     expect(landingRoute(gateway())).toBe("/attach");
     expect(landingRoute(gateway({ machine: MACHINE }))).toBe("/home");
+    // A standalone connection is attached at creation, so it always lands on
+    // the hub rather than on a gateway's attach screen.
+    expect(landingRoute(machineConnection())).toBe("/home");
+  });
+});
+
+describe("unavailable reasons", () => {
+  const CONSOLE_SCOPE = "openid profile offline_access control_plane:read";
+
+  it("says a machine connection has no gateway, not that a grant is missing", () => {
+    // The distinction is the point: "ask for more authority" is actionable and
+    // wrong here — there is no gateway to ask.
+    expect(sectionUnavailableReason(machineConnection(), "console")).toBe(
+      "no_gateway",
+    );
+    expect(sectionUnavailableReason(machineConnection(), "runtime")).toBe(
+      "no_gateway",
+    );
+    expect(
+      consoleSectionUnavailableReason(machineConnection(), "catalog"),
+    ).toBe("no_gateway");
+    expect(
+      consoleSectionUnavailableReason(machineConnection(), "sandboxes"),
+    ).toBe("no_gateway");
+  });
+
+  it("says a gateway pairing lacks the grant, and nothing when it holds it", () => {
+    expect(sectionUnavailableReason(gateway({ machine: MACHINE }), "console")).toBe(
+      "not_granted",
+    );
+    expect(
+      sectionUnavailableReason(
+        gateway({ machine: MACHINE, grantedScope: CONSOLE_SCOPE }),
+        "console",
+      ),
+    ).toBeNull();
+    expect(
+      consoleSectionUnavailableReason(gateway(), "catalog"),
+    ).toBeNull();
+  });
+
+  it("separates nothing connected from nothing attached", () => {
+    expect(sectionUnavailableReason(null, "sessions")).toBe("no_connection");
+    expect(sectionUnavailableReason(gateway(), "sessions")).toBe("no_machine");
+    expect(sectionUnavailableReason(machineConnection(), "sessions")).toBeNull();
+  });
+
+  it("tells a member apart from a session that never asked for the console", () => {
+    // Both hide the administration group, and the remedies differ: one can
+    // re-pair for the grant, the other cannot change what the gateway says
+    // about their account from a phone.
+    expect(
+      adminSectionUnavailableReason(gateway({ isAdmin: true }), "admin-usage"),
+    ).toBe("not_granted");
+    expect(
+      adminSectionUnavailableReason(
+        gateway({ grantedScope: CONSOLE_SCOPE }),
+        "admin-usage",
+      ),
+    ).toBe("not_admin");
+    // An unlearned role reads as member, never as unknown.
+    expect(
+      adminSectionUnavailableReason(
+        gateway({ grantedScope: CONSOLE_SCOPE, isAdmin: false }),
+        "admin-people",
+      ),
+    ).toBe("not_admin");
+    expect(
+      adminSectionUnavailableReason(
+        gateway({ grantedScope: CONSOLE_SCOPE, isAdmin: true }),
+        "admin-people",
+      ),
+    ).toBeNull();
+    // A standalone machine has no installation to administer at all, so it is
+    // neither ungranted nor a member — it is the wrong kind.
+    expect(
+      adminSectionUnavailableReason(machineConnection(), "admin-audit"),
+    ).toBe("no_gateway");
+    expect(adminSectionUnavailableReason(null, "admin-audit")).toBe(
+      "no_connection",
+    );
+  });
+});
+
+describe("supportsPush", () => {
+  it("is a gateway capability, so a standalone machine never offers it", () => {
+    // Push addresses live at an installation (mg ADR 0093); a machine has no
+    // device registry, and offering the toggle would call routes that 404.
+    expect(supportsPush(gateway())).toBe(true);
+    expect(supportsPush(machineConnection())).toBe(false);
+    expect(supportsPush(null)).toBe(false);
   });
 });
 

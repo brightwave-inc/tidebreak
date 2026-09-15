@@ -13,7 +13,7 @@ import type {
   SubscriptionUsageWindow,
 } from "../src/lib/consoleTypes";
 import { subscriptionQueries } from "../src/session/consoleQueries";
-import { useActiveConnection } from "../src/session/store";
+import { useActiveGatewayConnection } from "../src/session/store";
 
 /**
  * One quota window. `used_percent` arrives clamped, and `rejected` is the
@@ -145,7 +145,7 @@ function BindingCard({
  */
 export default function SubscriptionsScreen() {
   const query = useQuery(subscriptionQueries.list());
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const [refreshing, setRefreshing] = useState(false);
   const onRefresh = useCallback(() => {
     setRefreshing(true);

@@ -13,7 +13,7 @@ import {
   sharedAppMutations,
   sharedAppQueries,
 } from "../../src/session/consoleQueries";
-import { useActiveConnection } from "../../src/session/store";
+import { useActiveGatewayConnection } from "../../src/session/store";
 
 /**
  * One binding, as names rather than addresses: what the app may call, and
@@ -56,7 +56,7 @@ function BindingRow({
  */
 export default function SharedAppScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const query = useQuery(sharedAppQueries.detail(id));
   const me = useQuery(meQueries.identity());
   const app = query.data;

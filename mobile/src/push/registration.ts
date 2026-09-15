@@ -20,6 +20,7 @@ import * as Notifications from "expo-notifications";
 import { useEffect, useRef } from "react";
 import { AppState, Platform } from "react-native";
 import { fetchGatewayMeta } from "../lib/gateway";
+import { isGatewayConnection } from "../lib/connections";
 import {
   gatewayDeliversPush,
   pushPlatform,
@@ -226,7 +227,9 @@ export function PushSync(): null {
   // Reconciliation depends on which gateways exist and where they live, not on
   // the array identity the store hands out on every unrelated change — an
   // identity that every machine attach and every identity refresh touches.
-  const targets = list.map((connection) => ({
+  // Standalone machine connections are not targets at all: push is a gateway
+  // service (mg ADR 0093), and a machine has no device registry to upsert.
+  const targets = list.filter(isGatewayConnection).map((connection) => ({
     id: connection.id,
     gatewayUrl: connection.gatewayUrl,
   }));

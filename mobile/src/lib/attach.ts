@@ -3,7 +3,13 @@ import {
   tidebreakMachineResource,
 } from "./resource";
 import { fetchRefusingRedirects, type HttpFetch, type HttpResponse } from "./http";
-import { urlsMatch, validatedBaseUrl } from "./url";
+import {
+  REASON_REQUIRES_TLS,
+  REASON_URL_INVALID,
+  UrlValidationError,
+  urlsMatch,
+  validatedBaseUrl,
+} from "./url";
 import type { AuthDiscovery } from "./types";
 
 export const DISCOVERY_TIMEOUT_MS = 10_000;
@@ -14,6 +20,38 @@ export const REASON_GATEWAY_MISMATCH = "gateway_mismatch";
 export const REASON_RESOURCE_MISMATCH = "resource_mismatch";
 export const REASON_TOKEN_REFUSED = "token_refused";
 export const REASON_GATEWAY_AUTH_UNAVAILABLE = "gateway_auth_unavailable";
+
+/**
+ * Standalone attach was asked for, but this machine authenticates through a
+ * Model Gateway. Distinct from the refusals below because it is the one case
+ * with a working answer: pair the gateway instead.
+ */
+export const REASON_GATEWAY_MACHINE = "gateway_machine";
+
+/**
+ * The machine signs people in through an OpenID Connect provider. Its
+ * authenticator resolves only the `tb_oidc_` bearers it mints for a browser
+ * (`PrincipalAuthenticator::Oidc` in `crates/tidebreak-server/src/auth.rs`),
+ * so a roster token presented here names nobody even when the operator keeps a
+ * token file beside OIDC for CLI access.
+ */
+export const REASON_OIDC_UNSUPPORTED = "oidc_unsupported";
+
+/**
+ * The machine is a desktop app's loopback server: its per-launch bearer names
+ * nobody on a shared deployment and is not something an operator can hand out.
+ */
+export const REASON_LOCAL_ONLY = "local_only";
+
+/** The token is shaped in a way no roster token can be. */
+export const REASON_TOKEN_MALFORMED = "token_malformed";
+
+/**
+ * The token names a `service` principal. Ordinary member routes accept one —
+ * a service owns and runs sessions — but `/auth/token-sign-in` is deliberately
+ * narrower, and a phone is a sign-in-shaped client, not an automation.
+ */
+export const REASON_TOKEN_IS_SERVICE = "token_is_service";
 
 export class AttachError extends Error {
   readonly reason: string;
@@ -34,23 +72,42 @@ export class AttachError extends Error {
 export type DiscoveredMachine = {
   baseUrl: string;
   resource: string;
-  gatewayUrl: string;
+  /**
+   * The gateway that vouches for this machine, present only for a gateway
+   * attach. A standalone machine names none — there is no gateway in its path
+   * at all — which is exactly what its discovery document says.
+   */
+  gatewayUrl?: string;
 };
 
 /**
  * How a machine is expected to authenticate, chosen by the kind of connection
  * attaching it.
  *
- * `gateway` is the only implemented strategy: the machine must speak Model
- * Gateway auth, echo the resource this client derived, and name the paired
- * deployment. The union exists so standalone pairing (#3404) adds a
- * `{ kind: "machine" }` strategy — a direct URL with a static token, whose
- * discovery names no gateway — instead of loosening the check here.
+ * `gateway` requires the machine to speak Model Gateway auth, echo the
+ * resource this client derived, and name the paired deployment.
+ *
+ * `machine` (#3404) is standalone attach: a direct URL whose discovery answers
+ * `static_token`, authenticated by a long-lived roster token the operator
+ * hands over. Its discovery document carries no gateway and no resource to
+ * check an echo against, so verification there is what the *app* can establish
+ * on its own — the URL survived `validatedBaseUrl` (TLS or loopback, no
+ * credentials, no redirect), the mode is the one mode a phone can hold a
+ * credential for, and the token authenticates against the machine itself.
+ *
+ * Keeping the two as a union rather than a boolean is what makes the wrong
+ * pairing legible instead of silent: a gateway-authenticated machine reached
+ * through standalone attach is refused with an answer ("pair the gateway"),
+ * not with a generic failure.
  */
-export type AttachTarget = { kind: "gateway"; gatewayUrl: string };
+export type AttachTarget = { kind: "gateway"; gatewayUrl: string } | { kind: "machine" };
 
 export function gatewayTarget(gatewayUrl: string): AttachTarget {
   return { kind: "gateway", gatewayUrl };
+}
+
+export function machineTarget(): AttachTarget {
+  return { kind: "machine" };
 }
 
 /**
@@ -67,10 +124,15 @@ export async function discoverMachine(
   try {
     baseUrl = validatedBaseUrl(machineUrl);
   } catch (error) {
+    // The URL rule's own reason is carried, not flattened: `requires_tls` is
+    // the one refusal with a different answer for the user than "that is not a
+    // usable URL", and the epic's done-when asks for it by name.
     throw new AttachError(
       "validate",
-      "url_invalid",
-      error instanceof Error ? error.message : "The machine URL is not usable.",
+      error instanceof UrlValidationError ? error.reason : REASON_URL_INVALID,
+      error instanceof UrlValidationError && error.reason === REASON_REQUIRES_TLS
+        ? "A machine outside this phone must be reached over HTTPS."
+        : "The machine URL is not usable.",
     );
   }
   const derived = tidebreakMachineResource(baseUrl);
@@ -124,6 +186,10 @@ export async function discoverMachine(
       "Discovery did not return JSON.",
     );
   }
+  if (target.kind === "machine") {
+    verifyStandalone(discovery);
+    return { baseUrl, resource: derived };
+  }
   if (discovery.mode !== "gateway") {
     throw new AttachError(
       "discover",
@@ -163,6 +229,108 @@ export async function discoverMachine(
     resource: derived,
     gatewayUrl: validatedBaseUrl(target.gatewayUrl),
   };
+}
+
+/**
+ * The standalone half of verification: which discovery modes a phone holding a
+ * roster token can and cannot attach to.
+ *
+ * Every refusal is its own reason, because each has a different answer for the
+ * person holding the phone, and a single "unsupported mode" message would
+ * leave all three looking like the same bug.
+ */
+function verifyStandalone(discovery: AuthDiscovery): void {
+  switch (discovery.mode) {
+    case "static_token":
+      return;
+    case "gateway":
+      throw new AttachError(
+        "verify",
+        REASON_GATEWAY_MACHINE,
+        "This machine authenticates through Model Gateway. Pair that gateway instead — it attaches this machine for you.",
+      );
+    case "oidc":
+      throw new AttachError(
+        "verify",
+        REASON_OIDC_UNSUPPORTED,
+        "This machine signs people in through an identity provider, and only issues browser sessions. A token from its roster will not authenticate here.",
+      );
+    case "local":
+      throw new AttachError(
+        "verify",
+        REASON_LOCAL_ONLY,
+        "This is a desktop Tidebreak on its own machine. Its per-launch token names nobody, so it cannot be attached from a phone.",
+      );
+    default:
+      throw new AttachError(
+        "verify",
+        REASON_NOT_A_MACHINE,
+        "This machine reported an authentication mode this app does not know.",
+      );
+  }
+}
+
+/**
+ * Whether a static token authenticates against this machine, and whether it
+ * names somebody who signs in.
+ *
+ * `POST /auth/token-sign-in` is the machine's own public bootstrap probe
+ * (decision 87): it answers `204` for a roster token that names a person,
+ * `401` for one it cannot resolve, and `403` for a `service` principal, which
+ * owns automated sessions and deliberately does not sign in. The token travels
+ * in the header and appears in no URL, no log line, and no error message here.
+ */
+export async function probeStaticToken(
+  machineUrl: string,
+  token: string,
+  fetchImpl?: HttpFetch,
+): Promise<void> {
+  let response: HttpResponse;
+  try {
+    response = await fetchRefusingRedirects(
+      `${machineUrl}/auth/token-sign-in`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+      fetchImpl,
+    );
+  } catch (error) {
+    throw new AttachError(
+      "probe",
+      REASON_UNREACHABLE,
+      error instanceof Error
+        ? error.message
+        : "The machine did not respond to the sign-in probe.",
+    );
+  }
+  if (response.status === 401) {
+    throw new AttachError(
+      "probe",
+      REASON_TOKEN_REFUSED,
+      "The machine did not recognize that token. Check it against the deployment's token file, or ask for a fresh one.",
+    );
+  }
+  if (response.status === 403) {
+    throw new AttachError(
+      "probe",
+      REASON_TOKEN_IS_SERVICE,
+      "That token belongs to a service account, which cannot sign in. Use a token that names a person.",
+    );
+  }
+  if (response.status === 404) {
+    // Discovery said `static_token` a moment ago; a 404 here means the route
+    // is absent, so this build predates standalone sign-in.
+    throw new AttachError(
+      "probe",
+      REASON_NOT_A_MACHINE,
+      "This machine does not offer token sign-in. It may be running a build older than this app supports.",
+    );
+  }
+  if (!response.ok) {
+    throw new AttachError(
+      "probe",
+      REASON_NOT_A_MACHINE,
+      `The machine could not check that token (HTTP ${response.status}).`,
+    );
+  }
 }
 
 export async function probePolicy(

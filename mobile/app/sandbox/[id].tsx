@@ -49,7 +49,7 @@ import {
   sandboxMutations,
   sandboxQueries,
 } from "../../src/session/consoleQueries";
-import { useActiveConnection } from "../../src/session/store";
+import { useActiveGatewayConnection } from "../../src/session/store";
 
 /** One cell of the fact row: micro-label over a short value. */
 function Fact({
@@ -294,7 +294,7 @@ function SandboxDetail({ id }: { id: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const query = useQuery(sandboxQueries.detail(id));
   // The credential's own identity, not the connection record's cached one:
   // what decides ownership of a destructive verb must be asked of the

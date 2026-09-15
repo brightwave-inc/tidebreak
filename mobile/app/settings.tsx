@@ -2,12 +2,21 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Application from "expo-application";
 import { useRouter } from "expo-router";
 import * as Updates from "expo-updates";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { Pressable, Switch, Text, View } from "react-native";
 import { Button } from "../src/components/Controls";
 import { ConsoleLink } from "../src/components/Admin";
 import { Screen, Body } from "../src/components/Screen";
-import { connectionLabel } from "../src/lib/connections";
+import {
+  connectionLabel,
+  isGatewayConnection,
+} from "../src/lib/connections";
 import { fetchGatewayMeta } from "../src/lib/gateway";
 import {
   applyPushPreference,
@@ -23,7 +32,11 @@ import { deregisterConnection } from "../src/push/registration";
 import { readPushToken } from "../src/push/tokenCache";
 import { connections, secureStorage } from "../src/session/runtime";
 import { signOutActiveConnection } from "../src/session/signOut";
-import { useActiveConnection, useConnectionStore } from "../src/session/store";
+import {
+  useActiveConnection,
+  useActiveGatewayConnection,
+  useConnectionStore,
+} from "../src/session/store";
 
 /** One labelled fact about this installation. */
 function Fact({ label, value }: { label: string; value: string }) {
@@ -173,7 +186,11 @@ function NotificationPreferences({
  * the durable "stop sending me this" control is the per-kind toggle above.
  */
 function DeviceRegistrations() {
-  const list = useConnectionStore((state) => state.connections);
+  const all = useConnectionStore((state) => state.connections);
+  // Gateway connections only: push is a gateway service, and a standalone
+  // machine holds no push address for this phone to manage. Filtered outside
+  // the selector, which must return a stable reference.
+  const list = useMemo(() => all.filter(isGatewayConnection), [all]);
   const [registered, setRegistered] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -360,15 +377,17 @@ function AboutThisApp() {
 export default function SettingsScreen() {
   const router = useRouter();
   const connection = useActiveConnection();
+  const gateway = useActiveGatewayConnection();
   const count = useConnectionStore((state) => state.connections.length);
 
   // Re-read rather than trusted from the connection record: an operator can
   // enable push long after a pairing was made, and the stored snapshot would
-  // describe the installation as it was.
+  // describe the installation as it was. A standalone machine publishes no
+  // such metadata document, so the query never runs for one.
   const meta = useQuery({
-    queryKey: ["meta", connection?.gatewayUrl ?? ""],
-    queryFn: () => fetchGatewayMeta(connection?.gatewayUrl ?? ""),
-    enabled: Boolean(connection?.gatewayUrl),
+    queryKey: ["meta", gateway?.gatewayUrl ?? ""],
+    queryFn: () => fetchGatewayMeta(gateway?.gatewayUrl ?? ""),
+    enabled: Boolean(gateway?.gatewayUrl),
     staleTime: 60_000,
   });
 
@@ -395,18 +414,19 @@ export default function SettingsScreen() {
       >
         <View className="flex-row items-center justify-between">
           <Text className="text-xs uppercase tracking-wide text-muted-foreground">
-            Gateway
+            {connection && !gateway ? "Connection" : "Gateway"}
           </Text>
           <Text className="text-sm text-muted-foreground">
             {count > 1 ? `${count} connections  ›` : "Manage  ›"}
           </Text>
         </View>
         <Text className="text-base text-foreground">
-          {connection?.gatewayUrl ?? "Not paired"}
+          {gateway?.gatewayUrl ??
+            (connection ? "No gateway — attached directly" : "Not paired")}
         </Text>
-        {connection?.installationId ? (
+        {gateway?.installationId ? (
           <Text className="text-sm text-muted-foreground">
-            Installation {connection.installationId}
+            Installation {gateway.installationId}
           </Text>
         ) : null}
       </Pressable>
@@ -420,10 +440,10 @@ export default function SettingsScreen() {
           </Text>
         ) : null}
       </Card>
-      {connection && gatewayDeliversPush(meta.data) ? (
+      {gateway && gatewayDeliversPush(meta.data) ? (
         <NotificationPreferences
-          connectionId={connection.id}
-          gatewayUrl={connection.gatewayUrl}
+          connectionId={gateway.id}
+          gatewayUrl={gateway.gatewayUrl}
         />
       ) : null}
       <DeviceRegistrations />
@@ -441,9 +461,9 @@ export default function SettingsScreen() {
       ) : null}
       <AboutThisApp />
       <Body>
-        Sign out clears this connection&apos;s rotating refresh token and every
-        cached access token from the secure store. Other connections stay
-        signed in.
+        {gateway
+          ? "Sign out clears this connection’s rotating refresh token and every cached access token from the secure store. Other connections stay signed in."
+          : "Sign out deletes this machine’s token from the secure store. Other connections stay signed in."}
       </Body>
       <Pressable
         className="rounded-lg bg-critical px-4 py-3"

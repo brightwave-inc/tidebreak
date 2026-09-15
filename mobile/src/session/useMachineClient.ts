@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { MachineClient } from "../lib/machine";
+import { StaticTokenStore } from "../lib/machineTokenStore";
 import { connections } from "./runtime";
 import { useActiveMachine } from "./store";
 
@@ -32,6 +33,15 @@ function machineClientFor(machine: {
         tokens: {
           getAccessToken: (resource) =>
             connections.activeTokens().getAccessToken(resource),
+          // A standalone connection's roster token has no token endpoint to
+          // be refused at, so the machine's own 401 is what signs it out.
+          // A gateway's store has no such method and ignores this entirely.
+          reportStatus: (status) => {
+            const store = connections.activeTokens();
+            if (store instanceof StaticTokenStore) {
+              store.reportUnauthorized(status);
+            }
+          },
         },
       }),
     };

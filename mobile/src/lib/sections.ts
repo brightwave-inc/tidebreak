@@ -204,6 +204,109 @@ export function canAdminCancel(connection: Connection | null): boolean {
   );
 }
 
+/**
+ * Why a surface is not on offer.
+ *
+ * Absence alone is a bad answer when a person knows the surface exists: a
+ * gateway user who attaches a standalone machine, switches to it, and finds
+ * the console gone should be able to learn that it is gone *because this
+ * connection has no gateway*, not left to guess at a bug. Stable identifiers
+ * rather than sentences, so the copy lives with the screens and the rule stays
+ * one tested function.
+ */
+export type UnavailableReason =
+  /** Nothing is connected at all. */
+  | "no_connection"
+  /** Connected, but no machine is attached yet. */
+  | "no_machine"
+  /**
+   * This connection reaches a machine directly and has no gateway in its path,
+   * so no gateway surface can ever appear on it (#3404).
+   */
+  | "no_gateway"
+  /**
+   * A gateway connection whose recorded grant does not carry the authority
+   * this surface needs. Re-pairing against a widened gateway is the fix.
+   */
+  | "not_granted"
+  /**
+   * A gateway connection holding the grant, whose account the gateway has not
+   * said administers the installation. Nothing the phone can fix.
+   */
+  | "not_admin";
+
+/** Why `section` is absent for this connection, or null when it is present. */
+export function sectionUnavailableReason(
+  connection: Connection | null,
+  section: SectionId,
+): UnavailableReason | null {
+  if (hasSection(connection, section)) {
+    return null;
+  }
+  if (!connection) {
+    return "no_connection";
+  }
+  if (section === "console" || section === "runtime") {
+    return isGatewayConnection(connection) ? "not_granted" : "no_gateway";
+  }
+  return "no_machine";
+}
+
+/** Why `section` is absent from the console, or null when it is present. */
+export function consoleSectionUnavailableReason(
+  connection: Connection | null,
+  section: ConsoleSectionId,
+): UnavailableReason | null {
+  if (hasConsoleSection(connection, section)) {
+    return null;
+  }
+  if (!connection) {
+    return "no_connection";
+  }
+  return isGatewayConnection(connection) ? "not_granted" : "no_gateway";
+}
+
+/**
+ * Why an administration surface is absent, or null when it is present.
+ *
+ * The administration group is gated on two independent conditions
+ * (`administers`), and they fail for different reasons with different
+ * remedies: a session that never consented to the console can re-pair for it,
+ * an account the gateway calls a member cannot do anything about that from a
+ * phone, and a standalone machine has no gateway to administer at all. The
+ * grant is reported first, because it is the one a user can act on.
+ */
+export function adminSectionUnavailableReason(
+  connection: Connection | null,
+  section: AdminSectionId,
+): UnavailableReason | null {
+  if (hasAdminSection(connection, section)) {
+    return null;
+  }
+  if (!connection) {
+    return "no_connection";
+  }
+  if (!isGatewayConnection(connection)) {
+    return "no_gateway";
+  }
+  return grantsConsoleRead(connection.grantedScope)
+    ? "not_admin"
+    : "not_granted";
+}
+
+/**
+ * Whether push notifications can be offered for this connection at all.
+ *
+ * Push is a gateway service (mg ADR 0093): the device address is held by an
+ * installation and every notification is enqueued there. A standalone machine
+ * has no such registry, so the settings surface, the registration reconcile,
+ * and the tray-action router all skip one rather than calling routes that do
+ * not exist.
+ */
+export function supportsPush(connection: Connection | null): boolean {
+  return isGatewayConnection(connection);
+}
+
 /** Where the app belongs when it opens with this connection active. */
 export function landingRoute(connection: Connection | null): string {
   if (!connection) {

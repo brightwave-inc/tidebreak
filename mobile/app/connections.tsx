@@ -5,7 +5,7 @@ import { Screen, Body } from "../src/components/Screen";
 import {
   connectionDetail,
   connectionLabel,
-  type GatewayConnection,
+  type Connection,
 } from "../src/lib/connections";
 import { connections } from "../src/session/runtime";
 import { signOutConnection } from "../src/session/signOut";
@@ -27,7 +27,7 @@ function ConnectionRow({
   onRemove,
   busy,
 }: {
-  connection: GatewayConnection;
+  connection: Connection;
   active: boolean;
   first: boolean;
   onSwitch: () => void;
@@ -107,7 +107,7 @@ export default function ConnectionsScreen() {
         others signed in.
       </Body>
       {list.length === 0 ? (
-        <Body>No gateway is paired yet.</Body>
+        <Body>Nothing is connected yet.</Body>
       ) : (
         <View className="rounded-xl border border-border bg-background px-4">
           {list.map((connection, position) => (
@@ -130,6 +130,16 @@ export default function ConnectionsScreen() {
       >
         <Text className="text-center text-base font-medium text-primary-foreground">
           Pair another gateway
+        </Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel="Attach your own Tidebreak instance"
+        disabled={busy}
+        onPress={() => router.push("/attach-machine")}
+      >
+        <Text className="text-center text-sm text-muted-foreground underline">
+          Attach your own Tidebreak instance
         </Text>
       </Pressable>
     </Screen>

@@ -10,8 +10,14 @@
  * Deregistration is best-effort and time-bounded inside `deregisterConnection`:
  * an unreachable gateway must never be able to trap a user in a session they
  * asked to leave.
+ *
+ * A standalone machine connection (#3404) has no gateway to deregister from —
+ * push is a gateway service — so signing one out is the credential wipe alone:
+ * its roster token is deleted from the secure store and nothing else is
+ * touched.
  */
 
+import { isGatewayConnection } from "../lib/connections";
 import { deregisterConnection } from "../push/registration";
 import { connections } from "./runtime";
 
@@ -19,7 +25,7 @@ export async function signOutConnection(id: string): Promise<void> {
   const connection = connections
     .list()
     .find((candidate) => candidate.id === id);
-  if (connection) {
+  if (isGatewayConnection(connection)) {
     await deregisterConnection(id, connection.gatewayUrl);
   }
   await connections.remove(id);

@@ -41,7 +41,10 @@ import {
   hydrateConnections,
   secureStorage,
 } from "../session/runtime";
-import type { GatewayConnection } from "../lib/connections";
+import {
+  isGatewayConnection,
+  type GatewayConnection,
+} from "../lib/connections";
 import {
   ANDROID_UPDATES_CHANNEL_ID,
   decisionAction,
@@ -119,9 +122,13 @@ function pendingCopy(
 
 /** The connection a push names, or null when this phone does not hold it. */
 function connectionFor(installationId: string | null): GatewayConnection | null {
-  const list = connections.list();
+  // Push is a gateway service (mg ADR 0093): a standalone machine connection
+  // has no installation, registers no device, and can never be what a payload
+  // names — so the search is over gateway connections only.
+  const list = connections.list().filter(isGatewayConnection);
   if (!installationId) {
-    return connections.active();
+    const active = connections.active();
+    return isGatewayConnection(active) ? active : null;
   }
   return (
     list.find((entry) => entry.installationId === installationId) ?? null

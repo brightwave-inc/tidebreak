@@ -9,14 +9,16 @@
  *   attached through it, and the identity the session signed in as. The only
  *   kind implemented here.
  * - `machine` — a Tidebreak machine reached directly by URL with a static
- *   token, no gateway in the path (issue #3404). The shape exists so that
- *   slice adds a member to this union instead of re-cutting the store, and
- *   nothing in this slice constructs one.
+ *   token from its operator's roster, no gateway in the path (#3404). It
+ *   carries the machine and nothing else, because a standalone deployment
+ *   tells a client nothing about itself beyond the origin it answered on.
  *
  * Several connections coexist; exactly one is active. Credentials never live
- * in this module: a connection's refresh token is written under its own
- * secure-store key by its own `TokenStore` (`tokenStore.ts`), so signing out
- * of one connection cannot touch another's.
+ * in this module: a gateway connection's rotating refresh token and a
+ * machine connection's static token are each written under their own
+ * secure-store key by their own store (`tokenStore.ts`,
+ * `machineTokenStore.ts`), so signing out of one connection cannot touch
+ * another's.
  */
 
 import { sha256Hex } from "./crypto";
@@ -81,8 +83,13 @@ export type GatewayConnection = ConnectionBase & {
 };
 
 /**
- * A machine reached directly, with no gateway in the path (#3404). Declared,
- * deliberately unimplemented: no code in this slice builds or hydrates one.
+ * A machine reached directly, with no gateway in the path (#3404).
+ *
+ * Its credential is a long-lived roster token the operator handed over, not a
+ * rotating refresh family, so it is held by `StaticTokenStore` rather than
+ * `TokenStore` — and the machine is attached at the moment the connection is
+ * created, because a standalone connection with nothing attached would have
+ * nothing to authenticate against.
  */
 export type MachineConnection = ConnectionBase & {
   kind: "machine";
@@ -95,6 +102,12 @@ export function isGatewayConnection(
   connection: Connection | null | undefined,
 ): connection is GatewayConnection {
   return connection?.kind === "gateway";
+}
+
+export function isMachineConnection(
+  connection: Connection | null | undefined,
+): connection is MachineConnection {
+  return connection?.kind === "machine";
 }
 
 /** Secure-store keys allow `[A-Za-z0-9._-]` only. */
@@ -160,10 +173,44 @@ export function connectionLabel(connection: Connection): string {
   return url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
 }
 
+/**
+ * The id for a standalone machine connection.
+ *
+ * Derived from the canonical URL, because that is the only stable thing a
+ * standalone machine gives a client: its discovery document in `static_token`
+ * mode is `{"mode":"static_token"}` and nothing else — no installation id, no
+ * name, no version (`crates/tidebreak-server/src/auth.rs`). Deriving it means
+ * re-attaching the same machine with a rotated token replaces the connection
+ * rather than stacking a second one holding a dead credential.
+ *
+ * The `mc_` prefix is not decoration: the registry reads the kind off the id
+ * so it knows which credential store to open before it has read anything.
+ */
+export function machineConnectionId(baseUrl: string): string {
+  return `mc_${sha256Hex(baseUrl).slice(0, 32)}`;
+}
+
+/**
+ * Which kind an id names, without reading its record.
+ *
+ * Hydration has to choose a `TokenStore` or a `StaticTokenStore` before it can
+ * open the key that would say which — so the id carries the answer. Anything
+ * not marked as a machine is a gateway, which keeps every id written before
+ * this slice reading as what it is.
+ */
+export function connectionKindFromId(id: string): ConnectionKind {
+  return id.startsWith("mc_") ? "machine" : "gateway";
+}
+
 /** The second line of a connection row: what it is attached to. */
 export function connectionDetail(connection: Connection): string {
+  if (!isGatewayConnection(connection)) {
+    // The label already shows this machine's host, and there is no gateway
+    // behind it to name, so the detail line says how it authenticates instead.
+    return "Standalone machine · static token";
+  }
   if (!connection.machine) {
-    return isGatewayConnection(connection) ? "No machine attached" : "Machine";
+    return "No machine attached";
   }
   return connection.machine.baseUrl.replace(/^https?:\/\//, "");
 }

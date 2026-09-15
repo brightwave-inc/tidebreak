@@ -28,10 +28,10 @@
 import { useEffect } from "react";
 import { adminFromUsageScope } from "../lib/admin";
 import { connections } from "./runtime";
-import { useActiveConnection } from "./store";
+import { useActiveGatewayConnection } from "./store";
 
 export function useLearnedAdminRole(scope: string | null | undefined): void {
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const cached = connection?.isAdmin;
   const connectionId = connection?.id;
 

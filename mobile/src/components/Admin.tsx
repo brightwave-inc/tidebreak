@@ -25,7 +25,11 @@ import { stamp } from "../lib/consoleTime";
 import { formatMicroUsd } from "../lib/consoleTypes";
 import type { CostLimit } from "../lib/gatewayAdmin";
 import { administers } from "../lib/sections";
-import { useActiveConnection } from "../session/store";
+import { isGatewayConnection } from "../lib/connections";
+import {
+  useActiveConnection,
+  useActiveGatewayConnection,
+} from "../session/store";
 
 /**
  * Wraps an administration page. The gateway is the real gate — every read
@@ -35,6 +39,16 @@ import { useActiveConnection } from "../session/store";
  */
 export function AdminGate({ children }: { children: ReactNode }) {
   const connection = useActiveConnection();
+  if (!isGatewayConnection(connection)) {
+    // A standalone machine connection has no gateway to administer, so the
+    // administrator copy would be answering a question nobody asked (#3404).
+    return (
+      <EmptyState
+        title="No gateway"
+        detail="This connection reaches a machine directly, so there is no installation to administer here."
+      />
+    );
+  }
   if (!administers(connection)) {
     return (
       <EmptyState
@@ -131,7 +145,7 @@ export function ConsoleLink({
   webPath: string;
   writesHere?: boolean;
 }) {
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const baseUrl = connection?.gatewayUrl;
   if (!baseUrl) {
     return null;
