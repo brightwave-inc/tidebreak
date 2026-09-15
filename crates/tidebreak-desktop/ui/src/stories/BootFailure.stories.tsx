@@ -88,3 +88,15 @@ export const LongDetail: Story = {
     ),
   },
 };
+
+/** Hosted discovery failed before the browser could identify its attachment. */
+export const HostedDiscoveryUnavailable: Story = {
+  args: {
+    stage: "connect",
+    attachment: null,
+    error: new Error(
+      "Could not reach Tidebreak at https://tidebreak.example.com. Try again. " +
+        "If the connection still fails, contact your administrator.",
+    ),
+  },
+};

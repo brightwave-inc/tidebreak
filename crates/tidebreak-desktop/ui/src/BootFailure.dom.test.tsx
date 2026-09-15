@@ -81,7 +81,7 @@ describe("BootFailure", () => {
     const { onRetry } = renderFailure({ attachment: local, stage: "connect" });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Tidebreak could not start its server.",
+      "Tidebreak could not connect to its server.",
     );
     await user.click(screen.getByRole("button", { name: /Try again/ }));
     expect(onRetry).toHaveBeenCalledOnce();
