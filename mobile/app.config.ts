@@ -106,13 +106,15 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     "expo-router",
     "expo-secure-store",
     "expo-web-browser",
-    // Scanning the console's pairing QR. The permission string is what the OS
-    // shows in the prompt, so it names the one thing the camera is for.
+    // Scanning a pairing or attach QR. The permission string is what the OS
+    // shows in the prompt, so it names the one thing the camera is for. It
+    // covers both codes now: the gateway console's pairing code, and the
+    // standalone machine's attach code (#3404, decision 98).
     [
       "expo-camera",
       {
         cameraPermission:
-          "Tidebreak uses the camera only to scan the pairing code your gateway console shows.",
+          "Tidebreak uses the camera only to scan the code that connects this phone to your gateway or your own Tidebreak machine.",
         recordAudioAndroid: false,
       },
     ],

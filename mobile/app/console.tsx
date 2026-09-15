@@ -30,7 +30,7 @@ import {
   usageQueries,
 } from "../src/session/consoleQueries";
 import { useLearnedAdminRole } from "../src/session/useAdminRole";
-import { useActiveConnection } from "../src/session/store";
+import { useActiveGatewayConnection } from "../src/session/store";
 
 const SECTION_ROUTES: Record<ConsoleSectionId, { label: string; href: string }> =
   {
@@ -187,7 +187,7 @@ function StatGrid({ me }: { me: UserUsageRow }) {
  */
 export default function ConsoleScreen() {
   const router = useRouter();
-  const connection = useActiveConnection();
+  const connection = useActiveGatewayConnection();
   const sections = consoleSectionsFor(connection);
   const consoleGranted = sections.includes("sandboxes");
   const [refreshing, setRefreshing] = useState(false);

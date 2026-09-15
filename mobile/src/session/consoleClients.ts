@@ -20,6 +20,7 @@
  */
 
 import { GatewayClient } from "../lib/gatewayClient";
+import { isGatewayConnection } from "../lib/connections";
 import type { AppListResponse } from "../lib/consoleTypes";
 import {
   RESOURCE_CONTROL,
@@ -32,7 +33,7 @@ import { connections } from "./runtime";
 /** The active gateway's base URL, or a throw a screen can render. */
 function activeGatewayUrl(): string {
   const active = connections.active();
-  if (!active) {
+  if (!isGatewayConnection(active)) {
     throw new Error("No gateway connection is active.");
   }
   return active.gatewayUrl;

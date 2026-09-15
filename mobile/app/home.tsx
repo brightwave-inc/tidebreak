@@ -25,7 +25,10 @@ import { RESOURCE_CONTROL } from "../src/lib/resource";
 import { consoleSectionsFor, sectionsFor } from "../src/lib/sections";
 import { attentionSessionCount } from "../src/lib/updates";
 import { connections } from "../src/session/runtime";
-import { useActiveConnection } from "../src/session/store";
+import {
+  useActiveConnection,
+  useActiveGatewayConnection,
+} from "../src/session/store";
 import { useMachineClient } from "../src/session/useMachineClient";
 import { useHasSnapshot, useListedSessions } from "../src/session/updatesStore";
 import { useUpdatesFeed } from "../src/session/useUpdatesFeed";
@@ -102,6 +105,11 @@ export default function HomeScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
   const connection = useActiveConnection();
+  // The identity card and the gateway pack read a gateway's own facts. A
+  // standalone machine connection has none — it authenticates as a roster
+  // principal the machine names and tells the phone nothing about — so both
+  // resolve to null and their surfaces simply do not render.
+  const gateway = useActiveGatewayConnection();
   const client = useMachineClient();
   const { live, refresh } = useUpdatesFeed(client);
   const sessions = useListedSessions();
@@ -109,13 +117,13 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const identityQuery = useQuery({
-    queryKey: ["identity", connection?.gatewayUrl],
-    enabled: !!connection,
+    queryKey: ["identity", gateway?.gatewayUrl],
+    enabled: !!gateway,
     queryFn: async () => {
       const token = await connections
         .activeTokens()
         .getAccessToken(RESOURCE_CONTROL);
-      const identity = await fetchIdentity(connection!.gatewayUrl, token);
+      const identity = await fetchIdentity(gateway!.gatewayUrl, token);
       await connections.updateActive({ identity });
       return identity;
     },
@@ -124,13 +132,13 @@ export default function HomeScreen() {
   const workspacesQuery = useQuery({
     queryKey: ["code-workspaces", connection?.machine?.baseUrl],
     enabled: !!client,
-    queryFn: () => listActiveCodeWorkspaces(client!),
+    queryFn: ({ signal }) => listActiveCodeWorkspaces(client!, { signal }),
   });
 
   const approvalsQuery = useQuery({
     queryKey: ["code-approvals", client],
     enabled: !!client && isFocused,
-    queryFn: () => listCodeApprovals(client!),
+    queryFn: ({ signal }) => listCodeApprovals(client!, undefined, { signal }),
     refetchInterval: 5_000,
   });
 
@@ -188,7 +196,7 @@ export default function HomeScreen() {
     );
   }
 
-  const identity = identityQuery.data ?? connection.identity;
+  const identity = identityQuery.data ?? gateway?.identity;
   const workspaces = workspacesQuery.data ?? [];
   const machineHost = connection.machine.baseUrl.replace(/^https?:\/\//, "");
 
@@ -228,9 +236,9 @@ export default function HomeScreen() {
   // `control`-backed ones answer for any pairing, the console reads only for a
   // session that consented to them (`sections.ts`).
   const consoleSections = consoleSectionsFor(connection);
-  const gatewayHost = connection.gatewayUrl
-    .replace(/^https?:\/\//, "")
-    .replace(/\/+$/, "");
+  const gatewayHost = gateway
+    ? gateway.gatewayUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "")
+    : "";
 
   const activeSessionCount = hasSnapshot
     ? sessions.filter((digest) => digest.lifecycle !== "ended").length
@@ -240,7 +248,9 @@ export default function HomeScreen() {
     setRefreshing(true);
     refresh();
     await Promise.allSettled([
-      identityQuery.refetch(),
+      // `refetch` runs even a disabled query, so the gateway-only read is
+      // asked for only when there is a gateway to ask.
+      gateway ? identityQuery.refetch() : Promise.resolve(),
       workspacesQuery.refetch(),
       approvalsQuery.refetch(),
       repositoriesQuery.refetch(),
@@ -268,7 +278,10 @@ export default function HomeScreen() {
         >
           <View className="flex-1 gap-0.5">
             <Text className="text-base font-medium text-foreground">
-              {identity?.display_name || identity?.email || identity?.user_id || "…"}
+              {identity?.display_name ||
+                identity?.email ||
+                identity?.user_id ||
+                (gateway ? "…" : "Standalone machine")}
             </Text>
             <Text className="text-xs text-muted-foreground" numberOfLines={1}>
               {machineHost} · {live ? "Live" : "Reconnecting…"}

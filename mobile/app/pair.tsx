@@ -332,6 +332,21 @@ export default function PairScreen() {
         variant="secondary"
         onPress={() => router.push("/scan")}
       />
+      {/* The alternative onboarding path (#3404). Deliberately one quiet line
+          below the gateway flow rather than a second front door: a standalone
+          machine is a different way in, not a different product, and the
+          gateway path stays the primary one. */}
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel="Pair your own Tidebreak instance"
+        disabled={busy}
+        className="pt-2"
+        onPress={() => router.push("/attach-machine")}
+      >
+        <Text className="text-center text-sm text-muted-foreground underline">
+          Pairing your own Tidebreak instance? Tap here
+        </Text>
+      </Pressable>
     </Screen>
   );
 }

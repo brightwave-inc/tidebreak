@@ -1,10 +1,7 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
-import type { BarcodeScanningResult } from "expo-camera";
 import { useRouter } from "expo-router";
-import { useRef, useState } from "react";
-import { Linking, Text, View } from "react-native";
-import { Button } from "../src/components/Controls";
-import { Screen, Body, ErrorText } from "../src/components/Screen";
+import { useState } from "react";
+import { QrScanner } from "../src/components/QrScanner";
+import { Screen, ErrorText } from "../src/components/Screen";
 import { parsePairingScan } from "../src/lib/provision";
 
 /**
@@ -14,29 +11,21 @@ import { parsePairingScan } from "../src/lib/provision";
  * and no credential (`src/lib/provision.ts`). Both are handed back to the pair
  * screen, which probes the gateway and, on the user's confirmation, runs the
  * claim / match-code / console-approval leg.
+ *
+ * Standalone attach does not come through here. Its code *is* a credential, so
+ * it is scanned on the attach screen itself and never becomes a route
+ * parameter (`app/attach-machine.tsx`, decision 98).
  */
 export default function ScanScreen() {
-  const [permission, requestPermission] = useCameraPermissions();
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
-  // The scanner fires per camera frame, so one stray code would otherwise
-  // repaint the error state dozens of times a second.
-  const lock = useRef(false);
 
-  function onScanned(result: BarcodeScanningResult) {
-    if (lock.current) {
-      return;
-    }
-    const scan = parsePairingScan(result.data);
+  function onScanned(data: string) {
+    const scan = parsePairingScan(data);
     if (!scan) {
-      lock.current = true;
       setError("That code is not a Tidebreak pairing code.");
-      setTimeout(() => {
-        lock.current = false;
-      }, 1500);
       return;
     }
-    lock.current = true;
     router.replace({
       pathname: "/pair",
       params: scan.sessionCode
@@ -45,50 +34,13 @@ export default function ScanScreen() {
     });
   }
 
-  if (!permission?.granted) {
-    return (
-      <Screen title="Scan to pair">
-        <Body>
-          Tidebreak needs the camera to read the pairing code shown on your
-          gateway console.
-        </Body>
-        {permission?.canAskAgain === false ? (
-          <Button
-            label="Open Settings"
-            onPress={() => void Linking.openSettings()}
-          />
-        ) : (
-          <Button
-            disabled={!permission}
-            label="Allow camera access"
-            onPress={() => void requestPermission()}
-          />
-        )}
-      </Screen>
-    );
-  }
-
   return (
     <Screen title="Scan to pair">
-      <View className="h-96 overflow-hidden rounded-xl border border-border">
-        <CameraView
-          style={{ flex: 1 }}
-          facing="back"
-          barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-          onBarcodeScanned={onScanned}
-        />
-        {/* Aiming affordance only — the scanner reads the whole frame. */}
-        <View
-          pointerEvents="none"
-          className="absolute inset-0 items-center justify-center"
-        >
-          <View className="h-56 w-56 rounded-2xl border-2 border-white/90" />
-        </View>
-      </View>
-      <Text className="text-sm text-muted-foreground">
-        Center the pairing code in the square. Nothing in it is a credential —
-        you will approve this phone on the console.
-      </Text>
+      <QrScanner
+        permissionPrompt="Tidebreak needs the camera to read the pairing code shown on your gateway console."
+        hint="Center the pairing code in the square. Nothing in it is a credential — you will approve this phone on the console."
+        onScanned={onScanned}
+      />
       {error ? <ErrorText>{error}</ErrorText> : null}
     </Screen>
   );

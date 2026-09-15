@@ -20,14 +20,19 @@
 
 import {
   activeAfterRemoval,
+  connectionKindFromId,
   emptyIndex,
   gatewayConnectionId,
+  machineConnectionId,
   reinstalled,
   withConnectionId,
+  type Connection,
   type ConnectionIndex,
   type GatewayConnection,
+  type MachineConnection,
 } from "./connections";
 import { randomUrlSafe } from "./crypto";
+import { StaticTokenStore } from "./machineTokenStore";
 import {
   CONNECTION_INDEX_KEY,
   SESSION_STORAGE_KEY,
@@ -35,10 +40,21 @@ import {
   type SecureStorage,
 } from "./storage";
 import { SignedOutError, TokenStore, type TokenHttp } from "./tokenStore";
-import type { PersistedSession } from "./types";
+import type { AttachedMachine, PersistedSession } from "./types";
 
 /** One connection as the UI sees it: durable facts, no credential. */
-export type ConnectionSummary = GatewayConnection;
+export type ConnectionSummary = Connection;
+
+/**
+ * The credential core for one connection, whichever kind it is.
+ *
+ * `TokenStore` rotates an OAuth refresh family; `StaticTokenStore` holds one
+ * roster token. A union rather than a structural interface, because the two
+ * differ in exactly one direction that matters — only the static one can be
+ * told it was revoked (`reportUnauthorized`) — and a shared shape would hide
+ * that instead of making callers narrow for it.
+ */
+export type ConnectionCredentials = TokenStore | StaticTokenStore;
 
 export type RegistrySnapshot = {
   connections: ConnectionSummary[];
@@ -67,10 +83,16 @@ export type NewGatewayConnection = {
   grantedScope?: string;
 };
 
+/** What standalone attach knows about a new machine connection. */
+export type NewMachineConnection = {
+  machine: AttachedMachine;
+  staticToken: string;
+};
+
 export class ConnectionRegistry {
   private index: ConnectionIndex = emptyIndex();
-  private stores = new Map<string, TokenStore>();
-  private records = new Map<string, GatewayConnection>();
+  private stores = new Map<string, ConnectionCredentials>();
+  private records = new Map<string, Connection>();
   private listeners = new Set<(snapshot: RegistrySnapshot) => void>();
   private hydrated = false;
 
@@ -144,7 +166,7 @@ export class ConnectionRegistry {
   }
 
   /** The credential core for one connection, or null when it is unknown. */
-  tokensFor(id: string): TokenStore | null {
+  tokensFor(id: string): ConnectionCredentials | null {
     return this.stores.get(id) ?? null;
   }
 
@@ -152,11 +174,11 @@ export class ConnectionRegistry {
    * The active connection's credential core. Throws rather than returning null
    * so a caller that reached a signed-in surface cannot silently mint nothing.
    */
-  activeTokens(): TokenStore {
+  activeTokens(): ConnectionCredentials {
     const id = this.index.activeId;
     const store = id ? this.stores.get(id) : null;
     if (!store) {
-      throw new SignedOutError("No gateway connection is active");
+      throw new SignedOutError("No connection is active");
     }
     return store;
   }
@@ -191,7 +213,7 @@ export class ConnectionRegistry {
         : {}),
       ...(input.grantedScope ? { grantedScope: input.grantedScope } : {}),
     };
-    const store = this.storeFor(id);
+    const store = this.gatewayStoreFor(id);
     await store.replace({
       ...record,
       refreshToken: input.refreshToken,
@@ -208,10 +230,42 @@ export class ConnectionRegistry {
     return record;
   }
 
+  /**
+   * Adds a standalone machine and makes it active (#3404).
+   *
+   * The machine is attached at creation because there is nothing else to be:
+   * the URL, its verified `static_token` discovery, and the token that
+   * authenticated against it are the whole connection. Attaching the same
+   * machine again with a rotated token replaces the record, so the dead token
+   * is overwritten rather than left beside its successor.
+   */
+  async addMachine(input: NewMachineConnection): Promise<MachineConnection> {
+    const id = machineConnectionId(input.machine.baseUrl);
+    const now = this.deps.now?.() ?? new Date();
+    const existing = this.records.get(id);
+    const record: MachineConnection = {
+      id,
+      kind: "machine",
+      machine: input.machine,
+      addedAt: existing?.addedAt ?? now.toISOString(),
+    };
+    const store = this.machineStoreFor(id);
+    await store.replace({ ...record, staticToken: input.staticToken });
+    this.records.set(id, record);
+    this.index = {
+      ...this.index,
+      ids: withConnectionId(this.index.ids, id),
+      activeId: id,
+    };
+    await this.writeIndex();
+    this.emit();
+    return record;
+  }
+
   /** Persists a change to the active connection's durable facts. */
   async updateActive(
     partial: Partial<Omit<GatewayConnection, "id" | "kind">>,
-  ): Promise<GatewayConnection | null> {
+  ): Promise<Connection | null> {
     const id = this.index.activeId;
     if (!id) {
       return null;
@@ -220,7 +274,17 @@ export class ConnectionRegistry {
     if (!store) {
       return null;
     }
-    await store.update(partial);
+    if (store instanceof StaticTokenStore) {
+      // A standalone connection has no gateway facts to update, and its
+      // machine is fixed at attach. Silently ignoring a gateway-shaped write
+      // here would be a lie about what was persisted.
+      const { machine } = partial;
+      if (machine) {
+        await store.update({ machine });
+      }
+    } else {
+      await store.update(partial);
+    }
     const record = store.snapshot();
     if (!record) {
       return null;
@@ -286,14 +350,36 @@ export class ConnectionRegistry {
     this.emit();
   }
 
-  private storeFor(id: string): TokenStore {
+  private storeFor(id: string): ConnectionCredentials {
+    return connectionKindFromId(id) === "machine"
+      ? this.machineStoreFor(id)
+      : this.gatewayStoreFor(id);
+  }
+
+  private gatewayStoreFor(id: string): TokenStore {
     const existing = this.stores.get(id);
-    if (existing) {
+    if (existing instanceof TokenStore) {
       return existing;
     }
-    const store = new TokenStore(this.deps.storage, this.deps.http, id);
+    return this.register(id, new TokenStore(this.deps.storage, this.deps.http, id));
+  }
+
+  private machineStoreFor(id: string): StaticTokenStore {
+    const existing = this.stores.get(id);
+    if (existing instanceof StaticTokenStore) {
+      return existing;
+    }
+    return this.register(id, new StaticTokenStore(this.deps.storage, id));
+  }
+
+  /**
+   * Wires one store's sign-out into the directory. Both kinds reach it: a
+   * gateway revoking a refresh family and a machine answering 401 to a static
+   * token are the same event as far as the connection list is concerned.
+   */
+  private register<T extends ConnectionCredentials>(id: string, store: T): T {
     store.onSignedOut(() => {
-      // A revoked family signs out exactly this connection. Nothing awaits
+      // A revoked credential signs out exactly this connection. Nothing awaits
       // this: the listener runs inside the store's own wipe.
       if (this.index.ids.includes(id)) {
         void this.forget(id);
@@ -414,12 +500,26 @@ export class ConnectionRegistry {
   }
 }
 
-/** A stored record without its credential. */
-function publicRecord(record: GatewayConnection & { refreshToken?: string }): GatewayConnection {
-  const { refreshToken: _refreshToken, ...rest } = record as GatewayConnection & {
+/**
+ * A stored record without its credential.
+ *
+ * Every secret a store persists is stripped here by name, because this is the
+ * value the UI store mirrors and every screen reads. A connection summary that
+ * carried a refresh or roster token would put it in React state, in a zustand
+ * snapshot, and in any crash report that serializes one.
+ */
+function publicRecord(
+  record: Connection & {
     refreshToken?: string;
     accessTokens?: unknown;
-  };
-  const { accessTokens: _accessTokens, ...summary } = rest;
-  return summary;
+    staticToken?: string;
+  },
+): Connection {
+  const {
+    refreshToken: _refreshToken,
+    accessTokens: _accessTokens,
+    staticToken: _staticToken,
+    ...summary
+  } = record;
+  return summary as Connection;
 }

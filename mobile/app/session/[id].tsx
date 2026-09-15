@@ -64,7 +64,8 @@ export default function SessionDetailScreen() {
   const approvalsQuery = useQuery({
     queryKey: ["code-approvals", client, params.id],
     enabled: !!client && !!params.id,
-    queryFn: () => listCodeApprovals(client!, params.id!),
+    queryFn: ({ signal }) =>
+      listCodeApprovals(client!, params.id!, { signal }),
     refetchInterval: 5_000,
   });
   const approvals = pendingApprovals(approvalsQuery.data ?? []);

@@ -263,9 +263,14 @@ purpose:
   outside the repo's ancestry are the known cost, and the override waits for
   real instances of that pain.
 - **A local relay for the mobile client.** The hosted mobile path shipped in
-  epic [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644). What
-  remains deferred is the local relay from #3199, so a phone can attach to a
-  laptop rather than a hosted machine.
+  epic [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644), and
+  the phone can now also attach straight to a standalone machine — a direct
+  URL and a token from its roster, no gateway in the path
+  ([record 98](decisions/0098-standalone-machine-attach-on-mobile.md), #3404).
+  That covers a machine the phone can reach over trusted TLS. What remains
+  deferred is #3199's outbound machine link, which is what a phone would need
+  to reach a *laptop* — a machine with no stable address and no certificate
+  anyone issued.
 
 ## Memory that outlives a session
 

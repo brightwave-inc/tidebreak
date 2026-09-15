@@ -16,7 +16,7 @@ export default function ApprovalsScreen() {
   const approvalsQuery = useQuery({
     queryKey: ["code-approvals", client],
     enabled: !!client,
-    queryFn: () => listCodeApprovals(client!),
+    queryFn: ({ signal }) => listCodeApprovals(client!, undefined, { signal }),
     refetchInterval: 5_000,
   });
   const approvals = pendingApprovals(approvalsQuery.data ?? []);

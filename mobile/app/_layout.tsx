@@ -50,6 +50,10 @@ export default function RootLayout() {
           <Stack.Screen name="pair" options={{ title: "Gateway" }} />
           <Stack.Screen name="scan" options={{ title: "Scan to pair" }} />
           <Stack.Screen name="attach" options={{ title: "Machine" }} />
+          <Stack.Screen
+            name="attach-machine"
+            options={{ title: "Your own Tidebreak" }}
+          />
           <Stack.Screen name="home" options={{ title: "Home" }} />
           <Stack.Screen
             name="workspace/[id]/start"
