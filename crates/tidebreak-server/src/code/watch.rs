@@ -621,6 +621,14 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             Ok(())
         }
         WatchAssessment::Actionable(reason) => {
+            // A fix for this pull request may still be waiting in a session
+            // queue — parked while the checkout was busy, or held by a paused
+            // queue. That is not a failed attempt and not a reason to stack a
+            // second instruction: hold until the row promotes and its turn
+            // runs, then judge the head the turn actually produced.
+            if watch_fix_queued(runtime.as_ref(), &owner, &sessions).await? {
+                return Ok(());
+            }
             let same_head = watch.last_fix_head.is_some()
                 && watch.last_fix_head.as_deref() == pr.head_sha.as_deref();
             if same_head {
@@ -878,6 +886,29 @@ async fn watch_submission_was_accepted(
             .await?
             .iter()
             .any(|turn| turn.started_at >= reserved_at && is_watch_actor(turn.actor.as_ref()))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a watch fix instruction is still parked in any of the workspace's
+/// session queues, waiting for its turn boundary.
+///
+/// A queued fix has not run: counting it as an attempt would park the watch
+/// as "did not resolve" while the instruction sits in a busy or paused
+/// queue, and firing again would stack a second instruction behind it.
+async fn watch_fix_queued(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    sessions: &[Session],
+) -> Result<bool, ServerError> {
+    for session in sessions {
+        if list_queued_turns(&runtime.db, owner, session.id)
+            .await?
+            .iter()
+            .any(|turn| is_watch_actor(turn.actor.as_ref()))
         {
             return Ok(true);
         }

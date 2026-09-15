@@ -38,13 +38,14 @@ use super::client::{Client, EventSocket};
 /// two snapshots rather than a tagged union, so this is the one code-mode
 /// shape the client composes itself. Both arms reject unknown keys, so a
 /// snapshot that matches neither fails rather than folding into the other.
-/// The ran arm is boxed: a turn snapshot is several times the size of a
-/// queued row, and the enum is passed around by value.
+/// Both arms are boxed: a turn snapshot was always several times the size of
+/// a queued row, and the queued row grew a full actor with its trigger
+/// context; the enum is passed around by value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SubmitTurnResponse {
     Ran(Box<TurnSnapshot>),
-    Queued(QueuedTurn),
+    Queued(Box<QueuedTurn>),
 }
 
 fn session_access_path(session: SessionId) -> String {
