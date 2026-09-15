@@ -846,7 +846,7 @@ export const CodeActivityGroup = memo(
             </span>
           </>
         }
-        titleClassName="flex items-center gap-2"
+        titleClassName="flex items-center gap-2 overflow-hidden"
         trailing={
           <>
             <span className="sr-only">and {rest} more</span>
@@ -970,7 +970,7 @@ export function CodeToolCard({
           />
         </>
       }
-      titleClassName="flex items-center gap-2"
+      titleClassName="flex items-center gap-2 overflow-hidden"
       trailing={
         <>
           {status === "running" ? elapsed : duration}

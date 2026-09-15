@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 
@@ -437,5 +437,95 @@ export const Notices: Story = {
       await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);
       await expect(notice.scrollWidth).toBeLessThanOrEqual(notice.clientWidth);
     }
+  },
+};
+
+const groupedTools: CodeTranscriptItem[] = [
+  {
+    kind: "tool",
+    id: "group-command",
+    turnId: "group-turn",
+    callId: "group-command",
+    parentCallId: null,
+    name: "Bash",
+    detail: {
+      kind: "command",
+      cmd: "pnpm vitest run src/code/CodeCatalogStore.test.ts --reporter=verbose",
+      cwd: "/workspace/crates/tidebreak-desktop/ui",
+    },
+    status: "succeeded",
+    preview: "All tests passed",
+    startedAt: null,
+    durationMs: 2_000,
+  },
+  {
+    kind: "tool",
+    id: "group-edit",
+    turnId: "group-turn",
+    callId: "group-edit",
+    parentCallId: null,
+    name: "Edit",
+    detail: {
+      kind: "file_edit",
+      path: "/workspace/crates/tidebreak-desktop/ui/src/code/CodeCatalogStore.ts",
+    },
+    status: "succeeded",
+    preview: "Updated the workspace catalog.",
+    startedAt: null,
+    durationMs: 200,
+  },
+  {
+    kind: "tool",
+    id: "group-failed",
+    turnId: "group-turn",
+    callId: "group-failed",
+    parentCallId: null,
+    name: "Bash",
+    detail: { kind: "command", cmd: "pnpm test", cwd: "/workspace" },
+    status: "failed",
+    preview: "One test failed.",
+    startedAt: null,
+    durationMs: 1_000,
+  },
+];
+
+/** Nested icons remain inside the group border at compact transcript widths. */
+export const ExpandedToolGroup: Story = {
+  args: { items: groupedTools },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: /and 2 more/ }));
+    const icons = canvasElement.querySelectorAll<HTMLElement>(
+      ".tool-card-shell .tool-card-shell .tool-card-icon",
+    );
+    await expect(icons.length).toBe(3);
+    for (const icon of icons) {
+      const row = icon.closest("section")!;
+      const body = row.parentElement!;
+      const iconRect = icon.getBoundingClientRect();
+      const bodyRect = body.getBoundingClientRect();
+      await expect(iconRect.left).toBeGreaterThanOrEqual(bodyRect.left + 1);
+      await expect(iconRect.right).toBeLessThanOrEqual(bodyRect.right);
+      await expect(body.scrollWidth).toBeLessThanOrEqual(body.clientWidth);
+      const title = icon.nextElementSibling!;
+      const metadata = title.nextElementSibling!;
+      await expect(title.getBoundingClientRect().right).toBeLessThanOrEqual(
+        metadata.getBoundingClientRect().left,
+      );
+      await expect(getComputedStyle(title.firstElementChild!).overflowX).toBe(
+        "hidden",
+      );
+    }
+  },
+};
+
+export const ExpandedRunningToolGroup: Story = {
+  ...ExpandedToolGroup,
+  args: {
+    items: groupedTools.map((item) =>
+      item.id === "group-failed" && item.kind === "tool"
+        ? { ...item, status: "running", durationMs: null }
+        : item,
+    ),
   },
 };
