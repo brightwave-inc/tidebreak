@@ -154,6 +154,18 @@ impl ArchiveBlock {
             Self::IgnoredContent => "ignored_content",
         }
     }
+
+    /// What the checkout holds, for the sentence that asks the reader to
+    /// discard it. The kind is what the dialog shows, so an unpushed branch
+    /// must not read as uncommitted files.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::Uncommitted => "uncommitted changes",
+            Self::Unpushed => "unpushed commits",
+            Self::UncommittedAndUnpushed => "uncommitted changes and unpushed commits",
+            Self::IgnoredContent => "ignored files that are not disposable",
+        }
+    }
 }
 
 /// Failure from a git or worktree operation.
@@ -1765,8 +1777,27 @@ pub async fn archive_blockers(
     worktree_path: &Path,
     base_ref: &str,
 ) -> Result<Option<ArchiveBlock>, WorktreeError> {
+    archive_blockers_with_merged_head(worktree_path, base_ref, None).await
+}
+
+/// [`archive_blockers`] for a workspace whose pull request already merged.
+///
+/// `merged_head` is the head commit the host merged. A squash or rebase
+/// merge lands the work under new commits, and GitHub then deletes the head
+/// branch, so neither `@{u}..HEAD` nor `base..HEAD` can show the branch as
+/// pushed. When the checkout still sits on that head, the host holds every
+/// commit and the unpushed probe is skipped. A commit made after the merge
+/// moves HEAD off it and the probe runs as usual.
+pub async fn archive_blockers_with_merged_head(
+    worktree_path: &Path,
+    base_ref: &str,
+    merged_head: Option<&str>,
+) -> Result<Option<ArchiveBlock>, WorktreeError> {
     let uncommitted = has_uncommitted_work(worktree_path).await?;
-    let unpushed = has_unpushed_work(worktree_path, base_ref).await?;
+    let unpushed = match merged_head {
+        Some(head) if head_is(worktree_path, head).await? => false,
+        _ => has_unpushed_work(worktree_path, base_ref).await?,
+    };
     let ignored = has_non_disposable_ignored_content(worktree_path).await?;
     Ok(match (uncommitted, unpushed) {
         (true, true) => Some(ArchiveBlock::UncommittedAndUnpushed),
@@ -2267,6 +2298,22 @@ async fn verify_inside_worktree(path: &Path) -> Result<(), WorktreeError> {
             "worktree verification failed: path is not inside a work tree".to_owned(),
         ))
     }
+}
+
+/// Whether the checkout's HEAD is exactly `commit` (a full SHA from the host).
+async fn head_is(worktree_path: &Path, commit: &str) -> Result<bool, WorktreeError> {
+    let commit = commit.trim();
+    if commit.is_empty() {
+        return Ok(false);
+    }
+    let head = git_stdout(
+        Some(worktree_path),
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git rev-parse failed: {err}")))?;
+    Ok(head.eq_ignore_ascii_case(commit))
 }
 
 async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeError> {
@@ -3908,6 +3955,97 @@ mod tests {
         assert_eq!(ahead.trim(), "0");
         assert_eq!(
             archive_blockers(&work, "main").await.unwrap(),
+            Some(ArchiveBlock::Unpushed)
+        );
+    }
+
+    /// A squash merge lands the branch's work under a new commit on main and
+    /// GitHub deletes the head branch, so the branch's own commits are in
+    /// neither `@{u}..HEAD` nor `base..HEAD`. The merged head is what proves
+    /// the host holds the work.
+    #[tokio::test]
+    async fn archive_trusts_the_merged_head_after_a_squash_merge() {
+        let (dir, origin_checkout) = init_repo();
+        let bare = dir.path().join("origin.git");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                "--bare",
+                origin_checkout.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let work = dir.path().join("work");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        run(&work, &["git", "config", "user.email", "dev@example.com"]);
+        run(&work, &["git", "config", "user.name", "Dev"]);
+        run(&work, &["git", "checkout", "-b", "tidebreak/squashed"]);
+        std::fs::write(work.join("feature.txt"), "shipped\n").unwrap();
+        run(&work, &["git", "add", "feature.txt"]);
+        run(&work, &["git", "commit", "-m", "feature"]);
+        run(
+            &work,
+            &["git", "push", "-u", "origin", "tidebreak/squashed"],
+        );
+        let merged_head = git_stdout(Some(&work), &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The host squash-merges and deletes the head branch.
+        run(&work, &["git", "checkout", "main"]);
+        run(&work, &["git", "merge", "--squash", "tidebreak/squashed"]);
+        run(&work, &["git", "commit", "-m", "feature (#1)"]);
+        run(&work, &["git", "push", "origin", "main"]);
+        run(&bare, &["git", "branch", "-D", "tidebreak/squashed"]);
+        run(&work, &["git", "checkout", "tidebreak/squashed"]);
+
+        assert_eq!(
+            archive_blockers(&work, "main").await.unwrap(),
+            Some(ArchiveBlock::Unpushed),
+            "without the merged head the squashed branch looks unpushed"
+        );
+        assert_eq!(
+            archive_blockers_with_merged_head(&work, "main", Some(&merged_head))
+                .await
+                .unwrap(),
+            None,
+            "the checkout sits on the merged head, so nothing is left to push"
+        );
+        assert_eq!(
+            archive_blockers_with_merged_head(&work, "main", Some(&merged_head.to_uppercase()))
+                .await
+                .unwrap(),
+            None,
+            "SHA case must not matter"
+        );
+
+        // Uncommitted files still block, whatever the merge state.
+        std::fs::write(work.join("after.txt"), "not yet\n").unwrap();
+        assert_eq!(
+            archive_blockers_with_merged_head(&work, "main", Some(&merged_head))
+                .await
+                .unwrap(),
+            Some(ArchiveBlock::Uncommitted)
+        );
+
+        // A commit after the merge moves HEAD off the merged head; that work
+        // is nowhere on the host and must block.
+        run(&work, &["git", "add", "after.txt"]);
+        run(&work, &["git", "commit", "-m", "follow-up"]);
+        assert_eq!(
+            archive_blockers_with_merged_head(&work, "main", Some(&merged_head))
+                .await
+                .unwrap(),
             Some(ArchiveBlock::Unpushed)
         );
     }
