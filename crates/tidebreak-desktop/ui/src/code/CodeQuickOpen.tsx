@@ -37,6 +37,7 @@ export function CodeQuickOpen({
   contentRevision,
   onOpenFile,
   openRequest = 0,
+  enabled = true,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceTree">;
   workspaceId: string;
@@ -44,6 +45,7 @@ export function CodeQuickOpen({
   onOpenFile: (path: string) => void;
   /** Increment to open the picker: a New tab control, or the shell keymap. */
   openRequest?: number;
+  enabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [openWorkspaceId, setOpenWorkspaceId] = useState<string | null>(null);
@@ -62,8 +64,8 @@ export function CodeQuickOpen({
   }, [workspaceId]);
 
   useEffect(() => {
-    if (openRequest > 0) reveal();
-  }, [openRequest, reveal]);
+    if (enabled && openRequest > 0) reveal();
+  }, [enabled, openRequest, reveal]);
 
   useEffect(() => {
     loadedKeyRef.current = null;

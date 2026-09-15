@@ -145,3 +145,26 @@ team) or when a session needs to change owner.
   one: resolving access by the workspace's owner instead of the session's,
   or fanning out to viewers on the updates channel but not on the event
   socket.
+
+## Service workspace management
+
+A live `contribute` grant on a Slack-bound session whose owner is a service
+principal also permits management of that session's workspace. The caller can
+rename, archive, restore, inspect files and pull requests, and run the workspace's
+Git delivery operations. The server retains the service principal's owner key
+for those operations; execution identity never moves to the caller.
+
+This exception does not grant access to other workspaces, other sessions in the
+same workspace, repository-wide transcript search, repository settings, host
+terminals, native browsers, setup retry, watches, or session access management.
+The desktop renders the normal workspace layout with those owner-only controls
+removed. Workspace snapshots report management through `read_only` and report
+ownership separately through `is_owner`. Both values resolve from live access
+on list and get requests. A revoked contribution loses management immediately.
+Repository-free conversations have no workspace and keep the conversation view.
+
+Remote workspaces expose rename, archive, and the workspace pull request status
+and comments when the original external connection is available. The Files and
+Changes panels explain that the checkout lives in the sandbox. File browsing,
+restore, and Git delivery actions that require a host checkout remain unavailable;
+continue the task in chat to inspect files or publish changes.

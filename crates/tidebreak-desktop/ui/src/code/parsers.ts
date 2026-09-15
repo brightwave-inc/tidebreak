@@ -2097,6 +2097,7 @@ export function parseCodeWorkspace(
     !onlyKeys<WireCodeWorkspaceSnapshot>(value, [
       "base_refresh_warning",
       "read_only",
+      "is_owner",
       "id",
       "repo_id",
       "title",
@@ -2113,6 +2114,7 @@ export function parseCodeWorkspace(
       "setup_error",
     ]) ||
     (value.read_only !== undefined && typeof value.read_only !== "boolean") ||
+    (value.is_owner !== undefined && typeof value.is_owner !== "boolean") ||
     (value.base_refresh_warning !== undefined &&
       !nonEmptyLine(value.base_refresh_warning)) ||
     !wireId(value.id) ||
@@ -2133,6 +2135,7 @@ export function parseCodeWorkspace(
   }
   const parsed: CodeWorkspaceSnapshot = {
     ...(value.read_only !== undefined ? { read_only: value.read_only } : {}),
+    ...(value.is_owner !== undefined ? { is_owner: value.is_owner } : {}),
     ...(value.base_refresh_warning !== undefined
       ? { base_refresh_warning: value.base_refresh_warning }
       : {}),

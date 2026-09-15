@@ -70,6 +70,8 @@ type SetupFailedScenario =
 type WorkspaceScenario =
   | "active"
   | "shared"
+  | "managed-slack"
+  | "managed-slack-remote"
   | "nested"
   | "start"
   | "workspace-starting"
@@ -622,18 +624,29 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
   const currentWorkspace = isWorkspaceStartupScenario(scenario)
     ? startupWorkspace
     : scenario === "shared"
-      ? { ...workspace, read_only: true }
-      : isSetupFailedScenario(scenario)
+      ? { ...workspace, read_only: true, is_owner: false }
+      : scenario === "managed-slack" || scenario === "managed-slack-remote"
         ? {
             ...workspace,
-            status: "setup_failed" as const,
-            pr: undefined,
-            setup_error: setupFailureOutput[scenario],
+            read_only: false,
+            is_owner: false,
+            ...(scenario === "managed-slack-remote"
+              ? { worktree_path: `remote:${workspace.id}` }
+              : {}),
           }
-        : workspace;
+        : isSetupFailedScenario(scenario)
+          ? {
+              ...workspace,
+              status: "setup_failed" as const,
+              pr: undefined,
+              setup_error: setupFailureOutput[scenario],
+            }
+          : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
     ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
-    : prSnapshot;
+    : scenario === "managed-slack-remote"
+      ? { ...prSnapshot, remote: true }
+      : prSnapshot;
   const sessions =
     scenario === "start" ||
     scenario === "workspace-starting" ||
@@ -646,7 +659,15 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       : [
           scenario === "shared"
             ? { ...session, access: "view" as const, is_owner: false }
-            : session,
+            : scenario === "managed-slack" ||
+                scenario === "managed-slack-remote"
+              ? {
+                  ...session,
+                  access: "contribute" as const,
+                  is_owner: false,
+                  owner_kind: "service",
+                }
+              : session,
         ];
   const firstTurnFails =
     scenario === "first-turn-failure" || scenario === "fork-first-turn-failure";
@@ -1412,3 +1433,40 @@ export const CompactSubagentTranscript: Story = {
 };
 
 export const SharedTask: Story = { args: { scenario: "shared" } };
+
+/** A contributor manages the Slack workspace without host tools or owner actions. */
+export const ManagedSlackWorkspace: Story = {
+  args: { scenario: "managed-slack", initialUrl: fileUrl, reviewOpen: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByTestId("workspace-header"),
+    ).resolves.toBeInTheDocument();
+    await expect(
+      canvas.queryByRole("button", { name: "Terminal" }),
+    ).not.toBeInTheDocument();
+    await expect(
+      canvas.queryByText("Could not load this workspace"),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const ManagedSlackRemoteWorkspace: Story = {
+  args: {
+    scenario: "managed-slack-remote",
+    initialUrl: fileUrl,
+    reviewOpen: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findAllByText("Files are in the sandbox"),
+    ).resolves.not.toHaveLength(0);
+    await expect(
+      canvas.queryByRole("button", { name: "Terminal" }),
+    ).not.toBeInTheDocument();
+    await expect(
+      canvas.queryByRole("button", { name: "Commit" }),
+    ).not.toBeInTheDocument();
+  },
+};

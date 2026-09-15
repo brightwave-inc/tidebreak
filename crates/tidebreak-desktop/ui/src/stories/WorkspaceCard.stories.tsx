@@ -1,6 +1,6 @@
 import { useState, type ComponentProps, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import { toast } from "sonner";
 
 import { setEditorPreference } from "@/code/editorPreference";
@@ -1279,5 +1279,30 @@ export const SharedReadOnly: Story = {
       body.queryByRole("button", { name: "Merge" }),
     ).not.toBeInTheDocument();
     await expect(args.onCommand).not.toHaveBeenCalled();
+  },
+};
+
+export const ManagedSlackWorkspace: Story = {
+  args: {
+    workspace: { ...codeWorkspace, read_only: false, is_owner: false },
+    digest: readyToMergeDigest,
+    onWorkflowAction: fn(),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: canvas.getByRole("button", { name: /Scoped UI workshop/ }),
+    });
+    await expect(
+      body.findByRole("menuitem", { name: /^Archive$/ }),
+    ).resolves.toBeInTheDocument();
+    await expect(
+      body.queryByRole("menuitem", { name: "Toggle terminal" }),
+    ).not.toBeInTheDocument();
+    await expect(
+      body.queryByRole("menuitem", { name: "New session" }),
+    ).not.toBeInTheDocument();
   },
 };

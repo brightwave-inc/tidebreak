@@ -402,6 +402,55 @@ impl ScopedCode {
         self.get_workspace(id).await
     }
 
+    /// Workspace management is separate from execution and host access.
+    /// A live contributor to a Slack session owned by a service principal may
+    /// manage its workspace. Other shared sessions retain conversation access.
+    pub async fn can_manage_workspace(
+        &self,
+        workspace: &CodeWorkspace,
+    ) -> Result<bool, ServerError> {
+        if workspace.owner == self.owner {
+            return Ok(true);
+        }
+        for session in
+            tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
+                .await?
+        {
+            if session.workspace_id != Some(workspace.id)
+                || session.owner != workspace.owner
+                || session.owner_kind.as_deref() != Some("service")
+            {
+                continue;
+            }
+            let access = self.session_access(session.id).await?;
+            if access.level != tidebreak_core::SessionAccessLevel::Contribute {
+                continue;
+            }
+            let bindings = self
+                .runtime
+                .external_bindings_for_sessions(&session.owner, &[session.id])
+                .await?;
+            if bindings
+                .iter()
+                .any(|binding| binding.channel_kind == "slack")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub async fn require_workspace_management(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let workspace = self.read_workspace(id).await?;
+        if !self.can_manage_workspace(&workspace).await? {
+            return Err(ServerError::not_found("code workspace not found"));
+        }
+        Ok(workspace)
+    }
+
     /// Require ownership of a workspace before a mutation or live terminal read.
     pub async fn require_workspace_owner(
         &self,
@@ -434,6 +483,10 @@ impl ScopedCode {
     }
 
     pub async fn save_workspace(&self, workspace: &CodeWorkspace) -> Result<(), ServerError> {
+        let current = self.require_workspace_management(workspace.id).await?;
+        if current.owner != workspace.owner {
+            return Err(ServerError::not_found("code workspace not found"));
+        }
         self.runtime.save_workspace(workspace).await
     }
 
@@ -443,8 +496,9 @@ impl ScopedCode {
         force: bool,
         terminals: &crate::code::terminal::TerminalHub,
     ) -> Result<CodeWorkspace, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
         self.runtime
-            .archive_workspace(&self.owner, id, force, terminals)
+            .archive_workspace(&owner, id, force, terminals)
             .await
     }
 
@@ -453,7 +507,8 @@ impl ScopedCode {
     }
 
     pub async fn restore_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
-        self.runtime.restore_workspace(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.restore_workspace(&owner, id).await
     }
 
     pub async fn retry_workspace_setup(
@@ -556,13 +611,13 @@ impl ScopedCode {
         id: WorkspaceId,
         message: Option<String>,
     ) -> Result<CommitOutcome, ServerError> {
-        self.runtime
-            .commit_workspace(&self.owner, id, message)
-            .await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.commit_workspace(&owner, id, message).await
     }
 
     pub async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
-        self.runtime.push_workspace(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.push_workspace(&owner, id).await
     }
 
     pub async fn list_triggers(&self, repo_id: RepoId) -> Result<Vec<CodeTrigger>, ServerError> {
@@ -600,7 +655,8 @@ impl ScopedCode {
     }
 
     pub async fn workspace_pr(&self, id: WorkspaceId) -> Result<WorkspaceGitStatus, ServerError> {
-        let status = self.runtime.workspace_pr(&self.owner, id).await?;
+        let owner = self.require_workspace_management(id).await?.owner;
+        let status = self.runtime.workspace_pr(&owner, id).await?;
         // GitHub computes mergeability lazily: after a push or a base change
         // the stored digest answers "unknown" until something reads the pull
         // request from the host again. Being read is that ask — kick one
@@ -613,7 +669,7 @@ impl ScopedCode {
             .is_some_and(pull_request_mergeability_unknown)
         {
             let runtime = Arc::clone(&self.runtime);
-            let owner = self.owner.clone();
+            let owner = owner.clone();
             tokio::spawn(async move {
                 runtime.refresh_workspace_pr_row(&owner, id).await;
             });
@@ -631,14 +687,16 @@ impl ScopedCode {
         )>,
         ServerError,
     > {
-        self.runtime.workspace_pull_requests(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.workspace_pull_requests(&owner, id).await
     }
 
     pub async fn refresh_workspace_pr(
         &self,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        self.runtime.refresh_workspace_pr(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.refresh_workspace_pr(&owner, id).await
     }
 
     pub async fn start_watch(
@@ -667,6 +725,10 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
     ) -> Result<Option<tidebreak_core::CodeWatch>, ServerError> {
+        let workspace = self.require_workspace_management(id).await?;
+        if workspace.owner != self.owner {
+            return Ok(None);
+        }
         self.runtime.latest_watch(&self.owner, id).await
     }
 
@@ -674,14 +736,16 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
     ) -> Result<gh::PrComments, ServerError> {
-        self.runtime.workspace_pr_comments(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.workspace_pr_comments(&owner, id).await
     }
 
     pub async fn workspace_check_logs(
         &self,
         id: WorkspaceId,
     ) -> Result<(Option<String>, super::ci_logs::WrittenCheckLogs), ServerError> {
-        self.runtime.workspace_check_logs(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.workspace_check_logs(&owner, id).await
     }
 
     pub async fn merge_workspace_pr(
@@ -692,8 +756,9 @@ impl ScopedCode {
         method: gh::MergeMethod,
         auto: bool,
     ) -> Result<super::runtime::WorkspaceMergeOutcome, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
         self.runtime
-            .merge_workspace_pr(&self.owner, id, target, expected_head_sha, method, auto)
+            .merge_workspace_pr(&owner, id, target, expected_head_sha, method, auto)
             .await
     }
 
@@ -701,7 +766,8 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        self.runtime.mark_workspace_pr_ready(&self.owner, id).await
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.mark_workspace_pr_ready(&owner, id).await
     }
 
     pub async fn create_workspace_pr(
@@ -710,8 +776,9 @@ impl ScopedCode {
         title: Option<String>,
         body: Option<String>,
     ) -> Result<WorkspaceGitStatus, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
         self.runtime
-            .create_workspace_pr(&self.owner, id, title, body)
+            .create_workspace_pr(&owner, id, title, body)
             .await
     }
 

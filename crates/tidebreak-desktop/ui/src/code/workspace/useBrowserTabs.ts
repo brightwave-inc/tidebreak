@@ -31,10 +31,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
  */
 export function useBrowserTabs({
   workspaceId,
+  enabled = true,
   layout,
   setLayout,
 }: {
   workspaceId: string;
+  enabled?: boolean;
   layout: LayoutState;
   setLayout: (next: LayoutState) => void;
 }) {
@@ -51,16 +53,18 @@ export function useBrowserTabs({
 
   const closeBrowserPanels = useCallback(
     (browserIds: readonly string[]) => {
+      if (!enabled) return;
       for (const browserId of browserIds) {
         if (closedBrowserIdsRef.current.has(browserId)) continue;
         closedBrowserIdsRef.current.add(browserId);
         void closeCodeBrowser(workspaceId, browserId);
       }
     },
-    [workspaceId],
+    [workspaceId, enabled],
   );
 
   useEffect(() => {
+    if (!enabled) return;
     const empty = layout.tabs.length === 0 && !layout.editorSplit?.tabs.length;
     if (!restorationCheckedRef.current) {
       restorationCheckedRef.current = true;
@@ -97,9 +101,10 @@ export function useBrowserTabs({
       if (Object.keys(current).length !== ids.length) changed = true;
       return changed ? next : current;
     });
-  }, [closeBrowserPanels, layout, setLayout, workspaceId]);
+  }, [closeBrowserPanels, layout, setLayout, workspaceId, enabled]);
 
   function openBrowser(url?: string, preferredRegion?: CodeEditorRegion) {
+    if (!enabled) return;
     const browserId = crypto.randomUUID();
     seedBrowserSession({
       browserId,
@@ -132,7 +137,8 @@ export function useBrowserTabs({
   const setLayoutRef = useRef(setLayout);
   setLayoutRef.current = setLayout;
   useEffect(() => {
-    if (attachedRemotely() || !nativeCodeBrowserHost.available()) return;
+    if (!enabled || attachedRemotely() || !nativeCodeBrowserHost.available())
+      return;
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
     const adopt = (browserId: string, url?: string, title?: string) => {
@@ -207,7 +213,7 @@ export function useBrowserTabs({
       cancelled = true;
       unsubscribe?.();
     };
-  }, [workspaceId]);
+  }, [workspaceId, enabled]);
 
   /** The page behind a tab reported its document title. */
   function setBrowserTitle(browserId: string, title: string) {
@@ -222,7 +228,7 @@ export function useBrowserTabs({
   // another machine has no such screen to lend — sharing one with an agent that
   // is not here shares the wrong browser — so the row is absent rather than
   // present and refusing.
-  const canNewBrowser = !attachedRemotely();
+  const canNewBrowser = enabled && !attachedRemotely();
 
   return {
     browserTitles,

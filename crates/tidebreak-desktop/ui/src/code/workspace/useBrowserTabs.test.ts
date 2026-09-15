@@ -37,11 +37,11 @@ function withBrowser(layout: LayoutState, browserId: string) {
   return openCodeEditor(layout, { type: "browser", browserId });
 }
 
-function setup(initial: LayoutState, workspaceId = "ws-1") {
+function setup(initial: LayoutState, workspaceId = "ws-1", enabled = true) {
   const setLayout = vi.fn();
   const hook = renderHook(
     ({ layout }: { layout: LayoutState }) =>
-      useBrowserTabs({ workspaceId, layout, setLayout }),
+      useBrowserTabs({ workspaceId, layout, setLayout, enabled }),
     { initialProps: { layout: initial } },
   );
   return { ...hook, setLayout };
@@ -55,6 +55,22 @@ afterEach(() => {
 });
 
 describe("useBrowserTabs", () => {
+  it("does not restore or operate native browsers when workspace access excludes them", () => {
+    const { result, rerender, setLayout } = setup(
+      withBrowser(EMPTY, "b1"),
+      "ws-1",
+      false,
+    );
+    act(() => result.current.openBrowser("https://example.com"));
+    rerender({ layout: EMPTY });
+    expect(mocks.close).not.toHaveBeenCalled();
+    expect(mocks.seed).not.toHaveBeenCalled();
+    expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+    expect(setLayout).not.toHaveBeenCalled();
+    expect(result.current.canNewBrowser).toBe(false);
+  });
+
   it("titles every open browser and drops the title of a closed one", () => {
     const one = withBrowser(EMPTY, "b1");
     const { result, rerender } = setup(one);

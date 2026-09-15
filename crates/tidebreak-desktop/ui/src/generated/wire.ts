@@ -1682,9 +1682,13 @@ export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line
  */
 export type CodeWorkspaceSnapshot = {
 /**
- * True when the caller reads this workspace through a shared session.
+ * True when the caller cannot manage the workspace.
  */
 read_only?: boolean,
+/**
+ * Ownership remains necessary for host terminals and owner-only session actions.
+ */
+is_owner?: boolean,
 /**
  * Present only on creation when the base refresh could not complete.
  */

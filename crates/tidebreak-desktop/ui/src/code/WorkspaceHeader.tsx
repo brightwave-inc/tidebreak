@@ -52,7 +52,7 @@ export function WorkspaceHeader({
   reviewUnavailableReason?: string;
   terminalShortcut?: string;
   reviewShortcut?: string;
-  onToggleTerminal: () => void;
+  onToggleTerminal?: () => void;
   onToggleReview: () => void;
   overflowAction?: ReactNode;
   className?: string;
@@ -112,25 +112,27 @@ export function WorkspaceHeader({
         data-testid="workspace-header-utilities"
       >
         <div className="mx-0.5 hidden h-4 w-px bg-border-subtle min-[1100px]:block" />
-        <WithTooltip
-          label={
-            terminalOpen
-              ? `Go to terminal${shortcutSuffix(terminalShortcut)}`
-              : `New terminal${shortcutSuffix(terminalShortcut)}`
-          }
-        >
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="rounded-lg"
-            aria-pressed={terminalOpen}
-            aria-label="Terminal"
-            onClick={onToggleTerminal}
+        {onToggleTerminal && (
+          <WithTooltip
+            label={
+              terminalOpen
+                ? `Go to terminal${shortcutSuffix(terminalShortcut)}`
+                : `New terminal${shortcutSuffix(terminalShortcut)}`
+            }
           >
-            <SquareTerminal />
-          </Button>
-        </WithTooltip>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="rounded-lg"
+              aria-pressed={terminalOpen}
+              aria-label="Terminal"
+              onClick={onToggleTerminal}
+            >
+              <SquareTerminal />
+            </Button>
+          </WithTooltip>
+        )}
         <WithTooltip
           label={
             reviewUnavailableReason

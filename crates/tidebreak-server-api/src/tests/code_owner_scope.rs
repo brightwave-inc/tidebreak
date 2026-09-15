@@ -32,7 +32,7 @@ async fn two_user_code_app_with_runtime() -> (
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
-        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\ncarol {CAROL_TOKEN}\n"),
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\ncarol {CAROL_TOKEN}\nslack {SLACK_TOKEN} service\n"),
     )
     .unwrap();
     let mut registry = AdapterRegistry::new();
@@ -1119,6 +1119,36 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await
         .unwrap();
     assert_eq!(shared["read_only"], true);
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        session,
+        "principal:user:bob",
+        "contribute",
+    )
+    .await;
+    assert_eq!(
+        client
+            .patch(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .json(&serde_json::json!({"title":"Not my workspace"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
     for list_path in [
         "/code/workspaces".to_owned(),
         format!(
@@ -1285,4 +1315,218 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
             reqwest::StatusCode::NOT_FOUND
         );
     }
+}
+
+const SLACK_TOKEN: &str = "slack-service-token-for-workspace-management";
+
+/// Management borrows only a Slack service workspace. Ownership, host execution,
+/// sibling transcripts, and sharing remain separate permissions.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_workspace_management_is_scoped_and_revocable() {
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (repo_body, workspace) = register_and_workspace(&client, addr, SLACK_TOKEN, &repo).await;
+    let sessions = create_sibling_sessions(&client, addr, SLACK_TOKEN, &workspace, 2).await;
+    let id = workspace["id"].as_str().unwrap();
+    let session = &sessions[0];
+    let path = format!("/code/workspaces/{id}");
+    let owner = tidebreak_core::OwnerId::new("user:slack").unwrap();
+    let (grant, _) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    tidebreak_core::db::code::bind_external_session(
+        &runtime.db,
+        &owner,
+        grant.id,
+        "slack",
+        "T1/C1/123.45",
+        session.parse().unwrap(),
+    )
+    .await
+    .unwrap();
+    let other = runtime
+        .create_workspace(
+            &owner,
+            repo_body["id"].as_str().unwrap().parse().unwrap(),
+            Some("Unshared work".into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    for level in ["view", "contribute"] {
+        grant_access(
+            &client,
+            addr,
+            SLACK_TOKEN,
+            session,
+            "principal:user:bob",
+            level,
+        )
+        .await;
+        let snapshot: serde_json::Value = client
+            .get(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(snapshot["read_only"], level == "view");
+        assert_eq!(snapshot["is_owner"], false);
+        let listed: Vec<serde_json::Value> = client
+            .get(format!("http://{addr}/code/workspaces"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["read_only"], level == "view");
+        assert_eq!(listed[0]["is_owner"], false);
+        let renamed = client
+            .patch(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .json(&serde_json::json!({"title":"Managed from Tidebreak"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            renamed.status(),
+            if level == "view" {
+                reqwest::StatusCode::NOT_FOUND
+            } else {
+                reqwest::StatusCode::OK
+            }
+        );
+    }
+    // Workspace reads refer to the granted checkout, while repository history
+    // and sibling sessions must not borrow the service identity.
+    for suffix in ["/tree", "/file?path=README.md", "/files", "/pr"] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}{suffix}")).await,
+            reqwest::StatusCode::OK
+        );
+    }
+    for denied in [
+        format!("{path}/search?query=secret&history=true"),
+        format!("/code/workspaces/{}", other.id),
+        format!("/code/workspaces/{}/tree", other.id),
+        format!("/sessions/{}", sessions[1]),
+        format!("/sessions/{session}/access"),
+        format!("{path}/terminals"),
+        format!("/code/repos/{}", repo_body["id"].as_str().unwrap()),
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &denied).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "{denied}"
+        );
+    }
+    for suffix in ["/terminals", "/retry-setup"] {
+        assert_eq!(
+            post_status(
+                &client,
+                addr,
+                BOB_TOKEN,
+                &format!("{path}{suffix}"),
+                serde_json::json!({})
+            )
+            .await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    // The same service workspace can execute remotely. Persist the actual
+    // remote marker and assert the public API never treats it as a host tree.
+    let mut remote_workspace = runtime
+        .get_workspace(&owner, id.parse().unwrap())
+        .await
+        .unwrap();
+    remote_workspace.worktree_path = CodeWorkspace::remote_worktree_marker(remote_workspace.id);
+    tidebreak_core::db::code::save_workspace(&runtime.db, &remote_workspace)
+        .await
+        .unwrap();
+    // No external delegation gateway is installed in this fixture. A remote
+    // PR read reaches the scoped runtime and reports that missing connection.
+    let remote_pr = client
+        .get(format!("http://{addr}{path}/pr"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(remote_pr.status(), reqwest::StatusCode::CONFLICT);
+    let remote_pr: serde_json::Value = remote_pr.json().await.unwrap();
+    assert_eq!(remote_pr["kind"], "external_reconnect_required");
+    for suffix in [
+        "/tree",
+        "/files",
+        "/diff",
+        "/file?path=README.md",
+        "/blob?path=README.md",
+    ] {
+        let response = client
+            .get(format!("http://{addr}{path}{suffix}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{suffix}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["kind"], "workspace_remote", "{suffix}: {body}");
+    }
+    let archived = client
+        .post(format!("http://{addr}{path}/archive"))
+        .bearer_auth(BOB_TOKEN)
+        .json(&serde_json::json!({"force":true}))
+        .send()
+        .await
+        .unwrap();
+    assert!(archived.status().is_success(), "{}", archived.status());
+    let archived: serde_json::Value = archived.json().await.unwrap();
+    assert_eq!(archived["read_only"], false);
+    assert_eq!(archived["is_owner"], false);
+    assert_eq!(
+        runtime
+            .get_workspace(&owner, id.parse().unwrap())
+            .await
+            .unwrap()
+            .owner,
+        owner
+    );
+
+    client
+        .delete(format!(
+            "http://{addr}/sessions/{session}/access/principal:user:bob"
+        ))
+        .bearer_auth(SLACK_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &path).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("{path}/restore"),
+            serde_json::json!({})
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND
+    );
 }
