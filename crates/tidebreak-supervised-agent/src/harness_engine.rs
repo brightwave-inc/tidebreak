@@ -512,14 +512,19 @@ impl HarnessTurn {
             // continuity, and restarting fresh on the same task would
             // silently discard the turns already reported.
             Ok(Err(error)) => {
-                return TurnEnd::Fatal {
-                    message: error.to_string(),
+                return if self.interrupted {
+                    TurnEnd::Interrupted
+                } else {
+                    TurnEnd::Fatal {
+                        message: error.to_string(),
+                    }
                 };
             }
             Ok(Ok(outcome)) => outcome,
         };
         match outcome {
             TurnOutcome::Clean => match self.sink.read() {
+                Some(Terminal::Failed) | None if self.interrupted => TurnEnd::Interrupted,
                 Some(Terminal::Failed) => TurnEnd::Completed { success: false },
                 Some(Terminal::Interrupted) => TurnEnd::Interrupted,
                 // A clean process end with no terminal event only happens on
@@ -599,10 +604,15 @@ impl TurnHandle for HarnessTurn {
     }
 
     async fn interrupt(&mut self) {
-        self.interrupted = true;
-        // The engine may already be past the point of interrupting; the next
-        // wait reports how the turn actually ended either way.
-        let _ = self.session.interrupt().await;
+        // A terminal event or completed task that predates Stop keeps its result.
+        // Native engines can report a failed request when Stop cancels a human
+        // decision. Once an active turn accepts Stop, that failure is interruption.
+        if self.ended.is_some() || self.run.is_finished() || self.sink.read().is_some() {
+            return;
+        }
+        if self.session.interrupt().await.is_ok() {
+            self.interrupted = true;
+        }
     }
 
     fn drain_steer_acks(&mut self) -> Vec<uuid::Uuid> {
@@ -964,6 +974,47 @@ mod tests {
         let mut turn = engine.start_turn(request("go")).await.unwrap();
         turn.interrupt().await;
         assert_eq!(turn.wait().await, TurnEnd::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_pending_request_keeps_native_failure_cancelled() {
+        for outcome in [
+            Ok(TurnOutcome::Clean),
+            Err(HarnessError::Other("request cancelled".into())),
+        ] {
+            let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+                events: vec![HarnessEvent::TurnFailed {
+                    error: tidebreak_core::BoundedError {
+                        message: "human request cancelled".into(),
+                    },
+                }],
+                outcome,
+                waits_for_interrupt: true,
+            }]));
+            let mut engine = engine_over(adapter, probe(true));
+            let mut turn = engine.start_turn(request("ask a question")).await.unwrap();
+            turn.interrupt().await;
+            assert_eq!(turn.wait().await, TurnEnd::Interrupted);
+            assert_eq!(turn.wait().await, TurnEnd::Interrupted);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_after_a_native_failure_preserves_the_failure() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![HarnessEvent::TurnFailed {
+                error: tidebreak_core::BoundedError {
+                    message: "model refused".into(),
+                },
+            }],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        tokio::task::yield_now().await;
+        turn.interrupt().await;
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: false });
     }
 
     /// Some engines acknowledge an interrupt in their own stream and still

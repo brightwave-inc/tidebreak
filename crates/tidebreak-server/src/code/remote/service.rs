@@ -49,9 +49,9 @@ const PUMP_FAULT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5
 /// Ceiling on the wait between pump retries while faults persist.
 const PUMP_FAULT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long promotion leaves a session alone after a machine-side refusal
-/// (cap full, sign-in needed). Refusals journal a notice and poke attention;
-/// retrying every sweep tick would repeat both every two seconds.
+/// How long promotion leaves a session alone after a transport or sign-in
+/// refusal. Local capacity admission retries at the next sweep without
+/// repeating its notice.
 const PROMOTION_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Resolve one deployment's remote spawn settings from boot configuration.
@@ -1265,10 +1265,9 @@ mod tests {
         assert_eq!(promoted.id, stale.id);
     }
 
-    /// A cap-refused promotion holds instead of re-journaling the refusal
-    /// every sweep tick.
+    /// Capacity retries stay quiet and start once a terminal pump frees a slot.
     #[tokio::test]
-    async fn a_refused_promotion_holds_instead_of_spamming() {
+    async fn capacity_retries_stay_quiet_and_resume_when_a_slot_is_free() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
         let remote = runtime.remote_sessions().unwrap();
@@ -1278,6 +1277,7 @@ mod tests {
             .unwrap();
         // Session A holds every cap slot (the test settings cap is 2; take
         // both through direct core reservations).
+        let mut occupied = Vec::new();
         for _ in 0..2 {
             let filler = runtime
                 .create_remote_session(
@@ -1304,6 +1304,7 @@ mod tests {
             tidebreak_core::db::code::activate_incarnation(&runtime.db, &owner, row.id, "sb-x")
                 .await
                 .unwrap();
+            occupied.push(filler);
         }
         // Session B is idle with a queued head the sweep wants to promote.
         let blocked = runtime
@@ -1335,7 +1336,7 @@ mod tests {
         .unwrap();
 
         runtime.promote_remote_queue_heads().await.unwrap();
-        assert!(remote.promotion_held(blocked.id));
+        assert!(!remote.promotion_held(blocked.id));
         let notices = |events: &[tidebreak_core::code::SequencedEvent]| {
             events
                 .iter()
@@ -1348,8 +1349,7 @@ mod tests {
             .events;
         assert_eq!(notices(&events), 1);
 
-        // The next tick skips the held session: no second notice, the row
-        // stays queued.
+        // The next tick retries admission without repeating its notice.
         runtime.promote_remote_queue_heads().await.unwrap();
         let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, blocked.id, 0, 50)
             .await
@@ -1358,6 +1358,42 @@ mod tests {
         assert_eq!(notices(&events), 1);
         let (queued_rows, _) = runtime.list_queued_turns(&owner, blocked.id).await.unwrap();
         assert_eq!(queued_rows.len(), 1);
+
+        // Releasing a slot still requires the normal durable terminal pump.
+        // No timer or UI attention value closes the incarnation early.
+        let mut finished = occupied.remove(0);
+        _fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-x".into(),
+            state: SandboxState::Completed,
+            events: vec![SandboxEvent {
+                seq: 1,
+                kind: "supervisor_stopped".into(),
+                payload: serde_json::json!({"reason":"idle_ceiling"}),
+                created_at: String::new(),
+            }],
+            latest_event_seq: 1,
+        });
+        let report = remote
+            .driver(&runtime.db, runtime.bus.as_ref())
+            .pump(&mut finished, 0)
+            .await
+            .unwrap();
+        assert!(report.incarnation_stopped);
+        let closed = tidebreak_core::db::code::latest_incarnation(&runtime.db, &owner, finished.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.state, IncarnationState::Stopped);
+        assert!(closed.terminal_events_journaled);
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, blocked.id).await.unwrap();
+        assert!(queued_rows.is_empty());
+        let turn = latest_turn(&runtime.db, &owner, blocked.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.user_input, "waiting");
+        assert_eq!(_fake.spawns.lock().unwrap().len(), 1);
     }
 
     /// A spend-exhausted promotion pauses the queue: the condition is

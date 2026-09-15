@@ -1,7 +1,8 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot, CodeApprovalDecision } from "../api/types";
 import { UserQuestionsCard } from "../UserQuestionsCard";
+import { MessageMarkdown } from "../MessageMarkdown";
 import { toolPreviewPresentation } from "../ToolPreview";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -15,9 +16,8 @@ import { MiddleTruncate } from "./MiddleTruncate";
 
 /**
  * Parked engine approval. The normalized kind leads so the reader can decide;
- * the harness payload stays behind a disclosure so the card does not paraphrase
- * what the engine asked (decision 0033). Deny opens a feedback field the model
- * will see.
+ * the exact action or plan stays visible and the harness envelope stays behind
+ * a disclosure (decision 0033). Deny opens a feedback field the agent sees.
  */
 export function CodeApprovalCard({
   approval,
@@ -87,7 +87,7 @@ export function CodeApprovalCard({
 
   return (
     <section
-      className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
+      className="bg-background flex min-w-0 max-w-prose flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
       data-testid="code-approval-card"
@@ -98,7 +98,7 @@ export function CodeApprovalCard({
         </h3>
         <ApprovalState approval={approval} />
       </div>
-      <ApprovalKindBody approval={approval} />
+      <ApprovalKindBody approval={approval} onReveal={onReveal} />
       <ApprovalTimes
         requestedAt={approval.requested_at}
         decidedAt={approval.decided_at}
@@ -240,7 +240,13 @@ function ApprovalState({ approval }: { approval: CodeApprovalSnapshot }) {
   return null;
 }
 
-function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
+function ApprovalKindBody({
+  approval,
+  onReveal,
+}: {
+  approval: CodeApprovalSnapshot;
+  onReveal?: () => void;
+}) {
   switch (approval.kind.type) {
     case "command":
       return (
@@ -296,14 +302,106 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
           ))}
         </ul>
       );
-    case "plan":
+    case "plan": {
+      const proposal = planProposal(approval.harness_raw_json);
       return (
-        <p className="text-muted-foreground text-md break-words">
-          The engine proposed a plan. Accepting moves the session to{" "}
-          <span className="font-mono">{approval.kind.proposed_mode}</span>.
-        </p>
+        <div className="flex min-w-0 flex-col gap-3">
+          {proposal && (
+            <>
+              <h4 className="text-md font-medium break-words">
+                {proposal.title}
+              </h4>
+              <PlanPreview plan={proposal.plan} onReveal={onReveal} />
+            </>
+          )}
+          <p className="text-muted-foreground text-md break-words">
+            {proposal ? "Accepting" : "The engine proposed a plan. Accepting"}{" "}
+            moves the session to{" "}
+            <span className="font-mono">{approval.kind.proposed_mode}</span>.
+          </p>
+        </div>
       );
+    }
   }
+}
+
+function PlanPreview({
+  plan,
+  onReveal,
+}: {
+  plan: string;
+  onReveal?: () => void;
+}) {
+  const region = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const element = region.current;
+    if (!element) return;
+    const measure = () => {
+      setOverflowing(element.scrollHeight > element.clientHeight);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [plan, expanded]);
+
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <div
+        ref={region}
+        role="region"
+        aria-label="Proposed plan"
+        tabIndex={0}
+        className={cn(
+          "bg-muted min-w-0 overflow-auto rounded-md p-3 break-words",
+          !expanded && "max-h-96",
+          FOCUS_RING,
+        )}
+      >
+        <MessageMarkdown>{plan}</MessageMarkdown>
+      </div>
+      {(overflowing || expanded) && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="self-start"
+          aria-expanded={expanded}
+          onClick={() => {
+            onReveal?.();
+            setExpanded((current) => !current);
+          }}
+        >
+          {expanded ? "Show less" : "Show full plan"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** The canonical PlanProposalBody lives in the approval payload, not its kind. */
+function planProposal(raw: string): { title: string; plan: string } | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "title" in value &&
+      typeof value.title === "string" &&
+      value.title.trim().length > 0 &&
+      "plan" in value &&
+      typeof value.plan === "string" &&
+      value.plan.trim().length > 0
+    ) {
+      return { title: value.title, plan: value.plan };
+    }
+  } catch {
+    // Older native approvals may carry an unstructured harness payload.
+  }
+  return null;
 }
 
 function ApprovalTimes({

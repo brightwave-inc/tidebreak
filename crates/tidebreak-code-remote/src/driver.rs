@@ -43,6 +43,11 @@ use super::{
 /// does not hold a concurrency slot for an afternoon.
 const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 
+/// Keep a completed conversation warm briefly, then let the environment
+/// checkpoint and release it. Active turns, including human decisions, report
+/// non-idle; the next user message resumes the durable session on demand.
+const SUPERVISED_IDLE_TIMEOUT_SECONDS: u32 = 60;
+
 /// Whether a steering failure proves that transport never received the frame.
 #[derive(Debug)]
 pub enum SteerDispatchError {
@@ -284,18 +289,34 @@ async fn refusal_notice(
     message: String,
     attention: &str,
 ) -> Result<(), tidebreak_core::AgentError> {
-    journal_event(
-        db,
-        bus,
-        &session.owner,
-        session.id,
-        session.spawn_epoch,
-        tidebreak_core::Event::HarnessNotice {
-            level: tidebreak_core::HarnessNoticeLevel::Warning,
-            message,
-        },
-    )
-    .await;
+    // A capacity retry has no native event to advance this journal. Keep its
+    // reason durable once until the reason changes or a turn actually starts.
+    let repeated = tidebreak_core::db::code::list_recent_events(db, &session.owner, session.id, 1)
+        .await?
+        .first()
+        .is_some_and(|entry| {
+            matches!(
+                &entry.event,
+                tidebreak_core::Event::HarnessNotice {
+                    level: tidebreak_core::HarnessNoticeLevel::Warning,
+                    message: previous,
+                } if previous == &message
+            )
+        });
+    if !repeated {
+        journal_event(
+            db,
+            bus,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            tidebreak_core::Event::HarnessNotice {
+                level: tidebreak_core::HarnessNoticeLevel::Warning,
+                message,
+            },
+        )
+        .await;
+    }
     apply_attention(
         db,
         bus,
@@ -856,7 +877,7 @@ impl RemoteDriver<'_> {
                     bus,
                     session,
                     format!(
-                        "The turn was refused: all {} sandbox slots are in use by {}. Stop one of those sessions to continue, or ask the deployment operator to raise TIDEBREAK_RUNTIME_CONCURRENCY_CAP and restart Tidebreak.",
+                        "All {} sandbox slots are in use by {}. Queued messages start when a slot is free. Completed sandboxes release their slots after a short idle period.",
                         settings.incarnation_cap, names
                     ),
                     "the sandbox cap refused this turn",
@@ -925,7 +946,7 @@ impl RemoteDriver<'_> {
                 .map(|effort| effort.as_str().to_owned()),
             subscription: None,
             inference_sponsor,
-            idle_timeout_seconds: None,
+            idle_timeout_seconds: settings.engine.map(|_| SUPERVISED_IDLE_TIMEOUT_SECONDS),
             wall_clock_timeout_seconds: None,
             spend_ceiling_microusd: settings.spend_ceiling_microusd,
             max_turns: None,
@@ -2881,6 +2902,7 @@ mod tests {
             })
         );
         assert_eq!(spawns[0].harness, "custom");
+        assert_eq!(spawns[0].idle_timeout_seconds, Some(60));
     }
 
     /// A first turn on a fresh remote session reserves, spawns from the
@@ -2921,6 +2943,7 @@ mod tests {
         assert_eq!(spawns[0].repository_ref.as_deref(), Some("main"));
         assert_eq!(spawns[0].task, "build it");
         assert!(spawns[0].embedded_engine.is_none());
+        assert_eq!(spawns[0].idle_timeout_seconds, None);
         assert_eq!(spawns[0].mode.as_deref(), Some("turn"));
         assert_eq!(spawns[0].spend_ceiling_microusd, Some(5_000_000));
         assert_eq!(session.lifecycle, SessionLifecycle::Running);
@@ -3469,9 +3492,8 @@ mod tests {
         // recognizes, not by a session id, which they do not.
         assert!(notice.contains("remote"), "{notice}");
         assert!(!notice.contains(&session_a.id.to_string()), "{notice}");
-        assert!(notice.contains("Stop one of those sessions"), "{notice}");
         assert!(
-            notice.contains("TIDEBREAK_RUNTIME_CONCURRENCY_CAP"),
+            notice.contains("Queued messages start when a slot is free"),
             "{notice}"
         );
         let live = get_session(&db, &session_b.owner, session_b.id)

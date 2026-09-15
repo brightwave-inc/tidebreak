@@ -146,7 +146,7 @@ describe("ConnectApprovalView", () => {
   });
 });
 
-it("requires an explicit channel sponsorship choice with visible consent", async () => {
+it("defaults a fresh connection to sponsorship and preserves an opt-out on retry", async () => {
   const onApprove = vi.fn();
   const user = userEvent.setup();
   const supported = { ...page, inference_sponsorship_supported: true };
@@ -162,15 +162,26 @@ it("requires an explicit channel sponsorship choice with visible consent", async
   const checkbox = screen.getByRole("checkbox", {
     name: /including teammates’ later replies/,
   });
-  expect(checkbox).not.toBeChecked();
-  await user.click(screen.getByRole("button", { name: "Yes, this is me" }));
-  expect(onApprove).toHaveBeenLastCalledWith({ enabled: false });
-  await user.click(checkbox);
+  expect(checkbox).toBeChecked();
+  expect(screen.getByText(/Channel sponsorship starts on/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Yes, this is me" }));
   expect(onApprove).toHaveBeenLastCalledWith({
     enabled: true,
     consent_version: 1,
   });
+  await user.click(checkbox);
+  view.rerender(
+    <ConnectApprovalView
+      page={supported}
+      phase="ready"
+      error="The connect request could not be approved. Try again."
+      onApprove={onApprove}
+      onRetry={() => {}}
+    />,
+  );
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Yes, this is me" }));
+  expect(onApprove).toHaveBeenLastCalledWith({ enabled: false });
   view.rerender(
     <ConnectApprovalView
       page={{ ...supported, csrf: "another-handshake" }}
@@ -180,5 +191,5 @@ it("requires an explicit channel sponsorship choice with visible consent", async
       onRetry={() => {}}
     />,
   );
-  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(screen.getByRole("checkbox")).toBeChecked();
 });

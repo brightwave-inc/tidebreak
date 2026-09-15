@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -152,6 +158,126 @@ describe("CodeApprovalCard", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
   });
+
+  it.each(["pending", "approved"] as const)(
+    "shows the exact native plan from the stored payload while %s",
+    (state) => {
+      render(
+        <CodeApprovalCard
+          approval={{
+            ...pendingPlan,
+            state,
+            harness_raw_json: JSON.stringify({
+              title: "Verify the hosted approval",
+              plan: "## Verification\n\n1. Inspect the pending request.\n2. Run `printf TB-PLAN`.\n\nDo not change any repository files.",
+            }),
+          }}
+          onDecide={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("heading", { name: "Verify the hosted approval" }),
+      ).toBeVisible();
+      const plan = within(
+        screen.getByRole("region", { name: "Proposed plan" }),
+      );
+      expect(plan.getByRole("heading", { name: "Verification" })).toBeVisible();
+      expect(plan.getAllByRole("listitem")).toHaveLength(2);
+      expect(plan.getByText("printf TB-PLAN").tagName).toBe("CODE");
+      expect(
+        plan.getByText("Do not change any repository files."),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Harness payload" }),
+      ).toHaveAttribute("aria-expanded", "false");
+      if (state === "approved") {
+        expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+      }
+    },
+  );
+
+  it("keeps a long plan complete beyond the raw payload preview limit", () => {
+    render(
+      <CodeApprovalCard
+        approval={{
+          ...pendingPlan,
+          harness_raw_json: JSON.stringify({
+            title: "A complete plan",
+            plan: `${"Review the next step.\n\n".repeat(1100)}Final condition: remove the temporary output.`,
+          }),
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    const plan = screen.getByRole("region", { name: "Proposed plan" });
+    expect(plan.textContent!.length).toBeGreaterThan(MAX_PAYLOAD_CHARS);
+    expect(
+      within(plan).getByText("Final condition: remove the temporary output."),
+    ).toBeVisible();
+    expect(plan).toHaveAttribute("tabindex", "0");
+  });
+
+  it("lets the reader expand and collapse an overflowing plan", () => {
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(800);
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(336);
+    const onReveal = vi.fn();
+    try {
+      render(
+        <CodeApprovalCard
+          approval={{
+            ...pendingPlan,
+            harness_raw_json: JSON.stringify({
+              title: "Review all steps",
+              plan: "Read the complete plan before approving.",
+            }),
+          }}
+          onDecide={vi.fn()}
+          onReveal={onReveal}
+        />,
+      );
+      const region = screen.getByRole("region", { name: "Proposed plan" });
+      fireEvent.click(screen.getByRole("button", { name: "Show full plan" }));
+      expect(region).not.toHaveClass("max-h-96");
+      expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      expect(onReveal).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+      expect(region).toHaveClass("max-h-96");
+    } finally {
+      scrollHeight.mockRestore();
+      clientHeight.mockRestore();
+    }
+  });
+
+  it.each([
+    "",
+    "not json",
+    "null",
+    "[]",
+    '{"title":"Plan","plan":5}',
+    '{"title":"Plan","plan":"  "}',
+  ])(
+    "keeps legacy or malformed plan payloads readable without crashing: %s",
+    (harness_raw_json) => {
+      render(
+        <CodeApprovalCard
+          approval={{ ...pendingPlan, harness_raw_json }}
+          onDecide={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("Approve this plan?")).toBeVisible();
+      expect(
+        screen.queryByRole("region", { name: "Proposed plan" }),
+      ).toBeNull();
+      expect(screen.getByText("auto")).toBeVisible();
+    },
+  );
 
   it("leads with the command and keeps the harness payload collapsed", () => {
     render(<CodeApprovalCard approval={pendingCommand} onDecide={vi.fn()} />);

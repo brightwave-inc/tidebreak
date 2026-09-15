@@ -119,8 +119,8 @@ export function ConnectApprovalView({
   onRetry: () => void;
 }) {
   const consentId = useId();
-  const [sponsorChannels, setSponsorChannels] = useState(false);
-  useEffect(() => setSponsorChannels(false), [page?.csrf]);
+  const [sponsorChannels, setSponsorChannels] = useState(true);
+  useEffect(() => setSponsorChannels(true), [page?.csrf]);
   // The same shell as the hosted sign-in screen: a person arrives here
   // from a Slack card, often on a machine they have never opened, and the
   // page must say whose it is before it asks "is this you?".
@@ -211,9 +211,10 @@ export function ConnectApprovalView({
                       </label>
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      This is optional. You can enable or withdraw consent in
-                      your subscription settings. Repository and tool access
-                      stay with the channel’s connection.
+                      Channel sponsorship starts on for this connection. Clear
+                      the checkbox to turn it off. You can change this in your
+                      subscription settings. Repository and tool access stay
+                      with the channel’s connection.
                     </p>
                   </div>
                 ) : (

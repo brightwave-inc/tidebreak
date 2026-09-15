@@ -151,14 +151,92 @@ export const Questions: Story = {
   },
 };
 
+const nativePlan: CodeApprovalSnapshot = {
+  ...pending,
+  kind: { type: "plan", proposed_mode: "allow" },
+  harness_raw_json: JSON.stringify({
+    title: "Verify the hosted approval flow",
+    plan: [
+      "## Proposed steps",
+      "1. Inspect the pending approval and confirm its conversation identity.",
+      "2. After you approve, run the bounded command:",
+      "```sh\nprintf 'TB-PLAN-EXECUTED\\n'\n```",
+      "3. Report the command output once in this thread.",
+      "## Limits",
+      "Do not clone a repository, edit files, or start background work.",
+    ].join("\n\n"),
+  }),
+};
+
 export const Plan: Story = {
+  args: { approval: nativePlan },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("heading", { name: "Verify the hosted approval flow" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("region", { name: "Proposed plan" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Harness payload" }),
+    ).toHaveAttribute("aria-expanded", "false");
+  },
+};
+
+export const PlanLong: Story = {
   args: {
     approval: {
-      ...pending,
-      kind: { type: "plan", proposed_mode: "auto" },
-      harness_raw_json: "",
+      ...nativePlan,
+      harness_raw_json: JSON.stringify({
+        title:
+          "Verify the hosted approval flow across retries and session recovery",
+        plan: [
+          "## Scope",
+          "Check the pending decision in Slack and the hosted workspace. Keep the same approval identifier throughout the test.",
+          ...Array.from(
+            { length: 7 },
+            (_, index) =>
+              `### Check ${index + 1}\n\n1. Read the pending state and record the conversation identifier.\n2. Reload the hosted workspace and confirm that the exact plan remains readable.\n3. Verify that no command executes before you approve.`,
+          ),
+          "## Final check",
+          "Report the result once and release the test resources.",
+        ].join("\n\n"),
+      }),
     },
   },
+};
+
+export const PlanExpanded: Story = {
+  args: PlanLong.args,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Show full plan" }),
+    );
+    await expect(
+      canvas.getByRole("button", { name: "Show less" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  },
+};
+
+export const PlanDeciding: Story = {
+  args: { approval: nativePlan, deciding: true },
+};
+
+export const PlanDecisionFailed: Story = {
+  args: {
+    approval: nativePlan,
+    error: "Your decision could not be saved. The plan has not run. Try again.",
+  },
+};
+
+export const PlanReadOnly: Story = {
+  args: { approval: nativePlan, canDecide: false },
+};
+
+export const PlanWithoutBody: Story = {
+  args: { approval: { ...nativePlan, harness_raw_json: "" } },
 };
 
 export const QuestionsSelected: Story = {

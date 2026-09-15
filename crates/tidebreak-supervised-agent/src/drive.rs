@@ -1648,6 +1648,82 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn human_questions_and_plans_stay_non_idle_past_the_idle_window() {
+        use tidebreak_core::code::{SupervisorToolRequest, SupervisorToolTurn};
+        for (tool, arguments) in [
+            (
+                "ask_user_questions",
+                serde_json::json!({"questions":[{
+                    "id":"target", "header":"Target", "question":"Which target?",
+                    "allow_free_form":true,
+                }]}),
+            ),
+            (
+                "request_plan_approval",
+                serde_json::json!({"title":"Check status", "plan":"Run the read-only status check and report the result. Do not change any files."}),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let bridge = LocalToolBridge::start(root.path()).unwrap();
+            let socket = bridge.socket_path();
+            let (state, url) = start_supervisor().await;
+            let mut driver =
+                driver(MockEngine::new(), &url, &inputs("turn", None)).with_tool_bridge(bridge);
+            driver
+                .bridge
+                .as_mut()
+                .unwrap()
+                .begin_turn(SupervisorToolTurn {
+                    native_turn: 1,
+                    runtime_id: driver.runtime_id,
+                });
+            let helper = tokio::spawn(async move {
+                crate::tool_bridge::call(
+                    &socket,
+                    &SupervisorToolRequest {
+                        cancelled: false,
+                        turn: None,
+                        request_id: "long-question".into(),
+                        tool: tool.into(),
+                        arguments,
+                    },
+                )
+                .await
+            });
+            for _ in 0..100 {
+                driver.poll(false).await.unwrap();
+                if driver.bridge.as_ref().unwrap().waiting_for_human() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                driver.bridge.as_ref().unwrap().waiting_for_human(),
+                "{tool}"
+            );
+            // Move beyond both the 60-second idle ceiling and the delayed-form
+            // acceptance canary. Resume time before HTTP I/O can auto-advance it.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(151)).await;
+            tokio::time::resume();
+            assert!(
+                !helper.is_finished(),
+                "human input cannot expire at an idle ceiling"
+            );
+            driver.poll(true).await.unwrap();
+            assert_eq!(state.lock().unwrap().polls.last().unwrap()["idle"], false);
+            assert!(driver.stop_reason.is_none());
+            driver.bridge.as_mut().unwrap().end_turn();
+            assert!(helper.await.unwrap().is_err());
+            driver.poll(false).await.unwrap();
+            assert_eq!(state.lock().unwrap().polls.last().unwrap()["idle"], false);
+            driver.poll(true).await.unwrap();
+            assert_eq!(state.lock().unwrap().polls.last().unwrap()["idle"], true);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn native_reply_bypasses_refused_steer_without_skipping_its_acknowledgment() {
         use tidebreak_core::code::supervisor_tools::{
             encode_result_frames, SupervisorArtifact, SupervisorToolResult,
