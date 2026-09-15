@@ -16,6 +16,8 @@ import {
   EmptyState,
   SpendMeter,
 } from "../src/components/Console";
+import { ConsoleLink } from "../src/components/Admin";
+import { ownerDirectory, ownerLabel } from "../src/lib/admin";
 import { phaseChip } from "../src/lib/consoleLabels";
 import { relative } from "../src/lib/consoleTime";
 import type { SandboxView } from "../src/lib/consoleTypes";
@@ -31,11 +33,14 @@ import {
   statesForGroups,
 } from "../src/lib/sandboxStatus";
 import type { SandboxStatusGroupKey } from "../src/lib/sandboxStatus";
+import { administers } from "../src/lib/sections";
 import {
+  adminQueries,
   isSandboxesNotEnabled,
   meQueries,
   sandboxQueries,
 } from "../src/session/consoleQueries";
+import { useActiveConnection } from "../src/session/store";
 
 function StatusChips({
   selected,
@@ -87,10 +92,12 @@ function StatusChips({
 
 function SandboxRow({
   sandbox,
+  owner,
   attention,
   onPress,
 }: {
   sandbox: SandboxView;
+  owner?: string | undefined;
   attention: boolean;
   onPress: () => void;
 }) {
@@ -130,43 +137,84 @@ function SandboxRow({
           ceilingMicroUsd={sandbox.spend_ceiling_microusd}
         />
         <Text className="text-xs text-muted-foreground">
-          started {relative(sandbox.created_at)}
+          {owner ? `${owner} · ` : ""}started {relative(sandbox.created_at)}
         </Text>
       </Card>
     </Pressable>
   );
 }
 
+/** Whose runs the list is showing. Administrators only: a member has one scope. */
+function ScopeTab({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      className={`min-h-11 flex-1 items-center justify-center rounded-lg border ${
+        active ? "border-primary bg-primary" : "border-border bg-background"
+      }`}
+    >
+      <Text
+        className={`text-sm font-medium ${
+          active ? "text-primary-foreground" : "text-muted-foreground"
+        }`}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 /**
- * The caller's own runs.
+ * The run list: one's own by default, the whole installation for an
+ * administrator who asks.
  *
- * Deliberately not a fleet view: the read is pinned to the signed-in account,
- * so an administrator sees their own runs here exactly as a member does. The
- * installation-wide list, its owner attribution, and the administrator cancel
- * belong to slice #3402.
+ * An administrator's unscoped read is installation-wide — the server widens
+ * it, not the client — which is the point of the Everyone tab but also means
+ * the rows are not all the reader's own. Hence the owner line: a list of other
+ * people's runs that never says whose is a list that quietly invites
+ * misreading.
  */
 export default function SandboxesScreen() {
   const router = useRouter();
+  const connection = useActiveConnection();
+  const isAdmin = administers(connection);
   const [selected, setSelected] = useState<SandboxStatusGroupKey[]>([
     ...ALL_STATUS_GROUP_KEYS,
   ]);
+  const [mineOnly, setMineOnly] = useState(true);
   const [filter, setFilter] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
   const me = useQuery(meQueries.identity());
   const viewerId = me.data?.user_id;
 
+  // A member is always narrowed to themself; "Everyone" drops the parameter
+  // and lets the server's installation-wide widening answer.
+  const scopedToSelf = !isAdmin || mineOnly;
   const query = useQuery({
     ...sandboxQueries.list({
-      ...(viewerId ? { ownerId: viewerId } : {}),
+      ...(scopedToSelf && viewerId ? { ownerId: viewerId } : {}),
       states: statesForGroups(selected),
     }),
-    // Before the identity resolves there is no id to narrow with, and asking
-    // unscoped would answer an administrator's whole installation under a
-    // screen that says otherwise.
-    enabled: !!viewerId,
+    // Narrowing to self before the identity resolves has no id to narrow with,
+    // and asking unscoped would answer an administrator's whole installation
+    // under a control that says otherwise. The fleet read needs no id.
+    enabled: !scopedToSelf || !!viewerId,
   });
   const concurrency = useQuery(sandboxQueries.concurrency());
+  // Names for the owner line. The directory read is refused for a member, and
+  // a member's rows are all their own, so there is nothing to disambiguate.
+  const people = useQuery({ ...adminQueries.people(), enabled: isAdmin });
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -174,6 +222,11 @@ export default function SandboxesScreen() {
       () => setRefreshing(false),
     );
   }, [query, concurrency]);
+
+  const ownerNames = useMemo(
+    () => ownerDirectory(people.data?.data ?? []),
+    [people.data],
+  );
 
   const fetched = query.data?.data ?? [];
 
@@ -209,6 +262,9 @@ export default function SandboxesScreen() {
         sandbox.profile_name,
         sandbox.harness,
         sandbox.repository_url,
+        // The rendered label rather than the directory lookup, so a row that
+        // fell back to an id prefix is still reachable by typing it.
+        ownerLabel(sandbox.user_id, ownerNames, viewerId),
       ),
     );
     // Parked runs first, newest-first order preserved inside each half: the
@@ -218,7 +274,7 @@ export default function SandboxesScreen() {
       ...matched.filter((s) => needsAttention(s, viewerId)),
       ...matched.filter((s) => !needsAttention(s, viewerId)),
     ];
-  }, [inSelection, filter, viewerId]);
+  }, [inSelection, filter, ownerNames, viewerId]);
 
   if (isSandboxesNotEnabled(query.error)) {
     return (
@@ -241,6 +297,18 @@ export default function SandboxesScreen() {
       ? `${statusWords.slice(0, -1).join(", ")} or ${statusWords[statusWords.length - 1]}`
       : statusWords.join("");
   const occupancy = concurrency.data?.data;
+  // Which scope the empty copy is talking about. An administrator's tab is
+  // easy to lose track of, and a bare "No sandboxes" under Mine would read as
+  // a claim about the whole installation. A member has only one scope, so
+  // their copy names none.
+  const scopePhrase = !isAdmin
+    ? ""
+    : mineOnly
+      ? " of yours"
+      : " in this installation";
+  const scopedNoun = scopedToSelf
+    ? "your sandboxes"
+    : "the installation’s sandboxes";
 
   return (
     <SafeAreaView className="flex-1 bg-page-background" edges={["bottom"]}>
@@ -253,6 +321,7 @@ export default function SandboxesScreen() {
         renderItem={({ item }) => (
           <SandboxRow
             sandbox={item}
+            owner={ownerLabel(item.user_id, ownerNames, viewerId)}
             attention={needsAttention(item, viewerId)}
             onPress={() =>
               router.push({ pathname: "/sandbox/[id]", params: { id: item.id } })
@@ -272,11 +341,29 @@ export default function SandboxesScreen() {
             <TextInput
               value={filter}
               onChangeText={setFilter}
-              placeholder="Filter by task, repo, or profile"
+              placeholder={
+                isAdmin && !mineOnly
+                  ? "Filter by task, repo, profile, or owner"
+                  : "Filter by task, repo, or profile"
+              }
               placeholderTextColor="#697386"
               accessibilityLabel="Filter sandboxes"
               className="min-h-11 rounded-lg border border-border bg-background px-3 py-2.5 text-base text-foreground"
             />
+            {isAdmin ? (
+              <View className="flex-row gap-2">
+                <ScopeTab
+                  label="Mine"
+                  active={mineOnly}
+                  onPress={() => setMineOnly(true)}
+                />
+                <ScopeTab
+                  label="Everyone"
+                  active={!mineOnly}
+                  onPress={() => setMineOnly(false)}
+                />
+              </View>
+            ) : null}
             {occupancy ? (
               <View className="gap-1">
                 <Text className="text-xs text-muted-foreground">
@@ -296,9 +383,9 @@ export default function SandboxesScreen() {
           </View>
         }
         ListEmptyComponent={
-          query.isLoading || !viewerId ? null : query.isError ? (
+          query.isLoading || (scopedToSelf && !viewerId) ? null : query.isError ? (
             <EmptyState
-              title="Couldn’t load your sandboxes"
+              title={`Couldn’t load ${scopedNoun}`}
               {...(query.error instanceof Error
                 ? { detail: query.error.message }
                 : {})}
@@ -306,11 +393,11 @@ export default function SandboxesScreen() {
           ) : searching ? (
             <EmptyState
               title="Nothing matches this search"
-              detail={`No run’s task, repository, or profile matches “${filter.trim()}”.`}
+              detail={`No run’s task, repository, profile, or owner matches “${filter.trim()}”.`}
             />
           ) : allStatuses ? (
             <EmptyState
-              title="No sandboxes"
+              title={`No sandboxes${scopePhrase}`}
               detail="Hand a task to a sandbox from a harness and it appears here."
             />
           ) : (
@@ -318,10 +405,20 @@ export default function SandboxesScreen() {
             // what is absent and points at the control rather than claiming
             // that widening would reveal anything.
             <EmptyState
-              title={`No ${statusPhrase} runs`}
+              title={`No ${statusPhrase} runs${scopePhrase}`}
               detail="Other statuses are behind the chips above."
             />
           )
+        }
+        ListFooterComponent={
+          /* The console's sandbox index is administrator-only, so the hand-off
+             is offered only to one. Spawning, and every fleet verb beyond the
+             cancel on a run's own page, lives there. */
+          isAdmin ? (
+            <View className="pt-1">
+              <ConsoleLink webPath="/sandboxes" />
+            </View>
+          ) : null
         }
       />
     </SafeAreaView>

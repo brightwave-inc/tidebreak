@@ -25,6 +25,8 @@ import {
   SpendMeter,
 } from "../../src/components/Console";
 import { Button } from "../../src/components/Controls";
+import { ConsoleLink } from "../../src/components/Admin";
+import { ownerDirectory, ownerLabel } from "../../src/lib/admin";
 import {
   continuationGateLabel,
   failureReasonChip,
@@ -40,7 +42,9 @@ import type {
 import { isTerminal } from "../../src/lib/consoleTypes";
 import { describeEvent, HIDDEN_EVENT_KINDS } from "../../src/lib/sandboxEvents";
 import { grantsRuntimeExecute } from "../../src/lib/scope";
+import { administers, canAdminCancel } from "../../src/lib/sections";
 import {
+  adminQueries,
   meQueries,
   sandboxMutations,
   sandboxQueries,
@@ -310,14 +314,33 @@ function SandboxDetail({ id }: { id: string }) {
 
   // Known to be someone else's run, judged against the signed-in identity.
   // Deliberately false while that identity has not resolved: hiding the
-  // composer from the actual owner is the worse mistake, and this slice's read
-  // is pinned to the caller anyway.
+  // composer from the actual owner is the worse mistake, and a member's read
+  // is self-narrowed anyway.
   const notOwn =
     sandbox != null && viewerId != null && sandbox.user_id !== viewerId;
   // Steering and the owner cancel ride `runtime:<slug>`. A session whose
   // consent never carried the runtime scope cannot mint it, so the affordances
   // stay off rather than appearing and failing at the first tap.
   const canSteer = grantsRuntimeExecute(connection?.grantedScope);
+  const isAdmin = administers(connection);
+  // Stopping somebody else's run needs the role *and* the write scope; the
+  // owner verb needs neither.
+  const canCancelForeign = canAdminCancel(connection);
+
+  // A name for the owner line, which only an administrator can be reading — a
+  // member's every sandbox is their own, and the directory read is refused for
+  // one.
+  const people = useQuery({ ...adminQueries.people(), enabled: isAdmin });
+  const ownerName = useMemo(() => {
+    if (!sandbox) {
+      return undefined;
+    }
+    return ownerLabel(
+      sandbox.user_id,
+      ownerDirectory(people.data?.data ?? []),
+      viewerId,
+    );
+  }, [people.data, sandbox, viewerId]);
 
   useEffect(() => {
     if (receipt == null) {
@@ -351,7 +374,12 @@ function SandboxDetail({ id }: { id: string }) {
   });
 
   const cancel = useMutation({
-    mutationFn: () => sandboxMutations.cancel(id),
+    // Someone else's run takes the administrator verb — the runtime verb is
+    // owner-scoped and would refuse it. One's own run keeps the owner verb and
+    // its termination-intent semantics. The one predicate drives the button,
+    // the copy, and the routing, so they cannot disagree.
+    mutationFn: () =>
+      notOwn ? sandboxMutations.adminCancel(id) : sandboxMutations.cancel(id),
     onSuccess: () =>
       void queryClient.invalidateQueries({
         queryKey: sandboxQueries.detail(id).queryKey,
@@ -412,11 +440,17 @@ function SandboxDetail({ id }: { id: string }) {
   const waiting = inbox.filter((m) => !m.delivered).length;
   const composerOpen = composerFocused || message.length > 0;
   const showDock = !terminal && !notOwn && canSteer;
+  // One's own run offers cancel exactly when this session consented to the
+  // runtime scope; somebody else's when the administrator verb is reachable.
+  const showCancel =
+    !terminal && (notOwn ? canCancelForeign : canSteer);
 
   function confirmCancel() {
     Alert.alert(
       "Cancel this sandbox?",
-      `There is no resume and no snapshot — the run’s in-progress work is gone. ${
+      `${
+        notOwn ? `This is ${ownerName ?? "another account"}’s run. ` : ""
+      }There is no resume and no snapshot — the run’s in-progress work is gone. ${
         sandbox?.repository_url
           ? "Pushed branches and completed output are kept."
           : "Delivered output is kept."
@@ -471,6 +505,14 @@ function SandboxDetail({ id }: { id: string }) {
             <Text className="text-base text-foreground">
               {sandbox.task_prompt}
             </Text>
+            {/* Whose run this is, whenever it is not the reader's. A detail
+                screen that never says so is how somebody else's run gets read
+                as your own. */}
+            {ownerName ? (
+              <Text className="text-xs text-muted-foreground">
+                {ownerName}’s run
+              </Text>
+            ) : null}
             <View className="flex-row items-center justify-between gap-2">
               <ChipPill chip={phaseChip(sandbox.phase ?? sandbox.state)} />
               <Text className="text-xs text-muted-foreground">
@@ -563,11 +605,16 @@ function SandboxDetail({ id }: { id: string }) {
             }
           />
 
-          {/* One's own run offers cancel exactly when this session consented to
-              the runtime scope. The administrator cancel — the verb that stops
-              somebody else's run — is a control-plane write and belongs to the
-              admin console (#3402). */}
-          {!terminal && !notOwn && canSteer ? (
+          {/* The console's sandbox page is administrator-only, so the hand-off
+              is offered only to one — anyone else would be redirected away.
+              `writesHere` because the cancel button and the steering dock are
+              directly below: this session can act on the run here, and the
+              stock line would send it away for that. */}
+          {isAdmin ? (
+            <ConsoleLink webPath={`/sandboxes/${sandbox.id}`} writesHere />
+          ) : null}
+
+          {showCancel ? (
             <Button
               label={cancel.isPending ? "Cancelling…" : "Cancel sandbox"}
               variant="destructive"
@@ -579,8 +626,9 @@ function SandboxDetail({ id }: { id: string }) {
 
         {/* Steering is owner-scoped on the gateway and deliberately not
             admin-overridable, so on someone else's run the composer could only
-            be refused. The note names what is missing rather than leaving a
-            silent gap. */}
+            be refused. Cancel is different — a write-granted administrator
+            reaches the admin verb, and the button stays above — so the note
+            names what is still missing rather than leaving a silent gap. */}
         {!terminal && (notOwn || !canSteer) ? (
           <View
             className="border-t border-border bg-background px-5 pt-3"
@@ -588,7 +636,9 @@ function SandboxDetail({ id }: { id: string }) {
           >
             <Text className="text-xs text-muted-foreground">
               {notOwn
-                ? "Steering and cancel are owner-scoped — only this run’s owner can act on it here."
+                ? canCancelForeign
+                  ? `Steering is owner-scoped — only ${ownerName ?? "this run’s owner"} can steer it. Cancel is yours as an administrator.`
+                  : `Steering and cancel are owner-scoped — only ${ownerName ?? "this run’s owner"} can act on it here. Administrators cancel from the gateway console.`
                 : "This pairing was not granted the sandbox verbs. Sign in again to a gateway that offers them to steer or cancel from the phone."}
             </Text>
           </View>

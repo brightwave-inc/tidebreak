@@ -5,6 +5,7 @@ import * as Updates from "expo-updates";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Pressable, Switch, Text, View } from "react-native";
 import { Button } from "../src/components/Controls";
+import { ConsoleLink } from "../src/components/Admin";
 import { Screen, Body } from "../src/components/Screen";
 import { connectionLabel } from "../src/lib/connections";
 import { fetchGatewayMeta } from "../src/lib/gateway";
@@ -17,6 +18,7 @@ import {
   type PushPreference,
 } from "../src/lib/push";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
+import { administers } from "../src/lib/sections";
 import { deregisterConnection } from "../src/push/registration";
 import { readPushToken } from "../src/push/tokenCache";
 import { connections, secureStorage } from "../src/session/runtime";
@@ -425,6 +427,18 @@ export default function SettingsScreen() {
         />
       ) : null}
       <DeviceRegistrations />
+      {/* The deployment page the administration screens summarise. Gated on
+          the role because the console redirects everyone else away from it,
+          and a row that only ever lands on `/account` is worse than none. */}
+      {administers(connection) ? (
+        <View className="gap-2">
+          <Body>
+            This account administers this gateway. The phone summarises it;
+            the console is where it is configured.
+          </Body>
+          <ConsoleLink webPath="/system" />
+        </View>
+      ) : null}
       <AboutThisApp />
       <Body>
         Sign out clears this connection&apos;s rotating refresh token and every
