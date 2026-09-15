@@ -84,7 +84,7 @@ infer = { version = "=0.22.0", default-features = false }
 # Managed-preferences (MDM) plist decoding for the macOS policy reader. A
 # regular dependency, not a macOS-only one, so the extraction stays
 # unit-testable on every OS.
-plist = "=1.10.0"
+plist = "=1.10.1"
 # Managed-policy resolution deliberately projects authority failures into a
 # minimal misconfigured state; these warnings are the admin's field
 # diagnostic for what exactly is broken.
