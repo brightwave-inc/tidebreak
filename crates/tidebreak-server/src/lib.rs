@@ -1467,6 +1467,7 @@ async fn bind_inner(
         git_credentials,
         harness_llm,
     )
+    .with_blobs(state.blobs.clone())
     .with_gateway_runtime(state.gateway.clone())
     // The native computer-use adapter and its bridge executable arrive as
     // one binding so a runtime can never be installed without the sidecar

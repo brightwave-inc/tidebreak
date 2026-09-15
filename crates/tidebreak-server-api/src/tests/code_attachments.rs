@@ -671,6 +671,11 @@ async fn the_first_turn_of_a_new_session_accepts_an_image_published_after_create
         .expect("the publication names the blob")
         .to_owned();
 
+    assert!(
+        !dir.path().join("blobs").exists(),
+        "the first turn must read the configured store, not the default local directory"
+    );
+
     let first_turn = router
         .clone()
         .oneshot(
