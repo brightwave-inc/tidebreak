@@ -271,9 +271,8 @@ impl CodeRuntime {
     /// `requested_mode` is the permission mode the channel named, if any. On
     /// the machine's engine it is honored up to the operator's ceiling and
     /// refused by name above it; absent, the session takes the operator's
-    /// default (decision 88). A sandbox session is `Allow` because confinement
-    /// is its boundary (decision 39), so a request for any other mode there
-    /// is refused rather than approximated.
+    /// default (decision 88). Managed native sandboxes accept Ask through their
+    /// durable approval channel; other sandbox profiles keep Allow.
     #[allow(clippy::too_many_arguments)]
     pub async fn external_get_or_create(
         &self,

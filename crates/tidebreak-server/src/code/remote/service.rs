@@ -2876,6 +2876,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_managed_ask_preserves_the_requested_mode_with_or_without_a_repository() {
+        for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+            for repository in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut spawn_settings = settings();
+                spawn_settings.engine = Some(HarnessKind::ClaudeCode);
+                spawn_settings.engines = Some(vec![HarnessKind::ClaudeCode, HarnessKind::Codex]);
+                spawn_settings.embedded_engine_registration = true;
+                let (runtime, _, owner, repo) =
+                    runtime_with_remote_settings(dir.path(), spawn_settings).await;
+                let (resolved, _) = runtime
+                    .external_get_or_create(
+                        &owner,
+                        None,
+                        tidebreak_core::CodeGrantId::new(),
+                        "slack",
+                        "T1/C7/ask",
+                        repository.then_some(repo.id),
+                        Some("Approval canary".into()),
+                        harness,
+                        session_settings(),
+                        Some(PermissionMode::Ask),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let tidebreak_core::ExternalSessionResolution::Created(binding) = resolved else {
+                    panic!("expected a new managed session");
+                };
+                let session = runtime
+                    .get_session(&owner, binding.session_id)
+                    .await
+                    .unwrap();
+                assert_eq!(session.permission_mode, PermissionMode::Ask);
+                assert_eq!(session.harness_kind, harness);
+                assert_eq!(session.workspace_id.is_some(), repository);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_repositoryless_managed_slack_message_spawns_with_native_tools_and_deduplicates() {
         let dir = tempfile::tempdir().unwrap();
         let mut spawn_settings = settings();
