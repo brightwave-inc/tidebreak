@@ -5,6 +5,27 @@ export const WS_HANDSHAKE = "tidebreak-v1";
 export const WS_TOKEN_PREFIX = "tidebreak-token.";
 
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+const READ_RETRY_DELAYS_MS = [250, 750];
+const RETRYABLE_READ_STATUSES = new Set([502, 503, 504]);
+
+/** Stop the retry wait as soon as the caller leaves or cancels the request. */
+function waitForReadRetry(
+  ms: number,
+  signal?: AbortSignal | null,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const abort = () => {
+      globalThis.clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
 
 export type DeliveryRequestOptions = {
   signal?: AbortSignal;
@@ -156,17 +177,42 @@ export class HttpCore {
     init?: RequestInit,
     expectedStatus?: number,
   ): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
-    await throwIfNotOk(response);
-    if (expectedStatus !== undefined && response.status !== expectedStatus) {
-      throw new Error(
-        `unexpected response status: expected ${expectedStatus}, received ${response.status}`,
-      );
+    // Reads can survive a dropped connection without replaying a user action.
+    // Writes stay single-attempt because the server may have accepted them.
+    const read = (init?.method ?? "GET").toUpperCase() === "GET";
+    for (let attempt = 0; ; attempt += 1) {
+      init?.signal?.throwIfAborted();
+      try {
+        const response = await fetch(`${this.baseUrl}${path}`, init);
+        await throwIfNotOk(response);
+        if (
+          expectedStatus !== undefined &&
+          response.status !== expectedStatus
+        ) {
+          throw new Error(
+            `unexpected response status: expected ${expectedStatus}, received ${response.status}`,
+          );
+        }
+        if (response.status === 204) return undefined as T;
+        const text = await response.text();
+        if (text.length === 0) return undefined as T;
+        return JSON.parse(text) as T;
+      } catch (error) {
+        const retryable =
+          error instanceof TypeError ||
+          (error instanceof HttpError &&
+            RETRYABLE_READ_STATUSES.has(error.status));
+        if (
+          !read ||
+          !retryable ||
+          attempt >= READ_RETRY_DELAYS_MS.length ||
+          init?.signal?.aborted
+        ) {
+          throw error;
+        }
+        await waitForReadRetry(READ_RETRY_DELAYS_MS[attempt], init?.signal);
+      }
     }
-    if (response.status === 204) return undefined as T;
-    const text = await response.text();
-    if (text.length === 0) return undefined as T;
-    return JSON.parse(text) as T;
   }
 
   protected async deliveryJson<T>(

@@ -1291,6 +1291,8 @@ enum GatewayPrincipalKind {
 
 impl GatewayAuthenticator {
     const RESPONSE_LIMIT: usize = 16 * 1024;
+    const TRANSIENT_RETRIES: usize = 2;
+    const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
     fn new(base_url: &str, resource: String) -> Result<Self> {
         let mut base = reqwest::Url::parse(base_url.trim()).map_err(|error| {
@@ -1405,14 +1407,38 @@ impl GatewayAuthenticator {
         if !presented.starts_with("mg_at_") || presented.len() > 512 {
             return Ok(None);
         }
-        let response = self
-            .client
-            .get(self.principal_url.clone())
-            .query(&[("resource", &self.resource)])
-            .bearer_auth(presented)
-            .send()
-            .await
-            .map_err(|error| AgentError::msg(format!("gateway auth request failed: {error}")))?;
+        let mut response = None;
+        for attempt in 0..=Self::TRANSIENT_RETRIES {
+            let result = self
+                .client
+                .get(self.principal_url.clone())
+                .query(&[("resource", &self.resource)])
+                .bearer_auth(presented)
+                .send()
+                .await;
+            match result {
+                Ok(candidate)
+                    if candidate.status().is_server_error()
+                        && attempt < Self::TRANSIENT_RETRIES =>
+                {
+                    tokio::time::sleep(Self::TRANSIENT_RETRY_DELAY).await;
+                }
+                Ok(candidate) => {
+                    response = Some(candidate);
+                    break;
+                }
+                Err(error) if attempt < Self::TRANSIENT_RETRIES => {
+                    tracing::debug!(attempt, %error, "retrying transient gateway auth request");
+                    tokio::time::sleep(Self::TRANSIENT_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    return Err(AgentError::msg(format!(
+                        "gateway auth request failed: {error}"
+                    )));
+                }
+            }
+        }
+        let response = response.expect("gateway auth retry loop returns a response or error");
         if matches!(
             response.status(),
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
@@ -1951,6 +1977,7 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::routing::get;
     use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn headers(pairs: &[(HeaderName, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -2325,6 +2352,59 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(verifier.resolve("mg_at_broken").await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_auth_retries_transient_server_failures_only() {
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let user_id = uuid::Uuid::new_v4();
+        let app = Router::new().route(
+            "/api/v1/tidebreak/principal",
+            get(move || {
+                let attempt = observed.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt < 2 {
+                        StatusCode::BAD_GATEWAY.into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "user_id": user_id,
+                            "is_admin": false,
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let verifier =
+            GatewayAuthenticator::new(&format!("http://{address}"), "test-resource".into())
+                .unwrap();
+        let principal = verifier.resolve("mg_at_test").await.unwrap().unwrap();
+        assert_eq!(principal.owner_id().as_str(), format!("user:{user_id}"));
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.abort();
+
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let app = Router::new().route(
+            "/api/v1/tidebreak/principal",
+            get(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::UNAUTHORIZED }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let verifier =
+            GatewayAuthenticator::new(&format!("http://{address}"), "test-resource".into())
+                .unwrap();
+        assert!(verifier.resolve("mg_at_test").await.unwrap().is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
     }
 
