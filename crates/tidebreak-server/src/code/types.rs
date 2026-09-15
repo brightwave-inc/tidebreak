@@ -1442,6 +1442,12 @@ pub struct QueuedTurn {
     pub id: tidebreak_core::TurnId,
     pub session_id: tidebreak_core::SessionId,
     pub message: String,
+    /// Who parked this row, when it was not the session's owner typing — a
+    /// trigger fire or a watch fix turn. The tray uses it to draw the row as
+    /// the event it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor: Option<tidebreak_core::TurnActor>,
     pub position: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -1453,6 +1459,7 @@ impl From<tidebreak_core::code::QueuedTurn> for QueuedTurn {
             id: row.id,
             session_id: row.session_id,
             message: row.message,
+            actor: row.actor,
             position: row.position,
             created_at: row.created_at,
             updated_at: row.updated_at,

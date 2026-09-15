@@ -42,6 +42,7 @@ mod session_acts_as;
 mod session_context;
 mod session_inference;
 mod session_owner_kind;
+mod trigger_fire_context;
 mod turn_actor;
 mod workspace_setup_error;
 
@@ -119,6 +120,8 @@ impl MigratorTrait for Migrator {
             Box::new(managed_decision::ManagedDecisions),
             Box::new(session_inference::SessionInference),
             Box::new(native_turn_identity::NativeTurnIdentity),
+            Box::new(trigger_fire_context::TriggerFireContext),
+            Box::new(trigger_fire_context::TriggerQueueSink),
         ]
     }
 }

@@ -41,6 +41,7 @@ import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { TriggerEventCard } from "./TriggerEventCard";
 import {
   formatElapsedDuration,
   formatTurnDuration,
@@ -635,6 +636,12 @@ const TranscriptItem = memo(function TranscriptItem({
 }) {
   switch (item.kind) {
     case "user":
+      // A turn a trigger or watch fired is an event, not a person's message:
+      // lead with what happened on the pull request and fold the delivered
+      // instruction behind the expand.
+      if (item.trigger) {
+        return <TriggerEventCard context={item.trigger} message={item.text} />;
+      }
       return (
         <UserMessage
           text={item.text}

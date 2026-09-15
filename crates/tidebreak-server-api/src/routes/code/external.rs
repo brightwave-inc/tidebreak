@@ -853,10 +853,10 @@ pub async fn external_messages(
                 event_id: body.event_id,
                 channel_ts: body.channel_ts,
                 actor: tidebreak_core::TurnActor {
-                    principal: None,
                     display,
                     channel_kind: Some(grant.channel_kind.clone()),
                     external_identity,
+                    ..tidebreak_core::TurnActor::default()
                 },
                 steer: body.steer,
                 expected_turn_id: body.expected_turn_id,
@@ -1348,16 +1348,15 @@ async fn external_decide(
     };
     let actor = match body.actor {
         Some(actor) => tidebreak_core::TurnActor {
-            principal: None,
             display: actor.display,
             channel_kind: Some(grant.channel_kind.clone()),
             external_identity: Some(actor.external_identity),
+            ..tidebreak_core::TurnActor::default()
         },
         None => tidebreak_core::TurnActor {
-            principal: None,
-            display: None,
             channel_kind: Some(grant.channel_kind.clone()),
             external_identity: Some(grant.external_identity.clone()),
+            ..tidebreak_core::TurnActor::default()
         },
     };
     let settled = runtime

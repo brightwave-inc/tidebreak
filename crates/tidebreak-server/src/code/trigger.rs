@@ -29,7 +29,7 @@ use tidebreak_core::{
     CodePullRequestId, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerDeliveryId,
     CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload, CodeWorkspaceStatus, Event,
     HarnessNoticeLevel, OwnerId, PullRequestDigest, RepoId, Session, SessionId, SessionKind,
-    SessionLifecycle, TurnId, WorkspaceId,
+    SessionLifecycle, TriggerTurnContext, TriggerTurnSource, TurnId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
@@ -728,6 +728,11 @@ enum Delivery {
     },
     /// Submit a turn. The workspace is quiet, so nothing is contended.
     Turn { session_id: SessionId },
+    /// Park a durable queue row (decision 69). The session or its checkout is
+    /// busy and the harness cannot steer, so the event waits — visibly, in
+    /// the queue tray — for the next turn boundary instead of retrying an
+    /// invisible outbox with backoff.
+    Queue { session_id: SessionId },
     /// Raise attention and leave the session alone.
     Notify { session_id: SessionId },
 }
@@ -737,6 +742,7 @@ impl Delivery {
         match self {
             Self::Steer { session_id, .. }
             | Self::Turn { session_id }
+            | Self::Queue { session_id }
             | Self::Notify { session_id } => session_id,
         }
     }
@@ -762,6 +768,11 @@ async fn fire_one(
         action: trigger.action,
         condition: trigger.condition,
         message: trigger_message(trigger.condition, digest),
+        context: Some(TriggerTurnContext::from_digest(
+            TriggerTurnSource::Trigger,
+            trigger.condition,
+            digest,
+        )),
     };
     let now = Utc::now();
     let Some(fire) = insert_or_load_trigger_fire(&runtime.db, &identity, &payload, now).await?
@@ -949,6 +960,21 @@ async fn deliver_fire(
                     session_id,
                     message,
                     &trigger_name,
+                    payload.context.clone(),
+                    delivery_id,
+                    lease_token,
+                )
+                .await?;
+        }
+        Delivery::Queue { .. } => {
+            let trigger_name = format!("Trigger: {}", payload.condition.as_str());
+            runtime
+                .queue_trigger_turn(
+                    owner,
+                    session_id,
+                    message,
+                    &trigger_name,
+                    payload.context.clone(),
                     delivery_id,
                     lease_token,
                 )
@@ -990,10 +1016,21 @@ async fn plan_delivery(
             session_id: target.id,
         }));
     }
+    // A sandbox session refuses a direct trigger turn — the runtime's spawn
+    // and inbox calls have no idempotency key, so an ambiguous response could
+    // run one trigger twice. Its durable queue has no such ambiguity: the
+    // acceptance is a local row, and the remote sweep promotes it under its
+    // own admission (decision 0088).
+    if target.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+        return Ok(Some(Delivery::Queue {
+            session_id: target.id,
+        }));
+    }
 
     // Another session's turn owns the checkout. The turn lock in the worker is
-    // what actually serializes it (record 55); standing down here keeps the
-    // outbox pending so a later lease delivers it.
+    // what actually serializes it (record 55); a busy workspace parks the
+    // event as a durable queue row (decision 69) unless the running session's
+    // harness takes mid-turn steering.
     let busy = sessions
         .iter()
         .any(|session| session.lifecycle == SessionLifecycle::Running);
@@ -1003,17 +1040,27 @@ async fn plan_delivery(
         }));
     }
 
-    // Busy: steering is the only way in, and only where the engine takes it.
+    // Busy, and a sibling of the target owns the checkout: queue on the
+    // target, and the row promotes once the worktree frees.
     if target.lifecycle != SessionLifecycle::Running {
-        return Ok(None);
+        return Ok(Some(Delivery::Queue {
+            session_id: target.id,
+        }));
     }
+    // The target itself is mid-turn. Steering is the only way into that turn,
+    // and only where the engine takes it; everywhere else the queue row is
+    // the way in, at the turn boundary.
     let adapter = runtime.adapter(target.harness_kind)?;
     let probe = runtime.probe(adapter.as_ref()).await;
     if adapter.capabilities(&probe).mid_turn_steering != CapLevel::Supported {
-        return Ok(None);
+        return Ok(Some(Delivery::Queue {
+            session_id: target.id,
+        }));
     }
     let Some(turn) = get_open_turn(&runtime.db, owner, target.id).await? else {
-        return Ok(None);
+        return Ok(Some(Delivery::Queue {
+            session_id: target.id,
+        }));
     };
     Ok(Some(Delivery::Steer {
         session_id: target.id,
@@ -1027,7 +1074,7 @@ async fn plan_delivery(
 /// facts, and delivering to it would put two drivers on one loop. Recency is
 /// the last turn a session ran, falling back to when it was created, because
 /// a session row carries no activity timestamp of its own.
-async fn most_recently_active(
+pub(crate) async fn most_recently_active(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
     sessions: &[Session],

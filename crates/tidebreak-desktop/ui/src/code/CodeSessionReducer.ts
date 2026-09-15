@@ -56,6 +56,12 @@ export type CodeTranscriptItem =
        * turns recorded an actor.
        */
       actorLabel?: string;
+      /**
+       * The pull-request event a trigger or watch fired this turn on. The
+       * transcript draws such a turn as a structured event card instead of a
+       * person's message.
+       */
+      trigger?: import("../generated/wire").TriggerTurnContext;
       attachments?: import("../generated/wire").ImageRef[];
     }
   | {
@@ -769,6 +775,7 @@ function upsertTurnPrompt(
     // prompt's timestamp never depends on when this client happened to see it.
     createdAt: turn.started_at,
     actorLabel: actorLabel(turn.actor),
+    trigger: turn.actor?.trigger ?? undefined,
     attachments: turn.attachments ?? [],
   };
   const hasUser = state.items.some(

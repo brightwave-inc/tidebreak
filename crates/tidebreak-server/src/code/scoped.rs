@@ -1408,9 +1408,7 @@ impl ScopedCode {
             .await?;
         let actor = tidebreak_core::TurnActor {
             principal: Some(self.owner.to_string()),
-            display: None,
-            channel_kind: None,
-            external_identity: None,
+            ..tidebreak_core::TurnActor::default()
         };
         self.runtime
             .decide_approval(&owner, id, decision, Some(actor))

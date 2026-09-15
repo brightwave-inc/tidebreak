@@ -217,9 +217,9 @@ pub use code::{
     PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment,
     PullRequestCommentKind, PullRequestDigest, QueuedTurn, QuickAction, RepoId, SequencedEvent,
     Session, SessionAccessLevel, SessionActivity, SessionKind, SessionLifecycle, SessionVisibility,
-    ToolDetail, ToolOutcome, Turn, TurnActor, TurnParkWait, TurnStatus, TurnUsage, WorkspaceId,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
-    MAX_TOOL_SUMMARY_CHARS,
+    ToolDetail, ToolOutcome, TriggerTurnContext, TriggerTurnSource, Turn, TurnActor, TurnParkWait,
+    TurnStatus, TurnUsage, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

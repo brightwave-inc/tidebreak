@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 
 import type { ApiClient } from "./api";
+import { triggerEventSummary } from "./code/TriggerEventCard";
 import { friendlyErrorMessage } from "./lib/utils";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -21,7 +22,16 @@ import { Textarea } from "@/components/ui/textarea";
 const QUEUE_POLL_MS = 15_000;
 
 /** One queued message, in the vocabulary the tray renders. */
-export type QueueTrayRow = { id: string; content: string };
+export type QueueTrayRow = {
+  id: string;
+  content: string;
+  /**
+   * Short label naming the automation that parked this row ("Checks failed
+   * on #3411"), when it was not the person typing. Rendered as a quiet
+   * origin chip beside the content.
+   */
+  origin?: string;
+};
 
 /**
  * The queue operations the tray drives. Chat and code sessions expose the
@@ -71,6 +81,9 @@ export function codeQueueApi(
         queued: snapshot.queued.map((row) => ({
           id: row.id,
           content: row.message,
+          origin: row.actor?.trigger
+            ? triggerEventSummary(row.actor.trigger)
+            : undefined,
         })),
         paused: snapshot.paused,
       };
@@ -248,8 +261,16 @@ export function QueueTray({
                 onBlur={() => setEditing(null)}
               />
             ) : (
-              <span className="flex-1 truncate text-sm" title={row.content}>
-                {row.content}
+              <span
+                className="flex min-w-0 flex-1 items-baseline gap-2"
+                title={row.content}
+              >
+                {row.origin && (
+                  <span className="text-muted-foreground shrink-0 text-xs">
+                    {row.origin}
+                  </span>
+                )}
+                <span className="min-w-0 truncate text-sm">{row.content}</span>
               </span>
             )}
             <Button

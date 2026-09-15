@@ -81,6 +81,28 @@ export const SingleRow: Story = {
 };
 
 /**
+ * A trigger fire parked while the session was busy (decision 60 via decision
+ * 69). The origin chip names the pull-request event, so the row reads as the
+ * CI event it is rather than as something the person typed; edit, reorder,
+ * and delete still work — the event is retractable like any queued turn.
+ */
+export const QueuedTriggerEvent: Story = {
+  args: {
+    queue: staticQueue([
+      {
+        id: "q-t1",
+        origin: "Checks failed on #3411",
+        content:
+          "Tidebreak trigger: checks failed on #3411. Nobody typed this — a trigger you armed on this repository fired because the fact below changed.",
+      },
+      ...followUps.slice(0, 1),
+    ]),
+    active: true,
+    onStop: async () => {},
+  },
+};
+
+/**
  * An empty queue renders nothing at all — the composer stays untouched until
  * the first mid-turn send. The empty frame is here so a regression that
  * renders a bare header shows up.
