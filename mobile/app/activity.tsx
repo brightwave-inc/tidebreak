@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
-import { RefreshControl, ScrollView, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   Card,
@@ -9,17 +9,25 @@ import {
   ExpandableSection,
   StatTile,
 } from "../src/components/Console";
+import { ConsoleLink } from "../src/components/Admin";
 import { SectionLabel } from "../src/components/Controls";
 import {
   executionKindLabel,
   formatCount,
 } from "../src/lib/consoleLabels";
 import { formatMicroUsd } from "../src/lib/consoleTypes";
-import type { GroupedUsageRow, UsageResponse } from "../src/lib/consoleTypes";
+import type {
+  GroupedUsageRow,
+  UsageResponse,
+  UserUsageRow,
+} from "../src/lib/consoleTypes";
+import { administers } from "../src/lib/sections";
 import {
   meQueries,
   usageQueries,
 } from "../src/session/consoleQueries";
+import { useActiveConnection } from "../src/session/store";
+import { useLearnedAdminRole } from "../src/session/useAdminRole";
 
 function keyLabel(row: GroupedUsageRow, dimension: string): string {
   const value = row.key[dimension];
@@ -169,24 +177,77 @@ function CostRow({
 }
 
 /**
- * Strictly the signed-in account's usage: stat tiles, then expandable rollups.
+ * Which account this screen is reporting on.
+ *
+ * Offered only where the gateway's reads are installation-wide: those already
+ * carry every account's row, so switching costs one filtered re-read rather
+ * than any widening of authority. The credential is untouched — what changes
+ * is which account's row is being displayed, never who is asking.
+ */
+function AccountPicker({
+  users,
+  selectedId,
+  onPick,
+}: {
+  users: UserUsageRow[];
+  selectedId: string | undefined;
+  onPick: (userId: string) => void;
+}) {
+  return (
+    <Card className="gap-2">
+      <SectionLabel>Show usage for</SectionLabel>
+      <Text className="text-xs text-muted-foreground">
+        Your reads are installation-wide, so this view can show any account’s
+        usage. It changes what is displayed, not what you are signed in as.
+      </Text>
+      {users.map((user) => (
+        <Pressable
+          key={user.user_id}
+          accessibilityRole="button"
+          accessibilityState={{ selected: user.user_id === selectedId }}
+          onPress={() => onPick(user.user_id)}
+          className={`min-h-11 justify-center rounded-lg border px-3 py-2.5 ${
+            user.user_id === selectedId
+              ? "border-primary bg-background"
+              : "border-border bg-background"
+          }`}
+        >
+          <Text className="text-sm font-medium text-foreground">
+            {user.display_name || user.email}
+          </Text>
+          <Text className="text-xs text-muted-foreground">{user.email}</Text>
+        </Pressable>
+      ))}
+    </Card>
+  );
+}
+
+/**
+ * One account's usage: stat tiles, then expandable rollups.
  *
  * Members get self-narrowed reads from the server. An administrator's reads are
- * installation-wide, so their rollups are re-asked in filtered query mode pinned
- * to their own id — this screen is about *your* activity either way, and the
- * account switcher Tidewatch carried is an administrator affordance that belongs
- * with the rest of the admin console (#3402).
+ * installation-wide, so the rollups are re-asked in filtered query mode pinned
+ * to one account — their own by default, and any account the switcher names.
  */
 export default function ActivityScreen() {
   const [refreshing, setRefreshing] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  // Which account the view is reporting on, when it is not the caller's own.
+  // Deliberately screen state rather than anything persisted: it is a lens on
+  // one screen, and it must not survive into what the rest of the app thinks
+  // the signed-in account is.
+  const [viewing, setViewing] = useState<string | null>(null);
+  const connection = useActiveConnection();
   const me = useQuery(meQueries.identity());
   const summary = useQuery(usageQueries.summary());
   const scope = summary.data?.scope;
   const selfScoped = scope === "self";
-  const userId = me.data?.user_id;
+  useLearnedAdminRole(scope);
+  const isAdmin = administers(connection);
+  const userId = (isAdmin ? viewing : null) ?? me.data?.user_id;
 
-  // Installation-wide reads have to be narrowed back to the caller; a
-  // self-scoped read already is.
+  // Installation-wide reads have to be narrowed to one account; a self-scoped
+  // read already is.
   const needsFiltered = scope !== undefined && !selfScoped && Boolean(userId);
   const byModel = useQuery({
     ...usageQueries.mine(userId ?? "", "model"),
@@ -233,9 +294,11 @@ export default function ActivityScreen() {
     );
   }
 
-  const mine = selfScoped
+  const viewedRow = selfScoped
     ? summary.data?.by_user?.[0]
     : summary.data?.by_user?.find((row) => row.user_id === userId);
+  const mine = viewedRow;
+  const viewingOther = isAdmin && viewing != null && viewing !== me.data?.user_id;
 
   const modelRows = selfScoped
     ? compatRows(summary.data, "model")
@@ -263,11 +326,54 @@ export default function ActivityScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
       >
-        <Text className="text-xs text-muted-foreground">
-          Your usage on this gateway. Costs are billed spend only —
-          subscription-covered, provisioned-capacity, and prepaid-credit traffic
-          are different payers and are never summed in.
-        </Text>
+        {/* The account switcher: an administrator's reads already carry every
+            account's row, so this changes which one is displayed rather than
+            widening anything. A member has one account and taps nothing. */}
+        {switching && isAdmin ? (
+          <AccountPicker
+            users={summary.data?.by_user ?? []}
+            selectedId={userId}
+            onPick={(picked) => {
+              setViewing(picked);
+              setSwitching(false);
+            }}
+          />
+        ) : null}
+
+        <Pressable
+          accessibilityRole={isAdmin ? "button" : undefined}
+          accessibilityLabel={
+            isAdmin ? "Change which account this usage is for" : undefined
+          }
+          disabled={!isAdmin}
+          onPress={() => setSwitching((current) => !current)}
+        >
+          <Text className="text-xs text-muted-foreground">
+            {mine ? (
+              <>
+                Usage for{" "}
+                <Text className="font-medium text-foreground">
+                  {mine.display_name || mine.email}
+                </Text>
+                {isAdmin ? " (tap to switch)" : ""}.{" "}
+              </>
+            ) : (
+              "Your usage on this gateway. "
+            )}
+            Costs are billed spend only — subscription-covered,
+            provisioned-capacity, and prepaid-credit traffic are different
+            payers and are never summed in.
+          </Text>
+        </Pressable>
+
+        {viewingOther ? (
+          <Card>
+            <Text className="text-xs text-muted-foreground">
+              You are reading another account’s usage. Nothing about your own
+              session changed — the switcher only picks whose row is shown.
+            </Text>
+          </Card>
+        ) : null}
 
         {mine ? (
           <View className="gap-2">
@@ -438,7 +544,9 @@ export default function ActivityScreen() {
               <Text className="flex-1 text-xs text-muted-foreground">
                 {selfScoped
                   ? "The gateway narrows these reads to your account."
-                  : "Your reads are installation-wide; the figures above are pinned to your own account."}
+                  : viewingOther
+                    ? "Your reads are installation-wide; the figures above are pinned to the account the switcher named."
+                    : "Your reads are installation-wide; the figures above are pinned to your own account."}
               </Text>
               <ChipPill
                 chip={{
@@ -449,6 +557,12 @@ export default function ActivityScreen() {
             </View>
           </Card>
         </View>
+
+        {/* The console's usage page is administrator-only, so the hand-off is
+            offered only to one — a member would be redirected away from it.
+            This screen is one account's slice of the same subject; the
+            installation-wide figures and every write live there. */}
+        {isAdmin ? <ConsoleLink webPath="/usage" /> : null}
       </ScrollView>
     </SafeAreaView>
   );

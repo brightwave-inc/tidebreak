@@ -13,7 +13,11 @@
  */
 
 import { isGatewayConnection, type Connection } from "./connections";
-import { grantsConsoleRead, grantsRuntimeExecute } from "./scope";
+import {
+  grantsConsoleRead,
+  grantsConsoleWrite,
+  grantsRuntimeExecute,
+} from "./scope";
 
 export type SectionId =
   | "sessions"
@@ -106,6 +110,98 @@ export function hasConsoleSection(
   section: ConsoleSectionId,
 ): boolean {
   return consoleSectionsFor(connection).includes(section);
+}
+
+/** The gateway console's administration surfaces, in navigation order. */
+export type AdminSectionId =
+  | "admin-usage"
+  | "admin-models"
+  | "admin-people"
+  | "admin-teams"
+  | "admin-limits"
+  | "admin-guardrails"
+  | "admin-audit"
+  | "admin-configuration";
+
+/**
+ * Which administration surfaces one connection can show.
+ *
+ * Two independent conditions, and both are needed. The **grant** is the same
+ * `control_plane:read` seam the member surfaces use: a session that never
+ * consented to the console cannot mint the resource these reads authenticate,
+ * administrator or not. The **role** is `isAdmin`, cached on the connection
+ * from the usage read's scope (`admin.ts`), and it is a product judgement
+ * rather than a security one — the gateway refuses every read behind these
+ * screens for a member regardless of what the phone believes.
+ *
+ * An unlearned role reads as member: the group appears once the gateway has
+ * said so, which is the failure direction that costs a tap rather than the one
+ * that shows a member a wall of refusals.
+ *
+ * The order is how an administrator asks about an installation: what is it
+ * spending, what can it serve, who reaches it, what bounds it, what has it
+ * refused, and how is it wired.
+ */
+export function adminSectionsFor(
+  connection: Connection | null,
+): AdminSectionId[] {
+  if (!administers(connection)) {
+    return [];
+  }
+  return [
+    "admin-usage",
+    "admin-models",
+    "admin-people",
+    "admin-teams",
+    "admin-limits",
+    "admin-guardrails",
+    "admin-audit",
+    "admin-configuration",
+  ];
+}
+
+export function hasAdminSection(
+  connection: Connection | null,
+  section: AdminSectionId,
+): boolean {
+  return adminSectionsFor(connection).includes(section);
+}
+
+/**
+ * Whether this connection may show the administrator affordances that live
+ * *inside* the member screens — the sandbox fleet toggle and its owner
+ * attribution, the activity account switcher, the console hand-offs whose
+ * destination is an administrator-only console page.
+ *
+ * The same pair of conditions the administration group is gated on, asked
+ * where there is no section to hide: these surfaces answer for a member too,
+ * and only the extra controls on them are an administrator's.
+ */
+export function administers(connection: Connection | null): boolean {
+  if (!isGatewayConnection(connection)) {
+    return false;
+  }
+  return (
+    grantsConsoleRead(connection.grantedScope) && connection.isAdmin === true
+  );
+}
+
+/**
+ * Whether this session may stop somebody else's run.
+ *
+ * The administrator cancel is a control-plane *write*, so it needs the write
+ * scope on top of the role (mg ADR 0102) — a read-only console session is
+ * refused at the request, and an affordance that can only fail is worse than
+ * one that is absent. The owner cancel is a different verb on a different
+ * resource and is gated by `grantsRuntimeExecute`, not by this.
+ */
+export function canAdminCancel(connection: Connection | null): boolean {
+  if (!administers(connection)) {
+    return false;
+  }
+  return grantsConsoleWrite(
+    isGatewayConnection(connection) ? connection.grantedScope : undefined,
+  );
 }
 
 /** Where the app belongs when it opens with this connection active. */

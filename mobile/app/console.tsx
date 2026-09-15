@@ -21,14 +21,15 @@ import { Body, ErrorText, Screen } from "../src/components/Screen";
 import { formatCompact, phaseChip } from "../src/lib/consoleLabels";
 import { formatMicroUsd, isTerminal } from "../src/lib/consoleTypes";
 import type { SandboxView, UserUsageRow } from "../src/lib/consoleTypes";
-import { consoleSectionsFor } from "../src/lib/sections";
-import type { ConsoleSectionId } from "../src/lib/sections";
+import { consoleSectionsFor, adminSectionsFor } from "../src/lib/sections";
+import type { AdminSectionId, ConsoleSectionId } from "../src/lib/sections";
 import {
   isSandboxesNotEnabled,
   meQueries,
   sandboxQueries,
   usageQueries,
 } from "../src/session/consoleQueries";
+import { useLearnedAdminRole } from "../src/session/useAdminRole";
 import { useActiveConnection } from "../src/session/store";
 
 const SECTION_ROUTES: Record<ConsoleSectionId, { label: string; href: string }> =
@@ -40,6 +41,57 @@ const SECTION_ROUTES: Record<ConsoleSectionId, { label: string; href: string }> 
     subscriptions: { label: "Subscriptions", href: "/subscriptions" },
     "shared-apps": { label: "Shared apps", href: "/shared-apps" },
   };
+
+/**
+ * The administration rows. Each is a read-only summary of one subject, and
+ * each page hands off to the gateway's console where that subject is actually
+ * administered.
+ */
+const ADMIN_ROUTES: Record<
+  AdminSectionId,
+  { label: string; detail: string; href: string }
+> = {
+  "admin-usage": {
+    label: "Usage",
+    detail: "Installation-wide",
+    href: "/admin/usage",
+  },
+  "admin-models": {
+    label: "Models & providers",
+    detail: "Catalog",
+    href: "/admin/models",
+  },
+  "admin-people": {
+    label: "People",
+    detail: "Directory",
+    href: "/admin/people",
+  },
+  "admin-teams": {
+    label: "Teams",
+    detail: "Grants",
+    href: "/admin/teams",
+  },
+  "admin-limits": {
+    label: "Limits",
+    detail: "Every cap",
+    href: "/admin/limits",
+  },
+  "admin-guardrails": {
+    label: "Guardrails",
+    detail: "Activity",
+    href: "/admin/guardrails",
+  },
+  "admin-audit": {
+    label: "Audit log",
+    detail: "Ledger",
+    href: "/admin/audit",
+  },
+  "admin-configuration": {
+    label: "Configuration",
+    detail: "Apps & identity",
+    href: "/admin/configuration",
+  },
+};
 
 /** One live run in the Now strip: what it is doing and what it has cost. */
 function NowCard({
@@ -145,7 +197,7 @@ export default function ConsoleScreen() {
 
   // The Now strip is "your detached runs", so it always names the caller. An
   // administrator's unscoped read would answer the whole installation, which
-  // is a different screen (#3402).
+  // is what the Sandboxes screen's Everyone tab is for.
   const sandboxes = useQuery({
     ...sandboxQueries.list(viewerId ? { ownerId: viewerId } : {}),
     enabled: consoleGranted && !!viewerId,
@@ -154,6 +206,14 @@ export default function ConsoleScreen() {
     ...usageQueries.summary(),
     enabled: consoleGranted,
   });
+
+  // The read above is also the app's only administrator signal: its scope says
+  // whether the gateway widened it to the installation. Learned here because
+  // the hub is where it is already being made, and cached on the connection so
+  // the administration group below is there on the next first paint rather
+  // than appearing a beat late.
+  useLearnedAdminRole(summary.data?.scope);
+  const adminSections = adminSectionsFor(connection);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -275,6 +335,26 @@ export default function ConsoleScreen() {
               ))}
           </View>
         </View>
+
+        {/* Only for an account the gateway confirmed administers it. Every read
+            behind these rows is refused for a member, so the group is absent
+            rather than present-and-failing. */}
+        {adminSections.length > 0 ? (
+          <View className="gap-2">
+            <SectionLabel>Administration</SectionLabel>
+            <View className="rounded-xl border border-border bg-background px-4">
+              {adminSections.map((section, index) => (
+                <ConsoleRow
+                  key={section}
+                  label={ADMIN_ROUTES[section].label}
+                  detail={ADMIN_ROUTES[section].detail}
+                  first={index === 0}
+                  onPress={() => router.push(ADMIN_ROUTES[section].href)}
+                />
+              ))}
+            </View>
+          </View>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );

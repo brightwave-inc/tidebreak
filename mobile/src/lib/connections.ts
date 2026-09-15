@@ -50,6 +50,34 @@ export type GatewayConnection = ConnectionBase & {
    * never the session.
    */
   grantedScope?: string;
+  /**
+   * Whether this account administers the gateway, learned from the unfiltered
+   * usage read's `scope` (`admin.ts`) and cached here so the administration
+   * surfaces gate on first paint rather than resolving into view.
+   *
+   * A cached convenience, never an authority: every administrator read is
+   * refused server-side for a member regardless of what this says. Undefined
+   * means "not yet learned", which reads as member — the group appears when
+   * the gateway confirms it, and signing out of the connection deletes the
+   * record along with the answer.
+   */
+  isAdmin?: boolean;
+  /**
+   * Names this *sign-in*, as distinct from the connection, and is replaced
+   * every time somebody signs in here.
+   *
+   * The connection id is derived from the installation, so that re-pairing one
+   * deployment lands on one record instead of stacking live refresh families —
+   * which means the id alone cannot tell two *accounts* apart. This can, and
+   * `consoleCacheScope` is how the read caches inherit that.
+   *
+   * A random nonce rather than a counter, because it has to stay unique across
+   * the record's own deletion: signing out forgets the connection entirely, so
+   * anything derived from what the record remembers starts over for the next
+   * pairing — and starts over addressing cache entries the signed-out account
+   * filled, which outlive the record by as long as they are held.
+   */
+  pairingId?: string;
 };
 
 /**
@@ -92,6 +120,36 @@ export function gatewayConnectionId(
     return `gw_${keySafe(named)}`;
   }
   return `gw_${sha256Hex(gatewayUrl).slice(0, 32)}`;
+}
+
+/**
+ * The namespace every cached gateway read is filed under.
+ *
+ * Not the connection id, and the difference is the point. The id names a
+ * *deployment*, so signing in to one gateway as somebody else reuses it — and
+ * a cache keyed on the id alone would serve the previous account's answers to
+ * the next one, for as long as those entries live. That is not a privacy leak
+ * on its own (every response was already read by the account that fetched it,
+ * and the gateway re-authorizes every request) but it is a correctness one:
+ * the administration surfaces are derived from a cached usage read's `scope`,
+ * so a stale `installation` would light the whole administration group up for
+ * an account the gateway had just answered `self` for.
+ *
+ * Folding the pairing in makes that structurally impossible rather than
+ * something an eviction has to remember: a new sign-in cannot address the
+ * previous one's entries at all, and they age out on their own. It has to be
+ * the pairing id and not some property of the record, because sign-out deletes
+ * the record while the cache it filled survives.
+ */
+export function consoleCacheScope(connection: Connection | null): string {
+  if (!connection) {
+    return "unpaired";
+  }
+  // A record written before pairing ids existed has none; "0" can never
+  // collide with a nonce, so such a record simply keeps one stable scope.
+  return `${connection.id}#${
+    (isGatewayConnection(connection) ? connection.pairingId : null) ?? "0"
+  }`;
 }
 
 /** The host a connection is shown as in a list. */

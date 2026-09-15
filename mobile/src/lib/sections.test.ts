@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Connection, GatewayConnection } from "./connections";
 import {
+  adminSectionsFor,
+  administers,
+  canAdminCancel,
   consoleSectionsFor,
+  hasAdminSection,
   hasConsoleSection,
   landingRoute,
   sectionsFor,
@@ -139,5 +143,109 @@ describe("landingRoute", () => {  it("routes by what the connection has, not by 
     expect(landingRoute(null)).toBe("/pair");
     expect(landingRoute(gateway())).toBe("/attach");
     expect(landingRoute(gateway({ machine: MACHINE }))).toBe("/home");
+  });
+});
+
+describe("administers", () => {
+  const READ = "openid profile offline_access control_plane:read";
+
+  it("needs the role and the grant together", () => {
+    expect(administers(gateway({ grantedScope: READ, isAdmin: true }))).toBe(
+      true,
+    );
+    // The role without the console grant: this session never consented to the
+    // control plane, so it cannot mint the resource these reads authenticate
+    // with — administrator or not.
+    expect(administers(gateway({ isAdmin: true }))).toBe(false);
+    // The grant without the role is an ordinary member's console session.
+    expect(administers(gateway({ grantedScope: READ }))).toBe(false);
+  });
+
+  it("reads an unlearned role as member", () => {
+    // The failure direction that costs one refresh, rather than the one that
+    // shows a member a wall of refusals.
+    expect(administers(gateway({ grantedScope: READ, isAdmin: false }))).toBe(
+      false,
+    );
+    expect(administers(null)).toBe(false);
+  });
+
+  it("never promotes a connection with no gateway behind it", () => {
+    const direct: Connection = {
+      id: "m_one",
+      kind: "machine",
+      addedAt: "2026-01-01T00:00:00.000Z",
+      machine: MACHINE,
+    };
+    expect(administers(direct)).toBe(false);
+    expect(canAdminCancel(direct)).toBe(false);
+  });
+});
+
+describe("adminSectionsFor", () => {
+  const ADMIN = {
+    grantedScope: "openid profile offline_access control_plane:read",
+    isAdmin: true,
+  };
+
+  it("offers the whole administration group to an administrator", () => {
+    expect(adminSectionsFor(gateway(ADMIN))).toEqual([
+      "admin-usage",
+      "admin-models",
+      "admin-people",
+      "admin-teams",
+      "admin-limits",
+      "admin-guardrails",
+      "admin-audit",
+      "admin-configuration",
+    ]);
+    expect(hasAdminSection(gateway(ADMIN), "admin-audit")).toBe(true);
+  });
+
+  it("offers a member nothing at all", () => {
+    // Not a thinner group: every read behind these screens is refused for a
+    // member, so the group is absent rather than present-and-failing.
+    expect(adminSectionsFor(gateway({ ...ADMIN, isAdmin: false }))).toEqual([]);
+    expect(adminSectionsFor(gateway())).toEqual([]);
+    expect(adminSectionsFor(null)).toEqual([]);
+    expect(hasAdminSection(gateway(), "admin-audit")).toBe(false);
+  });
+});
+
+describe("canAdminCancel", () => {
+  const WRITE =
+    "openid profile offline_access control_plane:read control_plane:write";
+
+  it("needs the write scope on top of the role", () => {
+    expect(canAdminCancel(gateway({ grantedScope: WRITE, isAdmin: true }))).toBe(
+      true,
+    );
+    // A read-only console session is refused at the request, and a button
+    // that can only fail is worse than one that is absent.
+    expect(
+      canAdminCancel(
+        gateway({
+          grantedScope: "openid profile offline_access control_plane:read",
+          isAdmin: true,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("is not something a member's write grant buys", () => {
+    expect(canAdminCancel(gateway({ grantedScope: WRITE }))).toBe(false);
+  });
+
+  it("is a different verb from the owner cancel", () => {
+    // Steering and the owner cancel ride `runtime:execute`; holding that alone
+    // never reaches somebody else's run.
+    expect(
+      canAdminCancel(
+        gateway({
+          grantedScope: "openid profile offline_access runtime:execute",
+          isAdmin: true,
+        }),
+      ),
+    ).toBe(false);
   });
 });

@@ -27,6 +27,7 @@ import {
   type ConnectionIndex,
   type GatewayConnection,
 } from "./connections";
+import { randomUrlSafe } from "./crypto";
 import {
   CONNECTION_INDEX_KEY,
   SESSION_STORAGE_KEY,
@@ -165,6 +166,14 @@ export class ConnectionRegistry {
    * deployment again replaces its record — the id is derived from the
    * installation — so a re-pair refreshes the credential instead of stacking a
    * second live refresh family for one gateway.
+   *
+   * Because that id is a deployment's name and not an account's, the record is
+   * rebuilt from scratch rather than merged: everything the previous sign-in
+   * learned about *who* was signed in (`isAdmin`, and the identity behind it)
+   * has to go, and a fresh `pairingId` means the cached reads filed under the
+   * old one cannot be addressed by this session either. The id is minted here
+   * rather than counted off the record it replaces, because sign-out deletes
+   * that record and the caches it filled outlive it.
    */
   async addGateway(input: NewGatewayConnection): Promise<GatewayConnection> {
     const id = gatewayConnectionId(input.gatewayUrl, input.installationId);
@@ -175,6 +184,7 @@ export class ConnectionRegistry {
       kind: "gateway",
       gatewayUrl: input.gatewayUrl,
       addedAt: existing?.addedAt ?? now.toISOString(),
+      pairingId: randomUrlSafe(9),
       ...(input.installationId ? { installationId: input.installationId } : {}),
       ...(input.machinePrefillUrl
         ? { machinePrefillUrl: input.machinePrefillUrl }
