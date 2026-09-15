@@ -6,11 +6,23 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { Composer, type ComposerFiles, type ComposerImages } from "./Composer";
 
+const hasLocalHostAuthority = vi.hoisted(() => vi.fn(() => false));
+
+vi.mock("./host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./host")>()),
+  hasLocalHostAuthority,
+}));
+
 afterEach(cleanup);
+
+beforeEach(() => {
+  hasLocalHostAuthority.mockReturnValue(false);
+});
 
 const noop = async () => undefined;
 
@@ -36,6 +48,12 @@ function files(overrides: Partial<ComposerFiles> = {}): ComposerFiles {
   };
 }
 
+function pngFile(): File {
+  return new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+    type: "image/png",
+  });
+}
+
 function markdownFile(type = "text/markdown"): File {
   return new File(["# Notes\n"], "notes.md", { type });
 }
@@ -45,7 +63,11 @@ function csvFile(type = "text/csv"): File {
 }
 
 function renderComposer(
-  overrides: { images?: ComposerImages; files?: ComposerFiles } = {},
+  overrides: {
+    images?: ComposerImages;
+    files?: ComposerFiles;
+    nativeDropTarget?: ReactNode;
+  } = {},
 ) {
   return render(
     <Composer
@@ -57,6 +79,7 @@ function renderComposer(
       draft=""
       images={overrides.images ?? images()}
       files={overrides.files ?? files()}
+      nativeDropTarget={overrides.nativeDropTarget}
       onDraftChange={vi.fn()}
       onSend={noop}
       onSteer={noop}
@@ -110,7 +133,7 @@ it("routes dropped markdown and csv through document attach, not the image valid
   expect(onAttachFiles).not.toHaveBeenCalled();
 });
 
-it("does not reject markdown or csv whose browser type looks like an unsupported image", () => {
+it("routes a mixed hosted drop through document attach, including the image", () => {
   const onAttachHeld = vi.fn();
   const onAttachFiles = vi.fn();
   renderComposer({
@@ -118,10 +141,11 @@ it("does not reject markdown or csv whose browser type looks like an unsupported
     files: files({ onAttachHeld }),
   });
 
-  dropFiles([markdownFile("image/heic"), csvFile("image/tiff")]);
+  dropFiles([pngFile(), markdownFile(), csvFile()]);
 
   expect(onAttachHeld).toHaveBeenCalledOnce();
   expect(onAttachHeld.mock.calls[0][0].map((file: File) => file.name)).toEqual([
+    "shot.png",
     "notes.md",
     "data.csv",
   ]);
@@ -157,10 +181,68 @@ it("keeps image-only transfer when the surface has no document ingest", () => {
     files: files(),
   });
 
-  dropFiles([markdownFile("image/heic"), csvFile()]);
+  dropFiles([pngFile(), markdownFile(), csvFile()]);
 
   expect(onAttachFiles).toHaveBeenCalledOnce();
   expect(onAttachFiles.mock.calls[0][0].map((file: File) => file.name)).toEqual(
-    ["notes.md"],
+    ["shot.png"],
+  );
+});
+
+it("attaches a dropped PNG on a local-native code composer", () => {
+  hasLocalHostAuthority.mockReturnValue(true);
+  const onAttachFiles = vi.fn();
+  renderComposer({
+    images: images({ onAttachFiles }),
+    files: files(),
+  });
+
+  const event = dropFiles([pngFile()]);
+
+  expect(event.defaultPrevented).toBe(true);
+  expect(onAttachFiles).toHaveBeenCalledOnce();
+  expect(onAttachFiles.mock.calls[0][0].map((file: File) => file.name)).toEqual(
+    ["shot.png"],
+  );
+});
+
+it("does not HTML5-attach a local-native work-mode drop that DocumentDropTarget owns", () => {
+  hasLocalHostAuthority.mockReturnValue(true);
+  const onAttachHeld = vi.fn();
+  const onAttachFiles = vi.fn();
+  renderComposer({
+    images: images({ onAttachFiles }),
+    files: files({ onAttachHeld }),
+    nativeDropTarget: <div data-testid="native-drop-target" />,
+  });
+
+  const event = dropFiles([pngFile(), markdownFile(), csvFile()]);
+
+  expect(event.defaultPrevented).toBe(true);
+  expect(onAttachHeld).not.toHaveBeenCalled();
+  expect(onAttachFiles).not.toHaveBeenCalled();
+});
+
+it("keeps local-native paste on the image path instead of document ingest", () => {
+  hasLocalHostAuthority.mockReturnValue(true);
+  const onAttachHeld = vi.fn();
+  const onAttachFiles = vi.fn();
+  renderComposer({
+    images: images({ onAttachFiles }),
+    files: files({ onAttachHeld }),
+    nativeDropTarget: <div data-testid="native-drop-target" />,
+  });
+
+  const event = pasteFiles(screen.getByRole("textbox", { name: "Message" }), [
+    pngFile(),
+    markdownFile(),
+    csvFile(),
+  ]);
+
+  expect(event.defaultPrevented).toBe(true);
+  expect(onAttachHeld).not.toHaveBeenCalled();
+  expect(onAttachFiles).toHaveBeenCalledOnce();
+  expect(onAttachFiles.mock.calls[0][0].map((file: File) => file.name)).toEqual(
+    ["shot.png"],
   );
 });
