@@ -278,7 +278,7 @@ impl CodeRuntime {
     /// credentials and every checkout outside the lending gate — those keep
     /// `gh` exactly as it is. A gateway refusal fails the operation with its
     /// reason, exactly as a push does.
-    async fn workspace_acts_as(
+    pub(super) async fn workspace_acts_as(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,

@@ -16,8 +16,13 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use super::gh::{
+    GIT_CREDENTIAL_CONFIG_ARGS, GIT_CREDENTIAL_FORGE_HOST, GIT_CREDENTIAL_HOST_ENV,
+    GIT_CREDENTIAL_SECRET_ENV, GIT_CREDENTIAL_USERNAME_ENV,
+};
 use super::git_runner;
 use super::setup_script::{missing_image_toolchain_notice, run_workspace_script_with_env};
+use crate::obo_gateway::GitCredential;
 
 const GIT_TIMEOUT: Duration = git_runner::GIT_TIMEOUT;
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1777,7 +1782,7 @@ pub async fn archive_blockers(
     worktree_path: &Path,
     base_ref: &str,
 ) -> Result<Option<ArchiveBlock>, WorktreeError> {
-    archive_blockers_with_merged_head(worktree_path, base_ref, None).await
+    archive_blockers_with_merged_head_and_credential(worktree_path, base_ref, None, None).await
 }
 
 /// [`archive_blockers`] for a workspace whose pull request already merged.
@@ -1793,10 +1798,22 @@ pub async fn archive_blockers_with_merged_head(
     base_ref: &str,
     merged_head: Option<&str>,
 ) -> Result<Option<ArchiveBlock>, WorktreeError> {
+    archive_blockers_with_merged_head_and_credential(worktree_path, base_ref, merged_head, None)
+        .await
+}
+
+/// Whether the worktree has blockers, accounting for a merged pull request
+/// and borrowing the hosted forge credential when a remote check is needed.
+pub async fn archive_blockers_with_merged_head_and_credential(
+    worktree_path: &Path,
+    base_ref: &str,
+    merged_head: Option<&str>,
+    credential: Option<&GitCredential>,
+) -> Result<Option<ArchiveBlock>, WorktreeError> {
     let uncommitted = has_uncommitted_work(worktree_path).await?;
     let unpushed = match merged_head {
         Some(head) if head_is(worktree_path, head).await? => false,
-        _ => has_unpushed_work(worktree_path, base_ref).await?,
+        _ => has_unpushed_work_with_credential(worktree_path, base_ref, credential).await?,
     };
     let ignored = has_non_disposable_ignored_content(worktree_path).await?;
     Ok(match (uncommitted, unpushed) {
@@ -2301,7 +2318,7 @@ async fn verify_inside_worktree(path: &Path) -> Result<(), WorktreeError> {
 }
 
 /// Whether the checkout's HEAD is exactly `commit` (a full SHA from the host).
-async fn head_is(worktree_path: &Path, commit: &str) -> Result<bool, WorktreeError> {
+pub(crate) async fn head_is(worktree_path: &Path, commit: &str) -> Result<bool, WorktreeError> {
     let commit = commit.trim();
     if commit.is_empty() {
         return Ok(false);
@@ -2506,8 +2523,12 @@ fn take_non_disposable_ignored_path(pending: &mut Vec<u8>, disposable: &[PathBuf
     found
 }
 
-async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {
-    match remote_branch_is_present(worktree_path).await? {
+async fn has_unpushed_work_with_credential(
+    worktree_path: &Path,
+    base_ref: &str,
+    credential: Option<&GitCredential>,
+) -> Result<bool, WorktreeError> {
+    match remote_branch_is_present(worktree_path, credential).await? {
         Some(true) => {
             let count = git_stdout(
                 Some(worktree_path),
@@ -2527,7 +2548,10 @@ async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool,
 /// `None` means there is no upstream to observe. A stale remote-tracking ref
 /// is not enough: deleting the branch on the remote leaves `@{u}` resolvable.
 /// Network failures fail closed so archive cannot treat the branch as pushed.
-async fn remote_branch_is_present(worktree_path: &Path) -> Result<Option<bool>, WorktreeError> {
+async fn remote_branch_is_present(
+    worktree_path: &Path,
+    credential: Option<&GitCredential>,
+) -> Result<Option<bool>, WorktreeError> {
     let branch = match git_stdout(
         Some(worktree_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -2563,10 +2587,11 @@ async fn remote_branch_is_present(worktree_path: &Path) -> Result<Option<bool>, 
         Ok(merge) if !merge.is_empty() => merge,
         Ok(_) | Err(_) => return Ok(None),
     };
-    match git(
+    match git_with_credential(
         Some(worktree_path),
         ["ls-remote", &remote, &merge],
         GIT_TIMEOUT,
+        credential,
     )
     .await
     {
@@ -2742,12 +2767,50 @@ async fn git(
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     limit: Duration,
 ) -> Result<GitOutput, String> {
-    let output = git_raw(cwd, args, limit).await?;
-    Ok(GitOutput {
-        stdout: String::from_utf8_lossy(trim_git_stdout(&output.stdout)).into_owned(),
-    })
+    git_with_credential(cwd, args, limit, None).await
 }
 
+async fn git_with_credential(
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    limit: Duration,
+    credential: Option<&GitCredential>,
+) -> Result<GitOutput, String> {
+    let args: Vec<OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect();
+    let mut command = git_runner::git_command(cwd);
+    if let Some(credential) = credential {
+        command.args(GIT_CREDENTIAL_CONFIG_ARGS);
+        command
+            .env(GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
+            .env(GIT_CREDENTIAL_SECRET_ENV, &credential.secret)
+            .env(GIT_CREDENTIAL_HOST_ENV, GIT_CREDENTIAL_FORGE_HOST);
+    }
+    command.args(&args);
+    let description = format!(
+        "git {}",
+        args.iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let output = git_runner::wait_command_bounded(
+        &mut command,
+        limit,
+        git_runner::default_stdout_budget(),
+        git_runner::default_stderr_budget(),
+        &description,
+    )
+    .await
+    .map_err(|err| err.into_message(&description))?;
+    let (stdout, _) =
+        git_runner::finish_bounded_command(output, false, "git output exceeded its limit", false)?;
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(trim_git_stdout(&stdout)).into_owned(),
+    })
+}
 async fn git_stdout(
     cwd: Option<&Path>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
