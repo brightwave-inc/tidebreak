@@ -2900,7 +2900,7 @@ async fn gateway_verifier_outage_is_retryable_without_ending_the_session() {
                 {
                     Some("Bearer mg_at_retry") => {
                         let attempt = seen.fetch_add(1, Ordering::SeqCst);
-                        match attempt {
+                        match attempt / 3 {
                             0 => StatusCode::BAD_GATEWAY.into_response(),
                             1 => StatusCode::SERVICE_UNAVAILABLE.into_response(),
                             2 => StatusCode::GATEWAY_TIMEOUT.into_response(),
@@ -2928,13 +2928,14 @@ async fn gateway_verifier_outage_is_retryable_without_ending_the_session() {
             .unwrap()
     };
 
-    for _ in 0..3 {
+    for failed_request in 0..3 {
         let response = machine
             .clone()
             .oneshot(request("mg_at_retry"))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(attempts.load(Ordering::SeqCst), (failed_request + 1) * 3);
     }
     assert_eq!(
         machine
@@ -2953,7 +2954,7 @@ async fn gateway_verifier_outage_is_retryable_without_ending_the_session() {
             .status(),
         StatusCode::UNAUTHORIZED,
     );
-    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    assert_eq!(attempts.load(Ordering::SeqCst), 10);
     server.abort();
 }
 
