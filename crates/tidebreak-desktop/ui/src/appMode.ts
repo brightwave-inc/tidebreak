@@ -2,14 +2,14 @@ export type AppMode = "work" | "code";
 
 export const APP_MODE_STORAGE_KEY = "tidebreak.app-mode";
 
-/** Read the last mode the reader used. Work remains the safe first-run default. */
+/** Read the last mode the reader used. Code is the first-run default. */
 export function readStoredAppMode(): AppMode {
   try {
-    return window.localStorage.getItem(APP_MODE_STORAGE_KEY) === "code"
-      ? "code"
-      : "work";
+    return window.localStorage.getItem(APP_MODE_STORAGE_KEY) === "work"
+      ? "work"
+      : "code";
   } catch {
-    return "work";
+    return "code";
   }
 }
 
