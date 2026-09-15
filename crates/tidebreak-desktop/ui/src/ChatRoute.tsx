@@ -615,7 +615,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * the machine and adopted through the same code the host route uses.
    */
   async function attachHeldFiles() {
-    const chosen = await pickHeldFiles();
+    await attachChosenHeldFiles(await pickHeldFiles());
+  }
+
+  /**
+   * Route files the renderer already holds — picker, drop, or paste — the same
+   * way: supported image MIME uploads as pixels, everything else is ingested
+   * as a source. Image validation stays on the image half.
+   */
+  async function attachChosenHeldFiles(chosen: readonly File[]) {
     if (chosen.length === 0) return;
     setAttaching(true);
     setAttachError(null);
@@ -783,6 +791,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             items: files,
             attaching,
             onAttach,
+            onAttachHeld: (chosen) => {
+              void attachChosenHeldFiles(chosen);
+            },
             onReattach: onReattachFile,
             onRemove: (documentId) =>
               setComposerFiles((current) =>
