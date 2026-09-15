@@ -467,9 +467,10 @@ function required<T>(value: T | null, label: string): T {
 
 export async function listActiveCodeWorkspaces(
   client: MachineJsonClient,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ActiveCodeWorkspace[]> {
   return parseList(
-    await client.getJson("/code/workspaces"),
+    await client.getJson("/code/workspaces", options),
     parseCodeWorkspace,
     "Code workspaces",
   ).filter((workspace) => workspace.status === "active");
@@ -593,11 +594,12 @@ export async function launchCodeSession(
 export async function listCodeApprovals(
   client: MachineJsonClient,
   sessionId?: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<CodeApprovalSnapshot[]> {
   const params = new URLSearchParams({ state: "pending" });
   if (sessionId) params.set("session_id", sessionId);
   return parseList(
-    await client.getJson(`/approvals?${params.toString()}`),
+    await client.getJson(`/approvals?${params.toString()}`, options),
     parseCodeApproval,
     "Code approvals",
   );

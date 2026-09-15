@@ -139,7 +139,7 @@ describe("mobile supervision API contracts", () => {
     await expect(listActiveCodeWorkspaces(listed.client)).resolves.toEqual([
       expect.objectContaining({ id: "workspace-1" }),
     ]);
-    expect(listed.getJson).toHaveBeenCalledWith("/code/workspaces");
+    expect(listed.getJson).toHaveBeenCalledWith("/code/workspaces", {});
 
     const invalid = fakeClient([workspace, { ...workspace, branch_name: 42 }]);
     await expect(listActiveCodeWorkspaces(invalid.client)).rejects.toThrow(
@@ -357,6 +357,7 @@ describe("mobile supervision API contracts", () => {
     ).resolves.toHaveLength(1);
     expect(listed.getJson).toHaveBeenCalledWith(
       "/approvals?state=pending&session_id=session%2F1",
+      {},
     );
 
     const denied = fakeClient({

@@ -1,58 +1,50 @@
 import { useMemo } from "react";
-import { MachineClient } from "../lib/machine";
-import { StaticTokenStore } from "../lib/machineTokenStore";
+import type { MachineClient } from "../lib/machine";
+import { machineClientFor } from "../lib/machineClients";
 import { connections } from "./runtime";
-import { useActiveMachine } from "./store";
+import { useActiveConnection } from "./store";
 
-// One client instance per attached machine, shared across every mount, so
-// consumers that key shared resources by client identity (the updates feed)
-// coalesce instead of each opening their own.
+/**
+ * The machine client for the active connection.
+ *
+ * One instance per (connection, machine), shared across every mount, so
+ * consumers that key shared resources by client identity — the updates feed —
+ * coalesce instead of each opening their own socket.
+ *
+ * The connection id is part of the key, not just the machine's URL, because
+ * the client is bound to the connection that built it (`machineClients.ts`):
+ * two connections reaching the same machine authenticate as different
+ * principals, and a client handed the wrong one would mint from the wrong
+ * credential and report its refusals to the wrong connection.
+ */
 let cached: {
+  connectionId: string;
   baseUrl: string;
   resource: string;
   client: MachineClient;
 } | null = null;
 
-function machineClientFor(machine: {
-  baseUrl: string;
-  resource: string;
-}): MachineClient {
-  if (
-    !cached ||
-    cached.baseUrl !== machine.baseUrl ||
-    cached.resource !== machine.resource
-  ) {
-    cached = {
-      baseUrl: machine.baseUrl,
-      resource: machine.resource,
-      client: new MachineClient({
+export function useMachineClient(): MachineClient | null {
+  const connection = useActiveConnection();
+  const connectionId = connection?.id ?? null;
+  const machine = connection?.machine ?? null;
+  return useMemo(() => {
+    if (!connectionId || !machine) {
+      return null;
+    }
+    if (
+      !cached ||
+      cached.connectionId !== connectionId ||
+      cached.baseUrl !== machine.baseUrl ||
+      cached.resource !== machine.resource
+    ) {
+      cached = {
+        connectionId,
         baseUrl: machine.baseUrl,
         resource: machine.resource,
-        // Resolved per call, not captured: switching connections switches
-        // which refresh family mints this machine's tokens.
-        tokens: {
-          getAccessToken: (resource) =>
-            connections.activeTokens().getAccessToken(resource),
-          // A standalone connection's roster token has no token endpoint to
-          // be refused at, so the machine's own 401 is what signs it out.
-          // A gateway's store has no such method and ignores this entirely.
-          reportStatus: (status) => {
-            const store = connections.activeTokens();
-            if (store instanceof StaticTokenStore) {
-              store.reportUnauthorized(status);
-            }
-          },
-        },
-      }),
-    };
-  }
-  return cached.client;
-}
-
-export function useMachineClient(): MachineClient | null {
-  const machine = useActiveMachine();
-  return useMemo(() => {
-    if (!machine) return null;
-    return machineClientFor(machine);
-  }, [machine?.baseUrl, machine?.resource]);
+        client: machineClientFor(connections, connectionId, machine),
+      };
+    }
+    return cached.client;
+  }, [connectionId, machine?.baseUrl, machine?.resource]);
 }

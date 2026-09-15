@@ -132,6 +132,18 @@ that one connection. `403` and every other status are left alone: a `403` is an
 answer about a principal the machine still recognizes, and signing a member out
 for opening an admin-only surface would be wrong.
 
+**A machine client is bound to the connection that built it.** The connection
+id is captured at construction and every credential lookup — the mint and the
+refusal alike — goes through `tokensFor(id)`, never through an
+active-connection lookup. This is not hygiene: every live surface polls, a poll
+survives the user switching connections, and resolving a late `401` against
+whoever is active at *response* time would sign out a machine whose token was
+never on that wire while leaving the refused one signed in and still polling.
+It is the shape the push work already uses for the same reason — a tray press
+mints against the connection its payload names, so it cannot re-point the app.
+A client whose connection has since been signed out mints nothing and says so
+rather than borrowing another's credential.
+
 ### 5. Onboarding placement.
 
 One line at the foot of the pair screen — "Pairing your own Tidebreak instance?
@@ -243,5 +255,10 @@ gaps below.
   of either deletes only its own key.
 - A `401` through `MachineClient` wipes exactly that machine's token and drops
   exactly that connection, while a `403` and a `500` change nothing.
+- Machine A's request is in flight, the active connection is switched to
+  machine B, and A's `401` then arrives: **A alone is signed out and B's token
+  is untouched and still mints.** The case a plausible wrong implementation —
+  one that asks the registry which connection is active when the response lands
+  — gets exactly backwards, signing out the connection that was never refused.
 - No connection summary the UI mirrors carries `staticToken`, `refreshToken`,
   or a cached access token.

@@ -69,7 +69,7 @@ export default function StartWorkspaceSessionScreen() {
   const workspacesQuery = useQuery({
     queryKey: ["code-workspaces", machineKey],
     enabled: !!client,
-    queryFn: () => listActiveCodeWorkspaces(client!),
+    queryFn: ({ signal }) => listActiveCodeWorkspaces(client!, { signal }),
   });
   const harnessesQuery = useQuery({
     queryKey: ["code-harnesses", machineKey],

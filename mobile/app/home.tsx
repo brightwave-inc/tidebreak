@@ -132,13 +132,13 @@ export default function HomeScreen() {
   const workspacesQuery = useQuery({
     queryKey: ["code-workspaces", connection?.machine?.baseUrl],
     enabled: !!client,
-    queryFn: () => listActiveCodeWorkspaces(client!),
+    queryFn: ({ signal }) => listActiveCodeWorkspaces(client!, { signal }),
   });
 
   const approvalsQuery = useQuery({
     queryKey: ["code-approvals", client],
     enabled: !!client && isFocused,
-    queryFn: () => listCodeApprovals(client!),
+    queryFn: ({ signal }) => listCodeApprovals(client!, undefined, { signal }),
     refetchInterval: 5_000,
   });
 
