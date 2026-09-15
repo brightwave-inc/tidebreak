@@ -587,6 +587,13 @@ impl ClaudeSession {
         )? {
             argv.extend(flags);
         }
+        if self.permission_mode() == PermissionMode::Ask
+            && self.spec.tool_bridge.is_some()
+            && self.spec.approval.is_none()
+        {
+            argv.push("--permission-prompt-tool".into());
+            argv.push("mcp__tb-human__permission_prompt".into());
+        }
         if let Some(resume) = self.resume_ref.lock().expect("claude resume").clone() {
             argv.push("--resume".into());
             argv.push(resume);
@@ -1937,6 +1944,32 @@ done
             1,
             "both channels keep exactly one permission-prompt-tool flag"
         );
+    }
+
+    #[test]
+    fn managed_ask_uses_the_native_permission_prompt_without_bypass_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with_mode(
+            dir.path().join("claude"),
+            dir.path(),
+            Arc::new(Discard),
+            PermissionMode::Ask,
+        );
+        session.spec.tool_bridge = Some(crate::ToolBridgeSpec {
+            helper: PathBuf::from("/managed-helper"),
+            socket: PathBuf::from("/managed.sock"),
+        });
+        let plan = session.compose_plan_for(None, None).unwrap();
+        assert!(plan
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "manual"]));
+        assert!(plan.argv.windows(2).any(|pair| pair
+            == [
+                "--permission-prompt-tool",
+                "mcp__tb-human__permission_prompt"
+            ]));
+        assert!(!plan.argv.iter().any(|arg| arg.contains("skip-permissions")));
     }
 
     #[test]

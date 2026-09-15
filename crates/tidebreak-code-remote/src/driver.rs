@@ -108,8 +108,11 @@ impl RemoteSpawnSettings {
                 session.harness_kind
             ));
         }
-        if session.permission_mode != tidebreak_core::PermissionMode::Allow {
-            return Err("this sandbox profile supports Allow mode; Gateway still enforces repository and app access".into());
+        if session.permission_mode != tidebreak_core::PermissionMode::Allow
+            && !(session.permission_mode == tidebreak_core::PermissionMode::Ask
+                && self.embedded_engine_registration)
+        {
+            return Err("this sandbox profile supports Allow mode, or Ask mode with managed engine registration; Gateway still enforces repository and app access".into());
         }
         if session.fast_mode {
             return Err("this sandbox profile does not support fast mode".into());
@@ -912,27 +915,17 @@ impl RemoteDriver<'_> {
             harness: "custom".to_owned(),
             mode: Some("turn".to_owned()),
             task: if settings.engine.is_some() {
-                if repo.is_some() {
-                    tidebreak_core::code::RemoteWorkspaceTask::encode(
-                        &spawn_task,
-                        &workspace_branch,
-                    )
-                    .map_err(|error| {
-                        tidebreak_core::AgentError::config(format!(
-                            "the workspace task could not be encoded: {error}"
-                        ))
-                    })?
-                } else {
-                    tidebreak_core::code::RemoteWorkspaceTask::encode_scratch(
-                        &spawn_task,
-                        &workspace_branch,
-                    )
-                    .map_err(|error| {
-                        tidebreak_core::AgentError::config(format!(
-                            "the scratch task could not be encoded: {error}"
-                        ))
-                    })?
-                }
+                tidebreak_core::code::RemoteWorkspaceTask::encode_with_permissions(
+                    &spawn_task,
+                    &workspace_branch,
+                    repo.is_none(),
+                    session.permission_mode,
+                )
+                .map_err(|error| {
+                    tidebreak_core::AgentError::config(format!(
+                        "the workspace task could not be encoded: {error}"
+                    ))
+                })?
             } else {
                 spawn_task
             },
@@ -2859,6 +2852,44 @@ mod tests {
             let mut rejected = session.clone();
             rejected.harness_kind = tidebreak_core::HarnessKind::Opencode;
             assert!(settings.validate_execution(&rejected).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_ask_mode_reaches_the_runtime_envelope_for_both_engines() {
+        for harness in [
+            tidebreak_core::HarnessKind::ClaudeCode,
+            tidebreak_core::HarnessKind::Codex,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+            session.harness_kind = harness;
+            session.permission_mode = tidebreak_core::PermissionMode::Ask;
+            let fake = FakeProvisioner::default();
+            let mut settings = settings();
+            settings.engine = Some(tidebreak_core::HarnessKind::ClaudeCode);
+            settings.embedded_engine_registration = true;
+            settings.engines = Some(vec![
+                tidebreak_core::HarnessKind::ClaudeCode,
+                tidebreak_core::HarnessKind::Codex,
+            ]);
+            let driver = driver!(&db, &bus, &fake, &settings);
+            driver
+                .submit_turn(&mut session, Some(&workspace), Some(&repo), None, "start")
+                .await
+                .unwrap();
+            let spawns = fake.spawns.lock().unwrap();
+            let task = tidebreak_core::code::RemoteWorkspaceTask::parse(&spawns[0].task)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                task.permission_mode,
+                Some(tidebreak_core::PermissionMode::Ask)
+            );
+            assert_eq!(
+                spawns[0].embedded_engine.as_ref().unwrap().engine,
+                harness.as_str()
+            );
         }
     }
 

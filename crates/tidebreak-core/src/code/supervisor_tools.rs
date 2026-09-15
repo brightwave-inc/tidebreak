@@ -19,7 +19,10 @@ pub const TOOLS: &[&str] = &[
 ];
 /// Human decisions never enter ordinary tool execution or its timeout.
 pub fn is_human_decision(tool: &str) -> bool {
-    matches!(tool, "ask_user_questions" | "request_plan_approval")
+    matches!(
+        tool,
+        "ask_user_questions" | "request_plan_approval" | "request_tool_approval"
+    )
 }
 
 /// Canonical schemas for the human helpers, independent of a harness callback.
@@ -31,7 +34,7 @@ pub fn human_decision_spec(tool: &str) -> Option<crate::ToolSpec> {
         )),
         "request_plan_approval" => Some(crate::ToolSpec::for_args::<crate::ExitPlanModeArgs>(
             tool,
-            "Present a concrete plan and wait for the user's explicit decision. Supply its title and full Markdown plan. Acceptance authorizes this plan and preserves the session's Allow permissions. Rejection requires you to revise the plan using the feedback. Run this helper in the foreground and wait for its result before continuing.",
+            "Present a concrete plan and wait for the user's explicit decision. Supply its title and full Markdown plan. Acceptance authorizes this plan and preserves the session's permission mode. Rejection requires you to revise the plan using the feedback. Run this helper in the foreground and wait for its result before continuing.",
         )),
         _ => None,
     }
@@ -62,6 +65,13 @@ pub fn human_decision_kind(
             Ok(super::ApprovalKind::Plan {
                 proposed_mode: crate::PermissionMode::Allow,
             })
+        }
+        "request_tool_approval" => {
+            let raw = arguments
+                .get("raw")
+                .filter(|raw| raw.is_object())
+                .ok_or("native approval requires its original request")?;
+            Ok(native_approval_kind(raw))
         }
         _ => Err("this helper does not request a human decision".into()),
     }
@@ -115,7 +125,21 @@ pub fn validate_human_decision(
         {
             Ok(())
         }
-        _ => Err("this approval requires explicit answers or a plan decision".into()),
+        (
+            Kind::Command { .. }
+            | Kind::FileWrite { .. }
+            | Kind::Network { .. }
+            | Kind::Other { .. },
+            Decision::Approve,
+        ) => Ok(()),
+        (
+            Kind::Command { .. }
+            | Kind::FileWrite { .. }
+            | Kind::Network { .. }
+            | Kind::Other { .. },
+            Decision::Deny { feedback },
+        ) if feedback_valid(feedback) => Ok(()),
+        _ => Err("the decision does not match this approval".into()),
     }
 }
 
@@ -181,7 +205,7 @@ pub fn validate_request(request: &super::SupervisorToolRequest) -> Result<(), St
     if request.cancelled && !is_human_decision(&request.tool) {
         return Err("only human decisions can be cancelled".into());
     }
-    if !TOOLS.contains(&request.tool.as_str()) {
+    if !TOOLS.contains(&request.tool.as_str()) && request.tool != "request_tool_approval" {
         return Err("this native tool is unavailable".into());
     }
     if !request.arguments.is_object() {
@@ -621,4 +645,131 @@ mod stop_tests {
             decode_stop_frame(&format!("{STOP_PREFIX}{}", " ".repeat(MAX_FRAME_BYTES))).is_none()
         );
     }
+}
+
+/// Classify the original native request for the shared approval card.
+pub fn native_approval_kind(raw: &serde_json::Value) -> super::ApprovalKind {
+    let input = raw
+        .get("input")
+        .or_else(|| raw.get("metadata"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // Codex puts the command on the request itself, not under `input`.
+    if let Some(cmd) = raw
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        return super::ApprovalKind::Command {
+            cmd: cmd.to_owned(),
+            cwd: raw
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+    if let Some(cmd) = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        return super::ApprovalKind::Command {
+            cmd: cmd.to_owned(),
+            cwd: input
+                .get("cwd")
+                .or_else(|| raw.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+    let tool = raw
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| raw.get("permission").and_then(serde_json::Value::as_str))
+        .unwrap_or("");
+    let paths = approval_file_paths(raw, &input);
+    let path = paths.first().map(String::as_str).unwrap_or("");
+    match tool {
+        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => {
+            super::ApprovalKind::FileWrite { paths }
+        }
+        "Bash" | "bash" => super::ApprovalKind::Command {
+            cmd: String::new(),
+            cwd: input
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        },
+        "WebFetch" | "WebSearch" | "webfetch" | "websearch" => super::ApprovalKind::Network {
+            summary: tool.to_owned(),
+        },
+        "Read" | "read" | "Grep" | "grep" | "Glob" | "glob" | "NotebookRead" => {
+            super::ApprovalKind::Other {
+                summary: if path.is_empty() {
+                    tool.to_owned()
+                } else {
+                    format!("{tool} {path}")
+                },
+            }
+        }
+        "" | "unknown" => super::ApprovalKind::Other {
+            summary: "The engine needs approval".to_owned(),
+        },
+        other => super::ApprovalKind::Other {
+            summary: other.to_owned(),
+        },
+    }
+}
+
+fn approval_file_paths(raw: &serde_json::Value, input: &serde_json::Value) -> Vec<String> {
+    let metadata = raw.get("metadata").unwrap_or(&serde_json::Value::Null);
+    let cwd = metadata
+        .get("cwd")
+        .or_else(|| input.get("cwd"))
+        .or_else(|| raw.get("cwd"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty());
+    let direct = metadata
+        .get("filepath")
+        .or_else(|| metadata.get("file_path"))
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .or_else(|| raw.get("path"))
+        .and_then(serde_json::Value::as_str);
+    let candidates = direct.into_iter().chain(
+        raw.get("patterns")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|path| !path.chars().any(|ch| "*?[]{}".contains(ch))),
+    );
+    let mut paths = Vec::new();
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let normalized = normalize_approval_path(candidate, cwd);
+        if !normalized.is_empty() && !paths.contains(&normalized) {
+            paths.push(normalized);
+        }
+    }
+    paths
+}
+
+fn normalize_approval_path(path: &str, cwd: Option<&str>) -> String {
+    let render = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
+    let path = std::path::Path::new(path);
+    if let Ok(relative) = path.strip_prefix("/workspace") {
+        if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
+            return render(&std::path::Path::new(cwd).join(relative));
+        }
+    }
+    if path.is_relative() {
+        if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
+            return render(&std::path::Path::new(cwd).join(path));
+        }
+    }
+    render(path)
 }

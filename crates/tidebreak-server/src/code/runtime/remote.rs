@@ -235,6 +235,29 @@ impl CodeRuntime {
         }
     }
 
+    fn remote_sandbox_permission_mode(
+        &self,
+        harness: HarnessKind,
+        requested: Option<PermissionMode>,
+    ) -> Result<PermissionMode, ServerError> {
+        let mode = requested.unwrap_or(PermissionMode::Allow);
+        if mode == PermissionMode::Allow {
+            return Ok(mode);
+        }
+        let managed = self.remote_sessions().is_some_and(|remote| {
+            remote.settings.embedded_engine_registration
+                && matches!(harness, HarnessKind::ClaudeCode | HarnessKind::Codex)
+        });
+        if managed && mode == PermissionMode::Ask {
+            Ok(mode)
+        } else {
+            Err(ServerError::conflict_kind(
+                "permission_mode_unsupported",
+                format!("this sandbox deployment does not support {mode} for {harness}"),
+            ))
+        }
+    }
+
     /// Bind an external conversation to a session, creating the remote
     /// workspace, session, and binding together on first contact
     /// (docs/slack-sessions.md, stage 2).
@@ -248,9 +271,8 @@ impl CodeRuntime {
     /// `requested_mode` is the permission mode the channel named, if any. On
     /// the machine's engine it is honored up to the operator's ceiling and
     /// refused by name above it; absent, the session takes the operator's
-    /// default (decision 88). A sandbox session is `Allow` because confinement
-    /// is its boundary (decision 39), so a request for any other mode there
-    /// is refused rather than approximated.
+    /// default (decision 88). Managed native sandboxes accept Ask through their
+    /// durable approval channel; other sandbox profiles keep Allow.
     #[allow(clippy::too_many_arguments)]
     pub async fn external_get_or_create(
         &self,
@@ -427,23 +449,14 @@ impl CodeRuntime {
         let Some(repo_id) = repo_id else {
             return match location {
                 ExecutionLocation::Sandbox => {
-                    if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow)
-                    {
-                        return Err(ServerError::conflict_kind(
-                            "permission_mode_unsupported",
-                            format!(
-                                "this deployment runs channel sessions in a sandbox, which is \
-                                 always allow; {mode} is not available here"
-                            ),
-                        ));
-                    }
+                    let mode = self.remote_sandbox_permission_mode(harness, requested_mode)?;
                     let session = self
                         .build_repositoryless_remote_session(
                             owner,
                             owner_kind,
                             harness,
                             NewSessionSettings {
-                                permission_mode: PermissionMode::Allow,
+                                permission_mode: mode,
                                 acts_as: Some(identity.acts_as),
                                 ..settings
                             },
@@ -520,15 +533,7 @@ impl CodeRuntime {
         }
         match location {
             ExecutionLocation::Sandbox => {
-                if let Some(mode) = requested_mode.filter(|mode| *mode != PermissionMode::Allow) {
-                    return Err(ServerError::conflict_kind(
-                        "permission_mode_unsupported",
-                        format!(
-                            "this deployment runs channel sessions in a sandbox, which is \
-                             always allow; {mode} is not available here"
-                        ),
-                    ));
-                }
+                let mode = self.remote_sandbox_permission_mode(harness, requested_mode)?;
                 if repo.origin_host.is_none()
                     || repo.origin_owner.is_none()
                     || repo.origin_name.is_none()
@@ -539,6 +544,7 @@ impl CodeRuntime {
                     ));
                 }
                 let settings = NewSessionSettings {
+                    permission_mode: mode,
                     acts_as: Some(identity.acts_as),
                     ..settings
                 };

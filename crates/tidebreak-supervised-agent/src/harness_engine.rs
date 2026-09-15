@@ -8,10 +8,8 @@
 //!
 //! Posture and state:
 //!
-//! - The engine runs in [`PermissionMode::Allow`]. The sandbox's confinement
-//!   is the permission boundary here, the same posture engines already run
-//!   under in these environments; decision 0039 owns Allow's semantics, and
-//!   choosing it for a supervised pod is parity, not a weakening.
+//! - Managed engines use the workspace's Allow or Ask mode. Ask decisions
+//!   travel through the supervisor's durable human-decision channel.
 //! - The agent keeps no session state of its own. The engine's native session
 //!   store under the pod's home directory is the only continuity, and a
 //!   [`HarnessError::ResumeLost`] is fatal — the agent never silently starts
@@ -185,6 +183,8 @@ fn read_trimmed(name: &str) -> Option<String> {
 
 /// Everything [`HarnessEngine`] needs, resolved before the loop starts.
 pub struct HarnessEngineSpec {
+    /// Native posture requested by the workspace.
+    pub permission_mode: PermissionMode,
     /// Connected apps served by the sandbox sidecar, when the gateway provides them.
     pub apps: Option<tidebreak_harness::AppsChannelSpec>,
     /// Persistent Tidebreak session identity, or one local identity for standalone runs.
@@ -231,6 +231,15 @@ impl HarnessEngine {
     }
 
     async fn launch(&self) -> Result<Arc<dyn HarnessSession>, EngineError> {
+        if self.spec.permission_mode != PermissionMode::Allow
+            && !(self.spec.permission_mode == PermissionMode::Ask
+                && self.spec.tool_bridge.is_some()
+                && matches!(self.kind, HarnessKind::ClaudeCode | HarnessKind::Codex))
+        {
+            return Err(EngineError {
+                message: "Ask mode requires a managed native approval bridge".into(),
+            });
+        }
         let probe = &self.spec.probe;
         if !probe.found {
             let detail = probe.stderr.trim();
@@ -313,7 +322,7 @@ impl HarnessEngine {
                 session_id: self.spec.session_id,
                 worktree: self.spec.worktree.clone(),
                 allowed_read_roots: self.spec.allowed_read_roots.clone(),
-                permission_mode: PermissionMode::Allow,
+                permission_mode: self.spec.permission_mode,
                 model: self.spec.model.clone(),
                 reasoning_effort: self.spec.reasoning_effort,
                 fast_mode: false,
@@ -353,6 +362,8 @@ impl Engine for HarnessEngine {
             }
         };
         self.sink.clear();
+        let (approval_sender, approvals) = tokio::sync::mpsc::channel(8);
+        *self.sink.approvals.lock().unwrap() = Some(approval_sender);
         let input = TurnInput {
             turn_id: None,
             text: request.input,
@@ -371,6 +382,14 @@ impl Engine for HarnessEngine {
             sink: self.sink.clone(),
             interrupted: false,
             ended: None,
+            approvals,
+            decisions: tokio::task::JoinSet::new(),
+            approval_ids: std::collections::HashSet::new(),
+            tool_socket: self
+                .spec
+                .tool_bridge
+                .as_ref()
+                .map(|bridge| bridge.socket.clone()),
         }))
     }
 }
@@ -394,6 +413,11 @@ struct TurnSink {
     model: Mutex<Option<String>>,
     assistant: Mutex<AssistantBuffer>,
     steer_acks: Mutex<Vec<uuid::Uuid>>,
+    approvals: Mutex<
+        Option<
+            tokio::sync::mpsc::Sender<(tidebreak_harness::HarnessApprovalRef, serde_json::Value)>,
+        >,
+    >,
 }
 
 #[derive(Default)]
@@ -454,6 +478,14 @@ impl TurnSink {
 impl HarnessEventSink for TurnSink {
     async fn emit(&self, event: HarnessEvent) {
         match event {
+            HarnessEvent::ApprovalRequested {
+                harness_ref, raw, ..
+            } => {
+                let sender = self.approvals.lock().unwrap().clone();
+                if let Some(sender) = sender {
+                    let _ = sender.send((harness_ref, raw)).await;
+                }
+            }
             HarnessEvent::ModelReported { model } => {
                 *self.model.lock().unwrap() = Some(model);
             }
@@ -494,6 +526,11 @@ struct HarnessTurn {
     sink: Arc<TurnSink>,
     interrupted: bool,
     ended: Option<TurnEnd>,
+    approvals:
+        tokio::sync::mpsc::Receiver<(tidebreak_harness::HarnessApprovalRef, serde_json::Value)>,
+    decisions: tokio::task::JoinSet<Result<(), HarnessError>>,
+    approval_ids: std::collections::HashSet<String>,
+    tool_socket: Option<PathBuf>,
 }
 
 impl HarnessTurn {
@@ -557,7 +594,50 @@ impl TurnHandle for HarnessTurn {
         if let Some(ended) = &self.ended {
             return ended.clone();
         }
-        let joined = (&mut self.run).await;
+        let joined = loop {
+            tokio::select! {
+                biased;
+                joined = &mut self.run => break joined,
+                decision = self.decisions.join_next(), if !self.decisions.is_empty() => {
+                    match decision {
+                        Some(Ok(Err(error))) => {
+                            self.decisions.abort_all();
+                            let ended = TurnEnd::Fatal { message: format!("the native approval could not be delivered: {error}") };
+                            self.ended = Some(ended.clone());
+                            let _ = self.session.interrupt().await;
+                            return ended;
+                        }
+                        Some(Err(error)) if !error.is_cancelled() => {
+                            let _ = self.session.interrupt().await;
+                            let ended = TurnEnd::Fatal { message: format!("the native approval task failed: {error}") };
+                            self.ended = Some(ended.clone());
+                            return ended;
+                        }
+                        _ => (),
+                    }
+                }
+                Some((approval, raw)) = self.approvals.recv(), if !self.interrupted && self.decisions.len() < 8 => {
+                    if self.approval_ids.len() >= 1024 || !self.approval_ids.insert(approval.call_id.clone()) {
+                        self.decisions.abort_all();
+                        let _ = self.session.interrupt().await;
+                        let ended = TurnEnd::Fatal { message: "the engine reused a native approval ID in one turn".into() };
+                        self.ended = Some(ended.clone());
+                        return ended;
+                    }
+                    let socket = self.tool_socket.clone();
+                    let session = self.session.clone();
+                    // The task owns delivery across cancellations of wait() by poll ticks.
+                    self.decisions.spawn(async move {
+                        let decision = match socket {
+                            Some(socket) => crate::native_approvals::request(&socket, raw).await,
+                            None => tidebreak_harness::ApprovalDecision::Deny { feedback: Some("the managed approval bridge is unavailable".into()) },
+                        };
+                        session.decide(approval, decision).await
+                    });
+                }
+            }
+        };
+        self.decisions.abort_all();
         let ended = self.conclude(joined);
         self.ended = Some(ended.clone());
         ended
@@ -610,6 +690,8 @@ impl TurnHandle for HarnessTurn {
         if self.ended.is_some() || self.run.is_finished() || self.sink.read().is_some() {
             return;
         }
+        self.decisions.abort_all();
+        self.approvals.close();
         if self.session.interrupt().await.is_ok() {
             self.interrupted = true;
         }
@@ -652,6 +734,8 @@ mod tests {
         turns: Mutex<VecDeque<ScriptedTurn>>,
         sink: Arc<dyn HarnessEventSink>,
         interrupt: tokio::sync::Notify,
+        decisions: Arc<Mutex<Vec<(HarnessApprovalRef, ApprovalDecision)>>>,
+        decided: tokio::sync::Notify,
     }
 
     #[async_trait]
@@ -667,17 +751,29 @@ mod tests {
                 self.interrupt.notified().await;
             }
             for event in turn.events {
+                let approval = matches!(event, HarnessEvent::ApprovalRequested { .. });
                 self.sink.emit(event).await;
+                if approval {
+                    tokio::select! {
+                        _ = self.decided.notified() => (),
+                        _ = self.interrupt.notified() => {
+                            self.sink.emit(HarnessEvent::TurnInterrupted).await;
+                            return Ok(TurnOutcome::Clean);
+                        }
+                    }
+                }
             }
             turn.outcome
         }
 
         async fn decide(
             &self,
-            _approval: HarnessApprovalRef,
-            _decision: ApprovalDecision,
+            approval: HarnessApprovalRef,
+            decision: ApprovalDecision,
         ) -> Result<(), HarnessError> {
-            Err(HarnessError::Other("no approvals in this seam".to_owned()))
+            self.decisions.lock().unwrap().push((approval, decision));
+            self.decided.notify_one();
+            Ok(())
         }
 
         async fn interrupt(&self) -> Result<(), HarnessError> {
@@ -737,6 +833,7 @@ mod tests {
         turns: Mutex<Option<VecDeque<ScriptedTurn>>>,
         captured: Arc<Mutex<CapturedSpec>>,
         launch_error: Mutex<Option<HarnessError>>,
+        decisions: Arc<Mutex<Vec<(HarnessApprovalRef, ApprovalDecision)>>>,
     }
 
     impl FakeAdapter {
@@ -745,6 +842,7 @@ mod tests {
                 turns: Mutex::new(Some(turns.into())),
                 captured: Arc::new(Mutex::new(CapturedSpec::default())),
                 launch_error: Mutex::new(None),
+                decisions: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -804,7 +902,92 @@ mod tests {
                 turns: Mutex::new(self.turns.lock().unwrap().take().expect("one launch")),
                 sink: spec.sink,
                 interrupt: tokio::sync::Notify::new(),
+                decisions: self.decisions.clone(),
+                decided: tokio::sync::Notify::new(),
             }))
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_approval_waits_for_the_bound_result_and_stop_cancels_it() {
+        use crate::tool_bridge::LocalToolBridge;
+        use tidebreak_core::code::supervisor_tools::{encode_result_frames, SupervisorToolResult};
+        use tidebreak_core::code::SupervisorToolTurn;
+        for stop in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
+            bridge.begin_turn(SupervisorToolTurn {
+                native_turn: 1,
+                runtime_id: uuid::Uuid::new_v4(),
+            });
+            let native_ref = HarnessApprovalRef::engine("command-1");
+            let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+                events: vec![
+                    HarnessEvent::ApprovalRequested {
+                        harness_ref: native_ref.clone(),
+                        raw: serde_json::json!({"command":"printf marker"}),
+                        kind: None,
+                    },
+                    completed_event(),
+                ],
+                outcome: Ok(TurnOutcome::Clean),
+                waits_for_interrupt: false,
+            }]));
+            let decisions = adapter.decisions.clone();
+            let captured = adapter.captured.clone();
+            let mut engine = engine_over(adapter, probe(true));
+            engine.spec.permission_mode = PermissionMode::Ask;
+            engine.spec.tool_bridge = Some(tidebreak_harness::ToolBridgeSpec {
+                helper: PathBuf::from("/managed-helper"),
+                socket: bridge.socket_path(),
+            });
+            let mut turn = engine
+                .start_turn(request("request approval"))
+                .await
+                .unwrap();
+            let request = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::select! {
+                    _ = turn.wait() => panic!("the tool must wait for approval"),
+                    request = async { loop {
+                        if let Some(request) = bridge.drain_requests().pop() { break request; }
+                        tokio::task::yield_now().await;
+                    }} => request,
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                captured.lock().unwrap().permission_mode,
+                Some(PermissionMode::Ask)
+            );
+            assert!(decisions.lock().unwrap().is_empty());
+            assert_eq!(request.tool, "request_tool_approval");
+            if stop {
+                turn.interrupt().await;
+                assert_eq!(turn.wait().await, TurnEnd::Interrupted);
+                assert!(decisions.lock().unwrap().is_empty());
+            } else {
+                let result = SupervisorToolResult {
+                    request: Some(request.clone()),
+                    request_id: request.request_id.clone(),
+                    output: serde_json::json!({"is_error":false,"data":{"decision":"approved"}}),
+                    artifacts: vec![],
+                };
+                for frame in encode_result_frames(&result).unwrap() {
+                    bridge.receive_frame(&frame).unwrap();
+                }
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(2), turn.wait())
+                        .await
+                        .unwrap(),
+                    TurnEnd::Completed { success: true }
+                );
+                assert_eq!(
+                    *decisions.lock().unwrap(),
+                    [(native_ref, ApprovalDecision::Approve)]
+                );
+            }
         }
     }
 
@@ -826,6 +1009,7 @@ mod tests {
 
     fn engine_over(adapter: Arc<FakeAdapter>, spec_probe: HarnessProbe) -> HarnessEngine {
         HarnessEngine::new(HarnessEngineSpec {
+            permission_mode: PermissionMode::Allow,
             apps: None,
             session_id: tidebreak_core::SessionId::new(),
             adapter,
@@ -1425,6 +1609,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
             ("GITHUB_TOKEN".into(), "fixture-secret".into()),
         ]);
         let mut engine = HarnessEngine::new(HarnessEngineSpec {
+            permission_mode: PermissionMode::Allow,
             apps: None,
             session_id: tidebreak_core::SessionId::new(),
             adapter: tidebreak_harness::builtin_registry()

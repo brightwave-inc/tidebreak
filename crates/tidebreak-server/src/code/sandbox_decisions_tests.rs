@@ -497,9 +497,15 @@ async fn managed_decisions_bind_the_exact_turn_and_supervisor() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn managed_plan_acceptance_and_rejection_return_the_exact_decision_without_changing_allow() {
-    for approve in [true, false] {
-        let (dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Allow).await;
+async fn managed_plan_acceptance_and_rejection_return_the_exact_decision_without_changing_permissions(
+) {
+    for (mode, approve) in [
+        (PermissionMode::Allow, true),
+        (PermissionMode::Allow, false),
+        (PermissionMode::Ask, true),
+        (PermissionMode::Ask, false),
+    ] {
+        let (dir, runtime, session, incarnation, _) = fixture(true, mode).await;
         let (_, identity) = active_turn(&runtime, &session, incarnation).await;
         let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
         bridge.begin_turn(identity);
@@ -522,7 +528,7 @@ async fn managed_plan_acceptance_and_rejection_return_the_exact_decision_without
         assert_eq!(
             approval.kind,
             tidebreak_core::ApprovalKind::Plan {
-                proposed_mode: PermissionMode::Allow
+                proposed_mode: mode
             }
         );
         assert!(tidebreak_core::PlanProposalBody::from_raw(&approval.harness_raw).is_some());
@@ -559,7 +565,7 @@ async fn managed_plan_acceptance_and_rejection_return_the_exact_decision_without
                 .await
                 .unwrap()
                 .permission_mode,
-            PermissionMode::Allow
+            mode
         );
         if !approve {
             assert!(output["output"]["content"]
@@ -1072,4 +1078,167 @@ async fn managed_cancellation_cannot_claim_an_ordinary_request_id() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_native_approval_delivers_once_and_preserves_actor_and_posture() {
+    for approved in [true, false] {
+        let (dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Ask).await;
+        let (_, identity) = active_turn(&runtime, &session, incarnation).await;
+        let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
+        bridge.begin_turn(identity);
+        let socket = bridge.socket_path();
+        let helper = tokio::spawn(async move {
+            tidebreak_supervised_agent::native_approvals::request(
+                &socket,
+                serde_json::json!({"command":"printf approval-canary","cwd":"/workspace"}),
+            )
+            .await
+        });
+        let request = admitted(&mut bridge).await;
+        let executor = SandboxToolExecutor::new(Arc::downgrade(&runtime));
+        executor
+            .enqueue(&session.owner, session.id, incarnation, &request)
+            .await
+            .unwrap();
+        executor
+            .enqueue(&session.owner, session.id, incarnation, &request)
+            .await
+            .unwrap();
+        let approval = only_approval(&runtime, &session).await;
+        assert!(
+            matches!(&approval.kind, tidebreak_core::ApprovalKind::Command { cmd, .. } if cmd == "printf approval-canary")
+        );
+        assert_eq!(approval.harness_raw["command"], "printf approval-canary");
+        assert!(!helper.is_finished());
+        // An owner mismatch must never release a managed native call.
+        assert!(runtime
+            .decide_approval(
+                &OwnerId::new("foreign-owner").unwrap(),
+                approval.id,
+                ApprovalDecisionRequest::Approve,
+                None
+            )
+            .await
+            .is_err());
+        assert!(!helper.is_finished());
+        assert!(runtime
+            .decide_approval(&session.owner, approval.id, answer(&["test"], None), None)
+            .await
+            .is_err());
+        let actor = TurnActor {
+            display: Some("Alex".into()),
+            channel_kind: Some("slack".into()),
+            external_identity: Some("U-ALEX".into()),
+            ..Default::default()
+        };
+        let decide = || {
+            if approved {
+                ApprovalDecisionRequest::Approve
+            } else {
+                ApprovalDecisionRequest::Deny {
+                    feedback: Some("Skip this command".into()),
+                }
+            }
+        };
+        runtime
+            .decide_approval(&session.owner, approval.id, decide(), Some(actor.clone()))
+            .await
+            .unwrap();
+        assert!(runtime
+            .decide_approval(&session.owner, approval.id, decide(), None)
+            .await
+            .is_err());
+        let result = executor
+            .service(&session.owner, session.id, incarnation)
+            .await
+            .unwrap()
+            .remove(0);
+        for frame in encode_result_frames(&result).unwrap() {
+            bridge.receive_frame(&frame).unwrap();
+        }
+        assert_eq!(
+            helper.await.unwrap(),
+            if approved {
+                tidebreak_harness::ApprovalDecision::Approve
+            } else {
+                tidebreak_harness::ApprovalDecision::Deny {
+                    feedback: Some("Skip this command".into()),
+                }
+            }
+        );
+        assert_eq!(only_approval(&runtime, &session).await.actor, Some(actor));
+        assert_eq!(
+            runtime
+                .get_session(&session.owner, session.id)
+                .await
+                .unwrap()
+                .permission_mode,
+            PermissionMode::Ask
+        );
+    }
+}
+
+#[tokio::test]
+async fn managed_native_approval_after_stop_cannot_release_the_command() {
+    let (_dir, runtime, session, incarnation, _) = fixture(true, PermissionMode::Ask).await;
+    let (_, identity) = active_turn(&runtime, &session, incarnation).await;
+    let executor = SandboxToolExecutor::new(Arc::downgrade(&runtime));
+    let mut request = question_request("native-stop");
+    request.tool = "request_tool_approval".into();
+    request.arguments =
+        serde_json::json!({"raw":{"tool_name":"Bash","input":{"command":"touch marker"}}});
+    request.turn = Some(identity);
+    executor
+        .enqueue(&session.owner, session.id, incarnation, &request)
+        .await
+        .unwrap();
+    let approval = only_approval(&runtime, &session).await;
+    request.cancelled = true;
+    executor
+        .enqueue(&session.owner, session.id, incarnation, &request)
+        .await
+        .unwrap();
+    assert!(runtime
+        .decide_approval(
+            &session.owner,
+            approval.id,
+            ApprovalDecisionRequest::Approve,
+            None
+        )
+        .await
+        .is_err());
+    assert!(executor
+        .service(&session.owner, session.id, incarnation)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        only_approval(&runtime, &session).await.state,
+        ApprovalState::Abandoned
+    );
+}
+
+#[tokio::test]
+async fn retained_sandbox_cannot_claim_a_permission_mode_it_did_not_launch_with() {
+    let (_dir, runtime, mut session, _incarnation, _) = fixture(true, PermissionMode::Allow).await;
+    session.lifecycle = SessionLifecycle::Idle;
+    save_session(&runtime.db, &session).await.unwrap();
+    assert!(replace_sandbox_permission_mode(
+        &runtime.db,
+        &session.owner,
+        &session,
+        PermissionMode::Ask
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        runtime
+            .get_session(&session.owner, session.id)
+            .await
+            .unwrap()
+            .permission_mode,
+        PermissionMode::Allow
+    );
 }
