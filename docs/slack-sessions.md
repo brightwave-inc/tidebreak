@@ -599,13 +599,13 @@ default (`ask` unless the operator says otherwise) and
 `TIDEBREAK_EXTERNAL_PERMISSION_CEILING` bounds what a channel may ask
 for with `/tidebreak mode`. A request above the ceiling is refused by
 name, `permission_mode_above_ceiling`, so the person learns the
-deployment's rule instead of getting a silently clamped session; a
-request for anything but `allow` on a sandbox deployment is refused as
-`permission_mode_unsupported`. You answer approvals where you are. A
-machine session parks on the same cards the desktop shows; the external
-stream carries their facts and you settle them from Slack. A managed Ask sandbox session carries the same approval events as a machine
-session. An Allow sandbox session never asks. Slack `NeedsYou` includes `approval_requested` on machine and managed Ask sandbox
-sessions; connect, fenced, or failed stay as they were.
+deployment's rule instead of getting a silently clamped session. A sandbox
+profile without a managed native approval channel refuses any mode except
+`allow` as `permission_mode_unsupported`. You answer approvals where you are.
+Machine sessions and managed Ask sandbox sessions emit the same approval
+events and show the same cards in Tidebreak and Slack. An Allow sandbox
+session never asks. Slack `NeedsYou` includes `approval_requested` on machine
+and managed Ask sandbox sessions; connect, fenced, or failed stay as they were.
 
 Incarnations follow a durable intent protocol: write the incarnation
 intent row, provision, activate. Stop and reincarnate serialize through
