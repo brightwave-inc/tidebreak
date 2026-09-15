@@ -61,11 +61,21 @@ import {
   transcriptNavigationEntries,
 } from "./TranscriptNavigation";
 import { messageWithPastedText } from "./PastedText";
+import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "@/components/ui/empty";
 
 export type ChatViewProps = {
   client: ApiClient;
   chat: Chat;
   hydrated: boolean;
+  hydrationError?: string | null;
+  onRetryHydration?: () => void;
   nativeHost: boolean;
   deletingChat: boolean;
   composerModelMenu: ReactNode;
@@ -108,6 +118,8 @@ export function ChatView({
   client,
   chat,
   hydrated,
+  hydrationError,
+  onRetryHydration,
   nativeHost,
   deletingChat,
   composerModelMenu,
@@ -533,55 +545,71 @@ export function ChatView({
         />
       )}
       <div className={cn("message-view", fadeClass)}>
-        <MessageList
-          messages={messages}
-          chatId={chat.id}
-          folderAccessRequests={folderAccess.requests}
-          outputWritebackRequests={outputWritebacks.requests}
-          pendingPromptCount={pendingPromptCount}
-          nativeHost={nativeHost}
-          nativeBusy={folderAccess.resolving.size > 0}
-          resolvingFolderCalls={folderAccess.resolving}
-          folderAccessErrors={folderAccess.errors}
-          resolvingOutputWritebackCalls={outputWritebacks.resolving}
-          outputWritebackErrors={outputWritebacks.errors}
-          decidingApprovalCalls={approvals.deciding}
-          approvalErrors={approvals.errors}
-          grantScope={chat.project_id ? "project" : "chat"}
-          backgroundAgentRuns={agentRuns.runs}
-          backgroundAgentRunsLoading={agentRuns.loading}
-          backgroundAgentRunsError={agentRuns.error}
-          onRetryBackgroundAgentRuns={agentRuns.refresh}
-          onCancelBackgroundAgentRun={agentRuns.cancel}
-          onLoadBackgroundAgentActivity={agentRuns.loadActivity}
-          onLoadBackgroundAgentTaskPlan={agentRuns.loadTaskPlan}
-          onLoadBackgroundAgentProgress={agentRuns.loadProgress}
-          onOpenBackgroundAgent={onOpenAgentPanel}
-          onOpenOutput={onOpenOutput}
-          backgroundAgentClient={client}
-          busy={busy}
-          animateStreaming={animateStreaming}
-          compacting={compacting}
-          streamStalled={streamStalled}
-          scrollRef={attachScrollRef}
-          contentRef={attachContentRef}
-          pinLastTurn={pinLastTurn}
-          onScroll={handleScroll}
-          onApproval={approvals.decide}
-          onFolderAccessDecision={folderAccess.decide}
-          onFolderAccessCancel={folderAccess.cancel}
-          onOutputWritebackDecision={outputWritebacks.decide}
-          onOutputWritebackCancel={(callId, turnId) =>
-            outputWritebacks.cancel(callId, turnId)
-          }
-          onSelectPrompt={onSelectPrompt}
-          onRetryTurn={onRetryTurn}
-          hydrated={hydrated}
-          imageClient={client}
-          executionConfigClient={client}
-          changeClient={client}
-          memoryClient={client}
-        />
+        {hydrationError ? (
+          <Empty role="alert" className="h-full">
+            <EmptyHeader>
+              <EmptyTitle>Could not load this work</EmptyTitle>
+              <EmptyDescription className="break-words [overflow-wrap:anywhere]">
+                {hydrationError}
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button variant="outline" onClick={onRetryHydration}>
+                Retry loading
+              </Button>
+            </EmptyContent>
+          </Empty>
+        ) : (
+          <MessageList
+            messages={messages}
+            chatId={chat.id}
+            folderAccessRequests={folderAccess.requests}
+            outputWritebackRequests={outputWritebacks.requests}
+            pendingPromptCount={pendingPromptCount}
+            nativeHost={nativeHost}
+            nativeBusy={folderAccess.resolving.size > 0}
+            resolvingFolderCalls={folderAccess.resolving}
+            folderAccessErrors={folderAccess.errors}
+            resolvingOutputWritebackCalls={outputWritebacks.resolving}
+            outputWritebackErrors={outputWritebacks.errors}
+            decidingApprovalCalls={approvals.deciding}
+            approvalErrors={approvals.errors}
+            grantScope={chat.project_id ? "project" : "chat"}
+            backgroundAgentRuns={agentRuns.runs}
+            backgroundAgentRunsLoading={agentRuns.loading}
+            backgroundAgentRunsError={agentRuns.error}
+            onRetryBackgroundAgentRuns={agentRuns.refresh}
+            onCancelBackgroundAgentRun={agentRuns.cancel}
+            onLoadBackgroundAgentActivity={agentRuns.loadActivity}
+            onLoadBackgroundAgentTaskPlan={agentRuns.loadTaskPlan}
+            onLoadBackgroundAgentProgress={agentRuns.loadProgress}
+            onOpenBackgroundAgent={onOpenAgentPanel}
+            onOpenOutput={onOpenOutput}
+            backgroundAgentClient={client}
+            busy={busy}
+            animateStreaming={animateStreaming}
+            compacting={compacting}
+            streamStalled={streamStalled}
+            scrollRef={attachScrollRef}
+            contentRef={attachContentRef}
+            pinLastTurn={pinLastTurn}
+            onScroll={handleScroll}
+            onApproval={approvals.decide}
+            onFolderAccessDecision={folderAccess.decide}
+            onFolderAccessCancel={folderAccess.cancel}
+            onOutputWritebackDecision={outputWritebacks.decide}
+            onOutputWritebackCancel={(callId, turnId) =>
+              outputWritebacks.cancel(callId, turnId)
+            }
+            onSelectPrompt={onSelectPrompt}
+            onRetryTurn={onRetryTurn}
+            hydrated={hydrated}
+            imageClient={client}
+            executionConfigClient={client}
+            changeClient={client}
+            memoryClient={client}
+          />
+        )}
         <TranscriptNavigation
           entries={navigationEntries}
           scrollElement={scrollElement}
@@ -639,7 +667,7 @@ export function ChatView({
                 activeTurnId !== null &&
                 turnControls.cancelPendingTurnId === activeTurnId
               }
-              disabled={deletingChat}
+              disabled={deletingChat || !hydrated}
               draft={draft}
               history={composerHistory}
               modelMenu={composerModelMenu}

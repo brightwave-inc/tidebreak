@@ -71,6 +71,27 @@ fn set_session_visibility_body(visibility: tidebreak_core::SessionVisibility) ->
     serde_json::json!({ "visibility": visibility })
 }
 
+fn create_session_body(
+    harness: HarnessKind,
+    permission_mode: PermissionMode,
+    model: Option<&str>,
+    reasoning_effort: Option<tidebreak_core::ReasoningEffort>,
+    fast_mode: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "harness": harness,
+        "permission_mode": permission_mode,
+        "fast_mode": fast_mode,
+    });
+    if let Some(model) = model {
+        body["model"] = model.into();
+    }
+    if let Some(effort) = reasoning_effort {
+        body["reasoning_effort"] = effort.as_str().into();
+    }
+    body
+}
+
 impl Client {
     pub async fn list_harnesses(&self) -> Result<HarnessDoctorReport> {
         self.get_json(format!("{}/code/harnesses", self.base_url()))
@@ -171,16 +192,6 @@ impl Client {
             .await
     }
 
-    pub async fn create_session(
-        &self,
-        workspace: WorkspaceId,
-        harness: HarnessKind,
-        permission_mode: PermissionMode,
-    ) -> Result<SessionSnapshot> {
-        self.create_session_with(workspace, harness, permission_mode, None)
-            .await
-    }
-
     pub async fn create_session_with(
         &self,
         workspace: WorkspaceId,
@@ -188,13 +199,21 @@ impl Client {
         permission_mode: PermissionMode,
         model: Option<&str>,
     ) -> Result<SessionSnapshot> {
-        let mut body = serde_json::json!({
-            "harness": harness,
-            "permission_mode": permission_mode,
-        });
-        if let Some(model) = model {
-            body["model"] = model.into();
-        }
+        self.create_session_with_settings(workspace, harness, permission_mode, model, None, false)
+            .await
+    }
+
+    pub async fn create_session_with_settings(
+        &self,
+        workspace: WorkspaceId,
+        harness: HarnessKind,
+        permission_mode: PermissionMode,
+        model: Option<&str>,
+        reasoning_effort: Option<tidebreak_core::model::ReasoningEffort>,
+        fast_mode: bool,
+    ) -> Result<SessionSnapshot> {
+        let body =
+            create_session_body(harness, permission_mode, model, reasoning_effort, fast_mode);
         self.post_json(
             format!("{}/code/workspaces/{workspace}/sessions", self.base_url()),
             &body,
@@ -533,6 +552,34 @@ mod tests {
     use tidebreak_core::{
         AttentionSource, AttentionState, SessionAccessLevel, SessionLifecycle, SessionVisibility,
     };
+
+    #[test]
+    fn session_settings_use_the_create_session_wire_contract() {
+        assert_eq!(
+            create_session_body(
+                HarnessKind::Codex,
+                PermissionMode::Ask,
+                Some("gpt-6-astra"),
+                Some(tidebreak_core::ReasoningEffort::None),
+                true,
+            ),
+            serde_json::json!({
+                "harness": "codex",
+                "permission_mode": "ask",
+                "model": "gpt-6-astra",
+                "reasoning_effort": "none",
+                "fast_mode": true,
+            }),
+        );
+        assert_eq!(
+            create_session_body(HarnessKind::Codex, PermissionMode::Plan, None, None, false),
+            serde_json::json!({
+                "harness": "codex",
+                "permission_mode": "plan",
+                "fast_mode": false,
+            }),
+        );
+    }
 
     #[test]
     fn session_share_requests_match_the_server_routes_and_wire_shape() {

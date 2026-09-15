@@ -201,7 +201,7 @@ usage: tidebreak serve
        tidebreak code ws list [--repo <id|path>]
        tidebreak code ws show <id>
        tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow] [--model <id>] [--reasoning <level>] [--fast]
        tidebreak code session show <id>
        tidebreak code session reap <id>
        tidebreak code share grant <session-id> <subject> [--level view|contribute]

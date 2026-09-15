@@ -10,14 +10,10 @@ import type {
   SequencedEvent,
 } from "./api";
 import { useApp } from "./AppContext";
-import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { summedTurnTokens } from "./ContextUsage";
 import { ChatStatusChip } from "./ChatStatusChip";
-import {
-  loadChatApprovalHydration,
-  sessionFromOpenedChat,
-} from "./ChatApprovalHydration";
+import { useChatHydration } from "./useChatHydration";
 import { useChatListStore } from "./ChatListStore";
 import { useComposerAttachments, useComposerDrafts } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
@@ -140,7 +136,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
   const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
-  const [hydrated, setHydrated] = useState(false);
+  const {
+    hydrated,
+    error: hydrationError,
+    retry: retryHydration,
+  } = useChatHydration(client, chatId);
   const composerAttachments = useComposerAttachments(chatId);
   const files = composerAttachments.files;
   const pastedTexts = composerAttachments.pastedTexts;
@@ -220,47 +220,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat, chatId, hydrated]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setHydrated(false);
-    useChatSessionStore.getState().reset();
-    updateSession((session) => ({
-      ...session,
-      markerScrubber: new AssistantSourceMarkerStreamScrubber(),
-    }));
-    void (async () => {
-      try {
-        const hydration = await loadChatApprovalHydration(
-          client,
-          chatId,
-          () => !cancelled,
-        );
-        if (!hydration) return;
-        const { transcript, pendingApprovals } = hydration;
-        updateSession((session) =>
-          sessionFromOpenedChat(session, transcript, pendingApprovals),
-        );
-        setHydrated(true);
-      } catch (err) {
-        if (cancelled) return;
-        updateSession((session) => ({
-          ...session,
-          busy: true,
-          messages: [
-            {
-              id: nextId(),
-              role: "error",
-              text: `Could not load this work: ${String(err)}`,
-            },
-          ],
-        }));
-      }
-    })();
-    return () => {
-      cancelled = true;
+  useEffect(
+    () => () => {
       terminalHydrationGenerationRef.current += 1;
-    };
-  }, [client, chatId]);
+    },
+    [client, chatId],
+  );
 
   useEffect(() => {
     if (!hydrated) return;
@@ -530,7 +495,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     voiceInputUsed: boolean;
     fromComposer: boolean;
   }) {
-    if (!chat || !content || busy || deletingChatId !== null) return;
+    if (!chat || !hydrated || !content || busy || deletingChatId !== null)
+      return;
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     const optimisticId = nextId();
@@ -808,6 +774,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           client={client}
           chat={chat!}
           hydrated={hydrated}
+          hydrationError={hydrationError}
+          onRetryHydration={retryHydration}
           nativeHost={nativeHost}
           deletingChat={deletingChatId !== null}
           attachError={attachError}
