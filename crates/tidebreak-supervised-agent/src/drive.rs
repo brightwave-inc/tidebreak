@@ -395,7 +395,16 @@ impl<E: Engine> Driver<E> {
             match step {
                 TurnStep::End(end) => break end,
                 TurnStep::Tick => {
-                    self.poll(false).await?;
+                    if let Err(error) = self.poll(false).await {
+                        // The poll budget or a fatal refusal ends supervision.
+                        // Stop native work before dropping the turn handle.
+                        handle.interrupt().await;
+                        if let Some(bridge) = &mut self.bridge {
+                            bridge.end_turn();
+                        }
+                        self.pending_steers.clear();
+                        return Err(error);
+                    }
                     if self.stop_reason.is_some() {
                         handle.interrupt().await;
                         continue;
@@ -1040,6 +1049,7 @@ mod tests {
         message_batches: usize,
         stop: Option<String>,
         reject: Option<(u16, String)>,
+        rejected_polls: usize,
         block_next_poll: Option<PollBlock>,
     }
 
@@ -1051,6 +1061,9 @@ mod tests {
     ) -> axum::response::Response {
         let (reject, block) = {
             let mut supervisor = state.lock().unwrap();
+            if supervisor.reject.is_some() {
+                supervisor.rejected_polls += 1;
+            }
             (supervisor.reject.clone(), supervisor.block_next_poll.take())
         };
         if let Some((status, code)) = reject {
@@ -1136,6 +1149,7 @@ mod tests {
         correlated_calls: AtomicUsize,
         steer_acks: Mutex<Vec<uuid::Uuid>>,
         steer_acks_on_end: Mutex<Vec<uuid::Uuid>>,
+        interrupts: AtomicUsize,
         ends: tokio::sync::Mutex<mpsc::UnboundedReceiver<TurnEnd>>,
         end_sender: mpsc::UnboundedSender<TurnEnd>,
         records: Mutex<VecDeque<Option<AssistantRecord>>>,
@@ -1159,6 +1173,7 @@ mod tests {
                     correlated_calls: AtomicUsize::new(0),
                     steer_acks: Mutex::new(Vec::new()),
                     steer_acks_on_end: Mutex::new(Vec::new()),
+                    interrupts: AtomicUsize::new(0),
                     ends: tokio::sync::Mutex::new(ends),
                     end_sender,
                     records: Mutex::new(VecDeque::new()),
@@ -1231,6 +1246,7 @@ mod tests {
         }
 
         async fn interrupt(&mut self) {
+            self.state.interrupts.fetch_add(1, Ordering::SeqCst);
             self.state.end_sender.send(TurnEnd::Interrupted).unwrap();
         }
 
@@ -2308,6 +2324,156 @@ mod tests {
             event_payload(&state, "supervisor_stopped", 0)["reason"],
             "acceptance_met"
         );
+    }
+
+    #[tokio::test]
+    async fn transient_control_503s_preserve_the_active_turn_until_recovery() {
+        let (state, url) = start_supervisor().await;
+        state.lock().unwrap().reject = Some((503, "service_unavailable".into()));
+        let engine = MockEngine::new();
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs("turn", None)).run());
+
+        wait_for(&state, |supervisor| supervisor.rejected_polls >= 3).await;
+        assert_eq!(engine.turns().len(), 1);
+        assert_eq!(engine.state.interrupts.load(Ordering::SeqCst), 0);
+        assert!(!run.is_finished());
+
+        state.lock().unwrap().reject = None;
+        engine.finish(TurnEnd::Completed { success: true });
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        state.lock().unwrap().stop = Some("cancelled".into());
+        run.await.unwrap().unwrap();
+
+        assert_eq!(engine.turns().len(), 1);
+        assert_eq!(engine.state.interrupts.load(Ordering::SeqCst), 0);
+        let kinds = event_kinds(&state);
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "turn_started").count(),
+            1
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "turn_completed")
+                .count(),
+            1
+        );
+        assert!(!kinds.iter().any(|kind| kind == "turn_interrupted"));
+    }
+
+    #[tokio::test]
+    async fn exhausted_control_503s_interrupt_the_active_engine_before_exit() {
+        let (state, url) = start_supervisor().await;
+        state.lock().unwrap().reject = Some((503, "service_unavailable".into()));
+        let engine = MockEngine::new();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            driver(engine.clone(), &url, &inputs("turn", None))
+                .with_poll_interval(Duration::from_millis(1))
+                .run(),
+        )
+        .await
+        .expect("the driver must stop after its control poll budget")
+        .unwrap_err();
+
+        assert_eq!(error.code, EXIT_CONTROL_FATAL);
+        assert!(error.message.contains("120 consecutive polls"));
+        assert!(error.message.contains("503"));
+        assert_eq!(state.lock().unwrap().rejected_polls, 120);
+        assert_eq!(engine.turns().len(), 1);
+        assert_eq!(engine.state.interrupts.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_control_failure_closes_human_waits_and_pending_steers() {
+        use tidebreak_core::code::{SupervisorToolRequest, SupervisorToolTurn};
+
+        let root = tempfile::tempdir().unwrap();
+        let bridge = LocalToolBridge::start(root.path()).unwrap();
+        let socket = bridge.socket_path();
+        let (state, url) = start_supervisor().await;
+        let mut driver =
+            driver(MockEngine::new(), &url, &inputs("turn", None)).with_tool_bridge(bridge);
+        driver
+            .bridge
+            .as_mut()
+            .unwrap()
+            .begin_turn(SupervisorToolTurn {
+                native_turn: 1,
+                runtime_id: driver.runtime_id,
+            });
+        let helper = tokio::spawn(async move {
+            crate::tool_bridge::call(
+                &socket,
+                &SupervisorToolRequest {
+                    cancelled: false,
+                    turn: None,
+                    request_id: "pending-question".into(),
+                    tool: "ask_user_questions".into(),
+                    arguments: serde_json::json!({"questions":[{
+                        "id":"target", "header":"Target", "question":"Which target?",
+                        "allow_free_form":true,
+                    }]}),
+                },
+            )
+            .await
+        });
+        for _ in 0..100 {
+            driver.poll(false).await.unwrap();
+            if driver.bridge.as_ref().unwrap().waiting_for_human() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(driver.bridge.as_ref().unwrap().waiting_for_human());
+        let message = steering_message(1, 1, driver.runtime_id);
+        let frame = decode_steer_frame(&message.body).unwrap();
+        driver.pending_steers.insert(
+            uuid::Uuid::parse_str(&frame.correlation_uuid).unwrap(),
+            (message.seq, frame),
+        );
+        state.lock().unwrap().reject = Some((503, "service_unavailable".into()));
+        driver.consecutive_failures = MAX_CONSECUTIVE_POLL_FAILURES - 1;
+        let error = driver
+            .run_turn(TurnRequest {
+                turn: 1,
+                source: TurnSource::SpawnTask,
+                input: "do the thing".into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, EXIT_CONTROL_FATAL);
+        assert!(!driver.bridge.as_ref().unwrap().waiting_for_human());
+        assert!(driver.pending_steers.is_empty());
+        assert!(tokio::time::timeout(Duration::from_secs(1), helper)
+            .await
+            .expect("the terminal control error must release the human helper")
+            .unwrap()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_fatal_control_refusal_interrupts_without_retrying() {
+        let (state, url) = start_supervisor().await;
+        state.lock().unwrap().reject = Some((400, "sandbox_event_invalid".into()));
+        let engine = MockEngine::new();
+        let error = driver(engine.clone(), &url, &inputs("turn", None))
+            .run()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, EXIT_CONTROL_FATAL);
+        assert!(error.message.contains("sandbox_event_invalid"));
+        assert_eq!(state.lock().unwrap().rejected_polls, 1);
+        assert_eq!(engine.state.interrupts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
