@@ -365,9 +365,18 @@ pub(in crate::db) async fn list_queued_turns(
 
 /// Chats that currently hold at least one queued message, for the promoter's
 /// scan. Bounded output: distinct chat ids only.
+///
+/// A session the code runtime drives is left out: its worker drains its own
+/// queue, and a turn promoted here would land on the chat lane, which never
+/// claims a turn on such a session. The boundary is the one the claim scan
+/// applies, so every queued message has exactly one drain.
 pub(in crate::db) async fn chats_with_queued_turns(store: &DbStore) -> Result<Vec<SessionId>> {
     use sea_orm::QuerySelect;
     Ok(entities::code_queued_turn::Entity::find()
+        .filter(
+            entities::code_queued_turn::Column::SessionId
+                .not_in_subquery(super::super::code::session::code_runtime_session_ids()),
+        )
         .select_only()
         .column(entities::code_queued_turn::Column::SessionId)
         .distinct()
