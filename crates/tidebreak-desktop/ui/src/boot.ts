@@ -46,6 +46,13 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
   const fromMachine = await hostedServerInfo();
   if (fromMachine) return fromMachine;
 
+  if (!import.meta.env.DEV) {
+    throw new Error(
+      `Could not reach Tidebreak at ${window.location.origin}. Try again. ` +
+        "If the connection still fails, contact your administrator.",
+    );
+  }
+
   throw new Error(
     "No Tidebreak server is reachable from this browser tab. Keep " +
       "`scripts/dev.sh` running (it publishes a listen endpoint), or set " +
@@ -173,38 +180,49 @@ async function readDiscovery(
   fetch: typeof globalThis.fetch,
   url: string,
 ): Promise<AuthDiscovery | null> {
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (!body || typeof body !== "object") return null;
-    const record = body as { mode?: unknown; gateway_url?: unknown };
-    if (record.mode === "gateway") {
-      return typeof record.gateway_url === "string" && record.gateway_url
-        ? { mode: "gateway", gateway_url: record.gateway_url, resource: "" }
-        : null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { accept: "application/json" },
+      });
+      if (!response.ok) {
+        if (
+          attempt === 0 &&
+          (response.status === 429 || response.status >= 500)
+        ) {
+          continue;
+        }
+        return null;
+      }
+      const body: unknown = await response.json();
+      if (!body || typeof body !== "object") return null;
+      const record = body as { mode?: unknown; gateway_url?: unknown };
+      if (record.mode === "gateway") {
+        return typeof record.gateway_url === "string" && record.gateway_url
+          ? { mode: "gateway", gateway_url: record.gateway_url, resource: "" }
+          : null;
+      }
+      if (record.mode === "oidc") {
+        const oidc = record as { issuer_name?: unknown; start_url?: unknown };
+        return typeof oidc.issuer_name === "string" &&
+          typeof oidc.start_url === "string"
+          ? {
+              mode: "oidc",
+              issuer_name: oidc.issuer_name,
+              start_url: oidc.start_url,
+            }
+          : null;
+      }
+      if (record.mode === "static_token" || record.mode === "local") {
+        return { mode: record.mode };
+      }
+      return null;
+    } catch {
+      // Retry one failed discovery read before showing the connection error.
     }
-    if (record.mode === "oidc") {
-      const oidc = record as { issuer_name?: unknown; start_url?: unknown };
-      return typeof oidc.issuer_name === "string" &&
-        typeof oidc.start_url === "string"
-        ? {
-            mode: "oidc",
-            issuer_name: oidc.issuer_name,
-            start_url: oidc.start_url,
-          }
-        : null;
-    }
-    if (record.mode === "static_token" || record.mode === "local") {
-      return { mode: record.mode };
-    }
-    return null;
-  } catch {
-    return null;
   }
+  return null;
 }
 
 /** Vite-dev middleware that reads the desktop's listen.json. Absent in prod. */

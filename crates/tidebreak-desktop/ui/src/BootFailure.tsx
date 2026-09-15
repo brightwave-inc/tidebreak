@@ -106,7 +106,7 @@ function headline(attachment: BootAttachment | null, stage: BootStage): string {
   const machine = attachedMachine(attachment);
   if (machine) return `Could not reach ${machine}.`;
   return stage === "connect"
-    ? "Tidebreak could not start its server."
+    ? "Tidebreak could not connect to its server."
     : "Tidebreak started, but could not load its models.";
 }
 

@@ -5,6 +5,7 @@ import {
   HostedSignInRequired,
   acceptPastedToken,
   hostedServerInfo,
+  resolveServerInfo,
 } from "./boot";
 import {
   HOME_DRAFT_KEY,
@@ -52,6 +53,8 @@ function discovery(body: unknown, ok = true): typeof globalThis.fetch {
 
 afterEach(() => {
   resetHostedSessionForTests();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("the handoff fragment", () => {
@@ -182,6 +185,62 @@ describe("the hosted boot branch", () => {
       });
       expect(error.failure).toBeNull();
     });
+  });
+
+  it.each(["network", "503", "429", "invalid JSON"])(
+    "recovers from a transient %s discovery failure without losing the route",
+    async (failure) => {
+      const originalUrl = window.location.href;
+      window.history.replaceState(null, "", "#/code/s/pending-question");
+      try {
+        const valid = {
+          mode: "gateway",
+          gateway_url: "https://gateway.example.com",
+        };
+        const fetch = vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            if (failure === "network") throw new TypeError("Load failed");
+            if (failure === "invalid JSON") return new Response("<html>");
+            return new Response(null, { status: Number(failure) });
+          })
+          .mockResolvedValueOnce(new Response(JSON.stringify(valid)));
+        await expect(
+          hostedServerInfo({
+            origin: "https://tidebreak.example.com",
+            dev: false,
+            fetch,
+            bearer: null,
+          }),
+        ).rejects.toBeInstanceOf(HostedSignInRequired);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(window.location.hash).toBe("#/code/s/pending-question");
+        expect(hostedSession()?.discovery).toMatchObject(valid);
+      } finally {
+        window.history.replaceState(null, "", originalUrl);
+      }
+    },
+  );
+
+  it("bounds failed discovery retries and keeps development instructions out of hosted errors", async () => {
+    const fetch = vi.fn().mockRejectedValue(new TypeError("Load failed"));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_TIDEBREAK_URL", "");
+    vi.stubEnv("VITE_TIDEBREAK_TOKEN", "");
+    await expect(resolveServerInfo()).rejects.toThrow(
+      `Could not reach Tidebreak at ${window.location.origin}. Try again.`,
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(hostedSession()).toBeNull();
+  });
+
+  it("does not retry a missing discovery route", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 404 }));
+    await expect(hostedServerInfo({ dev: false, fetch })).resolves.toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("carries the landing route's failure reason to the sign-in screen", async () => {
