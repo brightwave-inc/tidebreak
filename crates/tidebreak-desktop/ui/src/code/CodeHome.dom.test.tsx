@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -194,10 +194,10 @@ describe("CodeHome", () => {
     expect(
       await screen.findByRole("heading", { name: "Start with a repository" }),
     ).toBeInTheDocument();
-    const main = document.querySelector(".main");
-    expect(main).not.toBeNull();
+    // The page no longer mounts the rail — the code layout route owns it —
+    // so the page's own Add repo button is the only one here.
     expect(
-      within(main as HTMLElement).getByRole("button", { name: "Add repo" }),
+      screen.getByRole("button", { name: "Add repo" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
@@ -247,11 +247,7 @@ describe("CodeHome", () => {
     expect(
       screen.getByRole("heading", { name: "Start with a repository" }),
     ).toBeInTheDocument();
-    const main = document.querySelector(".main");
-    expect(main).not.toBeNull();
-    expect(
-      within(main as HTMLElement).getByRole("button", { name: "Add repo" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add repo" })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Re-check" }));
     expect(refreshHarnessDoctor).toHaveBeenCalledOnce();
   });

@@ -34,9 +34,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
-import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeSidebar } from "./CodeSidebar";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
@@ -59,11 +57,9 @@ const EMPTY_HISTORY_SEARCH: HistorySearchState = {
 
 export function CodeArchivePage() {
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <CodeArchiveBody />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <CodeArchiveBody />
+    </div>
   );
 }
 

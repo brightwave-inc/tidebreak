@@ -12,7 +12,6 @@ import type {
   CodeDeliverySourceError,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
-import { CodeSidebar } from "./CodeSidebar";
 import { DeliveryRepositoriesDialog } from "./delivery/DeliveryRepositoriesDialog";
 import { GitPullRequest, Save, Settings2, Workflow } from "lucide-react";
 import {
@@ -28,7 +27,6 @@ import {
 } from "./delivery/status";
 import { PullRequestFilters, RunFilters } from "./delivery/filters";
 import { PullRequestsSurface } from "./delivery/PullRequestsSurface";
-import { RouteFrame } from "@/RouteFrame";
 import { RunsSurface } from "./delivery/RunsSurface";
 import { SaveViewDialog } from "./delivery/SaveViewDialog";
 import { SearchInput } from "@/components/SearchInput";
@@ -98,11 +96,9 @@ export function CodeDeliveryPage({
   search?: CodeDeliverySearch;
 }) {
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <CodeDeliveryBody surface={surface} search={search} />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <CodeDeliveryBody surface={surface} search={search} />
+    </div>
   );
 }
 

@@ -309,21 +309,18 @@ export function WorkspaceCard({
                   // selection from wherever the caret last sat, and with
                   // text selected macOS hands the next Cmd+Shift+A to its
                   // man-page text service instead of to the app.
-                  if (
-                    onSelectPointer &&
-                    pointerSelectIntent(event) !== "open"
-                  ) {
+                  if (pointerSelectIntent(event) !== "open") {
                     event.preventDefault();
                   }
                 }}
                 onClick={(event) => {
                   if (creating) return;
-                  if (
-                    onSelectPointer &&
-                    pointerSelectIntent(event) !== "open"
-                  ) {
+                  // A modifier click is a selection gesture. On a card that
+                  // cannot join the selection it does nothing, rather than
+                  // opening mid-sweep.
+                  if (pointerSelectIntent(event) !== "open") {
                     event.preventDefault();
-                    onSelectPointer(event);
+                    onSelectPointer?.(event);
                     return;
                   }
                   onOpen();

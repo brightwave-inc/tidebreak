@@ -37,8 +37,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { RouteFrame } from "@/RouteFrame";
-import { CodeSidebar } from "./CodeSidebar";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeSubscriptionUsage } from "./useCodeSubscriptionUsage";
 
@@ -56,11 +54,9 @@ const RANGE_OPTIONS: readonly {
 
 export function CodeAnalyticsPage() {
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <CodeAnalyticsBody />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <CodeAnalyticsBody />
+    </div>
   );
 }
 

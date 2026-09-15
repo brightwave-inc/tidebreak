@@ -35,7 +35,6 @@ import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { CodeQuickOpen } from "./CodeQuickOpen";
 import { CodeSessionContent } from "./CodeSessionPage";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
-import { CodeSidebar } from "./CodeSidebar";
 import {
   DEFAULT_INSPECTOR_LAYOUT,
   fitsInspectorSplit,
@@ -67,7 +66,6 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { RouteFrame } from "@/RouteFrame";
 import { sessionRecoveryAccess, sessionRecoveryState } from "./sessionRecovery";
 import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
@@ -140,14 +138,12 @@ const TerminalPane = lazy(async () => {
 export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
   const { client } = useApp();
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <CodeWorkspaceAccess
-          key={`${codeClientGeneration(client)}:${workspaceId}`}
-          workspaceId={workspaceId}
-        />
-      </div>
-    </RouteFrame>
+    <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
+      <CodeWorkspaceAccess
+        key={`${codeClientGeneration(client)}:${workspaceId}`}
+        workspaceId={workspaceId}
+      />
+    </div>
   );
 }
 

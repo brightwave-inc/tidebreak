@@ -1003,9 +1003,13 @@ it("opens a shared workspace without selection or mutation actions", async () =>
     detailDefaultOpen: true,
   });
   const card = screen.getByRole("button", { name: /Fix login.*app/ });
+  // A modifier click is a selection gesture; on a card that cannot join the
+  // selection it does nothing rather than opening mid-sweep.
   fireEvent.click(card, { metaKey: true });
-  expect(onOpen).toHaveBeenCalledOnce();
+  expect(onOpen).not.toHaveBeenCalled();
   expect(onSelectPointer).not.toHaveBeenCalled();
+  fireEvent.click(card);
+  expect(onOpen).toHaveBeenCalledOnce();
   fireEvent.contextMenu(card);
   expect(
     screen.queryByRole("menuitem", { name: /Archive/ }),
