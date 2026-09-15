@@ -27,7 +27,7 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 853
+- Rust crates: 854
 - Desktop UI production packages: 537
 - Distinct license texts: 591
 - Packages with no declared license: 0
@@ -1052,7 +1052,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/niklak/dom_query
 - License text: `LICENSE` ([L-8f8eade124ab](#l-8f8eade124ab))
 
-### dom_smoothie 0.18.0
+### dom_smoothie 0.18.1
 
 - License: `MIT`
 - Repository: https://github.com/niklak/dom_smoothie
@@ -1196,7 +1196,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/event-listener-strategy
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### fancy-regex 0.19.0
+### fancy-regex 0.19.1
 
 - License: `MIT`
 - Repository: https://github.com/fancy-regex/fancy-regex
@@ -2700,7 +2700,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rust-lang/pkg-config-rs
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### plist 1.10.0
+### plist 1.10.1
 
 - License: `MIT`
 - Repository: https://github.com/ebarnard/rust-plist/
@@ -2851,6 +2851,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-cf798811e9a0](#l-cf798811e9a0))
 
 ### quick-xml 0.41.0
+
+- License: `MIT`
+- Repository: https://github.com/tafia/quick-xml
+- License text: `LICENSE-MIT.md` ([L-12bfa73c9eac](#l-12bfa73c9eac))
+
+### quick-xml 0.42.0
 
 - License: `MIT`
 - Repository: https://github.com/tafia/quick-xml
@@ -3018,7 +3024,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/djkoloski/rend
 - License text: `LICENSE` ([L-a427dbea98ff](#l-a427dbea98ff))
 
-### reqwest 0.13.4
+### reqwest 0.13.5
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/seanmonstar/reqwest
@@ -4043,7 +4049,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml 1.1.5+spec-1.1.0
+### toml 1.1.6+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
@@ -4157,7 +4163,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tracing
 - License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
 
-### trash 5.2.7
+### trash 5.2.8
 
 - License: `MIT`
 - Repository: https://github.com/ArturKovacs/trash
@@ -4343,7 +4349,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/hsivonen/utf8_iter
 - License text: `COPYRIGHT` ([L-76c0e37c107d](#l-76c0e37c107d)), `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-7dc2f6402447](#l-7dc2f6402447))
 
-### uuid 1.26.0
+### uuid 1.26.1
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/uuid-rs/uuid
@@ -4577,13 +4583,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/tauri-plugin-vibrancy
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-b46700117441](#l-b46700117441)), `LICENSE.spdx` ([L-bb8278137f73](#l-bb8278137f73))
 
-### windows 0.56.0
+### windows 0.61.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### windows 0.61.3
+### windows 0.62.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4595,7 +4601,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### windows-core 0.56.0
+### windows-collections 0.3.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4619,19 +4625,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### windows-implement 0.56.0
+### windows-future 0.3.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
 ### windows-implement 0.60.2
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/microsoft/windows-rs
-- License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
-
-### windows-interface 0.56.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4661,13 +4661,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### windows-registry 0.5.3
+### windows-numerics 0.3.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### windows-result 0.1.2
+### windows-registry 0.5.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4746,6 +4746,12 @@ License identifiers named across all declared expressions:
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
 ### windows-threading 0.1.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/microsoft/windows-rs
+- License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
+
+### windows-threading 0.2.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
