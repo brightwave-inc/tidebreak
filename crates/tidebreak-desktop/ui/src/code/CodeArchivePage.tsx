@@ -13,7 +13,10 @@ import {
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
-import type { CodeWorkspaceHistorySearchMatch } from "@/api/types";
+import type {
+  CodeWorkspaceHistorySearchMatch,
+  CodeWorkspaceSnapshot,
+} from "@/api/types";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +39,7 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
+import { workspaceCommandsForAccess } from "./workspaceAccess";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
 
@@ -226,11 +230,8 @@ function CodeArchiveBody() {
   }, [archiveCandidates, historyMatchesByWorkspace, repos, trimmedSearch]);
 
   const restore = async (workspaceId: string) => {
-    if (
-      restoring ||
-      workspaces.find((workspace) => workspace.id === workspaceId)?.read_only
-    )
-      return;
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (restoring || !workspace || !canRestoreWorkspace(workspace)) return;
     setRestoring(workspaceId);
     try {
       const restored = await client.restoreCodeWorkspace(workspaceId);
@@ -475,7 +476,7 @@ function CodeArchiveBody() {
                         PR
                       </Button>
                     )}
-                    {!workspace.read_only && (
+                    {canRestoreWorkspace(workspace) && (
                       <Button
                         type="button"
                         size="xs"
@@ -512,6 +513,14 @@ function CodeArchiveBody() {
         )}
       </div>
     </div>
+  );
+}
+
+function canRestoreWorkspace(workspace: CodeWorkspaceSnapshot): boolean {
+  return (
+    workspaceCommandsForAccess(workspace, [
+      { id: "restore", label: "Restore workspace" },
+    ]).length > 0
   );
 }
 

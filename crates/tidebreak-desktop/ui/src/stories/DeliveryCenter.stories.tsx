@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { userEvent, within } from "storybook/test";
+import { expect, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -60,6 +60,7 @@ type DeliveryScenario =
   | "github-unavailable"
   | "runs"
   | "archive"
+  | "archive-remote"
   | "archive-search"
   | "archive-empty";
 
@@ -137,24 +138,43 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       remediation: "",
     },
   };
+  const archivedWorkspace = deliveryWorkspaces.find(
+    (workspace) => workspace.status === "released",
+  )!;
   const workspaces =
     scenario === "archive-empty"
       ? deliveryWorkspaces.filter(
           (workspace) => workspace.status !== "released",
         )
-      : scenario === "archive"
+      : scenario === "archive-remote"
         ? [
             {
-              ...deliveryWorkspaces.find(
-                (workspace) => workspace.status === "released",
-              )!,
-              id: "ws-shared-archive",
-              title: "Shared Slack investigation",
-              read_only: true,
+              ...archivedWorkspace,
+              id: "ws-remote-archive",
+              title: "Slack release investigation",
+              worktree_path: "remote:ws-remote-archive",
             },
-            ...deliveryWorkspaces,
+            {
+              ...archivedWorkspace,
+              id: "ws-pathless-archive",
+              title: "Conversation without a checkout",
+              worktree_path: "",
+            },
+            { ...archivedWorkspace, title: "Local workspace" },
           ]
-        : deliveryWorkspaces;
+        : scenario === "archive"
+          ? [
+              {
+                ...deliveryWorkspaces.find(
+                  (workspace) => workspace.status === "released",
+                )!,
+                id: "ws-shared-archive",
+                title: "Shared Slack investigation",
+                read_only: true,
+              },
+              ...deliveryWorkspaces,
+            ]
+          : deliveryWorkspaces;
   const refreshedMergedPullRequest = {
     ...deliveryPullRequests[0]!,
     state: "merged" as const,
@@ -643,6 +663,33 @@ export const ArchivePopulated: Story = {
   args: {
     scenario: "archive",
     initialUrl: "/code/archive",
+  },
+};
+
+export const ArchiveRemoteWorkspaces: Story = {
+  args: {
+    scenario: "archive-remote",
+    initialUrl: "/code/archive",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const remoteTitle = await canvas.findByText("Slack release investigation");
+    const remote = within(
+      remoteTitle.closest('[role="listitem"]') as HTMLElement,
+    );
+    await expect(remote.queryByRole("button", { name: "Restore" })).toBeNull();
+    await expect(
+      remote.getByRole("button", { name: "Open Slack release investigation" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getAllByRole("button", { name: "Restore" }),
+    ).toHaveLength(1);
+    const local = within(
+      canvas
+        .getByText("Local workspace")
+        .closest('[role="listitem"]') as HTMLElement,
+    );
+    await expect(local.getByRole("button", { name: "Restore" })).toBeEnabled();
   },
 };
 

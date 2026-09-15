@@ -92,3 +92,46 @@ it("searches owned archive history even when a shared row appears first for the 
     client.searchCodeWorkspace.mock.calls.every(([id]) => id === "owned"),
   ).toBe(true);
 });
+
+it.each(["remote:slack-workspace", ""])(
+  "keeps an archive at %j browsable without offering unsupported restore",
+  (worktreePath) => {
+    useCodeCatalogStore.setState({
+      workspaces: [
+        {
+          ...codeWorkspace,
+          id: "remote",
+          title: "Remote archive",
+          status: "archived",
+          worktree_path: worktreePath,
+          read_only: false,
+          is_owner: true,
+        },
+      ],
+    });
+    render(<CodeArchivePage />);
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Open Remote archive" }),
+    ).toBeVisible();
+    expect(client.restoreCodeWorkspace).not.toHaveBeenCalled();
+  },
+);
+
+it("restores an owned local archive and removes it from the archive list", async () => {
+  const archived = useCodeCatalogStore
+    .getState()
+    .workspaces.find((workspace) => workspace.id === "owned")!;
+  client.restoreCodeWorkspace.mockResolvedValueOnce({
+    ...archived,
+    status: "active",
+    archived_at: null,
+  });
+  render(<CodeArchivePage />);
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Restore" }));
+  expect(client.restoreCodeWorkspace).toHaveBeenCalledExactlyOnceWith("owned");
+  await waitFor(() => expect(screen.queryByText("Owned archive")).toBeNull());
+  expect(screen.getByText("Shared archive")).toBeVisible();
+});
