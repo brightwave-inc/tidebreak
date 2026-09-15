@@ -406,10 +406,24 @@ impl CodeRuntime {
         // read as unpushed and ask the user to discard work that already landed.
         let merged_head = merged_pull_request_head(&workspace);
         if path.exists() && !force {
-            if let Some(block) =
-                archive_blockers_with_merged_head(&path, &workspace.base_ref, merged_head)
-                    .await
-                    .map_err(map_worktree)?
+            let merged_head_matches = match merged_head {
+                Some(head) => worktree::head_is(&path, head).await.map_err(map_worktree)?,
+                None => false,
+            };
+            let credential = if merged_head_matches {
+                None
+            } else {
+                let acts_as = self.workspace_acts_as(owner, id).await;
+                self.borrow_git_credential(owner, &path, acts_as).await?
+            };
+            if let Some(block) = archive_blockers_with_merged_head_and_credential(
+                &path,
+                &workspace.base_ref,
+                merged_head,
+                credential.as_ref(),
+            )
+            .await
+            .map_err(map_worktree)?
             {
                 return Err(ServerError::conflict_kind(
                     block.as_str(),
@@ -554,10 +568,24 @@ impl CodeRuntime {
             }
             if !force {
                 let merged_head = merged_pull_request_head(&workspace);
-                if let Some(block) =
-                    archive_blockers_with_merged_head(path, &workspace.base_ref, merged_head)
-                        .await
-                        .map_err(map_worktree)?
+                let merged_head_matches = match merged_head {
+                    Some(head) => worktree::head_is(path, head).await.map_err(map_worktree)?,
+                    None => false,
+                };
+                let credential = if merged_head_matches {
+                    None
+                } else {
+                    let acts_as = self.workspace_acts_as(owner, workspace.id).await;
+                    self.borrow_git_credential(owner, path, acts_as).await?
+                };
+                if let Some(block) = archive_blockers_with_merged_head_and_credential(
+                    path,
+                    &workspace.base_ref,
+                    merged_head,
+                    credential.as_ref(),
+                )
+                .await
+                .map_err(map_worktree)?
                 {
                     return Err(ServerError::conflict_kind(
                         block.as_str(),
@@ -1370,6 +1398,93 @@ mod tests {
             None,
         );
         (dir, runtime, owner, repo_id)
+    }
+
+    #[tokio::test]
+    async fn archive_reopens_when_the_second_credential_mint_is_refused() {
+        use crate::obo_gateway::{
+            GitCredential, GitCredentialLender, GitForgeAttributionRequest, GitForgeError,
+            GitForgeIdentity, GitHubRepository,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct RefuseSecondMint(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl GitCredentialLender for RefuseSecondMint {
+            async fn git_forge_identity(
+                &self,
+                _owner: &OwnerId,
+                _attribution: GitForgeAttributionRequest,
+            ) -> Result<GitForgeIdentity, GitForgeError> {
+                panic!("archive must not probe forge identity");
+            }
+
+            async fn git_credential(
+                &self,
+                _owner: &OwnerId,
+                repository: &str,
+                _attribution: GitForgeAttributionRequest,
+            ) -> Result<GitCredential, GitForgeError> {
+                assert_eq!(repository, "acme/example");
+                if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+                    return Err(GitForgeError::Unavailable("test mint refusal".into()));
+                }
+                Ok(GitCredential {
+                    username: "x-access-token".into(),
+                    secret: "archive-test-credential".into(),
+                })
+            }
+
+            async fn list_repositories(
+                &self,
+                _owner: &OwnerId,
+                _attribution: GitForgeAttributionRequest,
+            ) -> Result<Vec<GitHubRepository>, GitForgeError> {
+                panic!("archive must not list forge repositories");
+            }
+        }
+
+        let (_dir, runtime, owner, repo_id) = runtime_with_repo("").await;
+        let workspace = runtime
+            .create_workspace(&owner, repo_id, Some("Archive retry".into()), None, None)
+            .await
+            .unwrap();
+        let path = Path::new(&workspace.worktree_path);
+        // No upstream: the test exercises both credential mints without network access.
+        git(
+            path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/example.git",
+            ],
+        );
+        let lender = Arc::new(RefuseSecondMint(AtomicUsize::new(0)));
+        let runtime = runtime.with_git_credentials(lender.clone());
+        let terminals = crate::code::terminal::TerminalHub::new();
+        let error = runtime
+            .archive_workspace(&owner, workspace.id, false, &terminals)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "git_forge_refused");
+        assert_eq!(lender.0.load(Ordering::SeqCst), 2);
+        assert!(path.exists());
+        assert_eq!(
+            runtime
+                .get_workspace(&owner, workspace.id)
+                .await
+                .unwrap()
+                .status,
+            CodeWorkspaceStatus::Active,
+        );
+        let archived = runtime
+            .archive_workspace(&owner, workspace.id, false, &terminals)
+            .await
+            .unwrap();
+        assert_eq!(archived.status, CodeWorkspaceStatus::Released);
+        assert!(!path.exists());
     }
 
     #[tokio::test]
