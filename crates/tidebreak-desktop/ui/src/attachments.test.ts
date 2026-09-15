@@ -85,6 +85,33 @@ describe("attachHeldChatFiles", () => {
     ]);
   });
 
+  it("ingests markdown and csv as documents rather than images", async () => {
+    const ingest = vi.fn(async () => ({ document_id: "doc-md" }));
+    const held = await attachHeldChatFiles(clientWith(ingest), "chat-1", [
+      new File(["# Notes\n"], "notes.md", { type: "text/markdown" }),
+      new File(["a,b\n1,2\n"], "data.csv", { type: "text/csv" }),
+    ]);
+
+    expect(held.images).toEqual([]);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    expect(
+      held.documents?.results.map((result) =>
+        result.status === "imported" ? result.document.displayName : result,
+      ),
+    ).toEqual(["notes.md", "data.csv"]);
+  });
+
+  it("ingests markdown and csv even when the browser reports an image type", async () => {
+    const ingest = vi.fn(async () => ({ document_id: "doc-md" }));
+    const held = await attachHeldChatFiles(clientWith(ingest), "chat-1", [
+      new File(["# Notes\n"], "notes.md", { type: "image/heic" }),
+      new File(["a,b\n1,2\n"], "data.csv", { type: "image/tiff" }),
+    ]);
+
+    expect(held.images).toEqual([]);
+    expect(ingest).toHaveBeenCalledTimes(2);
+  });
+
   it("posts nothing when the selection is all images", async () => {
     const ingest = vi.fn(async () => ({ document_id: "doc-4" }));
     const held = await attachHeldChatFiles(clientWith(ingest), "chat-1", [
