@@ -321,6 +321,17 @@ pub(in crate::db) fn code_runtime_sessions() -> sea_orm::Condition {
         .add(entities::session::Column::Lifecycle.ne(SessionLifecycle::Idle.as_str()))
 }
 
+/// Session ids matching [`code_runtime_sessions`], as a subquery for filters
+/// on tables that carry a `session_id`: the turn claim scan and the queued
+/// message sweeps split their work along this one boundary.
+pub(in crate::db) fn code_runtime_session_ids() -> sea_orm::sea_query::SelectStatement {
+    sea_orm::sea_query::Query::select()
+        .column(entities::session::Column::Id)
+        .from(entities::session::Entity)
+        .cond_where(code_runtime_sessions())
+        .to_owned()
+}
+
 /// Load one of the owner's sessions by id.
 ///
 /// Another owner's session is indistinguishable from a missing one.

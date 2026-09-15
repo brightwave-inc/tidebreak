@@ -160,15 +160,23 @@ pub async fn list_queued_turns(
     list_on(&store.conn, owner, session_id).await
 }
 
-/// Every session that has at least one queued message, across every owner.
+/// Every runtime-driven session that has at least one queued message, across
+/// every owner.
 ///
-/// The remote sweep's system path: promotion only matters where a queue
+/// The attach sweep's system path: promotion only matters where a queue
 /// exists, so the sweep asks for those sessions instead of walking every
-/// session row on the machine.
+/// session row on the machine. Only sessions the code runtime drives
+/// ([`super::session::code_runtime_sessions`]) are listed. A chat that only
+/// the chat routes have touched drains its queue on the chat lane; attaching
+/// a worker to it would move its turns off that lane for good.
 pub async fn sessions_with_queued_turns_all_owners(
     store: &DbStore,
 ) -> Result<Vec<(OwnerId, SessionId)>> {
     entities::code_queued_turn::Entity::find()
+        .filter(
+            entities::code_queued_turn::Column::SessionId
+                .in_subquery(super::session::code_runtime_session_ids()),
+        )
         .select_only()
         .column(entities::code_queued_turn::Column::Owner)
         .column(entities::code_queued_turn::Column::SessionId)

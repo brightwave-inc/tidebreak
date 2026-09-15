@@ -1244,11 +1244,7 @@ fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Cond
 /// lane until a code worker attaches, which is the boundary encoded by
 /// `code_runtime_sessions`.
 fn code_runtime_session_ids() -> sea_orm::sea_query::SelectStatement {
-    sea_orm::sea_query::Query::select()
-        .column(entities::session::Column::Id)
-        .from(entities::session::Entity)
-        .cond_where(super::code::code_runtime_sessions())
-        .to_owned()
+    super::code::session::code_runtime_session_ids()
 }
 
 async fn any_turn_claim_work_on<C>(

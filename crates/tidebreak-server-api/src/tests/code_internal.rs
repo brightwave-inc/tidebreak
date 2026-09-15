@@ -1739,6 +1739,67 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
     assert!(session["workspace_id"].is_null(), "{session}");
 }
 
+/// A message queued on a plain chat drains on the chat lane. The promoter's
+/// attach sweep must leave the chat alone: attaching a worker bumps the
+/// spawn epoch, which moves every later turn of that chat off the lane that
+/// claims it, so the queued message shows as sent, nothing runs it, and the
+/// next send answers `409` with an active turn that never finishes (#3430).
+#[tokio::test]
+async fn the_queued_turn_sweep_does_not_attach_a_worker_to_a_chat() {
+    let (router, token, runtime, _ran, _dir, _provider, state) =
+        internal_engine_app_capturing(vec![Step::Text("queued answer")]).await;
+    let bearer = format!("Bearer {token}");
+    let chat = super::make_chat(&router, &bearer).await;
+    let owner = OwnerId::local();
+
+    let queued = tidebreak_core::QueuedAgentTurn {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: "queued follow-up".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+        position: 0,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state.store.enqueue_queued_turn(&queued).await.unwrap();
+
+    crate::routes::promote_queued_turns(&state).await.unwrap();
+
+    assert!(
+        !runtime.has_worker(chat.id),
+        "the queued-turn sweep attached a worker to a chat"
+    );
+    let session = tidebreak_core::db::code::get_session(&runtime.db, &owner, chat.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.spawn_epoch, 0, "the chat left the chat lane");
+    assert!(
+        state
+            .store
+            .list_queued_turns(chat.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the queued message was not promoted"
+    );
+    let events = super::wait_for_turn(&state.store, chat.id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            tidebreak_core::AgentEvent::TurnCompleted { .. }
+        )),
+        "the promoted turn did not complete on the chat lane"
+    );
+    assert!(
+        !runtime.has_worker(chat.id),
+        "running the promoted turn attached a worker to the chat"
+    );
+}
+
 /// A session the runtime created and attached carries the engine's
 /// `SessionStarted` in the code journal. The chat route deletes the
 /// conversation and the code-side rows with it, and both routes then miss.
