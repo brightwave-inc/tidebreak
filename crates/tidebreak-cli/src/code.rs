@@ -74,8 +74,8 @@ usage: tidebreak code doctor [--refresh]
 
 Every verb takes --json (or --output-format json). run and watch stream NDJSON
 under --json. --timeout is seconds. watch --once prints the connect snapshot
-and exits. session start without --mode uses ask when the doctor says
-structured approvals are supported, otherwise plan.";
+and exits. session start without --mode uses the first mode the engine supports:
+allow, auto, ask, then plan. Pass --mode ask to require approval prompts.";
 
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -139,9 +139,8 @@ pub enum Command {
     SessionStart {
         workspace: WorkspaceId,
         harness: HarnessKind,
-        /// `None` means the doctor-driven default: ask when this engine's
-        /// structured approvals are Supported, otherwise plan. An explicit
-        /// `--mode` is passed through verbatim.
+        /// `None` chooses the first supported mode: allow, auto, ask, then plan.
+        /// An explicit `--mode` is passed through verbatim.
         mode: Option<PermissionMode>,
         model: Option<String>,
         reasoning_effort: Option<ReasoningEffort>,
@@ -2185,8 +2184,10 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
                     "--model" => model = Some(cursor.value("--model")?),
                     "--reasoning" => {
                         let raw = cursor.value("--reasoning")?;
-                        reasoning_effort = ReasoningEffort::from_str(&raw)
-                            .ok_or_else(|| format!("unknown reasoning effort {raw:?}"))?;
+                        reasoning_effort = Some(
+                            ReasoningEffort::from_str(&raw)
+                                .ok_or_else(|| format!("unknown reasoning effort {raw:?}"))?,
+                        );
                     }
                     "--fast" => fast_mode = true,
                     other => take_format(&mut flags, cursor, other)?,
@@ -2695,6 +2696,39 @@ mod tests {
 
     fn id() -> String {
         uuid::Uuid::nil().to_string()
+    }
+
+    #[test]
+    fn session_start_rejects_invalid_or_missing_settings() {
+        let ws = WorkspaceId::from(uuid::Uuid::nil()).to_string();
+        let base = [
+            "session",
+            "start",
+            "--ws",
+            ws.as_str(),
+            "--harness",
+            "codex",
+        ];
+        for flags in [
+            &["--model"][..],
+            &["--reasoning"][..],
+            &["--reasoning", "invalid"][..],
+        ] {
+            let input = base.iter().chain(flags.iter()).copied().collect::<Vec<_>>();
+            assert!(parse(args(&input)).is_err(), "accepted {flags:?}");
+        }
+        let Command::SessionStart {
+            model,
+            reasoning_effort,
+            fast_mode,
+            ..
+        } = parse(args(&base)).unwrap()
+        else {
+            panic!("expected SessionStart")
+        };
+        assert_eq!(model, None);
+        assert_eq!(reasoning_effort, None);
+        assert!(!fast_mode);
     }
 
     #[test]

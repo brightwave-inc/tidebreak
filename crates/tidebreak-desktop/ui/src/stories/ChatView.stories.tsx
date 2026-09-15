@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -480,6 +480,7 @@ type DecisionOutcome = "success" | "pending" | "failure";
 
 type StoryScenario = {
   id: string;
+  hydration?: "loading" | "error";
   messages: ChatMessage[];
   draft?: string;
   busy?: boolean;
@@ -779,6 +780,7 @@ function StoryChat({
   scenario: StoryScenario;
 }) {
   const [chat, setChat] = useState<Chat>(() => ({ ...storyChat }));
+  const [hydration, setHydration] = useState(scenario.hydration);
   const draftRef = useRef(scenario.draft ?? "");
   const images: ComposerImages = {
     items: scenario.attachments?.images ?? [],
@@ -865,7 +867,13 @@ function StoryChat({
             key={scenario.id}
             client={client}
             chat={chat}
-            hydrated
+            hydrated={hydration === undefined}
+            hydrationError={
+              hydration === "error"
+                ? "The connection was interrupted. Retry to load the transcript and pending approvals."
+                : null
+            }
+            onRetryHydration={() => setHydration(undefined)}
             nativeHost={scenario.nativeHost ?? false}
             deletingChat={false}
             composerModelMenu={
@@ -1159,4 +1167,52 @@ export const MinimumWindowBusyContext: Story = {
     },
   },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+export const LoadingTranscript: Story = {
+  args: {
+    scenario: {
+      id: "loading-transcript",
+      messages: [],
+      draft: "Keep this draft while the work loads.",
+      hydration: "loading",
+    },
+  },
+};
+
+export const HydrationFailure: Story = {
+  args: {
+    scenario: {
+      id: "hydration-failure",
+      messages: [],
+      draft: "Keep this draft while the work loads.",
+      hydration: "error",
+    },
+  },
+};
+
+export const HydrationRetry: Story = {
+  args: {
+    scenario: {
+      id: "hydration-retry",
+      messages: [],
+      draft: "Keep this draft while the work loads.",
+      hydration: "error",
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByRole("alert")).toHaveTextContent(
+      "Could not load this work",
+    );
+    await expect(canvas.getByRole("textbox")).toBeDisabled();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Retry loading" }),
+    );
+    await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
+    await expect(canvas.getByRole("textbox")).toBeEnabled();
+    await expect(canvas.getByRole("textbox")).toHaveValue(
+      "Keep this draft while the work loads.",
+    );
+  },
 };
