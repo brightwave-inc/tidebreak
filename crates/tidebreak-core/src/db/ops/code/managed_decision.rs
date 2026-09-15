@@ -32,6 +32,7 @@ struct LiveTurn {
     grant: uuid::Uuid,
     turn: uuid::Uuid,
     epoch: i64,
+    permission_mode: crate::PermissionMode,
 }
 
 /// The session lock serializes answers with stop, replacement, and revocation.
@@ -53,10 +54,13 @@ async fn live_turn<C: ConnectionTrait>(
         .ok_or_else(|| invalid("human decision session is absent"))?;
     if session_row.lifecycle != "running"
         || session_row.execution_location != "sandbox"
-        || session_row.permission_mode.as_deref() != Some("allow")
+        || !matches!(
+            session_row.permission_mode.as_deref(),
+            Some("allow" | "ask")
+        )
     {
         return Err(invalid(
-            "human decisions require a running managed session in Allow mode",
+            "human decisions require a running managed session in Allow or Ask mode",
         ));
     }
     let incarnation_row = entities::code_session_incarnation::Entity::find_by_id(incarnation.0)
@@ -136,6 +140,11 @@ async fn live_turn<C: ConnectionTrait>(
         grant,
         turn: turn.id,
         epoch: session_row.spawn_epoch,
+        permission_mode: if session_row.permission_mode.as_deref() == Some("ask") {
+            crate::PermissionMode::Ask
+        } else {
+            crate::PermissionMode::Allow
+        },
     })
 }
 
@@ -182,7 +191,7 @@ pub async fn enqueue_managed_decision(
             "cancelled proposals cannot create a human decision",
         ));
     }
-    let kind = human_decision_kind(&request.tool, &request.arguments)
+    let mut kind = human_decision_kind(&request.tool, &request.arguments)
         .map_err(AgentError::InvalidTarget)?;
     let identity = request
         .turn
@@ -190,6 +199,9 @@ pub async fn enqueue_managed_decision(
         .ok_or_else(|| invalid("human decision has no supervisor turn identity"))?;
     let tx = store.conn.begin().await.map_err(store_err)?;
     let live = live_turn(&tx, owner, session, incarnation, identity).await?;
+    if let crate::ApprovalKind::Plan { proposed_mode } = &mut kind {
+        *proposed_mode = live.permission_mode;
+    }
     let prior = decision::Entity::find()
         .filter(decision::Column::Owner.eq(owner.as_str()))
         .filter(decision::Column::SessionId.eq(session.0))
@@ -253,7 +265,11 @@ pub async fn enqueue_managed_decision(
         session_id: session,
         turn_id: TurnId(live.turn),
         kind,
-        harness_raw: request.arguments.clone(),
+        harness_raw: if request.tool == "request_tool_approval" {
+            request.arguments["raw"].clone()
+        } else {
+            request.arguments.clone()
+        },
         native_call_id: Some(request.request_id.clone()),
         server_capability: None,
         request_sha256: Some(
@@ -464,9 +480,10 @@ pub async fn settle_managed_decision(
     validate_human_decision(&approval.kind, &answer).map_err(AgentError::InvalidTarget)?;
     let (note, data) = match &answer {
         ApprovalDecisionKind::Answered { answers } => ("The user answered these questions. Continue using the supplied answers.", serde_json::json!({"decision":"answered","answers":answers})),
-        ApprovalDecisionKind::PlanDecided { approve: true, feedback } => ("The user accepted the plan. Begin executing it with the session's existing Allow permissions.", serde_json::json!({"decision":"accepted","feedback":feedback,"permission_mode":"allow"})),
+        ApprovalDecisionKind::PlanDecided { approve: true, feedback } => ("The user accepted the plan. Begin executing it with the session's existing permission mode.", serde_json::json!({"decision":"accepted","feedback":feedback,"permission_mode":live.permission_mode})),
         ApprovalDecisionKind::PlanDecided { approve: false, feedback } => ("The user rejected the plan. Do not execute it. Revise it using the feedback before requesting approval again.", serde_json::json!({"decision":"rejected","feedback":feedback})),
         ApprovalDecisionKind::Deny { feedback } => ("The user declined this request. Do not treat it as consent or an answer.", serde_json::json!({"decision":"rejected","feedback":feedback})),
+        ApprovalDecisionKind::Approve => ("The user approved this tool call once.", serde_json::json!({"decision":"approved"})),
         _ => return Err(invalid("invalid human decision")),
     };
     let result = SupervisorToolResult {

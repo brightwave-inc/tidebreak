@@ -210,12 +210,13 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         if !has_slack_binding(&runtime, owner, session_id).await? {
             return Ok(String::new());
         }
-        require_session(&runtime, owner, session_id).await?;
+        let permission_mode = require_session(&runtime, owner, session_id).await?;
         let tools = runtime
             .tool_registry()
             .ok_or_else(|| AgentError::config("native tool registry is unavailable"))?;
         let specs = TOOLS
             .iter()
+            .filter(|name| permission_mode == PermissionMode::Allow || is_human_decision(name))
             .map(|name| {
                 if let Some(spec) = human_decision_spec(name) {
                     return Ok(spec);
@@ -235,7 +236,7 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
         let mut context = String::new();
         super::channel_preferences::append_instructions(&mut context, &instructions);
         context.push_str(&format!(
-            "\n\nNative tools: send one JSON object containing request_id, tool, and arguments on stdin to \"$TIDEBREAK_TOOL_HELPER\" tool-call. Use a unique request_id for each logical call and keep it unchanged when retrying that call. A pending conversation result has its own request_id inside output; to resume that conversation read, make a new helper call whose arguments contain only that conversation request_id. The helper prints output and artifact metadata after writing the artifacts relative to the engine working directory. For structured questions, call the tb-human MCP tool ask_user_questions. For plan decisions, call its request_plan_approval tool. Call human tools through MCP, never through the shell helper or in the background. Wait for the explicit human result; never treat a timeout, an error, a missing answer, or a pending card as consent. A plan decision preserves the session's existing Allow permissions.\n\n{}\n\nAvailable native tool schemas:\n{}",
+            "\n\nNative tools: send one JSON object containing request_id, tool, and arguments on stdin to \"$TIDEBREAK_TOOL_HELPER\" tool-call. Use a unique request_id for each logical call and keep it unchanged when retrying that call. A pending conversation result has its own request_id inside output; to resume that conversation read, make a new helper call whose arguments contain only that conversation request_id. The helper prints output and artifact metadata after writing the artifacts relative to the engine working directory. For structured questions, call the tb-human MCP tool ask_user_questions. For plan decisions, call its request_plan_approval tool. Call human tools through MCP, never through the shell helper or in the background. Wait for the explicit human result; never treat a timeout, an error, a missing answer, or a pending card as consent. A plan decision preserves the session's existing permission mode.\n\n{}\n\nAvailable native tool schemas:\n{}",
             super::conversation_tools::CONVERSATION_GUIDANCE,
             serde_json::to_string(&specs)?,
         ));
@@ -256,7 +257,13 @@ impl super::remote::driver::HostToolExecutor for SandboxToolExecutor {
     ) -> Result<(), AgentError> {
         validate_request(request).map_err(AgentError::InvalidTarget)?;
         let runtime = self.runtime()?;
-        require_session(&runtime, owner, session_id).await?;
+        let permission_mode = require_session(&runtime, owner, session_id).await?;
+        if !is_human_decision(&request.tool) && permission_mode != PermissionMode::Allow {
+            return Err(AgentError::AccessDenied(
+                "ordinary host tools require Allow mode; use the native harness tools in Ask mode"
+                    .into(),
+            ));
+        }
         if is_human_decision(&request.tool) {
             let event = if request.cancelled {
                 tidebreak_core::db::code::cancel_managed_decision(
@@ -504,23 +511,26 @@ async fn require_session(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     id: SessionId,
-) -> Result<(), AgentError> {
+) -> Result<PermissionMode, AgentError> {
     let session = tidebreak_core::db::code::get_session(&runtime.db, owner, id)
         .await?
         .ok_or_else(|| AgentError::AccessDenied("native tool session is unavailable".into()))?;
     if runtime.update_quiesce_active()
         || session.execution_location != ExecutionLocation::Sandbox
-        || session.permission_mode != PermissionMode::Allow
+        || !matches!(
+            session.permission_mode,
+            PermissionMode::Allow | PermissionMode::Ask
+        )
         || matches!(
             session.lifecycle,
             SessionLifecycle::Ended | SessionLifecycle::Fenced
         )
     {
         return Err(AgentError::AccessDenied(
-            "native tools require a live sandbox session in Allow mode".into(),
+            "native tools require a live sandbox session in Allow or Ask mode".into(),
         ));
     }
-    Ok(())
+    Ok(session.permission_mode)
 }
 
 impl CodeRuntime {
@@ -534,7 +544,11 @@ impl CodeRuntime {
         request: &SupervisorToolRequest,
     ) -> Result<SupervisorToolResult, AgentError> {
         validate_request(request).map_err(AgentError::InvalidTarget)?;
-        require_session(self, owner, session_id).await?;
+        if require_session(self, owner, session_id).await? != PermissionMode::Allow {
+            return Err(AgentError::AccessDenied(
+                "ordinary host tools require Allow mode".into(),
+            ));
+        }
         let receipt = list_native_tool_requests(&self.db, owner, session_id, incarnation)
             .await?
             .into_iter()

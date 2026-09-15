@@ -175,7 +175,8 @@ pub struct ExternalSessionBody {
     /// The permission mode the channel asks for. On the machine's engine it
     /// is honored up to the operator's ceiling and refused by name above it;
     /// absent, the session takes the operator's default (decision 88). A
-    /// sandbox session is always `allow`, so any other value is refused.
+    /// managed sandbox sessions may use `ask` for Claude Code and Codex; other
+    /// sandbox profiles refuse modes they cannot transport.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
     /// Required under a workspace grant.

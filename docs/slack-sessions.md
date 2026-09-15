@@ -514,8 +514,9 @@ also sets `TIDEBREAK_RUNTIME_ENGINES=claude_code,codex`, so each session can sel
 one of the two packaged engines when managed registration is enabled with
 `TIDEBREAK_RUNTIME_EMBEDDED_ENGINE_REGISTRATION=true`. Existing custom profiles
 omit that setting, keep their existing token exchange and spawn behavior, and
-continue to use only their declared default engine. Each engine uses Allow permissions inside
-Gateway's confinement. Unsupported engine,
+continue to use only their declared default engine. Managed Claude Code and Codex
+children may use Ask: the native prompt goes through the durable approval card.
+Other profiles keep Allow inside Gateway's confinement. Unsupported engine,
 permission, or fast-mode settings are refused before a remote turn starts.
 The custom-harness contract does not transport tool approvals.
 Choose the model and reasoning level when you create the session. This
@@ -588,9 +589,10 @@ ship Slack on the machine engine; the refusal rested on the sandbox
 being the only thing that made unattended `Allow` safe, and the answer
 is not to withhold sessions but to withhold `Allow`.
 
-Permission mode follows the location. Inside a sandbox the engine is
-`Allow`; confinement is the permission boundary
-([`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)).
+Permission mode follows the location. Inside a managed sandbox, Claude Code and
+Codex use `Ask` through the native approval channel or `Allow` when the channel
+chooses full autonomy. Other sandbox profiles use `Allow`; confinement remains
+the permission boundary ([`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)).
 On the machine the session takes the mode the channel named, else the
 operator's default: `TIDEBREAK_EXTERNAL_PERMISSION_MODE` sets that
 default (`ask` unless the operator says otherwise) and
@@ -601,10 +603,9 @@ deployment's rule instead of getting a silently clamped session; a
 request for anything but `allow` on a sandbox deployment is refused as
 `permission_mode_unsupported`. You answer approvals where you are. A
 machine session parks on the same cards the desktop shows; the external
-stream carries their facts and you settle them from Slack. A sandbox
-session stays Allow and never asks, so it still carries none of these
-events. Slack `NeedsYou` includes `approval_requested` on a machine
-session; connect, fenced, or failed stay as they were.
+stream carries their facts and you settle them from Slack. A managed Ask sandbox session carries the same approval events as a machine
+session. An Allow sandbox session never asks. Slack `NeedsYou` includes `approval_requested` on machine and managed Ask sandbox
+sessions; connect, fenced, or failed stay as they were.
 
 Incarnations follow a durable intent protocol: write the incarnation
 intent row, provision, activate. Stop and reincarnate serialize through

@@ -24,6 +24,7 @@ pub mod engine;
 pub mod harness_engine;
 pub mod human_mcp;
 pub mod inputs;
+pub mod native_approvals;
 pub mod registration;
 pub mod scratch;
 pub mod tool_bridge;

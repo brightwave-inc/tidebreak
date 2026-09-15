@@ -87,6 +87,8 @@ pub struct Repository {
 /// Every input the agent reads, resolved and defaulted.
 #[derive(Clone, Debug)]
 pub struct Inputs {
+    /// Native permission posture selected by the workspace.
+    pub permission_mode: tidebreak_core::PermissionMode,
     /// Task text for the first turn.
     pub task: String,
     /// Branch assigned by Tidebreak for the primary repository.
@@ -330,7 +332,18 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
             })
             .transpose()?;
 
+    let permission_mode = envelope
+        .as_ref()
+        .and_then(|task| task.permission_mode)
+        .unwrap_or(tidebreak_core::PermissionMode::Allow);
+    if permission_mode == tidebreak_core::PermissionMode::Ask && embedded_engine.is_none() {
+        return Err(InputError::unusable(
+            TASK_VARIABLE,
+            "Ask mode requires managed engine registration",
+        ));
+    }
     Ok(Inputs {
+        permission_mode,
         task,
         workspace_branch,
         control_url,
@@ -408,6 +421,32 @@ mod tests {
         assert!(!inputs.forge_push_denied);
         assert_eq!(inputs.incarnation, 1);
         assert!(inputs.embedded_engine.is_none());
+    }
+
+    #[test]
+    fn ask_requires_the_registered_bridge_and_preserves_the_task() {
+        for engine in ["claude_code", "codex"] {
+            let mut raw = minimal();
+            raw.task = Some(
+                tidebreak_core::code::RemoteWorkspaceTask::encode_with_permissions(
+                    "work",
+                    "scratch/task",
+                    true,
+                    tidebreak_core::PermissionMode::Ask,
+                )
+                .unwrap(),
+            );
+            raw.engine = Some(engine.into());
+            assert!(resolve(raw.clone()).is_err());
+            raw.embedded_engine = Some(serde_json::json!({"engine":engine,"engine_session_id":tidebreak_core::SessionId::new()}).to_string());
+            let inputs = resolve(raw).unwrap();
+            assert_eq!(inputs.permission_mode, tidebreak_core::PermissionMode::Ask);
+            assert_eq!(inputs.task, "work");
+        }
+        assert_eq!(
+            resolve(minimal()).unwrap().permission_mode,
+            tidebreak_core::PermissionMode::Allow
+        );
     }
 
     #[test]

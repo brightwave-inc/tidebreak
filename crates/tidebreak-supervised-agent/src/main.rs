@@ -198,6 +198,7 @@ async fn run_inputs(
         None => None,
     };
     let engine = HarnessEngine::new(HarnessEngineSpec {
+        permission_mode: inputs.permission_mode,
         apps,
         session_id,
         adapter,

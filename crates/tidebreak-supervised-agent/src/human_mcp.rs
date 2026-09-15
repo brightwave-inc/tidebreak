@@ -14,7 +14,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 const MAX_CALLS: usize = 8;
 const MAX_IDS: usize = 128;
-const GUIDANCE: &str = "Use ask_user_questions for structured choices and request_plan_approval for a concrete plan. These MCP calls wait for an explicit human decision. Do not invoke them through a shell or in the background. Do not treat an error or a missing response as consent. Plan acceptance preserves the session's Allow permissions.";
+const GUIDANCE: &str = "Use ask_user_questions for structured choices and request_plan_approval for a concrete plan. These MCP calls wait for an explicit human decision. Do not invoke them through a shell or in the background. Do not treat an error or a missing response as consent. Plan acceptance preserves the session's permission mode.";
 
 async fn read_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -123,11 +123,15 @@ where
                 "capabilities":{"tools":{}},"serverInfo":{"name":"tb-human","version":"1.0.0"},"instructions":GUIDANCE}),
             Some("ping") => json!({}),
             Some("tools/list") => {
-                json!({"tools": (["ask_user_questions","request_plan_approval"].into_iter().map(|name| {
-                let spec = human_decision_spec(name).expect("fixed human tool");
-                json!({"name":spec.name,"description":spec.description,"inputSchema":spec.input_schema,
-                    "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}})
-            }).collect::<Vec<_>>())})
+                let mut tools: Vec<Value> = ["ask_user_questions", "request_plan_approval"].into_iter().map(|name| {
+                    let spec = human_decision_spec(name).expect("fixed human tool");
+                    json!({"name":spec.name,"description":spec.description,"inputSchema":spec.input_schema,
+                        "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}})
+                }).collect();
+                tools.push(json!({"name":"permission_prompt","description":"Wait for an explicit decision on the native tool request.",
+                    "inputSchema":{"type":"object","properties":{"tool_name":{"type":"string"},"input":{"type":"object"},"tool_use_id":{"type":"string"}},"required":["tool_name","input","tool_use_id"]},
+                    "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+                json!({"tools":tools})
             }
             Some("tools/call") => {
                 let params = &request["params"];
@@ -136,7 +140,27 @@ where
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                if let Err(error) = human_decision_kind(name, &args) {
+                let native_permission = name == "permission_prompt";
+                let (name, args) = if native_permission {
+                    let valid = serde_json::from_value::<
+                        tidebreak_harness::claude::approvals::PermissionPromptRequest,
+                    >(args.clone())
+                    .is_ok_and(|request| {
+                        !request.tool_use_id.is_empty() && !request.tool_name.is_empty()
+                    });
+                    if !valid {
+                        write(&writer, json!({"jsonrpc":"2.0","id":id,"result":tool_error("invalid native permission request")})).await?;
+                        continue;
+                    }
+                    ("request_tool_approval", json!({"raw":args}))
+                } else {
+                    (name, args)
+                };
+                if !native_permission
+                    && !matches!(name, "ask_user_questions" | "request_plan_approval")
+                {
+                    tool_error("this human helper is unavailable")
+                } else if let Err(error) = human_decision_kind(name, &args) {
                     tool_error(&error)
                 } else if pending.len() >= MAX_CALLS {
                     tool_error("too many human calls are pending")
@@ -180,9 +204,19 @@ where
                     let writer = writer.clone();
                     let socket = socket.clone();
                     let task = pending.spawn(async move {
-                        let result = match crate::tool_bridge::call(&socket, &call).await {
-                            Ok(result) => json!({"content":[{"type":"text","text":result["output"].to_string()}],"isError":result["output"]["is_error"].as_bool().unwrap_or(false)}),
-                            Err(error) => tool_error(&error),
+                        let reply = crate::tool_bridge::call(&socket, &call).await;
+                        let result = if native_permission {
+                            let decision = match reply {
+                                Ok(result) => crate::native_approvals::decision_from_output(&result["output"]),
+                                Err(error) => tidebreak_harness::ApprovalDecision::Deny { feedback: Some(error) },
+                            };
+                            let response = tidebreak_harness::claude::approvals::PermissionPromptResponse::from_decision(&decision);
+                            json!({"content":[{"type":"text","text":response.as_text_block()}],"isError":false})
+                        } else {
+                            match reply {
+                                Ok(result) => json!({"content":[{"type":"text","text":result["output"].to_string()}],"isError":result["output"]["is_error"].as_bool().unwrap_or(false)}),
+                                Err(error) => tool_error(&error),
+                            }
                         };
                         write(&writer, json!({"jsonrpc":"2.0","id":id,"result":result})).await
                     });
@@ -244,6 +278,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_permission_mcp_waits_and_returns_the_native_allow_or_deny_shape() {
+        for approve in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
+            bridge.begin_turn(SupervisorToolTurn {
+                native_turn: 1,
+                runtime_id: uuid::Uuid::new_v4(),
+            });
+            let (client, server) = tokio::io::duplex(100_000);
+            let (server_read, server_write) = tokio::io::split(server);
+            let (client_read, mut client_write) = tokio::io::split(client);
+            let mut client_read = BufReader::new(client_read);
+            let server = tokio::spawn(serve(
+                BufReader::new(server_read),
+                server_write,
+                bridge.socket_path(),
+            ));
+            send(&mut client_write, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"permission_prompt","arguments":{"tool_name":"Bash","tool_use_id":"tool-1","input":{"command":"printf marker"}}}})).await;
+            let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Some(request) = bridge.drain_requests().pop() {
+                        break request;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(request.tool, "request_tool_approval");
+            assert_eq!(request.arguments["raw"]["tool_use_id"], "tool-1");
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(901)).await;
+            assert!(bridge.waiting_for_human());
+            send(
+                &mut client_write,
+                json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
+            )
+            .await;
+            assert_eq!(receive(&mut client_read).await["id"], 2);
+            let result = SupervisorToolResult {
+                request: Some(request.clone()),
+                request_id: request.request_id.clone(),
+                output: json!({"is_error":false,"data":{"decision":if approve { "approved" } else { "rejected" },"feedback":"Skip it"}}),
+                artifacts: vec![],
+            };
+            for frame in encode_result_frames(&result).unwrap() {
+                bridge.receive_frame(&frame).unwrap();
+            }
+            let response = receive(&mut client_read).await;
+            assert_eq!(response["id"], 1);
+            assert_eq!(response["result"]["isError"], false);
+            let body: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(body["behavior"], if approve { "allow" } else { "deny" });
+            if !approve {
+                assert_eq!(body["message"], "Skip it");
+            }
+            tokio::time::resume();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn human_mcp_waits_past_tool_timeouts_and_keeps_ping_and_exact_result_binding() {
         let dir = tempfile::tempdir().unwrap();
         let mut bridge = LocalToolBridge::start(dir.path()).unwrap();
@@ -271,7 +369,7 @@ mod tests {
         )
         .await;
         let catalog = receive(&mut client_read).await;
-        assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 3);
         assert!(catalog["result"]["tools"]
             .as_array()
             .unwrap()

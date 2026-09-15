@@ -442,6 +442,23 @@ pub async fn replace_sandbox_permission_mode(
     if &expected.owner != owner || expected.execution_location != ExecutionLocation::Sandbox {
         return Ok(None);
     }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, expected.id).await? {
+        return Ok(None);
+    }
+    // A retained native process keeps its launch posture, even between turns.
+    if entities::code_session_incarnation::Entity::find()
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(expected.id.0))
+        .filter(entities::code_session_incarnation::Column::State.is_in(["intent", "active"]))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Err(AgentError::InvalidTarget(
+            "Wait for the sandbox to stop before changing its permission mode.".into(),
+        ));
+    }
     let updated = entities::session::Entity::update_many()
         .col_expr(
             entities::session::Column::PermissionMode,
@@ -460,12 +477,13 @@ pub async fn replace_sandbox_permission_mode(
         .filter(
             entities::session::Column::ExecutionLocation.eq(ExecutionLocation::Sandbox.as_str()),
         )
-        .exec(&store.conn)
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
     if updated.rows_affected != 1 {
         return Ok(None);
     }
+    transaction.commit().await.map_err(store_err)?;
     get_session(store, owner, expected.id).await
 }
 

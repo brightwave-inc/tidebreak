@@ -321,6 +321,7 @@ impl CodeRuntime {
         }
         if tidebreak_core::db::code::is_managed_decision(&self.db, owner, id).await? {
             let decision = match request {
+                ApprovalDecisionRequest::Approve => ApprovalDecisionKind::Approve,
                 ApprovalDecisionRequest::Answers { answers } => {
                     ApprovalDecisionKind::Answered { answers }
                 }
