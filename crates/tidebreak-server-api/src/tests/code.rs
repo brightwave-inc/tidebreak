@@ -241,7 +241,6 @@ pub(super) async fn code_app_with_options(
     } else {
         runtime
     };
-    let runtime = Arc::new(runtime);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,
@@ -253,6 +252,12 @@ pub(super) async fn code_app_with_options(
             ..AgentConfig::default()
         },
     );
+    // Keep publication outside the runtime's default directory so attachment
+    // tests catch readers that silently fall back to local blob storage.
+    state.blobs = Arc::new(tidebreak_core::FsBlobStore::new(
+        dir.path().join("configured-blobs"),
+    ));
+    let runtime = Arc::new(runtime.with_blobs(state.blobs.clone()));
     if let Some(gate) = put_gate {
         state.blobs = Arc::new(GatedPutBlobStore {
             inner: runtime.blobs.clone(),

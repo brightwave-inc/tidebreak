@@ -795,6 +795,14 @@ impl CodeRuntime {
         self
     }
 
+    /// Use the same blob store as image publication and transcript reads.
+    /// Hosted deployments may keep these bytes in object storage instead of
+    /// the local filesystem selected by the standalone constructors.
+    pub fn with_blobs(mut self, blobs: Arc<dyn tidebreak_core::BlobStore>) -> Self {
+        self.blobs = blobs;
+        self
+    }
+
     /// Wire the managed-policy-aware gateway catalog used by local engines.
     pub fn with_gateway_runtime(
         mut self,
