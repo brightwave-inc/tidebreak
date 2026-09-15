@@ -17,14 +17,16 @@ use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
 use tidebreak_core::{
-    ApprovalClass, ChatRequest, ContentBlock, DbStore, ModelProvider, OwnerId, ProviderEvent,
-    ProviderId, SessionId, StopReason, Store, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
-    TurnId, TurnParkWait, TurnRunStatus, TurnStatus,
+    ApprovalClass, CapLevel, ChatRequest, CodeRepo, ContentBlock, DbStore, ModelProvider, OwnerId,
+    ProviderEvent, ProviderId, RepoId, SessionId, StopReason, Store, Tool, ToolCtx, ToolOutput,
+    ToolRegistry, ToolSpec, TurnId, TurnParkWait, TurnRunStatus, TurnStatus,
 };
 use tidebreak_harness::AdapterRegistry;
 
+use crate::code::session_tools::SessionTools;
 use crate::code::CodeRuntime;
 use crate::engine::internal::InternalAdapter;
+use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 
 /// One model completion the scripted provider answers with.
 enum Step {
@@ -258,6 +260,92 @@ async fn internal_engine_app_with_location(
     )));
     state.events.mirror_into(runtime.bus.clone());
     let runtime = Arc::new(runtime);
+    state.code = Some(runtime.clone());
+    let token = state.token.clone();
+    (
+        app(state.clone()),
+        token,
+        runtime,
+        ran,
+        dir,
+        provider,
+        state,
+    )
+}
+
+/// Internal-engine fixture with production SessionTools wiring and a
+/// caller-shaped runtime: register on the process registry, share that
+/// registry with the code runtime, then attach after the runtime is Arc.
+async fn internal_engine_app_configured(
+    steps: Vec<Step>,
+    execution_location: tidebreak_core::AgentRunExecutionLocation,
+    customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
+) -> (
+    axum::Router,
+    Arc<str>,
+    Arc<CodeRuntime>,
+    Arc<AtomicUsize>,
+    tempfile::TempDir,
+    Arc<ScriptedProvider>,
+    AppState,
+) {
+    let (dir, store) = temp_db_store("internal.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    let session_tools = Arc::new(SessionTools::default());
+    session_tools.register(&mut tools);
+    tools.register(Box::new(FakeExec { ran: ran.clone() }));
+    tools.register_validated_foreground_client(
+        tidebreak_core::ask_user_questions_tool_spec(),
+        ApprovalClass::ReadOnly,
+        tidebreak_core::validate_ask_user_questions_arguments,
+    );
+    tools.register_validated_foreground_client(
+        tidebreak_core::exit_plan_mode_tool_spec(),
+        ApprovalClass::ReadOnly,
+        tidebreak_core::validate_exit_plan_mode_arguments,
+    );
+    tools.register_validated_foreground_client(
+        ToolSpec {
+            name: "connect_folder".into(),
+            description: "Connect one folder through the trusted client".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        ApprovalClass::ReadOnly,
+        serde_json::Value::is_object,
+    );
+    tools.register_foreground_agent_orchestration();
+    let provider = Arc::new(ScriptedProvider {
+        steps: Mutex::new(steps),
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
+    });
+    let tools = Arc::new(tools);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(MemSecrets::default()),
+        tools.clone(),
+        AgentConfig {
+            model: "scripted".into(),
+            ..AgentConfig::default()
+        },
+    );
+    spawn_turn_worker_with_blobs(&state);
+    let mut runtime =
+        CodeRuntime::with_registry(db, dir.path().to_path_buf(), AdapterRegistry::new());
+    runtime = customize(runtime);
+    runtime.adapters.register(Arc::new(InternalAdapter::new(
+        state.clone(),
+        runtime.db.clone(),
+        execution_location,
+    )));
+    state.events.mirror_into(runtime.bus.clone());
+    let runtime = Arc::new(runtime.with_tool_registry(tools));
+    session_tools.attach(&runtime);
     state.code = Some(runtime.clone());
     let token = state.token.clone();
     (
@@ -2353,6 +2441,213 @@ async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
             .iter()
             .any(|text| text.contains("all three repositories")),
         "the internal conversation did not run its first turn through the code event surface: {events:?}"
+    );
+}
+
+/// A machine with no sandbox runtime: a Slack conversation without a
+/// repository answers, then a follow-up starts repository work as a child
+/// workspace under the same grant. Placement stays on the machine.
+#[tokio::test]
+async fn external_conversation_without_runtime_answers_then_creates_a_machine_workspace_child() {
+    use tidebreak_core::{ExecutionLocation, HarnessKind, PermissionMode};
+    let workspace_harness = Arc::new(
+        ScriptedAdapter::new(plain_text_script())
+            .with_approvals(CapLevel::Supported)
+            .with_allow_mode(CapLevel::Supported),
+    );
+    let harness = workspace_harness.clone();
+    let (router, _token, runtime, _ran, dir, _provider, _state) = internal_engine_app_configured(
+        vec![
+            Step::Text("Issue one is the highest priority of the three."),
+            Step::Tool {
+                name: "code_session_create",
+                input: serde_json::json!({
+                    "repository": "acme/tools",
+                    "task": "Do the first issue in acme/tools",
+                    "request_key": "first",
+                }),
+            },
+            Step::Text("Started the first issue in acme/tools."),
+        ],
+        tidebreak_core::AgentRunExecutionLocation::InProcess,
+        move |mut runtime| {
+            runtime.adapters.register(harness);
+            runtime.with_external_permission_policy(PermissionMode::Allow, PermissionMode::Allow)
+        },
+    )
+    .await;
+    assert!(
+        runtime.remote_sessions().is_none(),
+        "this path must not configure a sandbox runtime"
+    );
+    let owner = OwnerId::local();
+    let root = super::code::init_git_repo_named(dir.path(), "tools");
+    super::code::add_github_remote(&root, "tools");
+    tidebreak_core::db::code::insert_repo(
+        &runtime.db,
+        &CodeRepo {
+            id: RepoId::new(),
+            owner: owner.clone(),
+            root_path: root.display().to_string(),
+            display_name: "tools".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: vec![],
+            created_at: chrono::Utc::now(),
+            removed_at: None,
+            cloned_from: None,
+            origin_host: Some("github.com".into()),
+            origin_owner: Some("acme".into()),
+            origin_name: Some("tools".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U", "W")
+        .await
+        .unwrap();
+    let bearer = pair.token;
+    let (status, created) = call_router_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &bearer,
+        Some(serde_json::json!({"external_key": "W:C:unanchored", "title": "Triage then work"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id: SessionId = serde_json::from_value(created["session_id"].clone()).unwrap();
+    let session = runtime.get_session(&owner, id).await.unwrap();
+    assert!(session.workspace_id.is_none(), "{session:?}");
+    assert_eq!(session.harness_kind, HarnessKind::Internal);
+    assert_eq!(session.execution_location, ExecutionLocation::Machine);
+    assert_eq!(session.permission_mode, PermissionMode::Allow);
+    let message_uri = format!("/external/code/sessions/{id}/messages");
+    let (status, message) = call_router_json(
+        &router,
+        "POST",
+        &message_uri,
+        &bearer,
+        Some(serde_json::json!({
+            "text": "Look at these three issues and tell me which is worth doing first.",
+            "event_id": "Ev-triage",
+            "channel_ts": "1.0"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{message}");
+    assert_eq!(message["outcome"], "new_turn");
+    wait_for_turn_completion(&runtime, &owner, id).await;
+    let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, id, 0, 200)
+        .await
+        .unwrap();
+    assert!(
+        events.events.iter().any(|event| matches!(
+            &event.event,
+            tidebreak_core::Event::AssistantDelta { text }
+                if text.contains("highest priority")
+        )),
+        "the triage turn did not answer on the internal engine: {events:?}"
+    );
+    let (status, message) = call_router_json(
+        &router,
+        "POST",
+        &message_uri,
+        &bearer,
+        Some(serde_json::json!({
+            "text": "Do the first one in acme/tools",
+            "event_id": "Ev-do-first",
+            "channel_ts": "2.0"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{message}");
+    assert_eq!(message["outcome"], "new_turn");
+    wait_for_turn_completion(&runtime, &owner, id).await;
+    let parent = runtime.get_session(&owner, id).await.unwrap();
+    assert!(
+        parent.workspace_id.is_none(),
+        "the conversation itself stays workspace-less: {parent:?}"
+    );
+    let children = tidebreak_core::db::code::child_sessions(&runtime.db, &owner, id)
+        .await
+        .unwrap();
+    let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, id, 0, 200)
+        .await
+        .unwrap();
+    assert_eq!(
+        children.len(),
+        1,
+        "follow-up did not create one repository workspace child; events={events:?}"
+    );
+    let child = &children[0];
+    assert_eq!(child.harness_kind, HarnessKind::ClaudeCode);
+    assert_eq!(child.execution_location, ExecutionLocation::Machine);
+    assert_eq!(child.permission_mode, PermissionMode::Allow);
+    let workspace_id = child
+        .workspace_id
+        .expect("the child must occupy a repository workspace");
+    let workspace = runtime.get_workspace(&owner, workspace_id).await.unwrap();
+    assert!(!workspace.is_remote(), "{workspace:?}");
+    let repo = runtime.get_repo(&owner, workspace.repo_id).await.unwrap();
+    assert_eq!(repo.origin_owner.as_deref(), Some("acme"));
+    assert_eq!(repo.origin_name.as_deref(), Some("tools"));
+    assert!(
+        tidebreak_core::db::code::session_bound_to_grant(&runtime.db, &owner, id, grant.id)
+            .await
+            .unwrap()
+    );
+    assert!(tidebreak_core::db::code::session_bound_to_grant(
+        &runtime.db,
+        &owner,
+        child.id,
+        grant.id
+    )
+    .await
+    .unwrap());
+    let parent_bindings =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &owner, id)
+            .await
+            .unwrap();
+    assert_eq!(parent_bindings.len(), 1, "{parent_bindings:?}");
+    assert_eq!(parent_bindings[0].external_key, "W:C:unanchored");
+    let child_bindings =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &owner, child.id)
+            .await
+            .unwrap();
+    assert_eq!(child_bindings.len(), 1, "{child_bindings:?}");
+    assert_eq!(child_bindings[0].grant_id, grant.id);
+    assert_eq!(child_bindings[0].external_key, format!("child/{id}/first"));
+    let context = tidebreak_core::db::code::session_context(&runtime.db, &owner, child.id)
+        .await
+        .unwrap()
+        .expect("the child records its parent conversation");
+    assert_eq!(context.parent_session_id, Some(id));
+    assert_eq!(context.request_key.as_deref(), Some("first"));
+    wait_for_turn_completion(&runtime, &owner, child.id).await;
+    let child_events = tidebreak_core::db::code::list_events(&runtime.db, &owner, child.id, 0, 200)
+        .await
+        .unwrap();
+    assert!(
+        child_events.events.iter().any(|event| match &event.event {
+            tidebreak_core::Event::AssistantDelta { text }
+            | tidebreak_core::Event::AssistantMessage { text, .. } => {
+                text.contains("hello from the scripted engine")
+            }
+            _ => false,
+        }),
+        "the child turn did not complete on the machine harness: {child_events:?}"
+    );
+    assert!(
+        runtime.remote_sessions().is_none(),
+        "child creation must not install a sandbox runtime"
+    );
+    assert!(
+        !workspace_harness.launched_approvals().is_empty(),
+        "the workspace child must launch on the machine harness"
     );
 }
 
