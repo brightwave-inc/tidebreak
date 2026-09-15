@@ -112,7 +112,7 @@ function deliveryCopy(target: CodeTriggerTarget | null): string {
   }
   return target.delivery === "steer"
     ? `Interrupts ${target.sessionTitle} mid-turn (${target.harnessLabel}).`
-    : `Waits for ${target.sessionTitle} to go quiet, then sends a turn (${target.harnessLabel} cannot be interrupted).`;
+    : `Sends a turn to ${target.sessionTitle}; mid-turn it queues visibly and runs at the next boundary (${target.harnessLabel} cannot be interrupted).`;
 }
 
 export function CodeTriggerRules({

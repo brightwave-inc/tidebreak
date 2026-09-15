@@ -2070,6 +2070,7 @@ pub mod code_trigger_fire {
         pub delivery_condition: Option<String>,
         pub delivery_action: Option<String>,
         pub delivery_message: Option<String>,
+        pub delivery_context: Option<Json>,
         pub state: String,
         pub attempt_count: i64,
         pub lease_token: Option<Uuid>,

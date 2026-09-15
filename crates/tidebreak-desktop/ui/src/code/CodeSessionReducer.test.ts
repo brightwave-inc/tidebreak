@@ -580,6 +580,31 @@ const SNAPSHOT_TURN = {
 };
 
 describe("hydrate then replay", () => {
+  it("carries a trigger's structured event onto the user item", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        user_input: "Tidebreak trigger: checks failed on #3411.",
+        actor: {
+          principal: null,
+          display: "Trigger: checks_failed",
+          channel_kind: null,
+          external_identity: null,
+          trigger: {
+            source: "trigger" as const,
+            condition: "checks_failed" as const,
+            pr_number: 3411,
+          },
+        },
+      },
+    ]);
+    expect(hydrated.items[0]).toMatchObject({
+      kind: "user",
+      actorLabel: "Trigger: checks_failed",
+      trigger: { condition: "checks_failed", pr_number: 3411 },
+    });
+  });
+
   it("does not let a stale running snapshot reopen a completed turn", () => {
     const now = vi
       .fn<() => string>()

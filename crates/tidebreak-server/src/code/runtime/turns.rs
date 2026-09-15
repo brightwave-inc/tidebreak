@@ -356,12 +356,14 @@ impl CodeRuntime {
     }
 
     /// Submit a turn created by one durable trigger delivery.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_trigger_turn(
         &self,
         owner: &OwnerId,
         id: SessionId,
         message: String,
         trigger_name: &str,
+        context: Option<tidebreak_core::TriggerTurnContext>,
         delivery_id: tidebreak_core::CodeTriggerDeliveryId,
         lease_token: uuid::Uuid,
     ) -> Result<SubmitTurnOutcome, ServerError> {
@@ -374,7 +376,7 @@ impl CodeRuntime {
             Vec::new(),
             // A trigger fires under the owner's identity but is not the owner
             // typing, so the transcript names the trigger (decision 0086).
-            Some(TurnActor::trigger(trigger_name)),
+            Some(trigger_actor(trigger_name, context)),
             Some(TriggerDeliveryClaim {
                 delivery_id,
                 lease_token,
@@ -382,6 +384,54 @@ impl CodeRuntime {
             false,
         )
         .await
+    }
+
+    /// Park one durable trigger delivery as a queued turn (decision 69).
+    ///
+    /// The session or its checkout is busy and the harness cannot steer, so
+    /// the queue row is how the event reaches the agent: durably, visibly in
+    /// the queue tray, at the next turn boundary. The row insert and the
+    /// delivery receipt land in one transaction, so a lease that expires
+    /// afterwards cannot repeat the event.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn queue_trigger_turn(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        message: String,
+        trigger_name: &str,
+        context: Option<tidebreak_core::TriggerTurnContext>,
+        delivery_id: tidebreak_core::CodeTriggerDeliveryId,
+        lease_token: uuid::Uuid,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        let session = self.get_session(owner, id).await?;
+        let now = chrono::Utc::now();
+        let queued = QueuedTurn {
+            id: TurnId::new(),
+            session_id: session.id,
+            message,
+            actor: Some(trigger_actor(trigger_name, context)),
+            attachments: Vec::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let Some(row) = tidebreak_core::db::code::accept_trigger_queue_delivery(
+            &self.db,
+            owner,
+            delivery_id,
+            lease_token,
+            &queued,
+            now,
+        )
+        .await?
+        else {
+            return Ok(SubmitTurnOutcome::AlreadyDelivered);
+        };
+        // The worker drains the queue at its next boundary; a session whose
+        // worker went away drains on relaunch, because the row is durable.
+        self.wake_queue_for_location(&session);
+        Ok(SubmitTurnOutcome::Queued(Box::new(row)))
     }
 
     /// Park a message as a durable queue row (decision 69).
@@ -1071,5 +1121,15 @@ impl CodeRuntime {
             ));
         }
         Ok(())
+    }
+}
+
+/// The actor a trigger-shaped submission writes: named so the transcript
+/// never reads as the owner typing, and carrying the structured event when
+/// the fire captured one (so the renderer can draw it).
+fn trigger_actor(name: &str, context: Option<tidebreak_core::TriggerTurnContext>) -> TurnActor {
+    match context {
+        Some(context) => TurnActor::trigger_event(name, context),
+        None => TurnActor::trigger(name),
     }
 }

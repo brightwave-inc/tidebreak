@@ -61,6 +61,96 @@ where
         .collect()
 }
 
+/// The session's queued rows on an open transaction, FIFO. The caller holds
+/// the session write lock.
+pub(super) async fn list_queued_turns_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Vec<QueuedTurn>>
+where
+    C: ConnectionTrait,
+{
+    list_on(conn, owner, session_id).await
+}
+
+/// Park one message at the queue tail on an open transaction. The caller
+/// holds the session write lock and has already enforced the depth cap.
+pub(super) async fn enqueue_queued_turn_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    queued: &QueuedTurn,
+    position: i32,
+) -> Result<QueuedTurn>
+where
+    C: ConnectionTrait,
+{
+    if queued.id.0.is_nil() || queued.message.trim().is_empty() || queued.message.contains('\0') {
+        return Err(AgentError::Store("invalid code queued turn".into()));
+    }
+    let now = database_now(conn).await?;
+    entities::code_queued_turn::ActiveModel {
+        id: Set(queued.id.0),
+        owner: Set(owner.as_str().to_owned()),
+        session_id: Set(queued.session_id.0),
+        message: Set(queued.message.clone()),
+        attachments_json: Set(serde_json::to_string(&queued.attachments).map_err(store_err)?),
+        file_attachments_json: Set("[]".to_owned()),
+        invoked_skills_json: Set("[]".to_owned()),
+        voice_input_used: Set(false),
+        fingerprint: Set(None),
+        actor: Set(queued
+            .actor
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
+        position: Set(position),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    let inserted = entities::code_queued_turn::Entity::find_by_id(queued.id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store("code queued turn disappeared".into()))?;
+    queued_turn_from_model(inserted)
+}
+
+/// Rewrite one queued row's message and actor in place on an open
+/// transaction, keeping its position so a superseded event does not lose its
+/// place in line. `None` when the row is gone.
+pub(super) async fn supersede_queued_turn_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+    queued_id: TurnId,
+    message: &str,
+    actor: Option<&crate::code::TurnActor>,
+) -> Result<Option<QueuedTurn>>
+where
+    C: ConnectionTrait,
+{
+    let Some(existing) = entities::code_queued_turn::Entity::find_by_id(queued_id.0)
+        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let now = database_now(conn).await?;
+    let mut model: entities::code_queued_turn::ActiveModel = existing.into();
+    model.message = Set(message.to_owned());
+    model.actor = Set(actor.map(serde_json::to_value).transpose()?);
+    model.updated_at = Set(now);
+    let updated = model.update(conn).await.map_err(store_err)?;
+    queued_turn_from_model(updated).map(Some)
+}
+
 /// The session's queued messages, FIFO.
 pub async fn list_queued_turns(
     store: &DbStore,
@@ -145,9 +235,6 @@ pub async fn enqueue_queued_turn(
     owner: &OwnerId,
     queued: &QueuedTurn,
 ) -> Result<QueuedTurn> {
-    if queued.id.0.is_nil() || queued.message.trim().is_empty() || queued.message.contains('\0') {
-        return Err(AgentError::Store("invalid code queued turn".into()));
-    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, queued.session_id).await? {
         return Err(AgentError::Store(format!(
@@ -164,35 +251,7 @@ pub async fn enqueue_queued_turn(
         )));
     }
     let position = rows.last().map_or(0, |last| last.position + 1);
-    let now = database_now(&transaction).await?;
-    entities::code_queued_turn::ActiveModel {
-        id: Set(queued.id.0),
-        owner: Set(owner.as_str().to_owned()),
-        session_id: Set(queued.session_id.0),
-        message: Set(queued.message.clone()),
-        attachments_json: Set(serde_json::to_string(&queued.attachments).map_err(store_err)?),
-        file_attachments_json: Set("[]".to_owned()),
-        invoked_skills_json: Set("[]".to_owned()),
-        voice_input_used: Set(false),
-        fingerprint: Set(None),
-        actor: Set(queued
-            .actor
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?),
-        position: Set(position),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
-    .await
-    .map_err(store_err)?;
-    let inserted = entities::code_queued_turn::Entity::find_by_id(queued.id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store("code queued turn disappeared".into()))?;
-    let inserted = queued_turn_from_model(inserted)?;
+    let inserted = enqueue_queued_turn_on(&transaction, owner, queued, position).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(inserted)
 }

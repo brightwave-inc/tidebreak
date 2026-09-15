@@ -205,6 +205,7 @@ fn turn() -> TurnSnapshot {
             display: Some("Mara".into()),
             channel_kind: None,
             external_identity: None,
+            trigger: None,
         }),
         id: turn_id(),
         session_id: session_id(),
@@ -234,6 +235,26 @@ fn queued_turn() -> QueuedTurn {
         id: TurnId(id(0x06)),
         session_id: session_id(),
         message: "Then add the fixture test.".to_owned(),
+        // A trigger-parked row, so the fixture exercises the structured
+        // event the tray renders (decision 60 via decision 69).
+        actor: Some(tidebreak_core::TurnActor {
+            display: Some("Trigger: checks_failed".to_owned()),
+            trigger: Some(tidebreak_core::TriggerTurnContext {
+                source: tidebreak_core::TriggerTurnSource::Trigger,
+                condition: tidebreak_core::CodeTriggerCondition::ChecksFailed,
+                pr_number: 3411,
+                pr_title: Some("Bound the code parser".to_owned()),
+                pr_url: Some("https://github.com/acme/tidebreak/pull/3411".to_owned()),
+                head_sha: Some("0f0e0d0c0b0a0908".to_owned()),
+                failing_checks: vec![tidebreak_core::PullRequestCheck {
+                    name: "desktop-ui".to_owned(),
+                    bucket: tidebreak_core::PullRequestCheckBucket::Fail,
+                    detail: None,
+                    url: Some("https://github.com/acme/tidebreak/actions/runs/1".to_owned()),
+                }],
+            }),
+            ..Default::default()
+        }),
         position: 0,
         created_at: at(1_756_700_170),
         updated_at: at(1_756_700_170),
@@ -873,6 +894,7 @@ fn event_frames() -> Vec<Fixture> {
                         display: Some("Ines".into()),
                         channel_kind: Some("slack".into()),
                         external_identity: Some("U123".into()),
+                        trigger: None,
                     }),
                 },
             ),

@@ -64,9 +64,7 @@ pub async fn decide_plan(
                     },
                     Some(tidebreak_core::TurnActor {
                         principal: Some(store.owner_id().to_string()),
-                        display: None,
-                        channel_kind: None,
-                        external_identity: None,
+                        ..tidebreak_core::TurnActor::default()
                     }),
                 )
                 .await

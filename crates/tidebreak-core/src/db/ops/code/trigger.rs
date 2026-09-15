@@ -13,8 +13,8 @@ use sea_orm::{
 use crate::code::{
     CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerDeliveryId,
     CodeTriggerDeliverySink, CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload,
-    CodeTriggerFireState, CodeTriggerId, RepoId, SessionId, SessionLifecycle, Turn, TurnId,
-    WorkspaceId,
+    CodeTriggerFireState, CodeTriggerId, QueuedTurn, RepoId, SessionId, SessionLifecycle, Turn,
+    TurnId, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::Attention;
@@ -146,6 +146,117 @@ pub async fn accept_trigger_turn_delivery(
     }
     transaction.commit().await.map_err(store_err)?;
     Ok(accepted)
+}
+
+/// Atomically accept a trigger queue delivery and park its durable queue row.
+///
+/// The queue row is the acceptance boundary (decision 69): it survives a
+/// restart and promotes at the session's next turn boundary, so a busy
+/// session on a harness that cannot steer still receives the event — as a
+/// visible, editable row rather than an invisible outbox retry.
+///
+/// When an unpromoted queued row from the same source, condition, and pull
+/// request is still waiting, the new fire supersedes it in place: the stale
+/// head's event would only be noise by the time the row promotes. The receipt
+/// then names the superseded row's id.
+///
+/// `None` means another sink already accepted this delivery.
+pub async fn accept_trigger_queue_delivery(
+    store: &DbStore,
+    owner: &OwnerId,
+    delivery_id: CodeTriggerDeliveryId,
+    lease_token: uuid::Uuid,
+    queued: &QueuedTurn,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<QueuedTurn>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    validate_claimed_delivery_on(&transaction, owner, delivery_id, lease_token, accepted_at)
+        .await?;
+    if !super::acquire_code_session_write_lock(&transaction, queued.session_id).await? {
+        return Err(AgentError::Store(format!(
+            "code trigger queue session {} not found",
+            queued.session_id
+        )));
+    }
+    let session = entities::session::Entity::find_by_id(queued.session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "code trigger queue session {} not found",
+                queued.session_id
+            ))
+        })?;
+    let lifecycle = SessionLifecycle::from_str(&session.lifecycle).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has unknown lifecycle {}",
+            session.id, session.lifecycle
+        ))
+    })?;
+    if matches!(
+        lifecycle,
+        SessionLifecycle::Fenced | SessionLifecycle::Ended
+    ) {
+        return Err(AgentError::Store(format!(
+            "code trigger queue session {} cannot queue while {}",
+            queued.session_id,
+            lifecycle.as_str()
+        )));
+    }
+    let rows = super::queued::list_queued_turns_on(&transaction, owner, queued.session_id).await?;
+    let supersedes = queued.actor.as_ref().and_then(|actor| {
+        let context = actor.trigger.as_ref()?;
+        rows.iter().find(|row| {
+            row.actor
+                .as_ref()
+                .and_then(|other| other.trigger.as_ref())
+                .is_some_and(|other| {
+                    other.source == context.source
+                        && other.condition == context.condition
+                        && other.pr_number == context.pr_number
+                })
+        })
+    });
+    let row_id = supersedes.map_or(queued.id, |row| row.id);
+    let accepted = insert_delivery_receipt_on(
+        &transaction,
+        owner,
+        delivery_id,
+        CodeTriggerDeliverySink::Queue,
+        queued.session_id,
+        Some(row_id),
+        accepted_at,
+    )
+    .await?;
+    if !accepted {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let written = if let Some(existing) = supersedes {
+        super::queued::supersede_queued_turn_on(
+            &transaction,
+            owner,
+            queued.session_id,
+            existing.id,
+            &queued.message,
+            queued.actor.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| AgentError::Store("code queued turn disappeared".into()))?
+    } else {
+        if rows.len() >= QueuedTurn::MAX_PER_SESSION {
+            return Err(AgentError::Store(format!(
+                "a session may queue at most {} messages",
+                QueuedTurn::MAX_PER_SESSION
+            )));
+        }
+        let position = rows.last().map_or(0, |last| last.position + 1);
+        super::queued::enqueue_queued_turn_on(&transaction, owner, queued, position).await?
+    };
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(written))
 }
 
 /// Atomically accept a trigger attention delivery and write its session state.
@@ -561,6 +672,11 @@ pub async fn insert_or_load_trigger_fire(
         delivery_condition: Set(Some(payload.condition.as_str().to_owned())),
         delivery_action: Set(Some(payload.action.as_str().to_owned())),
         delivery_message: Set(Some(payload.message.clone())),
+        delivery_context: Set(payload
+            .context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
         state: Set(CodeTriggerFireState::Pending.as_str().to_owned()),
         attempt_count: Set(0),
         lease_token: Set(None),
@@ -881,6 +997,7 @@ pub async fn insert_settled_trigger_fire(
             delivery_condition: Set(None),
             delivery_action: Set(None),
             delivery_message: Set(None),
+            delivery_context: Set(None),
             state: Set(CodeTriggerFireState::Delivered.as_str().to_owned()),
             attempt_count: Set(0),
             lease_token: Set(None),
@@ -964,6 +1081,16 @@ fn fire_from_row(row: entities::code_trigger_fire::Model) -> Result<CodeTriggerF
                 action,
                 condition,
                 message,
+                context: row
+                    .delivery_context
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|err| {
+                        AgentError::Store(format!(
+                            "code_trigger_fire {} delivery context: {err}",
+                            row.delivery_id
+                        ))
+                    })?,
             })
         }
         _ => {

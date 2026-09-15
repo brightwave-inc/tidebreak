@@ -4413,7 +4413,13 @@ updated_at: string, };
  * promoted turn is inserted under. `position` is 0-based and dense within
  * the session.
  */
-export type QueuedTurn = { id: TurnId, session_id: SessionId, message: string, position: number, created_at: string, updated_at: string, };
+export type QueuedTurn = { id: TurnId, session_id: SessionId, message: string,
+/**
+ * Who parked this row, when it was not the session's owner typing — a
+ * trigger fire or a watch fix turn. The tray uses it to draw the row as
+ * the event it is.
+ */
+actor?: TurnActor, position: number, created_at: string, updated_at: string, };
 
 /**
  * A named command the user can run in a workspace.
@@ -5554,6 +5560,51 @@ width: number, height: number, };
 export type TranscriptRole = "user" | "assistant" | "system" | "compaction";
 
 /**
+ * The pull-request event a trigger or watch turn was fired on.
+ *
+ * Captured when the fire is minted so the renderer can draw the event as it
+ * was — condition, pull request, and failing checks — without re-deriving it
+ * from state that has since moved. The delivered message stays the harness's
+ * input; this context is the same facts for the person reading the
+ * transcript.
+ */
+export type TriggerTurnContext = {
+/**
+ * Whether a trigger rule or a watch submitted the turn.
+ */
+source: TriggerTurnSource,
+/**
+ * The condition that fired.
+ */
+condition: CodeTriggerCondition,
+/**
+ * Pull request number on the host.
+ */
+pr_number: number,
+/**
+ * Pull request title, when known at fire time.
+ */
+pr_title?: string,
+/**
+ * Host URL for the pull request, when known.
+ */
+pr_url?: string,
+/**
+ * Head SHA the fire was fingerprinted against, when known.
+ */
+head_sha?: string,
+/**
+ * The checks that were failing at fire time, empty for conditions that
+ * are not about checks.
+ */
+failing_checks?: Array<PullRequestCheck>, };
+
+/**
+ * Which automation submitted a trigger-shaped turn.
+ */
+export type TriggerTurnSource = "trigger" | "watch";
+
+/**
  * Who submitted a turn, or settled a decision (decision 0086).
  *
  * Every field is optional, because the paths that write one know different
@@ -5583,7 +5634,13 @@ channel_kind: string | null,
 /**
  * The channel's own id for this person.
  */
-external_identity: string | null, };
+external_identity: string | null,
+/**
+ * The pull-request event that submitted this turn, when a trigger or a
+ * watch did rather than a person. The renderer uses it to draw the turn
+ * as a structured event instead of a person's message.
+ */
+trigger?: TriggerTurnContext, };
 
 /**
  * Why a turn failed, closed and coarse enough to be stable.

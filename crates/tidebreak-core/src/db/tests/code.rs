@@ -44,6 +44,7 @@ fn trigger_payload(
         action,
         condition,
         message: format!("trigger test payload for {}", condition.as_str()),
+        context: None,
     }
 }
 
@@ -4080,6 +4081,120 @@ async fn trigger_turn_acceptance_is_atomic_and_global() {
     .await
     .unwrap());
     assert_eq!(accepted_turn.session_id, session_id);
+}
+
+/// Queue acceptance parks the durable row and its receipt in one transaction
+/// (decision 69 as a trigger sink), refuses a retry of an accepted delivery,
+/// and a later fire for the same source, condition, and pull request
+/// supersedes the waiting row in place instead of stacking a second event.
+#[tokio::test]
+async fn trigger_queue_acceptance_parks_and_supersedes() {
+    use crate::code::{
+        CodeTriggerAction, CodeTriggerCondition, QueuedTurn, TriggerTurnContext, TriggerTurnSource,
+        TurnActor,
+    };
+    use crate::db::code::{
+        accept_trigger_queue_delivery, list_queued_turns, trigger_delivery_accepted,
+    };
+
+    let (_dir, store, session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let (delivery_id, lease_token) = claimed_trigger_delivery(
+        &store,
+        &owner,
+        session_id,
+        CodeTriggerCondition::ChecksFailed,
+        CodeTriggerAction::Deliver,
+    )
+    .await;
+    let context = TriggerTurnContext {
+        source: TriggerTurnSource::Trigger,
+        condition: CodeTriggerCondition::ChecksFailed,
+        pr_number: 42,
+        pr_title: None,
+        pr_url: None,
+        head_sha: Some("aaaa1111".to_owned()),
+        failing_checks: Vec::new(),
+    };
+    let queued = QueuedTurn {
+        id: TurnId::new(),
+        session_id,
+        message: "checks failed on #42 at aaaa1111".to_owned(),
+        actor: Some(TurnActor::trigger_event(
+            "Trigger: checks_failed",
+            context.clone(),
+        )),
+        attachments: Vec::new(),
+        position: 0,
+        created_at: now(),
+        updated_at: now(),
+    };
+    let row =
+        accept_trigger_queue_delivery(&store, &owner, delivery_id, lease_token, &queued, now())
+            .await
+            .unwrap()
+            .expect("first acceptance parks the row");
+    assert_eq!(row.id, queued.id);
+    assert!(trigger_delivery_accepted(&store, &owner, delivery_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        list_queued_turns(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A retry of the accepted delivery must not park a second row.
+    assert!(accept_trigger_queue_delivery(
+        &store,
+        &owner,
+        delivery_id,
+        lease_token,
+        &queued,
+        now()
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    // A new head fires a new delivery; the waiting row is rewritten in place.
+    let (second_delivery, second_lease) = claimed_trigger_delivery(
+        &store,
+        &owner,
+        session_id,
+        CodeTriggerCondition::ChecksFailed,
+        CodeTriggerAction::Deliver,
+    )
+    .await;
+    let superseding = QueuedTurn {
+        id: TurnId::new(),
+        message: "checks failed on #42 at bbbb2222".to_owned(),
+        actor: Some(TurnActor::trigger_event(
+            "Trigger: checks_failed",
+            TriggerTurnContext {
+                head_sha: Some("bbbb2222".to_owned()),
+                ..context
+            },
+        )),
+        ..queued.clone()
+    };
+    let written = accept_trigger_queue_delivery(
+        &store,
+        &owner,
+        second_delivery,
+        second_lease,
+        &superseding,
+        now(),
+    )
+    .await
+    .unwrap()
+    .expect("the second fire supersedes the waiting row");
+    assert_eq!(written.id, queued.id, "the row keeps its place in line");
+    let rows = list_queued_turns(&store, &owner, session_id).await.unwrap();
+    assert_eq!(rows.len(), 1, "supersede must not stack a second event");
+    assert_eq!(rows[0].message, superseding.message);
 }
 
 /// Attention acceptance locks the current session state and commits the

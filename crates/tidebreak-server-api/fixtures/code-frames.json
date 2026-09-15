@@ -222,6 +222,27 @@
     "kind": "queued_turn",
     "name": "queued turn",
     "value": {
+      "actor": {
+        "channel_kind": null,
+        "display": "Trigger: checks_failed",
+        "external_identity": null,
+        "principal": null,
+        "trigger": {
+          "condition": "checks_failed",
+          "failing_checks": [
+            {
+              "bucket": "fail",
+              "name": "desktop-ui",
+              "url": "https://github.com/acme/tidebreak/actions/runs/1"
+            }
+          ],
+          "head_sha": "0f0e0d0c0b0a0908",
+          "pr_number": 3411,
+          "pr_title": "Bound the code parser",
+          "pr_url": "https://github.com/acme/tidebreak/pull/3411",
+          "source": "trigger"
+        }
+      },
       "created_at": "2025-09-01T04:16:10Z",
       "id": "00000000-0000-0000-0000-000000000006",
       "message": "Then add the fixture test.",
@@ -237,6 +258,27 @@
       "paused": true,
       "queued": [
         {
+          "actor": {
+            "channel_kind": null,
+            "display": "Trigger: checks_failed",
+            "external_identity": null,
+            "principal": null,
+            "trigger": {
+              "condition": "checks_failed",
+              "failing_checks": [
+                {
+                  "bucket": "fail",
+                  "name": "desktop-ui",
+                  "url": "https://github.com/acme/tidebreak/actions/runs/1"
+                }
+              ],
+              "head_sha": "0f0e0d0c0b0a0908",
+              "pr_number": 3411,
+              "pr_title": "Bound the code parser",
+              "pr_url": "https://github.com/acme/tidebreak/pull/3411",
+              "source": "trigger"
+            }
+          },
           "created_at": "2025-09-01T04:16:10Z",
           "id": "00000000-0000-0000-0000-000000000006",
           "message": "Then add the fixture test.",

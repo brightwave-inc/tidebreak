@@ -26,9 +26,10 @@ use tidebreak_core::db::code::{
     release_watch_submission, reserve_watch_submission, save_watch, WatchSubmissionClaim,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, Session,
-    SessionKind, SessionLifecycle, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeTriggerCondition, CodeWatch, CodeWatchId,
+    CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, PullRequestDigest,
+    Session, SessionKind, SessionLifecycle, TriggerTurnContext, TriggerTurnSource, TurnActor,
+    WorkspaceId,
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
@@ -84,6 +85,17 @@ impl WatchReason {
             Self::Conflicts => "merge conflicts",
             Self::Behind => "the branch is behind its base",
             Self::ChangesRequested => "requested changes",
+        }
+    }
+
+    /// The trigger vocabulary for this reason, so a watch fix turn renders
+    /// with the same condition chip a trigger fire does.
+    pub(crate) const fn condition(self) -> CodeTriggerCondition {
+        match self {
+            Self::FailingChecks => CodeTriggerCondition::ChecksFailed,
+            Self::Conflicts => CodeTriggerCondition::Conflicts,
+            Self::Behind => CodeTriggerCondition::Behind,
+            Self::ChangesRequested => CodeTriggerCondition::ChangesRequested,
         }
     }
 }
@@ -475,7 +487,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         // hold (decision 66).
         SessionLifecycle::Running | SessionLifecycle::Created | SessionLifecycle::Idle => {}
     }
-    if reconcile_watch_submission(runtime, watch, &session).await? {
+    if reconcile_watch_submission(runtime, watch).await? {
         return Ok(());
     }
     let workspace = match runtime.get_workspace(&owner, watch.workspace_id).await {
@@ -609,6 +621,14 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             Ok(())
         }
         WatchAssessment::Actionable(reason) => {
+            // A fix for this pull request may still be waiting in a session
+            // queue — parked while the checkout was busy, or held by a paused
+            // queue. That is not a failed attempt and not a reason to stack a
+            // second instruction: hold until the row promotes and its turn
+            // runs, then judge the head the turn actually produced.
+            if watch_fix_queued(runtime.as_ref(), &owner, &sessions).await? {
+                return Ok(());
+            }
             let same_head = watch.last_fix_head.is_some()
                 && watch.last_fix_head.as_deref() == pr.head_sha.as_deref();
             if same_head {
@@ -651,7 +671,19 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                 .await;
             }
             let instruction = fix_turn_instruction(reason, &pr);
-            let session_id = watch.session_id;
+            // The fix turn lands in the conversation the user is actually
+            // reading: the workspace's most recently active interactive
+            // session when one exists, the watch's own session otherwise.
+            // The event reaches the agent in chat rather than running in a
+            // session nobody has open, and the trigger context lets the
+            // renderer draw it as the event it is.
+            let session_id = super::trigger::most_recently_active(runtime, &owner, &sessions)
+                .await?
+                .map_or(watch.session_id, |session| session.id);
+            let actor = TurnActor::trigger_event(
+                "Watch",
+                TriggerTurnContext::from_digest(TriggerTurnSource::Watch, reason.condition(), &pr),
+            );
             let watch_id = watch.id;
             let workspace_id = watch.workspace_id;
             let head = pr.head_sha.clone();
@@ -672,7 +704,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                         Vec::new(),
                         // The watch sweep runs under the owner's identity and
                         // names itself, the way a trigger does.
-                        Some(tidebreak_core::TurnActor::trigger("Watch")),
+                        Some(actor),
                     )
                     .await;
                 let accepted = match &result {
@@ -680,7 +712,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                     Err(_) => match watch_submission_was_accepted(
                         task_runtime.as_ref(),
                         &task_owner,
-                        session_id,
+                        workspace_id,
                         reserved_at,
                     )
                     .await
@@ -772,13 +804,15 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
 async fn reconcile_watch_submission(
     runtime: &CodeRuntime,
     watch: &mut CodeWatch,
-    session: &tidebreak_core::Session,
 ) -> Result<bool, ServerError> {
     let Some(reservation) = watch_submission_reservation(watch) else {
         return Ok(false);
     };
-    let accepted = session.lifecycle == SessionLifecycle::Running
-        || watch_submission_was_accepted(runtime, &watch.owner, watch.session_id, watch.updated_at)
+    // The actor-tagged scan is the admission evidence: a running fix turn is
+    // already a persisted turn row, and an interactive session running the
+    // user's own turn must not read as acceptance.
+    let accepted =
+        watch_submission_was_accepted(runtime, &watch.owner, watch.workspace_id, watch.updated_at)
             .await?;
     let reservation_detail = watch.detail.clone().unwrap_or_default();
     let claim = WatchSubmissionClaim {
@@ -826,23 +860,72 @@ async fn reconcile_watch_submission(
     Ok(false)
 }
 
+/// Whether a watch fix submission landed anywhere in the workspace since the
+/// reservation: as a running or persisted turn, or as a durable queue row.
+///
+/// The scan covers every session because the fix turn targets the most
+/// recently active interactive session, which a restart cannot re-derive.
+/// Only rows the watch itself submitted count — a person typing right after
+/// the reservation must not read as an accepted fix turn.
 async fn watch_submission_was_accepted(
     runtime: &CodeRuntime,
     owner: &OwnerId,
-    session_id: tidebreak_core::SessionId,
+    workspace_id: WorkspaceId,
     reserved_at: chrono::DateTime<Utc>,
 ) -> Result<bool, ServerError> {
-    if list_queued_turns(&runtime.db, owner, session_id)
-        .await?
-        .iter()
-        .any(|turn| turn.created_at >= reserved_at)
-    {
-        return Ok(true);
+    let sessions = list_sessions_for_workspace(&runtime.db, owner, workspace_id).await?;
+    for session in sessions {
+        if list_queued_turns(&runtime.db, owner, session.id)
+            .await?
+            .iter()
+            .any(|turn| turn.created_at >= reserved_at && is_watch_actor(turn.actor.as_ref()))
+        {
+            return Ok(true);
+        }
+        if list_turns(&runtime.db, owner, session.id)
+            .await?
+            .iter()
+            .any(|turn| turn.started_at >= reserved_at && is_watch_actor(turn.actor.as_ref()))
+        {
+            return Ok(true);
+        }
     }
-    Ok(list_turns(&runtime.db, owner, session_id)
-        .await?
-        .iter()
-        .any(|turn| turn.started_at >= reserved_at))
+    Ok(false)
+}
+
+/// Whether a watch fix instruction is still parked in any of the workspace's
+/// session queues, waiting for its turn boundary.
+///
+/// A queued fix has not run: counting it as an attempt would park the watch
+/// as "did not resolve" while the instruction sits in a busy or paused
+/// queue, and firing again would stack a second instruction behind it.
+async fn watch_fix_queued(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    sessions: &[Session],
+) -> Result<bool, ServerError> {
+    for session in sessions {
+        if list_queued_turns(&runtime.db, owner, session.id)
+            .await?
+            .iter()
+            .any(|turn| is_watch_actor(turn.actor.as_ref()))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the watch submitted this row. The display fallback covers rows
+/// written before the actor carried a structured trigger context.
+fn is_watch_actor(actor: Option<&TurnActor>) -> bool {
+    actor.is_some_and(|actor| {
+        actor
+            .trigger
+            .as_ref()
+            .is_some_and(|context| context.source == TriggerTurnSource::Watch)
+            || actor.display.as_deref() == Some("Watch")
+    })
 }
 
 /// The workspace's pull request as its fact row holds it, when that row's

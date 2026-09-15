@@ -107,6 +107,8 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260912_000001_managed_decisions",
             "m20260914_000001_session_inference",
             "m20260914_000002_native_turn_identity",
+            "m20260915_000001_trigger_fire_context",
+            "m20260915_000002_trigger_queue_sink",
         ]
     );
     assert!(db

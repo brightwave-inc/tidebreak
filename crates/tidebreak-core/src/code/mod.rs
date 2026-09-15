@@ -1511,6 +1511,12 @@ pub struct TurnActor {
     pub channel_kind: Option<String>,
     /// The channel's own id for this person.
     pub external_identity: Option<String>,
+    /// The pull-request event that submitted this turn, when a trigger or a
+    /// watch did rather than a person. The renderer uses it to draw the turn
+    /// as a structured event instead of a person's message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trigger: Option<TriggerTurnContext>,
 }
 
 impl TurnActor {
@@ -1527,6 +1533,15 @@ impl TurnActor {
     pub fn trigger(name: &str) -> Self {
         Self {
             display: Some(name.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// A trigger or watch fire carrying the structured event it fired on.
+    pub fn trigger_event(name: &str, context: TriggerTurnContext) -> Self {
+        Self {
+            display: Some(name.to_owned()),
+            trigger: Some(context),
             ..Self::default()
         }
     }
@@ -1550,6 +1565,76 @@ impl TurnActor {
             first.to_uppercase(),
             chars.as_str()
         )))
+    }
+}
+
+/// Which automation submitted a trigger-shaped turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerTurnSource {
+    /// A standing trigger rule fired (decision 60).
+    Trigger,
+    /// A watch task submitted a fix turn (decision 50).
+    Watch,
+}
+
+/// The pull-request event a trigger or watch turn was fired on.
+///
+/// Captured when the fire is minted so the renderer can draw the event as it
+/// was — condition, pull request, and failing checks — without re-deriving it
+/// from state that has since moved. The delivered message stays the harness's
+/// input; this context is the same facts for the person reading the
+/// transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TriggerTurnContext {
+    /// Whether a trigger rule or a watch submitted the turn.
+    pub source: TriggerTurnSource,
+    /// The condition that fired.
+    pub condition: CodeTriggerCondition,
+    /// Pull request number on the host.
+    pub pr_number: u64,
+    /// Pull request title, when known at fire time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr_title: Option<String>,
+    /// Host URL for the pull request, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr_url: Option<String>,
+    /// Head SHA the fire was fingerprinted against, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+    /// The checks that were failing at fire time, empty for conditions that
+    /// are not about checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_checks: Vec<PullRequestCheck>,
+}
+
+impl TriggerTurnContext {
+    /// Capture the digest fields the renderer needs to draw this event.
+    #[must_use]
+    pub fn from_digest(
+        source: TriggerTurnSource,
+        condition: CodeTriggerCondition,
+        pr: &PullRequestDigest,
+    ) -> Self {
+        Self {
+            source,
+            condition,
+            pr_number: pr.number,
+            pr_title: pr.title.clone(),
+            pr_url: pr.url.clone(),
+            head_sha: pr.head_sha.clone(),
+            failing_checks: pr
+                .checks
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter(|check| check.bucket == PullRequestCheckBucket::Fail)
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -2687,6 +2772,10 @@ pub struct CodeTriggerFireIdentity {
 #[serde(rename_all = "snake_case")]
 pub enum CodeTriggerDeliverySink {
     Turn,
+    /// A durable queued turn parked while the session was busy (decision 69).
+    /// The queue row is the acceptance boundary: it survives a restart and
+    /// promotes at the next turn boundary.
+    Queue,
     Steer,
     Attention,
 }
@@ -2696,6 +2785,7 @@ impl CodeTriggerDeliverySink {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Turn => "turn",
+            Self::Queue => "queue",
             Self::Steer => "steer",
             Self::Attention => "attention",
         }
@@ -2747,6 +2837,11 @@ pub struct CodeTriggerFirePayload {
     pub condition: CodeTriggerCondition,
     /// Fully rendered message delivered to a turn or steering sink.
     pub message: String,
+    /// Structured event carried onto the delivered turn's actor so the
+    /// renderer can draw it. Rows minted before this field carry none and
+    /// render from the message alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<TriggerTurnContext>,
 }
 
 /// One trigger outbox row against one exact pull request head.
@@ -2923,6 +3018,7 @@ mod tests {
             display: Some("Ada Lovelace".to_owned()),
             channel_kind: Some("slack".to_owned()),
             external_identity: Some("U123".to_owned()),
+            ..TurnActor::default()
         };
         assert_eq!(display.label().as_deref(), Some("Ada Lovelace"));
 
@@ -2944,6 +3040,7 @@ mod tests {
             display: Some(String::new()),
             channel_kind: Some(String::new()),
             external_identity: None,
+            ..TurnActor::default()
         };
         assert_eq!(empty_strings.label(), None);
     }

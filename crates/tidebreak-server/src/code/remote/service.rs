@@ -2654,6 +2654,7 @@ mod tests {
                 session.id,
                 "review changed".into(),
                 "Trigger: checks failed",
+                None,
                 tidebreak_core::CodeTriggerDeliveryId::new(),
                 uuid::Uuid::new_v4(),
             )
