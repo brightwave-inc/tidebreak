@@ -2965,6 +2965,7 @@ export function parseTurnActor(
       "display",
       "channel_kind",
       "external_identity",
+      "trigger",
     ]) ||
     !nullableLine(value.principal) ||
     !nullableLine(value.display) ||
@@ -2973,11 +2974,58 @@ export function parseTurnActor(
   ) {
     return null;
   }
+  const trigger =
+    value.trigger === undefined
+      ? undefined
+      : parseTriggerTurnContext(value.trigger);
+  if (value.trigger !== undefined && !trigger) return null;
   return {
     principal: value.principal ?? null,
     display: value.display ?? null,
     channel_kind: value.channel_kind ?? null,
     external_identity: value.external_identity ?? null,
+    ...(trigger ? { trigger } : {}),
+  };
+}
+
+/**
+ * The pull-request event a trigger or watch turn was fired on. The failing
+ * checks reuse the digest's own check validator, so the event's list is
+ * bounded exactly like the checks beside it.
+ */
+function parseTriggerTurnContext(
+  value: unknown,
+): import("../generated/wire").TriggerTurnContext | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<import("../generated/wire").TriggerTurnContext>(value, [
+      "source",
+      "condition",
+      "pr_number",
+      "pr_title",
+      "pr_url",
+      "head_sha",
+      "failing_checks",
+    ]) ||
+    (value.source !== "trigger" && value.source !== "watch") ||
+    !isMember(value.condition, TRIGGER_CONDITIONS) ||
+    !isFiniteNumber(value.pr_number) ||
+    !optionalLine(value.pr_title) ||
+    !optionalLine(value.pr_url) ||
+    !optionalLine(value.head_sha)
+  ) {
+    return null;
+  }
+  const failing = parsePullRequestChecks(value.failing_checks);
+  if (!failing) return null;
+  return {
+    source: value.source,
+    condition: value.condition,
+    pr_number: value.pr_number,
+    ...(value.pr_title !== undefined ? { pr_title: value.pr_title } : {}),
+    ...(value.pr_url !== undefined ? { pr_url: value.pr_url } : {}),
+    ...(value.head_sha !== undefined ? { head_sha: value.head_sha } : {}),
+    ...(failing.length > 0 ? { failing_checks: failing } : {}),
   };
 }
 
@@ -3104,6 +3152,7 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
       "id",
       "session_id",
       "message",
+      "actor",
       "position",
       "created_at",
       "updated_at",
@@ -3117,6 +3166,8 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
   ) {
     return null;
   }
+  const actor = parseTurnActor(value.actor);
+  if (value.actor !== undefined && !actor) return null;
   return {
     id: value.id,
     session_id: value.session_id,
@@ -3124,6 +3175,7 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
     position: value.position,
     created_at: value.created_at,
     updated_at: value.updated_at,
+    ...(actor ? { actor } : {}),
   };
 }
 
