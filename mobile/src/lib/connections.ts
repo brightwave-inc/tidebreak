@@ -63,15 +63,21 @@ export type GatewayConnection = ConnectionBase & {
    */
   isAdmin?: boolean;
   /**
-   * How many times this connection has been signed in to, counting from one.
+   * Names this *sign-in*, as distinct from the connection, and is replaced
+   * every time somebody signs in here.
    *
-   * The id is derived from the installation so that re-pairing one deployment
-   * lands on one record rather than stacking live refresh families — which
-   * means the id alone cannot tell two *accounts* apart. Signing in as
-   * somebody else reuses it. This counter is what changes then, and
-   * `consoleCacheScope` is how the read caches inherit that change.
+   * The connection id is derived from the installation, so that re-pairing one
+   * deployment lands on one record instead of stacking live refresh families —
+   * which means the id alone cannot tell two *accounts* apart. This can, and
+   * `consoleCacheScope` is how the read caches inherit that.
+   *
+   * A random nonce rather than a counter, because it has to stay unique across
+   * the record's own deletion: signing out forgets the connection entirely, so
+   * anything derived from what the record remembers starts over for the next
+   * pairing — and starts over addressing cache entries the signed-out account
+   * filled, which outlive the record by as long as they are held.
    */
-  pairingGeneration?: number;
+  pairingId?: string;
 };
 
 /**
@@ -129,16 +135,20 @@ export function gatewayConnectionId(
  * so a stale `installation` would light the whole administration group up for
  * an account the gateway had just answered `self` for.
  *
- * Folding the pairing generation in makes that structurally impossible rather
- * than something an eviction has to remember: a new sign-in cannot address the
- * previous one's entries at all, and they age out on their own.
+ * Folding the pairing in makes that structurally impossible rather than
+ * something an eviction has to remember: a new sign-in cannot address the
+ * previous one's entries at all, and they age out on their own. It has to be
+ * the pairing id and not some property of the record, because sign-out deletes
+ * the record while the cache it filled survives.
  */
 export function consoleCacheScope(connection: Connection | null): string {
   if (!connection) {
     return "unpaired";
   }
+  // A record written before pairing ids existed has none; "0" can never
+  // collide with a nonce, so such a record simply keeps one stable scope.
   return `${connection.id}#${
-    isGatewayConnection(connection) ? (connection.pairingGeneration ?? 0) : 0
+    (isGatewayConnection(connection) ? connection.pairingId : null) ?? "0"
   }`;
 }
 

@@ -333,37 +333,50 @@ describe("ConnectionRegistry", () => {
     // identity attached, would still be sitting there; the next screen to
     // mount would hand it straight back to `useLearnedAdminRole`, which would
     // re-persist the role the sign-in had just cleared.
-    const storage = memoryStorage();
-    const store = registry(storage);
-    await store.hydrate();
-    const cache = new QueryClient();
+    //
+    // Run twice over the two ways one account follows another at one
+    // installation. The signed-out path is the harder one: it deletes the
+    // record, so anything the scope key derives from what the *record*
+    // remembers is back to its starting value for the next pairing, while the
+    // cache entry it has to stay clear of is still there.
+    for (const signOutFirst of [false, true]) {
+      const storage = memoryStorage();
+      const store = registry(storage);
+      await store.hydrate();
+      const cache = new QueryClient();
 
-    await store.addGateway({
-      gatewayUrl: "https://one.example.test",
-      refreshToken: "mg_rt_admin",
-      installationId: "inst-one",
-      grantedScope: "openid profile offline_access control_plane:read",
-    });
-    // The hub opens and the administrator's usage read lands in the cache.
-    const adminKey = [consoleCacheScope(store.active()), "usage", "summary"];
-    cache.setQueryData(adminKey, { scope: "installation" });
-    await store.updateActive({ isAdmin: true });
+      const paired = await store.addGateway({
+        gatewayUrl: "https://one.example.test",
+        refreshToken: "mg_rt_admin",
+        installationId: "inst-one",
+        grantedScope: "openid profile offline_access control_plane:read",
+      });
+      // The hub opens and the administrator's usage read lands in the cache.
+      const adminKey = [consoleCacheScope(store.active()), "usage", "summary"];
+      cache.setQueryData(adminKey, { scope: "installation" });
+      await store.updateActive({ isAdmin: true });
 
-    // Somebody else signs in to the same gateway, and the gateway answers
-    // their reads `self`.
-    await store.addGateway({
-      gatewayUrl: "https://one.example.test",
-      refreshToken: "mg_rt_member",
-      installationId: "inst-one",
-      grantedScope: "openid profile offline_access control_plane:read",
-    });
+      if (signOutFirst) {
+        await store.remove(paired.id);
+        expect(store.active()).toBeNull();
+      }
 
-    const memberKey = [consoleCacheScope(store.active()), "usage", "summary"];
-    expect(memberKey).not.toEqual(adminKey);
-    // Nothing to learn a role from until this account's own read answers, so
-    // `adminFromUsageScope(undefined)` leaves the cleared role cleared.
-    expect(cache.getQueryData(memberKey)).toBeUndefined();
-    expect(store.active()?.isAdmin).toBeUndefined();
+      // Somebody else signs in to the same gateway, and the gateway answers
+      // their reads `self`.
+      await store.addGateway({
+        gatewayUrl: "https://one.example.test",
+        refreshToken: "mg_rt_member",
+        installationId: "inst-one",
+        grantedScope: "openid profile offline_access control_plane:read",
+      });
+
+      const memberKey = [consoleCacheScope(store.active()), "usage", "summary"];
+      expect(memberKey).not.toEqual(adminKey);
+      // Nothing to learn a role from until this account's own read answers, so
+      // `adminFromUsageScope(undefined)` leaves the cleared role cleared.
+      expect(cache.getQueryData(memberKey)).toBeUndefined();
+      expect(store.active()?.isAdmin).toBeUndefined();
+    }
   });
 
   it("publishes every change to its listeners", async () => {
