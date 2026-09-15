@@ -117,3 +117,42 @@ it("invalidates a loaded chat when the client changes", async () => {
   await waitFor(() => expect(result.current.error).toBe("Offline"));
   expect(result.current.hydrated).toBe(false);
 });
+
+it("restores a parked approval after retry before reporting hydration complete", async () => {
+  const pending: PendingToolApproval = {
+    callId: "call-search",
+    turnId: "turn-live",
+    action: "search",
+    approval: "search_may_share_query_and_excerpts",
+    class: "sensitive",
+    preview: null,
+    canApprove: true,
+    canRemember: true,
+    grantRungs: ["whole_tool"],
+    autoJudgeStatus: null,
+  };
+  const client = {
+    listChatMessages: vi.fn().mockResolvedValue(transcript),
+    listPendingApprovals: vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockResolvedValue([pending]),
+  };
+  const { result } = renderHook(() => useChatHydration(client, "chat-1"));
+  await waitFor(() => expect(result.current.error).toBe("Offline"));
+  act(() => result.current.retry());
+  await waitFor(() => expect(result.current.hydrated).toBe(true));
+  const state = useChatSessionStore.getState();
+  expect(state.lastSeq).toBe(7);
+  expect(state.busy).toBe(true);
+  expect(state.activeTurnId).toBe("turn-live");
+  expect(state.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: "approval",
+        callId: "call-search",
+        canApprove: true,
+      }),
+    ]),
+  );
+});

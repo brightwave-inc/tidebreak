@@ -191,16 +191,6 @@ impl Client {
             .await
     }
 
-    pub async fn create_session(
-        &self,
-        workspace: WorkspaceId,
-        harness: HarnessKind,
-        permission_mode: PermissionMode,
-    ) -> Result<SessionSnapshot> {
-        self.create_session_with_settings(workspace, harness, permission_mode, None, None, false)
-            .await
-    }
-
     pub async fn create_session_with(
         &self,
         workspace: WorkspaceId,
