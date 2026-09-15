@@ -225,10 +225,14 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
         "steer_ack" | "steer_refused" => {}
         "supervisor_stopped" => {
             let reason = payload_str(payload, "reason").unwrap_or("stopped");
-            out.journal.push(notice(
-                HarnessNoticeLevel::Info,
-                format!("The remote supervisor stopped ({reason})."),
-            ));
+            // Routine retirement adds no conversation content. Turn interruption,
+            // failure, and checkpoint events retain their own visible outcomes.
+            if !matches!(reason, "stop_requested" | "idle_ceiling" | "idle_timeout") {
+                out.journal.push(notice(
+                    HarnessNoticeLevel::Info,
+                    format!("The remote supervisor stopped ({reason})."),
+                ));
+            }
             out.terminal_flush = true;
         }
         "pod_lost" => {
@@ -559,6 +563,69 @@ mod tests {
         // Environment lifecycle events are recognized, not vocabulary drift.
         assert!(!project_event(&b, "running", &json!({})).unrecognized);
         assert!(project_event(&b, "brand_new_kind", &json!({})).unrecognized);
+    }
+
+    #[tokio::test]
+    async fn routine_retirement_advances_the_cursor_without_a_notice() {
+        for reason in ["stop_requested", "idle_ceiling", "idle_timeout"] {
+            for terminal_kind in ["turn_completed", "turn_interrupted"] {
+                let dir = tempfile::tempdir().unwrap();
+                let (db, bus, session, _, _) = seed(dir.path()).await;
+                let incarnation = seeded_incarnation(&db, &session).await;
+                let b = binding(&session, incarnation);
+                let batch = read(
+                    SandboxState::Expired,
+                    2,
+                    vec![
+                        event(1, terminal_kind, json!({ "turn": 1, "exit_code": 0 })),
+                        event(2, "supervisor_stopped", json!({ "reason": reason })),
+                    ],
+                );
+                let outcome = ingest_events(&db, &bus, &b, &batch).await.unwrap();
+                assert!(outcome.terminal_flush_journaled);
+                assert!(outcome.fence.is_none());
+                let replay = ingest_events(&db, &bus, &b, &batch).await.unwrap();
+                assert_eq!(replay.ingested, 0);
+                let stored = latest_incarnation(&db, &b.owner, b.session_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.events_cursor, 2);
+                let page = list_events(&db, &b.owner, b.session_id, 0, 200)
+                    .await
+                    .unwrap();
+                assert!(!page.events.iter().any(|row| matches!(
+                    &row.event,
+                    Event::HarnessNotice { message, .. }
+                        if message.contains("remote supervisor stopped")
+                )));
+                assert_eq!(
+                    page.events
+                        .iter()
+                        .filter(|row| matches!(
+                            (&row.event, terminal_kind),
+                            (Event::TurnCompleted { .. }, "turn_completed")
+                                | (Event::TurnInterrupted { .. }, "turn_interrupted")
+                        ))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unexpected_supervisor_stops_remain_visible() {
+        let session = session_value();
+        let b = binding(&session, CodeIncarnationId::new());
+        for reason in ["engine_failed", "spend_ceiling", "unrecognized_reason"] {
+            let projection = project_event(&b, "supervisor_stopped", &json!({ "reason": reason }));
+            assert!(projection.terminal_flush);
+            assert!(matches!(
+                &projection.journal[..],
+                [Event::HarnessNotice { message, .. }] if message.contains(reason)
+            ));
+        }
     }
 
     /// A driven stream produces the journal rows and attention transitions,
