@@ -17,6 +17,12 @@
  * Writes only on a real change, and only from a scope that answers the
  * question — `adminFromUsageScope` returns undefined for the `filtered` scope a
  * parameterised read carries, which must not demote a cached administrator.
+ *
+ * What keeps this honest across a change of account is not this hook: the read
+ * it learns from is filed under `consoleCacheScope`, which moves with the
+ * pairing generation. A member signing in where an administrator was finds no
+ * cached usage response to read a scope out of, so there is nothing here to
+ * persist until the gateway has answered that account for itself.
  */
 
 import { useEffect } from "react";

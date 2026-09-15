@@ -62,6 +62,16 @@ export type GatewayConnection = ConnectionBase & {
    * record along with the answer.
    */
   isAdmin?: boolean;
+  /**
+   * How many times this connection has been signed in to, counting from one.
+   *
+   * The id is derived from the installation so that re-pairing one deployment
+   * lands on one record rather than stacking live refresh families — which
+   * means the id alone cannot tell two *accounts* apart. Signing in as
+   * somebody else reuses it. This counter is what changes then, and
+   * `consoleCacheScope` is how the read caches inherit that change.
+   */
+  pairingGeneration?: number;
 };
 
 /**
@@ -104,6 +114,32 @@ export function gatewayConnectionId(
     return `gw_${keySafe(named)}`;
   }
   return `gw_${sha256Hex(gatewayUrl).slice(0, 32)}`;
+}
+
+/**
+ * The namespace every cached gateway read is filed under.
+ *
+ * Not the connection id, and the difference is the point. The id names a
+ * *deployment*, so signing in to one gateway as somebody else reuses it — and
+ * a cache keyed on the id alone would serve the previous account's answers to
+ * the next one, for as long as those entries live. That is not a privacy leak
+ * on its own (every response was already read by the account that fetched it,
+ * and the gateway re-authorizes every request) but it is a correctness one:
+ * the administration surfaces are derived from a cached usage read's `scope`,
+ * so a stale `installation` would light the whole administration group up for
+ * an account the gateway had just answered `self` for.
+ *
+ * Folding the pairing generation in makes that structurally impossible rather
+ * than something an eviction has to remember: a new sign-in cannot address the
+ * previous one's entries at all, and they age out on their own.
+ */
+export function consoleCacheScope(connection: Connection | null): string {
+  if (!connection) {
+    return "unpaired";
+  }
+  return `${connection.id}#${
+    isGatewayConnection(connection) ? (connection.pairingGeneration ?? 0) : 0
+  }`;
 }
 
 /** The host a connection is shown as in a list. */

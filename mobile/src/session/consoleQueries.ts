@@ -37,6 +37,7 @@ import type {
 } from "../lib/consoleTypes";
 import { isTerminal } from "../lib/consoleTypes";
 import { AUDIT_PAGE_SIZE, PEOPLE_PAGE_SIZE } from "../lib/admin";
+import { consoleCacheScope } from "../lib/connections";
 import type {
   AuditEventPage,
   AuthenticationPolicy,
@@ -63,9 +64,17 @@ import {
   runtimeClient,
 } from "./consoleClients";
 
-/** The connection every key is scoped to, or a stable stand-in when unpaired. */
+/**
+ * The connection every key is scoped to, or a stable stand-in when unpaired.
+ *
+ * `consoleCacheScope`, not the connection id: the id names the deployment and
+ * is reused when somebody else signs in to it, and these caches must never
+ * outlive the sign-in that filled them. See the note there — the
+ * administration surfaces are derived from a cached usage read, so a stale
+ * entry is not merely stale, it answers a question about who you are.
+ */
 function consoleScopeKey(): string {
-  return connections.active()?.id ?? "unpaired";
+  return consoleCacheScope(connections.active());
 }
 
 /** The code the API returns when this installation does not run sandboxes. */

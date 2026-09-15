@@ -165,6 +165,12 @@ export class ConnectionRegistry {
    * deployment again replaces its record — the id is derived from the
    * installation — so a re-pair refreshes the credential instead of stacking a
    * second live refresh family for one gateway.
+   *
+   * Because that id is a deployment's name and not an account's, the record is
+   * rebuilt from scratch rather than merged: everything the previous sign-in
+   * learned about *who* was signed in (`isAdmin`, and the identity behind it)
+   * has to go, and `pairingGeneration` moves on so the cached reads filed
+   * under the old one cannot be addressed by the new session either.
    */
   async addGateway(input: NewGatewayConnection): Promise<GatewayConnection> {
     const id = gatewayConnectionId(input.gatewayUrl, input.installationId);
@@ -175,6 +181,7 @@ export class ConnectionRegistry {
       kind: "gateway",
       gatewayUrl: input.gatewayUrl,
       addedAt: existing?.addedAt ?? now.toISOString(),
+      pairingGeneration: (existing?.pairingGeneration ?? 0) + 1,
       ...(input.installationId ? { installationId: input.installationId } : {}),
       ...(input.machinePrefillUrl
         ? { machinePrefillUrl: input.machinePrefillUrl }

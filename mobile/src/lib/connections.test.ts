@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeAfterRemoval,
   connectionDetail,
+  consoleCacheScope,
   connectionLabel,
   gatewayConnectionId,
   isGatewayConnection,
@@ -97,5 +98,32 @@ describe("connection rendering", () => {
       }),
     ).toBe(false);
     expect(isGatewayConnection(null)).toBe(false);
+  });
+});
+
+describe("consoleCacheScope", () => {
+  it("separates one sign-in from the next at the same deployment", () => {
+    // The id names a deployment, so it is identical across the two; only the
+    // generation says these are different sessions.
+    expect(consoleCacheScope(connection({ pairingGeneration: 1 }))).not.toBe(
+      consoleCacheScope(connection({ pairingGeneration: 2 })),
+    );
+  });
+
+  it("is stable for one sign-in", () => {
+    const paired = connection({ pairingGeneration: 3 });
+    expect(consoleCacheScope(paired)).toBe(consoleCacheScope({ ...paired }));
+    // Nothing a live session learns about itself may move the namespace, or a
+    // read would be refetched every time the role or the machine is recorded.
+    expect(consoleCacheScope({ ...paired, isAdmin: true })).toBe(
+      consoleCacheScope(paired),
+    );
+  });
+
+  it("gives an unpaired app and a record from an older build stable scopes", () => {
+    expect(consoleCacheScope(null)).toBe("unpaired");
+    // A record written before this field existed has no generation to read;
+    // it scopes consistently rather than colliding with "unpaired".
+    expect(consoleCacheScope(connection())).toBe("gw_one#0");
   });
 });

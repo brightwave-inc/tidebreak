@@ -1,6 +1,7 @@
+import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionRegistry } from "./connectionRegistry";
-import { gatewayConnectionId } from "./connections";
+import { consoleCacheScope, gatewayConnectionId } from "./connections";
 import {
   CONNECTION_INDEX_KEY,
   SESSION_STORAGE_KEY,
@@ -320,6 +321,48 @@ describe("ConnectionRegistry", () => {
     });
 
     expect(again.id).toBe(paired.id);
+    expect(store.active()?.isAdmin).toBeUndefined();
+  });
+
+  it("never lets a re-pair read the previous account's cached answers", async () => {
+    // The scenario clearing `isAdmin` alone does not cover. The record is
+    // rebuilt, but the *reads* the role is derived from live in react-query
+    // under a key built from the connection — and the id in that key is the
+    // installation's, identical across the two sign-ins. The previous
+    // account's unfiltered usage response, `scope: "installation"` and no
+    // identity attached, would still be sitting there; the next screen to
+    // mount would hand it straight back to `useLearnedAdminRole`, which would
+    // re-persist the role the sign-in had just cleared.
+    const storage = memoryStorage();
+    const store = registry(storage);
+    await store.hydrate();
+    const cache = new QueryClient();
+
+    await store.addGateway({
+      gatewayUrl: "https://one.example.test",
+      refreshToken: "mg_rt_admin",
+      installationId: "inst-one",
+      grantedScope: "openid profile offline_access control_plane:read",
+    });
+    // The hub opens and the administrator's usage read lands in the cache.
+    const adminKey = [consoleCacheScope(store.active()), "usage", "summary"];
+    cache.setQueryData(adminKey, { scope: "installation" });
+    await store.updateActive({ isAdmin: true });
+
+    // Somebody else signs in to the same gateway, and the gateway answers
+    // their reads `self`.
+    await store.addGateway({
+      gatewayUrl: "https://one.example.test",
+      refreshToken: "mg_rt_member",
+      installationId: "inst-one",
+      grantedScope: "openid profile offline_access control_plane:read",
+    });
+
+    const memberKey = [consoleCacheScope(store.active()), "usage", "summary"];
+    expect(memberKey).not.toEqual(adminKey);
+    // Nothing to learn a role from until this account's own read answers, so
+    // `adminFromUsageScope(undefined)` leaves the cleared role cleared.
+    expect(cache.getQueryData(memberKey)).toBeUndefined();
     expect(store.active()?.isAdmin).toBeUndefined();
   });
 
