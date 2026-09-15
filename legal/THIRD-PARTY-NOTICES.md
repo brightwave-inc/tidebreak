@@ -28,7 +28,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 853
-- Desktop UI production packages: 536
+- Desktop UI production packages: 537
 - Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -5388,7 +5388,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/extend-hq/react-pptx.git
 - License text: `LICENSE` ([L-89aba894e358](#l-89aba894e358))
 
-### @extend-ai/react-xlsx 0.16.3
+### @extend-ai/react-xlsx 0.16.4
 
 - License: `MIT`
 - Repository: git+https://github.com/extend-hq/react-xlsx.git
@@ -5844,41 +5844,47 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/sveltejs/acorn-typescript.git
 - License text: `LICENSE.md` ([L-fda6af299ef7](#l-fda6af299ef7))
 
-### @tanstack/history 1.162.1
+### @tanstack/history 1.162.3
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.32
+### @tanstack/react-router 1.170.35
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-store 0.9.3
+### @tanstack/react-store 0.11.1
 
 - License: `MIT`
 - Repository: https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/react-virtual 3.14.10
+### @tanstack/react-virtual 3.14.12
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/router-core 1.171.27
+### @tanstack/router-core 1.171.29
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/store 0.9.3
+### @tanstack/store 0.11.1
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
+
+### @tanstack/virtual-core 3.17.10
+
+- License: `MIT`
+- Repository: git+https://github.com/TanStack/virtual.git
+- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
 ### @tanstack/virtual-core 3.17.8
 
@@ -5940,13 +5946,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react 19.2.18
+### @types/react 19.3.0
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react-dom 19.2.7
+### @types/react-dom 19.3.0
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
@@ -7390,7 +7396,7 @@ License identifiers named across all declared expressions:
 - Repository: lydell/js-tokens
 - License text: `LICENSE` ([L-7e02e9c37c88](#l-7e02e9c37c88))
 
-### jszip 3.10.1
+### jszip 3.10.2
 
 - License: `(MIT OR GPL-3.0-or-later)`
 - Repository: https://github.com/Stuk/jszip.git
@@ -7402,7 +7408,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/KaTeX/KaTeX.git
 - License text: `LICENSE` ([L-d3c8c167dfa0](#l-d3c8c167dfa0))
 
-### katex 0.18.6
+### katex 0.18.7
 
 - License: `MIT`
 - Repository: https://github.com/KaTeX/KaTeX.git
@@ -7474,7 +7480,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.41.0
+### lucide-react 1.45.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7876,13 +7882,13 @@ License identifiers named across all declared expressions:
 - Repository: alexeyraspopov/picocolors
 - License text: `LICENSE` ([L-fa11af88c78d](#l-fa11af88c78d))
 
-### plotly.js-dist-min 4.0.0
+### plotly.js-dist-min 4.1.0
 
 - License: `MIT`
 - Repository: git+https://github.com/plotly/plotly.js.git
 - License text: `LICENSE` ([L-2245817910c2](#l-2245817910c2))
 
-### postcss 8.5.26
+### postcss 8.5.28
 
 - License: `MIT`
 - Repository: postcss/postcss
@@ -7930,13 +7936,13 @@ License identifiers named across all declared expressions:
 - Repository: git://github.com/mourner/rbush.git
 - License text: `LICENSE` ([L-81a696f48238](#l-81a696f48238))
 
-### react 19.2.8
+### react 19.3.0
 
 - License: `MIT`
 - Repository: https://github.com/react/react.git
 - License text: `LICENSE` ([L-cf9b17822d1f](#l-cf9b17822d1f))
 
-### react-dom 19.2.8
+### react-dom 19.3.0
 
 - License: `MIT`
 - Repository: https://github.com/react/react.git
@@ -8068,10 +8074,10 @@ License identifiers named across all declared expressions:
 - Repository: git://github.com/feross/safe-buffer.git
 - License text: `LICENSE` ([L-dff1a84cb703](#l-dff1a84cb703))
 
-### scheduler 0.27.0
+### scheduler 0.28.0
 
 - License: `MIT`
-- Repository: https://github.com/facebook/react.git
+- Repository: https://github.com/react/react.git
 - License text: `LICENSE` ([L-cf9b17822d1f](#l-cf9b17822d1f))
 
 ### seroval 1.6.3
@@ -8164,7 +8170,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dcastil/tailwind-merge.git
 - License text: `LICENSE.md` ([L-b25c1d68b353](#l-b25c1d68b353))
 
-### tailwind-merge 3.6.0
+### tailwind-merge 3.7.0
 
 - License: `MIT`
 - Repository: https://github.com/dcastil/tailwind-merge.git
