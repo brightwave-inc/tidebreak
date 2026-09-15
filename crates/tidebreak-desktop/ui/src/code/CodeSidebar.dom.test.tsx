@@ -205,7 +205,7 @@ describe("CodeSidebar", () => {
     );
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Research feedback, Agent working",
+        name: "Research feedback, Agent working, Tidebreak",
       }),
     );
     await waitFor(() =>
@@ -1125,7 +1125,12 @@ it("discovers a shared workspace without owner-only status or bulk actions", asy
     { initialUrl: "/code" },
   );
   const card = await screen.findByRole("button", { name: /^Fix login/ });
+  // A modifier click on a card that cannot join the selection is absorbed:
+  // it neither opens the workspace nor seeds a selection.
   fireEvent.click(card, { metaKey: true });
+  expect(router.state.location.pathname).toBe("/code");
+  expect(useCodeUiStore.getState().selectedWorkspaceIds).toEqual([]);
+  fireEvent.click(card);
   await waitFor(() =>
     expect(router.state.location.pathname).toBe("/code/w/ws-1"),
   );

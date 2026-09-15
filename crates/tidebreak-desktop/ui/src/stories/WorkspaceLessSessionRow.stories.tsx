@@ -143,3 +143,22 @@ export const SlackCompact: Story = {
   args: { ...SlackChannel.args, density: "compact" },
   play: undefined,
 };
+
+/** The engine mark and age ride the detail line, as on a workspace card. */
+export const SlackEngineAndAge: Story = {
+  args: {
+    digest: {
+      ...idleCompleteDigest,
+      workspace: null,
+      harness_kind: "claude_code",
+      title: "Fix the deployment failure",
+      external_origin: slackOrigin,
+      trigger_target_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByRole("button");
+    await expect(row.querySelector("[title='Claude Code']")).not.toBeNull();
+    await expect(row).toHaveTextContent("3h");
+  },
+};

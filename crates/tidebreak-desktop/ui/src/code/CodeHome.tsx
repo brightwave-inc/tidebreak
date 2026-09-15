@@ -14,10 +14,8 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { toast } from "sonner";
-import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
-import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
@@ -38,11 +36,9 @@ import { middleTruncate } from "./workspaceCards";
 
 export function CodeHome() {
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
-        <CodeHomeBody />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
+      <CodeHomeBody />
+    </div>
   );
 }
 

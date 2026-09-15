@@ -32,6 +32,10 @@ import {
 import { ConnectApprovalRoute } from "./ConnectApprovalRoute";
 import { WorkspaceApprovalRoute } from "./WorkspaceApprovalRoute";
 
+const CodeLayout = lazyRouteComponent(
+  () => import("./code/CodeLayout"),
+  "CodeLayout",
+);
 const CodeHome = lazyRouteComponent(
   () => import("./code/CodeHome"),
   "CodeHome",
@@ -222,8 +226,23 @@ function ProjectRouteComponent() {
   );
 }
 
-const codeRoute = createRoute({
+/**
+ * The pathless layout every `/code` route hangs off. It mounts the code rail
+ * once, so moving between workspaces, conversations, and the library pages
+ * swaps only the pane instead of remounting the whole frame.
+ */
+const codeLayoutRoute = createRoute({
   getParentRoute: () => rootRoute,
+  id: "code-layout",
+  component: () => (
+    <CodeRouteSuspense>
+      <CodeLayout />
+    </CodeRouteSuspense>
+  ),
+});
+
+const codeRoute = createRoute({
+  getParentRoute: () => codeLayoutRoute,
   path: "/code",
   component: () => (
     <CodeRouteSuspense>
@@ -233,7 +252,7 @@ const codeRoute = createRoute({
 });
 
 const codeSessionRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/s/$sessionId",
   component: CodeSessionRouteComponent,
 });
@@ -248,7 +267,7 @@ function CodeSessionRouteComponent() {
 }
 
 const codeWorkspaceRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/w/$workspaceId",
   validateSearch: (search: Record<string, unknown>): PanelSearch =>
     panelSearchFrom(search),
@@ -256,7 +275,7 @@ const codeWorkspaceRoute = createRoute({
 });
 
 const codeAnalyticsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/analytics",
   component: () => (
     <CodeRouteSuspense>
@@ -266,14 +285,14 @@ const codeAnalyticsRoute = createRoute({
 });
 
 const codeDeliveryPullRequestsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/delivery/pull-requests",
   validateSearch: codeDeliverySearchFrom,
   component: CodeDeliveryPullRequestsRoute,
 });
 
 const codeDeliveryRunsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/delivery/runs",
   validateSearch: codeDeliverySearchFrom,
   component: CodeDeliveryRunsRoute,
@@ -298,7 +317,7 @@ function CodeDeliveryRunsRoute() {
 }
 
 const codeArchiveRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => codeLayoutRoute,
   path: "/code/archive",
   component: () => (
     <CodeRouteSuspense>
@@ -425,13 +444,15 @@ export const routeTree = rootRoute.addChildren([
   chatRoute,
   projectRoute,
   projectChatRoute,
-  codeRoute,
-  codeSessionRoute,
-  codeWorkspaceRoute,
-  codeAnalyticsRoute,
-  codeDeliveryPullRequestsRoute,
-  codeDeliveryRunsRoute,
-  codeArchiveRoute,
+  codeLayoutRoute.addChildren([
+    codeRoute,
+    codeSessionRoute,
+    codeWorkspaceRoute,
+    codeAnalyticsRoute,
+    codeDeliveryPullRequestsRoute,
+    codeDeliveryRunsRoute,
+    codeArchiveRoute,
+  ]),
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,

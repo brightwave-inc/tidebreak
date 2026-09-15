@@ -335,12 +335,13 @@ export function CodeSidebar() {
               digest={digest}
               active={pathname === `/code/s/${digest.session}`}
               density={prefs.density}
-              onOpen={(sessionId) =>
+              onOpen={(sessionId) => {
+                clearWorkspaceSelection();
                 void navigate({
                   to: "/code/s/$sessionId",
                   params: { sessionId },
-                })
-              }
+                });
+              }}
             />
           )}
           renderWorkspace={(workspace) => {

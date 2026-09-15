@@ -10,9 +10,7 @@ import type { CodeSessionSnapshot, ModelInfo } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { RouteFrame } from "@/RouteFrame";
 import { codeClientGeneration } from "./CodeClientGeneration";
-import { CodeSidebar } from "./CodeSidebar";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
 
@@ -63,18 +61,16 @@ function CodeSessionRouteBody({ sessionId }: { sessionId: string }) {
     };
   }, [client, sessionId, navigate, attempt]);
   return (
-    <RouteFrame sidebar={<CodeSidebar />}>
-      <CodeSessionContent
-        key={sessionId}
-        session={session}
-        error={error}
-        client={client}
-        models={models}
-        defaultModelKey={defaultModelKey}
-        onRetry={() => setAttempt((value) => value + 1)}
-        onRecovered={setSession}
-      />
-    </RouteFrame>
+    <CodeSessionContent
+      key={sessionId}
+      session={session}
+      error={error}
+      client={client}
+      models={models}
+      defaultModelKey={defaultModelKey}
+      onRetry={() => setAttempt((value) => value + 1)}
+      onRecovered={setSession}
+    />
   );
 }
 
