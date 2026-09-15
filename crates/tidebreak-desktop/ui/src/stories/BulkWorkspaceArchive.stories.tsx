@@ -32,7 +32,7 @@ const blocked: WorkspaceArchiveFailure[] = [
     workspace: { ...codeWorkspace, title: "Fix login redirects" },
     error: new HttpError(
       409,
-      "409: Workspace has uncommitted or unpushed work; pass force to discard it",
+      "409: Workspace has uncommitted changes; pass force to discard them",
       "uncommitted",
     ),
   },
@@ -79,7 +79,7 @@ export const LongSelection: Story = {
       },
       error: new HttpError(
         409,
-        "409: Workspace has uncommitted or unpushed work; pass force to discard it",
+        "409: Workspace has uncommitted changes; pass force to discard them",
         "uncommitted",
       ),
     })),

@@ -401,14 +401,22 @@ impl CodeRuntime {
         // Blockers first: a refused archive must leave the workspace exactly as
         // it was, and running the hook script is not "exactly as it was".
         self.refuse_running_sessions(owner, id, force).await?;
+        // A merged pull request proves the host holds the branch's work even
+        // after a squash merge deleted the head branch, which would otherwise
+        // read as unpushed and ask the user to discard work that already landed.
+        let merged_head = merged_pull_request_head(&workspace);
         if path.exists() && !force {
-            if let Some(block) = archive_blockers(&path, &workspace.base_ref)
-                .await
-                .map_err(map_worktree)?
+            if let Some(block) =
+                archive_blockers_with_merged_head(&path, &workspace.base_ref, merged_head)
+                    .await
+                    .map_err(map_worktree)?
             {
                 return Err(ServerError::conflict_kind(
                     block.as_str(),
-                    "workspace has uncommitted or unpushed work; pass force to discard it",
+                    format!(
+                        "workspace has {}; pass force to discard them",
+                        block.describe()
+                    ),
                 ));
             }
         }
@@ -545,13 +553,18 @@ impl CodeRuntime {
                 ));
             }
             if !force {
-                if let Some(block) = archive_blockers(path, &workspace.base_ref)
-                    .await
-                    .map_err(map_worktree)?
+                let merged_head = merged_pull_request_head(&workspace);
+                if let Some(block) =
+                    archive_blockers_with_merged_head(path, &workspace.base_ref, merged_head)
+                        .await
+                        .map_err(map_worktree)?
                 {
                     return Err(ServerError::conflict_kind(
                         block.as_str(),
-                        "workspace changed during archive; the checkout was preserved",
+                        format!(
+                            "workspace gained {} during archive; the checkout was preserved",
+                            block.describe()
+                        ),
                     ));
                 }
             }
@@ -1269,6 +1282,19 @@ impl CodeRuntime {
             .entry(workspace_id)
             .or_default()
             .clone()
+    }
+}
+
+/// The head commit of the workspace's pull request when the host reports it
+/// merged. Only that head proves the branch is on the host: a later commit
+/// moves HEAD off it and archive probes the remote as usual.
+fn merged_pull_request_head(workspace: &CodeWorkspace) -> Option<&str> {
+    let pr = workspace.pr.as_ref()?;
+    let merged = pr.merged == Some(true) || pr.state.eq_ignore_ascii_case("merged");
+    if merged {
+        pr.head_sha.as_deref()
+    } else {
+        None
     }
 }
 

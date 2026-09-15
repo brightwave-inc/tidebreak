@@ -82,9 +82,9 @@ use super::session_worker::{
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
 use super::worktree::{
-    self, archive_blockers, branch_name, branch_name_from_slug, create_worktree, prune_worktrees,
-    remove_worktree, run_archive_script, run_setup_script, slugify, validate_repo_path,
-    worktree_dir, WorktreeError,
+    self, archive_blockers_with_merged_head, branch_name, branch_name_from_slug, create_worktree,
+    prune_worktrees, remove_worktree, run_archive_script, run_setup_script, slugify,
+    validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 use crate::error::ServerError;
