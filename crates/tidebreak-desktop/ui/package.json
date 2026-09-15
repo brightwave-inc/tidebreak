@@ -100,7 +100,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
-    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/ext-apps": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@storybook/addon-a11y": "10.6.0",
     "@storybook/react-vite": "10.6.0",
