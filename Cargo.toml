@@ -44,7 +44,7 @@ debug-assertions = false
 brush-parser = "=0.4.0"
 # Backreference regexes for the sed danger heuristics; `regex` has no
 # backreferences and cannot express them.
-fancy-regex = "=0.19.0"
+fancy-regex = "=0.19.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 # `unbounded_depth` matches what tauri-build already enables in the desktop
 # graph, so every build selection resolves one serde_json instead of two.
@@ -54,7 +54,7 @@ serde_json = { version = "=1.0.151", features = ["unbounded_depth"] }
 # engine (and each other) about what the config declares. A substring scan
 # cannot tell a declared provider from a comment, and the filter must
 # forward exactly the env keys the declared providers name.
-toml = "=1.1.5"
+toml = "=1.1.6"
 schemars = { version = "=1.2.2", features = ["uuid1"] }
 # Validates tool-call arguments against the advertised input_schema at
 # dispatch. No resolvers: schemas come from the registry or a mounted MCP
@@ -66,7 +66,7 @@ cap-fs-ext = "=4.0.3"
 futures = "=0.3.34"
 futures-timer = "=3.0.4"
 thiserror = "=2.0.20"
-uuid = { version = "=1.26.0", features = ["v4", "serde"] }
+uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # Generates the renderer's TypeScript wire types from these serde definitions.
@@ -112,7 +112,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 # Share reqwest with tauri-plugin-updater. In reqwest 0.13, `rustls` enables
 # rustls-platform-verifier; ClientBuilder installs it when no custom roots are set.
 # Query and form encoding require explicit features in reqwest 0.13.
-reqwest = { version = "=0.13.4", default-features = false, features = ["json", "multipart", "stream", "query", "form", "rustls"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "multipart", "stream", "query", "form", "rustls"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "=0.11.0"
@@ -125,7 +125,7 @@ async-stream = "=0.3.6"
 object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
-trash = { version = "=5.2.7", default-features = false, features = ["coinit_apartmentthreaded"] }
+trash = { version = "=5.2.8", default-features = false, features = ["coinit_apartmentthreaded"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 tracing = "=0.1.44"
@@ -134,7 +134,7 @@ tracing = "=0.1.44"
 url = { version = "=2.5.8", features = ["serde"] }
 # Image header/decode allowlist codecs shared by server, mcp, code-execution.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
-dom_smoothie = "=0.18.0"
+dom_smoothie = "=0.18.1"
 # Exact version dom_smoothie builds against; pins move together.
 dom_query = "=0.28.0"
 
