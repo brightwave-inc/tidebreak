@@ -463,7 +463,8 @@ jobs:
       # dependency graph once. Separate `cargo test -p` commands resolve
       # different feature sets and rebuild tidebreak-core for each of them.
       # The desktop's default features already turn on the keychain backends
-      # the credential tests exercise.
+      # the credential tests exercise. `~` is nextest's contains matcher, the
+      # same substring scope `cargo test <filter>` gave these names.
       - name: desktop and credential integration tests
         run: >-
           cargo nextest run --locked -p tidebreak-desktop
@@ -471,9 +472,9 @@ jobs:
           -p tidebreak-server
           -p tidebreak-core
           -E 'package(tidebreak-desktop)
-          | (package(tidebreak-cli) & (test(setup::tests) | binary(serve)))
-          | (package(tidebreak-server) & test(tests::listener))
-          | (package(tidebreak-core) & test(keychain))'
+          | (package(tidebreak-cli) & (test(~setup::tests) | binary(serve)))
+          | (package(tidebreak-server) & test(~tests::listener))
+          | (package(tidebreak-core) & test(~keychain))'
 
   windows-check:
     name: Windows cargo check
