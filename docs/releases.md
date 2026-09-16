@@ -183,7 +183,8 @@ automatic.
    Parallel Windows and Linux jobs produce x86_64 and ARM64 NSIS, AppImage, and
    Debian packages; every package is signed with the Tauri updater key after
    packaging. A fresh release cannot continue unless every operating-system
-   and architecture build succeeds.
+   and architecture build the dispatch selected succeeds. Windows and Linux
+   can be paused per release; see [Paused platforms](#paused-platforms).
 8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
@@ -249,6 +250,39 @@ The preflight that resumes an already-hosted release validates it against the
 current platform set. A release published before this platform change cannot
 be re-dispatched: it fails on the artifact paths and updater keys instead of
 silently republishing a different release shape.
+
+### Paused platforms
+
+Windows and Linux packaging can be paused per release. Nobody is asking for
+newer builds, and the macOS lane already gates every release, so building
+three platforms only costs runner time and adds failure surface. The
+`platforms` input on the release workflow records the choice. The Windows and
+Linux jobs, artifact downloads, and manifest entries all key off it: `all`
+builds every platform and `macos` skips the Windows and Linux jobs. The
+input's default is what a draft publishes with; change it to pause or resume
+those platforms for every release, or dispatch the workflow with the other
+value for one release. A retry of an existing release must repeat the
+selection its original run used, because the hosted manifest is validated
+against that platform set.
+
+The default stays `all` until a release containing the desktop updater's
+missing-platform handling (`TargetNotFound` reads as "no update", added in
+#3462) has shipped to Windows and Linux. Before that, a `latest.json` with
+no Windows or Linux entry makes every installed client on those platforms
+report a failed update check on startup. Keeping the old entries is not an
+alternative: the feed carries one version, so a client would install the same
+old package on every check. Flip the default to `macos` in the release after
+that one ships.
+
+While paused, a release still keeps the README's permanent download links
+working: the `attach_downloads` job copies the stable-name Windows and Linux
+installers and their `.sha256` sidecars from the previous published GitHub
+release into the new one. Versioned packages and updater signatures are not
+carried, so `latest.json` lists only macOS and an installed Windows or Linux
+app reports no update rather than a build that does not exist. The last
+release that built every platform is the one those carried downloads come
+from; find it by following the chain of release pages back to one with
+versioned `Tidebreak_<version>_<arch>` Windows and Linux assets.
 
 ### Windows: unsigned x86_64 and ARM64 NSIS
 

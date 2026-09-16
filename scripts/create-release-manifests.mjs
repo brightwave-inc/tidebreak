@@ -75,10 +75,24 @@ export const RELEASE_PLATFORMS = [
 // it does not build.
 export const STAGING_RELEASE_PLATFORMS = [MACOS_PLATFORM];
 
-function releasePlatforms(channel) {
-  return channel === "staging"
-    ? STAGING_RELEASE_PLATFORMS
-    : RELEASE_PLATFORMS;
+// The production platform selections a release run can dispatch with. Windows
+// and Linux packaging is paused (`macos` is the workflow default) until someone
+// needs a newer build; `all` restores the full set without a code change. See
+// docs/releases.md.
+export const RELEASE_PLATFORM_SELECTIONS = {
+  all: RELEASE_PLATFORMS,
+  macos: [MACOS_PLATFORM],
+};
+
+export function releasePlatforms(channel, selection = "all") {
+  if (channel === "staging") return STAGING_RELEASE_PLATFORMS;
+  const platforms = RELEASE_PLATFORM_SELECTIONS[selection];
+  if (!platforms) {
+    throw new Error(
+      `unknown release platform selection: ${selection} (expected one of ${Object.keys(RELEASE_PLATFORM_SELECTIONS).join(", ")})`,
+    );
+  }
+  return platforms;
 }
 
 function requiredOption(options, name) {
@@ -94,7 +108,7 @@ function parseOptions(args) {
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
       throw new Error(
-        "usage: create-release-manifests.mjs --dist <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url> [--channel production|staging]",
+        "usage: create-release-manifests.mjs --dist <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url> [--channel production|staging] [--platforms all|macos]",
       );
     }
     options.set(flag.slice(2), value);
@@ -234,6 +248,7 @@ export function createReleaseManifests({
   publishedAt,
   baseUrl,
   channel = "production",
+  platformSelection = "all",
 }) {
   const normalizedBaseUrl = assertChannelVersion({
     channelId: channel,
@@ -249,7 +264,7 @@ export function createReleaseManifests({
   }
   const distPath = path.resolve(dist);
   const artifacts = [];
-  const platforms = releasePlatforms(channel);
+  const platforms = releasePlatforms(channel, platformSelection);
 
   for (const platformDescriptor of platforms) {
     for (const arch of platformDescriptor.architectures) {
@@ -353,6 +368,7 @@ function main() {
     publishedAt: requiredOption(options, "published-at"),
     baseUrl: requiredOption(options, "base-url"),
     channel: options.get("channel") || "production",
+    platformSelection: options.get("platforms") || "all",
   });
   console.log(JSON.stringify(result.manifest, null, 2));
 }

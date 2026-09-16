@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   createReleaseManifests,
+  RELEASE_PLATFORM_SELECTIONS,
   RELEASE_PLATFORMS,
   STAGING_RELEASE_PLATFORMS,
 } from "./create-release-manifests.mjs";
@@ -258,5 +259,64 @@ test("rejects a published manifest that points outside its immutable prefix", ()
         ...RELEASE,
       }),
     /unexpected artifact URL/,
+  );
+});
+
+test("a macOS-only selection publishes only the macOS platform", () => {
+  const dist = releaseFixture("0.4.2", RELEASE_PLATFORM_SELECTIONS.macos);
+  const { manifest, latest } = createReleaseManifests({
+    dist,
+    ...RELEASE,
+    platformSelection: "macos",
+  });
+
+  assert.deepEqual(
+    manifest.artifacts.map((artifact) => artifact.platform),
+    ["macos", "macos", "macos"],
+  );
+  // No Windows or Linux key: an installed app on those platforms sees no
+  // update rather than a pointer at a build that does not exist.
+  assert.deepEqual(Object.keys(latest.platforms), [
+    "darwin-aarch64",
+    "darwin-x86_64",
+  ]);
+
+  const latestPath = path.join(dist, "resumed-latest.json");
+  const resumed = preparePublishedRelease({
+    manifestPath: path.join(dist, "manifest.json"),
+    latestPath,
+    ...RELEASE,
+    platformSelection: "macos",
+  });
+  assert.deepEqual(resumed.latest, latest);
+});
+
+test("a platform selection must match the artifacts it is checked against", () => {
+  const dist = releaseFixture("0.4.2", RELEASE_PLATFORM_SELECTIONS.macos);
+  assert.throws(
+    () => createReleaseManifests({ dist, ...RELEASE }),
+    /required release artifact is missing/,
+  );
+  assert.throws(
+    () =>
+      createReleaseManifests({
+        dist,
+        ...RELEASE,
+        platformSelection: "windows",
+      }),
+    /unknown release platform selection: windows/,
+  );
+
+  const full = releaseFixture();
+  createReleaseManifests({ dist: full, ...RELEASE });
+  assert.throws(
+    () =>
+      preparePublishedRelease({
+        manifestPath: path.join(full, "manifest.json"),
+        latestPath: path.join(full, "latest-resumed.json"),
+        ...RELEASE,
+        platformSelection: "macos",
+      }),
+    /unexpected artifact count/,
   );
 });

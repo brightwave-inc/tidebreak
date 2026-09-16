@@ -63,9 +63,10 @@ diligence, then rewrote it in Rust and released it as Tidebreak.
 
 > [!WARNING]
 > Tidebreak is pre-1.0. Interfaces and local data formats may change between
-> releases. Windows and Linux packages ship for x86_64 and ARM64, but some
-> platform-specific capabilities remain macOS-only and appear as unavailable
-> in the app.
+> releases. Windows and Linux packages exist for x86_64 and ARM64, but new
+> builds are paused: the links below serve the last Windows and Linux builds
+> that shipped, and some platform-specific capabilities remain macOS-only and
+> appear as unavailable in the app.
 
 ## Code mode
 
@@ -163,8 +164,8 @@ execution providers that you choose; the Tidebreak desktop adds no usage fee.
 | Platform | Packages | Notes |
 | --- | --- | --- |
 | **macOS** | [Universal `.dmg`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg) | Apple Silicon and Intel; signed and notarized |
-| **Windows** | [x86_64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe) · [ARM64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe) | Windows may show a SmartScreen warning while installers are not Authenticode-signed |
-| **Linux** | x86_64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb) · ARM64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb) | Built on Ubuntu 22.04; use a compatible glibc-based distribution |
+| **Windows** | [x86_64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe) · [ARM64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe) | Builds paused; this is the last installer that shipped. Windows may show a SmartScreen warning while installers are not Authenticode-signed |
+| **Linux** | x86_64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb) · ARM64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb) | Builds paused; these are the last packages that shipped. Built on Ubuntu 22.04; use a compatible glibc-based distribution |
 
 Every package has a `.sha256` sidecar on the release. See the
 [installation guide](https://www.tidebreak.io/docs/installation/) for checksum

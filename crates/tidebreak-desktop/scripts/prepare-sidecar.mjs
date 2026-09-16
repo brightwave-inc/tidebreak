@@ -36,26 +36,51 @@ const targets =
     ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
     : [triple];
 
+// The sidecar binaries this hook stages, with the Cargo package that owns each.
+//
+// The host broker is the desktop's existing sidecar: it owns the per-workspace
+// process tree for code executions. The CLI binary gives every Tidebreak
+// desktop session a canonical `tidebreak` command on PATH so provider harnesses
+// (Claude, Codex, OpenCode) can invoke `tidebreak browser-mcp` or other
+// agent-side commands through a session-scoped capfile without asking the user
+// to install or find anything.
+const SIDECARS = [
+  { binary: "tidebreak-host-broker", package: "tidebreak-host-broker" },
+  { binary: "tidebreak", package: "tidebreak-cli" },
+];
+
 /**
- * Build and stage one named Cargo binary into the Tauri sidecar directory.
+ * Compile every sidecar for one target in a single Cargo invocation.
  *
+ * The invocation selects the desktop package alongside the sidecar packages
+ * but builds only the sidecar binaries. Cargo unifies features across the
+ * selected packages, so the shared dependency graph resolves exactly as it
+ * does when Tauri compiles the desktop crate right after this hook. Building
+ * the sidecars on their own resolves a different graph (Tauri pulls extra
+ * features into shared crates such as reqwest and tokio-util), and Cargo then
+ * recompiles tidebreak-core and every crate above it a second time.
+ *
+ * Tauri passes `tauri/custom-protocol` to its own release build and nothing
+ * extra to its dev build, so this hook mirrors that per profile.
  */
-function stageBinary(binaryName, packageName) {
+function buildSidecars(target) {
+  const cargoArgs = ["build", "-p", "tidebreak-desktop"];
+  for (const sidecar of SIDECARS) cargoArgs.push("-p", sidecar.package);
+  for (const sidecar of SIDECARS) cargoArgs.push("--bin", sidecar.binary);
+  cargoArgs.push("--locked");
+  if (release) cargoArgs.push("--release", "--features", "tauri/custom-protocol");
+  if (configuredTarget) cargoArgs.push("--target", target);
+  execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
+}
+
+/**
+ * Copy one compiled sidecar into the Tauri sidecar directory under its
+ * target-suffixed name, then lipo the per-target copies for a universal build.
+ */
+function stageBinary(binaryName) {
   const stagedSidecars = [];
   for (const target of targets) {
     const extension = target.includes("windows") ? ".exe" : "";
-    const cargoArgs = [
-      "build",
-      "-p",
-      packageName,
-      "--bin",
-      binaryName,
-      "--locked",
-    ];
-    if (release) cargoArgs.push("--release");
-    if (configuredTarget) cargoArgs.push("--target", target);
-    execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
-
     const source = join(
       targetRoot,
       ...(configuredTarget ? [target] : []),
@@ -86,17 +111,8 @@ function stageBinary(binaryName, packageName) {
   }
 }
 
-// The host broker is the desktop's existing sidecar: it owns the per-workspace
-// process tree for code executions.
-stageBinary("tidebreak-host-broker", "tidebreak-host-broker");
-
-// The CLI binary gives every Tidebreak desktop session a canonical `tidebreak`
-// command on PATH so provider harnesses (Claude, Codex, OpenCode) can invoke
-// `tidebreak browser-mcp` or other agent-side commands through a session-
-// scoped capfile without asking the user to install or find anything.
-// The later harness command-path PR resolves the absolute path at runtime;
-// this slice only packages the binary so it is available on disk.
-stageBinary("tidebreak", "tidebreak-cli");
+for (const target of targets) buildSidecars(target);
+for (const sidecar of SIDECARS) stageBinary(sidecar.binary);
 
 // Native computer use depends on the separately signed Swift helper.
 stageComputerUseHelper({ desktopDir, workspaceDir, targetRoot, triple, release });
