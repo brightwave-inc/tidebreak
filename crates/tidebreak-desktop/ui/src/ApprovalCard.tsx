@@ -259,6 +259,15 @@ export function approvalAsk(
   if (preview?.tool === "delegate_agent") {
     return { title: "Start this background agent?", summaryLine: summary };
   }
+  if (preview?.tool === "code_session") {
+    return {
+      title:
+        preview.operation === "create"
+          ? "Start this repository work?"
+          : "Send this follow-up?",
+      summaryLine: summary,
+    };
+  }
   return { title: summary, summaryLine: null };
 }
 
@@ -425,7 +434,7 @@ function spokenAction(preview: ToolActionPreview): string {
         ? preview.url
         : preview.tool === "write_file"
           ? preview.path
-          : preview.tool === "delegate_agent"
+          : preview.tool === "delegate_agent" || preview.tool === "code_session"
             ? preview.task
             : preview.query;
   return bounded(spoken);

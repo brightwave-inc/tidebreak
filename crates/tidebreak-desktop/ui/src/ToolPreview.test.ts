@@ -7,6 +7,36 @@ import {
 } from "./ToolPreview";
 
 describe("toolPreviewPresentation", () => {
+  it("shows the repository task and the requested harness and model", () => {
+    expect(
+      toolPreviewPresentation({
+        tool: "code_session",
+        operation: "create",
+        target: "example/repository",
+        task: "Inspect the failing test.",
+        harness: "codex",
+        model: "example-model",
+      }),
+    ).toEqual({
+      headline: "Start work in example/repository",
+      detail:
+        "Start work in example/repository\nInspect the failing test.\nHarness: codex\nModel: example-model",
+    });
+  });
+
+  it("shows the exact follow-up and session without inventing missing settings", () => {
+    expect(
+      toolPreviewPresentation({
+        tool: "code_session",
+        operation: "continue",
+        target: "session-1",
+        task: "Run the focused test.",
+        harness: null,
+        model: null,
+      }).detail,
+    ).toBe("Continue session session-1\nRun the focused test.");
+  });
+
   it("reads a command back as the argument vector it will run", () => {
     expect(
       toolPreviewPresentation({

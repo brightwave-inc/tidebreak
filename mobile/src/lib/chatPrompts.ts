@@ -80,6 +80,7 @@ const APPROVABLE_KINDS = {
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
   computer_may_control_app: true,
+  code_session_may_run_repository_agent: true,
   unsupported: false,
 } as const satisfies Record<ToolApprovalKind, boolean>;
 
@@ -92,6 +93,7 @@ const APPROVAL_KINDS = {
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
   computer_may_control_app: true,
+  code_session_may_run_repository_agent: true,
   unsupported: true,
 } as const satisfies Record<ToolApprovalKind, true>;
 
@@ -166,9 +168,7 @@ function stringList(
 }
 
 function narration(value: Record<string, unknown>): { summary?: string } {
-  return nonEmptyBounded(value.summary, 200)
-    ? { summary: value.summary }
-    : {};
+  return nonEmptyBounded(value.summary, 200) ? { summary: value.summary } : {};
 }
 
 function parseNetworkPolicy(value: unknown): NetworkPolicy | null {
@@ -247,10 +247,11 @@ export function parseMobileToolActionPreview(
   }
   if (preview.tool === "web_extract") {
     if (
-      !onlyKeys<Extract<ToolActionPreview, { tool: "web_extract" }>>(
-        preview,
-        ["tool", "url", "summary"],
-      ) ||
+      !onlyKeys<Extract<ToolActionPreview, { tool: "web_extract" }>>(preview, [
+        "tool",
+        "url",
+        "summary",
+      ]) ||
       !nonEmptyBounded(preview.url, 512)
     ) {
       return null;
@@ -263,10 +264,11 @@ export function parseMobileToolActionPreview(
   }
   if (preview.tool === "write_file") {
     if (
-      !onlyKeys<Extract<ToolActionPreview, { tool: "write_file" }>>(
-        preview,
-        ["tool", "path", "summary"],
-      ) ||
+      !onlyKeys<Extract<ToolActionPreview, { tool: "write_file" }>>(preview, [
+        "tool",
+        "path",
+        "summary",
+      ]) ||
       !nonEmptyBounded(preview.path, 512)
     ) {
       return null;
@@ -290,6 +292,26 @@ export function parseMobileToolActionPreview(
       return null;
     }
     return { tool: "delegate_agent", task: preview.task, network };
+  }
+  if (preview.tool === "code_session") {
+    const { operation, target, task, harness, model } = preview;
+    if (
+      !onlyKeys<Extract<ToolActionPreview, { tool: "code_session" }>>(preview, [
+        "tool",
+        "operation",
+        "target",
+        "task",
+        "harness",
+        "model",
+      ]) ||
+      (operation !== "create" && operation !== "continue") ||
+      !nonEmptyBounded(target, 512) ||
+      !nonEmptyBounded(task, 512) ||
+      !(harness === null || nonEmptyBounded(harness, 512)) ||
+      !(model === null || nonEmptyBounded(model, 512))
+    )
+      return null;
+    return { tool: "code_session", operation, target, task, harness, model };
   }
   if (preview.tool !== "exec") return null;
   const files = preview.files === undefined ? [] : preview.files;
@@ -334,6 +356,7 @@ function isRememberableKind(kind: ToolApprovalKind): boolean {
   return (
     APPROVABLE_KINDS[kind] &&
     kind !== "external_mcp_may_call_server" &&
+    kind !== "code_session_may_run_repository_agent" &&
     kind !== "computer_may_control_app"
   );
 }
@@ -400,7 +423,7 @@ export function parseMobilePendingToolApproval(
   if (
     grantRungs.some((rung) => rung === null) ||
     (grantRungs.length > 0 && !isRememberableKind(approval.approval)) ||
-    approval.can_remember !== (grantRungs.length > 0)
+    approval.can_remember !== grantRungs.length > 0
   ) {
     return null;
   }
@@ -422,11 +445,7 @@ function parseQuestionOption(value: unknown): MobileUserQuestionOption | null {
   const option = record(value);
   if (
     !option ||
-    !onlyKeys<WireUserQuestionOption>(option, [
-      "id",
-      "label",
-      "description",
-    ]) ||
+    !onlyKeys<WireUserQuestionOption>(option, ["id", "label", "description"]) ||
     !nonEmptyBounded(option.id, 64) ||
     !nonEmptyBounded(option.label, 80) ||
     !nonEmptyBounded(option.description, 240)
@@ -588,9 +607,7 @@ export async function decideMobileToolApproval(
   client: MachineJsonClient,
   chatId: string,
   callId: string,
-  decision:
-    | { decision: "approve" }
-    | { decision: "reject"; feedback: string },
+  decision: { decision: "approve" } | { decision: "reject"; feedback: string },
 ): Promise<void> {
   const body =
     decision.decision === "approve"
@@ -638,8 +655,7 @@ export async function answerMobileUserQuestions(
       !answer.selectedOptionIds.every((option) =>
         nonEmptyBounded(option, 64),
       ) ||
-      new Set(answer.selectedOptionIds).size !==
-        answer.selectedOptionIds.length
+      new Set(answer.selectedOptionIds).size !== answer.selectedOptionIds.length
     ) {
       throw new Error("Question answers contain invalid data.");
     }
@@ -696,10 +712,7 @@ export async function decideMobilePlan(
 ): Promise<void> {
   const feedback =
     decision.decision === "reject" ? decision.feedback?.trim() : undefined;
-  if (
-    feedback !== undefined &&
-    (!boundedBlock(feedback, 4_000) || !feedback)
-  ) {
+  if (feedback !== undefined && (!boundedBlock(feedback, 4_000) || !feedback)) {
     throw new Error("Plan feedback must contain readable text.");
   }
   await client.requestJson(
@@ -745,6 +758,8 @@ export function mobileApprovalQuestion(
       return "Start this background agent?";
     case "computer_may_control_app":
       return "Control this app?";
+    case "code_session_may_run_repository_agent":
+      return "Start or continue this repository work?";
     case "unsupported":
       return "Reject this unsupported action?";
   }
@@ -768,12 +783,24 @@ export function mobileApprovalSummary(kind: ToolApprovalKind): string {
       return "The background agent runs unattended in its own workspace.";
     case "computer_may_control_app":
       return "The action can interact with the selected application.";
+    case "code_session_may_run_repository_agent":
+      return "The request can start or continue repository work under this conversation's permissions.";
     case "unsupported":
       return "This action cannot be approved from the mobile app.";
   }
 }
 
 export function mobileToolPreviewDetail(preview: ToolActionPreview): string {
+  if (preview.tool === "code_session") {
+    return [
+      `${preview.operation === "create" ? "Repository" : "Session"}: ${preview.target}`,
+      preview.task,
+      preview.harness && `Harness: ${preview.harness}`,
+      preview.model && `Model: ${preview.model}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
   if (preview.tool === "search") {
     return `${preview.query}\n# searched against this conversation's sources`;
   }

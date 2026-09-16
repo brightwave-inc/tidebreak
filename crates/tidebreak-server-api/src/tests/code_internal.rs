@@ -2449,6 +2449,15 @@ async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
 /// workspace under the same grant. Placement stays on the machine.
 #[tokio::test]
 async fn external_conversation_without_runtime_answers_then_creates_a_machine_workspace_child() {
+    external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Allow).await;
+}
+
+#[tokio::test]
+async fn external_conversation_ask_approval_creates_a_machine_workspace_child() {
+    external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Ask).await;
+}
+
+async fn external_conversation_creates_machine_child(mode: tidebreak_core::PermissionMode) {
     use tidebreak_core::{ExecutionLocation, HarnessKind, PermissionMode};
     let workspace_harness = Arc::new(
         ScriptedAdapter::new(plain_text_script())
@@ -2472,7 +2481,7 @@ async fn external_conversation_without_runtime_answers_then_creates_a_machine_wo
         tidebreak_core::AgentRunExecutionLocation::InProcess,
         move |mut runtime| {
             runtime.adapters.register(harness);
-            runtime.with_external_permission_policy(PermissionMode::Allow, PermissionMode::Allow)
+            runtime.with_external_permission_policy(mode, PermissionMode::Allow)
         },
     )
     .await;
@@ -2524,7 +2533,7 @@ async fn external_conversation_without_runtime_answers_then_creates_a_machine_wo
     assert!(session.workspace_id.is_none(), "{session:?}");
     assert_eq!(session.harness_kind, HarnessKind::Internal);
     assert_eq!(session.execution_location, ExecutionLocation::Machine);
-    assert_eq!(session.permission_mode, PermissionMode::Allow);
+    assert_eq!(session.permission_mode, mode);
     let message_uri = format!("/external/code/sessions/{id}/messages");
     let (status, message) = call_router_json(
         &router,
@@ -2566,6 +2575,45 @@ async fn external_conversation_without_runtime_answers_then_creates_a_machine_wo
     .await;
     assert_eq!(status, StatusCode::OK, "{message}");
     assert_eq!(message["outcome"], "new_turn");
+    if mode == PermissionMode::Ask {
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let approvals = tidebreak_core::db::code::list_approvals(
+                    &runtime.db,
+                    &owner,
+                    Some(tidebreak_core::ApprovalState::Pending),
+                    Some(id),
+                )
+                .await
+                .unwrap();
+                if let Some(approval) = approvals.into_iter().next() {
+                    break approval;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("child creation must ask for approval");
+        assert!(
+            tidebreak_core::db::code::child_sessions(&runtime.db, &owner, id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a child started before approval"
+        );
+        let (status, decision) = call_router_json(
+            &router,
+            "POST",
+            &format!(
+                "/external/code/sessions/{id}/approvals/{}/decision",
+                approval.id
+            ),
+            &bearer,
+            Some(serde_json::json!({"decision":"approve"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{decision}");
+    }
     wait_for_turn_completion(&runtime, &owner, id).await;
     let parent = runtime.get_session(&owner, id).await.unwrap();
     assert!(
@@ -2586,7 +2634,7 @@ async fn external_conversation_without_runtime_answers_then_creates_a_machine_wo
     let child = &children[0];
     assert_eq!(child.harness_kind, HarnessKind::ClaudeCode);
     assert_eq!(child.execution_location, ExecutionLocation::Machine);
-    assert_eq!(child.permission_mode, PermissionMode::Allow);
+    assert_eq!(child.permission_mode, mode);
     let workspace_id = child
         .workspace_id
         .expect("the child must occupy a repository workspace");

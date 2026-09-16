@@ -126,6 +126,87 @@ export const ToolUse: Story = {
   },
 };
 
+const repositoryWork: CodeApprovalSnapshot = {
+  ...pending,
+  kind: {
+    type: "tool_use",
+    preview: {
+      tool: "code_session",
+      operation: "create",
+      target: "example/repository",
+      task: "Inspect the failing test and report the cause. Wait before changing files.",
+      harness: "codex",
+      model: "example-model",
+    },
+    offered_grants: [],
+  },
+  harness_raw_json: "",
+};
+
+export const RepositoryWork: Story = {
+  args: { approval: repositoryWork },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Start this repository work?")).toBeVisible();
+    await expect(canvas.getByRole("button", { name: "Approve" })).toBeEnabled();
+    await expect(
+      canvas.queryByText(/don't ask again/i),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const RepositoryFollowUp: Story = {
+  args: {
+    approval: {
+      ...repositoryWork,
+      kind: {
+        type: "tool_use",
+        offered_grants: [],
+        preview: {
+          tool: "code_session",
+          operation: "continue",
+          target: "3f1c0d4a-0000-4000-8000-000000000004",
+          task: "Run the focused regression test and report its result.",
+          harness: null,
+          model: null,
+        },
+      },
+    },
+  },
+};
+
+export const RepositoryWorkDeciding: Story = {
+  args: { approval: repositoryWork, deciding: true },
+};
+
+export const RepositoryWorkFailed: Story = {
+  args: {
+    approval: repositoryWork,
+    error: "Your decision could not be saved. Repository work has not started.",
+  },
+};
+
+export const RepositoryWorkLong: Story = {
+  args: {
+    approval: {
+      ...repositoryWork,
+      kind: {
+        type: "tool_use",
+        offered_grants: [],
+        preview: {
+          tool: "code_session",
+          operation: "create",
+          target:
+            "example/repository-with-a-long-name-for-verifying-the-consent-card-at-narrow-widths",
+          task: "Inspect the regression that prevents Slack child sessions from receiving approvals. Check the exact session and turn identifiers, preserve the parent's status card, and verify that reconnecting does not duplicate the request. Report the finding before changing files.",
+          harness: "claude_code",
+          model: "provider-model-with-a-long-identifier-for-consent-preview",
+        },
+      },
+    },
+  },
+};
+
 export const Questions: Story = {
   args: {
     approval: {

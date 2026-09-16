@@ -489,6 +489,18 @@ fn bound_action_preview(preview: ToolActionPreview) -> (ToolActionPreview, bool)
             any_at_field_cap([path.as_str()].into_iter().chain(summary.as_deref()))
         }
         ToolActionPreview::DelegateAgent { .. } => false,
+        ToolActionPreview::CodeSession {
+            target,
+            task,
+            harness,
+            model,
+            ..
+        } => any_at_field_cap(
+            [target.as_str(), task.as_str()]
+                .into_iter()
+                .chain(harness.as_deref())
+                .chain(model.as_deref()),
+        ),
     };
     let (preview, truncated) = match preview {
         ToolActionPreview::Exec {
@@ -554,6 +566,10 @@ fn tool_name_for_preview(preview: &ToolActionPreview) -> String {
         ToolActionPreview::WebExtract { .. } => "web_extract".into(),
         ToolActionPreview::WriteFile { .. } => "write_file".into(),
         ToolActionPreview::DelegateAgent { .. } => crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+        ToolActionPreview::CodeSession { operation, .. } => match operation {
+            crate::preview::CodeSessionOperation::Create => "code_session_create".into(),
+            crate::preview::CodeSessionOperation::Continue => "code_run_turn".into(),
+        },
     }
 }
 
@@ -563,6 +579,7 @@ fn class_for_preview(preview: &ToolActionPreview) -> ApprovalClass {
         | ToolActionPreview::WriteFile { .. }
         | ToolActionPreview::DelegateAgent { .. } => ApprovalClass::Workspace,
         ToolActionPreview::Search { .. }
+        | ToolActionPreview::CodeSession { .. }
         | ToolActionPreview::WebSearch { .. }
         | ToolActionPreview::WebExtract { .. } => ApprovalClass::Sensitive,
     }

@@ -240,6 +240,14 @@ fn receipt_tail(result: &str, max_chars: usize) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// Whether the request creates a child session or continues an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeSessionOperation {
+    Create,
+    Continue,
+}
+
 /// The action a call will take, in a form a human can inspect.
 ///
 /// Approval cards need this because consent to an action you cannot see is not
@@ -357,6 +365,15 @@ pub enum ToolActionPreview {
         /// The network policy the child inherits from this chat.
         network: crate::model::NetworkPolicy,
     },
+    /// A bounded request to start or continue a repository agent. The target
+    /// is a repository for creation or an existing child session for follow-up.
+    CodeSession {
+        operation: CodeSessionOperation,
+        target: String,
+        task: String,
+        harness: Option<String>,
+        model: Option<String>,
+    },
 }
 
 impl ToolActionPreview {
@@ -416,6 +433,40 @@ impl ToolActionPreview {
                 path: clamp(arguments.get("path")?.as_str()?, MAX_ACTION_FIELD_CHARS)?,
                 summary: clamped_summary(arguments),
             }),
+            "code_session_create" | "code_run_turn" => {
+                let create = tool_name == "code_session_create";
+                Some(Self::CodeSession {
+                    operation: if create {
+                        CodeSessionOperation::Create
+                    } else {
+                        CodeSessionOperation::Continue
+                    },
+                    target: clamp(
+                        arguments
+                            .get(if create { "repository" } else { "session_id" })?
+                            .as_str()?
+                            .trim(),
+                        MAX_ACTION_FIELD_CHARS,
+                    )?,
+                    task: clamp(
+                        arguments
+                            .get(if create { "task" } else { "text" })?
+                            .as_str()?
+                            .trim(),
+                        MAX_ACTION_FIELD_CHARS,
+                    )?,
+                    harness: if create {
+                        clamped_field(arguments.get("harness"))
+                    } else {
+                        None
+                    },
+                    model: if create {
+                        clamped_field(arguments.get("model"))
+                    } else {
+                        None
+                    },
+                })
+            }
             _ => None,
         }
     }
@@ -433,7 +484,7 @@ impl ToolActionPreview {
             | Self::WebSearch { summary, .. }
             | Self::WebExtract { summary, .. }
             | Self::WriteFile { summary, .. } => summary.as_deref(),
-            Self::DelegateAgent { .. } => None,
+            Self::DelegateAgent { .. } | Self::CodeSession { .. } => None,
         }
     }
 
@@ -452,7 +503,7 @@ impl ToolActionPreview {
             | Self::WebSearch { summary, .. }
             | Self::WebExtract { summary, .. }
             | Self::WriteFile { summary, .. } => *summary = None,
-            Self::DelegateAgent { .. } => {}
+            Self::DelegateAgent { .. } | Self::CodeSession { .. } => {}
         }
         action
     }

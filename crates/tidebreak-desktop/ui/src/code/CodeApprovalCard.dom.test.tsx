@@ -102,6 +102,48 @@ const pendingPlan: CodeApprovalSnapshot = {
 };
 
 describe("CodeApprovalCard", () => {
+  it.each(["create", "continue"] as const)(
+    "approves %s repository work once",
+    async (operation) => {
+      const user = userEvent.setup();
+      const onDecide = vi.fn();
+      render(
+        <CodeApprovalCard
+          approval={{
+            ...pendingToolUse,
+            kind: {
+              type: "tool_use",
+              offered_grants: [],
+              preview: {
+                tool: "code_session",
+                operation,
+                target: "example/repository",
+                task: "Inspect the failing test.",
+                harness: "codex",
+                model: "example-model",
+              },
+            },
+          }}
+          onDecide={onDecide}
+        />,
+      );
+      expect(
+        screen.getByText(
+          operation === "create"
+            ? "Start this repository work?"
+            : "Send this follow-up?",
+        ),
+      ).toBeVisible();
+      expect(screen.getByText(/Inspect the failing test/)).toHaveTextContent(
+        "Harness: codex",
+      );
+      expect(screen.queryByText(/don't ask again/i)).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Approve" }));
+      expect(onDecide).toHaveBeenCalledOnce();
+      expect(onDecide).toHaveBeenCalledWith("approve");
+    },
+  );
+
   it.each([pendingCommand, pendingQuestions, pendingPlan])(
     "shows the Slack contributor after parsing a settled $kind.type approval",
     (pending) => {

@@ -457,6 +457,11 @@ function approvalTitle(approval: CodeApprovalSnapshot): string {
     case "network":
       return "Allow this network access?";
     case "tool_use":
+      if (approval.kind.preview.tool === "code_session") {
+        return approval.kind.preview.operation === "create"
+          ? "Start this repository work?"
+          : "Send this follow-up?";
+      }
       return "Run this tool?";
     case "questions":
       return "Answer these questions?";

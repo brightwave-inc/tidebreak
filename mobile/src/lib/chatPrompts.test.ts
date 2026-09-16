@@ -72,8 +72,7 @@ const plan = {
   call_id: "call-plan",
   turn_id: "turn-1",
   title: "Add mobile prompt cards",
-  plan:
-    "## Steps\n1. Parse each pending prompt strictly.\n2. Show its mobile card.\n3. Submit the exact decision.",
+  plan: "## Steps\n1. Parse each pending prompt strictly.\n2. Show its mobile card.\n3. Submit the exact decision.",
   proposed_at: "2026-08-27T20:00:01Z",
 };
 
@@ -88,6 +87,48 @@ function fakeClient(response: unknown): {
 }
 
 describe("mobile chat prompt contracts", () => {
+  it("recovers repository work without allowing a remembered grant", () => {
+    const preview = {
+      tool: "code_session",
+      operation: "create",
+      target: "example/repository",
+      task: "Inspect tests.",
+      harness: "codex",
+      model: null,
+    };
+    const action = {
+      ...approval,
+      action: "other",
+      approval: "code_session_may_run_repository_agent",
+      can_remember: false,
+      grant_rungs: [],
+      preview,
+    };
+    expect(parseMobilePendingToolApproval(action)).toMatchObject({
+      canApprove: true,
+      canRemember: false,
+      grantRungs: [],
+      preview,
+    });
+    expect(
+      parseMobilePendingToolApproval({
+        ...action,
+        can_remember: true,
+        grant_rungs: ["whole_tool"],
+      }),
+    ).toBeNull();
+    expect(
+      parseMobileToolActionPreview({ ...preview, operation: "delete" }),
+    ).toBeNull();
+    expect(
+      parseMobileToolActionPreview({ ...preview, hidden_arguments: "secret" }),
+    ).toBeNull();
+    expect(parseMobileToolActionPreview({ ...preview, task: "" })).toBeNull();
+    expect(
+      mobileToolPreviewDetail(parseMobileToolActionPreview(preview)!),
+    ).toBe("Repository: example/repository\nInspect tests.\nHarness: codex");
+  });
+
   it("parses a closed approval and preserves its exact action preview", () => {
     expect(parseMobilePendingToolApproval(approval)).toEqual({
       callId: "call-approval",
@@ -165,12 +206,9 @@ describe("mobile chat prompt contracts", () => {
 
   it("sends approve-once and bounded rejection feedback", async () => {
     const sent = fakeClient(undefined);
-    await decideMobileToolApproval(
-      sent.client,
-      "chat/1",
-      "call/1",
-      { decision: "approve" },
-    );
+    await decideMobileToolApproval(sent.client, "chat/1", "call/1", {
+      decision: "approve",
+    });
     expect(sent.requestJson).toHaveBeenLastCalledWith(
       "/chats/chat%2F1/approvals/call%2F1",
       {
@@ -180,12 +218,10 @@ describe("mobile chat prompt contracts", () => {
       },
     );
 
-    await decideMobileToolApproval(
-      sent.client,
-      "chat-1",
-      "call-2",
-      { decision: "reject", feedback: "  Use the cached result.  " },
-    );
+    await decideMobileToolApproval(sent.client, "chat-1", "call-2", {
+      decision: "reject",
+      feedback: "  Use the cached result.  ",
+    });
     expect(sent.requestJson).toHaveBeenLastCalledWith(
       "/chats/chat-1/approvals/call-2",
       {
@@ -289,12 +325,7 @@ describe("mobile chat prompt contracts", () => {
       },
     );
 
-    await answerMobileUserQuestions(
-      sent.client,
-      "chat-1",
-      "call-2",
-      [],
-    );
+    await answerMobileUserQuestions(sent.client, "chat-1", "call-2", []);
     expect(sent.requestJson).toHaveBeenLastCalledWith(
       "/chats/chat-1/questions/call-2/answer",
       { method: "POST", body: { answers: [] } },

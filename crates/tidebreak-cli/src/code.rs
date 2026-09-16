@@ -1724,6 +1724,26 @@ fn tool_action_line(preview: &tidebreak_core::ToolActionPreview) -> String {
         ToolActionPreview::WebExtract { url, summary: _ } => format!("fetch: {url}"),
         ToolActionPreview::WriteFile { path, summary: _ } => format!("write: {path}"),
         ToolActionPreview::DelegateAgent { task, network: _ } => format!("agent: {task}"),
+        ToolActionPreview::CodeSession {
+            operation,
+            target,
+            task,
+            harness,
+            model,
+        } => {
+            let action = match operation {
+                tidebreak_core::preview::CodeSessionOperation::Create => "Start repository work",
+                tidebreak_core::preview::CodeSessionOperation::Continue => "Continue session",
+            };
+            let mut lines = vec![format!("{action}: {target}"), task.clone()];
+            if let Some(harness) = harness {
+                lines.push(format!("Harness: {harness}"));
+            }
+            if let Some(model) = model {
+                lines.push(format!("Model: {model}"));
+            }
+            lines.join("\n")
+        }
     }
 }
 
