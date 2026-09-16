@@ -85,6 +85,7 @@ import {
 import { useConfirm } from "@/components/ConfirmDialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { hasLocalHostAuthority } from "./host";
 import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import type { ImportedDocument } from "@/documents";
 import type { PluginInfo } from "./api";
@@ -221,6 +222,14 @@ export type ComposerFiles = {
   recent?: readonly TranscriptFileAttachment[];
   attaching: boolean;
   onAttach?: () => void;
+  /**
+   * Attach files the renderer already holds — a hosted drop or paste — through
+   * the same mixed image/document routing as the picker. Absent on surfaces
+   * that only accept images, which keep the image-only transfer path. Local
+   * native composers do not use this for HTML5 transfer: drop is claimed by
+   * DocumentDropTarget, and paste cannot present the local-import credential.
+   */
+  onAttachHeld?: (files: readonly File[]) => void;
   /** Put one of `recent` back on the next message. */
   onReattach?: (file: TranscriptFileAttachment) => void;
   onRemove: (documentId: string) => void;
@@ -911,15 +920,25 @@ export function Composer({
   }
 
   /**
-   * Images from a drop or a paste take the same route as the picker's, so the
-   * chip, the progress, and the failure behave identically whichever way the
-   * reader chose. A paste that carries no image is left alone: it is text.
+   * Hosted work-mode drops and pastes take the same mixed routing as the
+   * picker: images upload as pixels, everything else is ingested as a source.
+   * A surface without document ingest (code) keeps the image-only path. Local
+   * native paste stays on that image path too: renderer-held document ingest
+   * is bearer-only and 401s on a desktop embedding. A paste that carries no
+   * file is left alone: it is text.
    */
   function acceptTransfer(transfer: DataTransfer | null): boolean {
-    if (!images || inputDisabled) return false;
-    const files = imageFilesFrom(transfer);
-    if (files.length === 0) return false;
-    images.onAttachFiles(files);
+    if (inputDisabled) return false;
+    const dropped = transfer ? [...transfer.files] : [];
+    if (dropped.length === 0) return false;
+    if (files?.onAttachHeld && !hasLocalHostAuthority()) {
+      files.onAttachHeld(dropped);
+      return true;
+    }
+    if (!images) return false;
+    const imageFiles = imageFilesFrom(transfer);
+    if (imageFiles.length === 0) return false;
+    images.onAttachFiles(imageFiles);
     return true;
   }
 
@@ -930,8 +949,12 @@ export function Composer({
     // path that runs there. This handler is what a dev-server webview does
     // with a drop, and its own handling of one is to navigate away from the
     // app and display the file — so a drop must be claimed here whether or not
-    // it is taken.
+    // it is taken. Local native work-mode already imports from the claimed
+    // paths; do not also attach whatever File list the webview still exposes.
+    // Code-mode never mounts that target, so the webview File list remains the
+    // image attach path.
     event.preventDefault();
+    if (hasLocalHostAuthority() && nativeDropTarget) return;
     acceptTransfer(event.dataTransfer);
   }
 
@@ -1027,7 +1050,8 @@ export function Composer({
         void submit();
       }}
       onDragEnter={(event) => {
-        if (!images || inputDisabled) return;
+        if (inputDisabled) return;
+        if (!images && !files?.onAttachHeld) return;
         if (!transferCarriesFiles(event.dataTransfer)) return;
         dragDepthRef.current += 1;
         setDragging(true);
@@ -1048,7 +1072,9 @@ export function Composer({
           role="status"
         >
           <ImageIcon size={15} aria-hidden="true" />
-          Drop an image to attach it
+          {files?.onAttachHeld
+            ? "Drop files to attach them"
+            : "Drop an image to attach it"}
         </div>
       )}
       {contextItemCount > 0 && (
