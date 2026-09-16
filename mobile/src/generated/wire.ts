@@ -2329,7 +2329,15 @@ fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compact
 /**
  * Whether a new (or confirmed) checkpoint was stored.
  */
-compacted: boolean, };
+compacted: boolean, } | { "type": "session_tree",
+/**
+ * Direct children, same objects as `SessionSnapshot.children`.
+ */
+children: Array<SessionTreeChild>,
+/**
+ * Present only when a parent wait is known; never inferred.
+ */
+wait: SessionTreeWait | null, };
 
 /**
  * The execution backend that ran a command, as a closed vocabulary.
@@ -4950,7 +4958,60 @@ execution_location: ExecutionLocation,
  * Absent on a snapshot from before the field existed; the parser
  * treats that as the owner-kind default.
  */
-acts_as?: ActsAs, };
+acts_as?: ActsAs,
+/**
+ * Direct children this viewer may see. Always present so a reconnect
+ * can tell an empty tree from a legacy snapshot that omitted the field.
+ */
+children: Array<SessionTreeChild>,
+/**
+ * A parent wait that is actually known. Always present (`null` when
+ * none); never inferred by counting children.
+ */
+wait: SessionTreeWait | null, };
+
+/**
+ * One direct child on a parent session tree.
+ */
+export type SessionTreeChild = {
+/**
+ * Child session id. Open and, if fenced, reap use this id.
+ */
+id: SessionId,
+/**
+ * Workspace or conversation title, when one is stored.
+ */
+title?: string,
+/**
+ * Closed status vocabulary the Slack parent card renders.
+ */
+status: SessionTreeChildStatus,
+/**
+ * Whether the child needs a person (approval, fence, stall, or pin).
+ */
+attention: boolean,
+/**
+ * Whether the child is fenced.
+ */
+fenced: boolean, };
+
+/**
+ * Status of one direct child session on a parent tree.
+ */
+export type SessionTreeChildStatus = "running" | "queued" | "completed" | "fenced" | "failed" | "interrupted";
+
+/**
+ * A parent wait that is actually parked, never inferred by counting children.
+ */
+export type SessionTreeWait = {
+/**
+ * How many named children have not settled.
+ */
+waiting: number,
+/**
+ * How many children the wait named.
+ */
+total: number, };
 
 /**
  * Who may read a session without holding an access row (decision 0086).

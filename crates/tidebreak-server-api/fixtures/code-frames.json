@@ -90,6 +90,7 @@
           "type": "working"
         }
       },
+      "children": [],
       "created_at": "2025-09-01T04:13:20Z",
       "execution_location": "sandbox",
       "external_origin": {
@@ -120,6 +121,7 @@
       "reasoning_effort": "high",
       "unrecognized_event_count": 0,
       "visibility": "private",
+      "wait": null,
       "workspace_id": "00000000-0000-0000-0000-000000000002"
     }
   },
@@ -139,6 +141,7 @@
           "type": "fenced"
         }
       },
+      "children": [],
       "created_at": "2025-09-01T04:13:20Z",
       "execution_location": "sandbox",
       "external_origins": [
@@ -169,6 +172,7 @@
       "reasoning_effort": "high",
       "unrecognized_event_count": 0,
       "visibility": "private",
+      "wait": null,
       "workspace_id": null
     }
   },
@@ -1378,6 +1382,26 @@
         "type": "compaction_finished"
       },
       "seq": 65
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: session_tree",
+    "value": {
+      "event": {
+        "children": [
+          {
+            "attention": false,
+            "fenced": false,
+            "id": "00000000-0000-0000-0000-000000000003",
+            "status": "running",
+            "title": "Inspect the parser"
+          }
+        ],
+        "type": "session_tree",
+        "wait": null
+      },
+      "seq": 66
     }
   }
 ]

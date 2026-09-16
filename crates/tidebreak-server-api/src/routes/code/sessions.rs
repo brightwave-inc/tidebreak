@@ -139,6 +139,7 @@ pub(super) async fn snapshot_with_origin(
     snapshot.access = Some(access.level);
     snapshot.is_owner = Some(access.owner);
     snapshot.set_external_origins(bindings);
+    code.attach_session_tree(&mut snapshot).await?;
     Ok(snapshot)
 }
 

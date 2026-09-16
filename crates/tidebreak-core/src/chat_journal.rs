@@ -301,7 +301,8 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
         }
         | Event::CheckpointRecorded { .. }
         | Event::HarnessNotice { .. }
-        | Event::CredentialRefused { .. } => return Ok(None),
+        | Event::CredentialRefused { .. }
+        | Event::SessionTree { .. } => return Ok(None),
     }))
 }
 

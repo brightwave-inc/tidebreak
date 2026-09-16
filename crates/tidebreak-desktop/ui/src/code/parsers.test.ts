@@ -416,6 +416,75 @@ describe("parseCodeSession attention states", () => {
   });
 });
 
+describe("session tree wire values", () => {
+  const child = {
+    id: "child-1",
+    title: "Inspect the repository",
+    status: "running",
+    attention: false,
+    fenced: false,
+  };
+
+  it("distinguishes legacy snapshots from authoritative empty trees", () => {
+    expect(parseCodeSession(SESSION)).not.toHaveProperty("children");
+    expect(parseCodeSession(SESSION)).not.toHaveProperty("wait");
+    expect(
+      parseCodeSession({ ...SESSION, children: [], wait: null }),
+    ).toMatchObject({
+      children: [],
+      wait: null,
+    });
+    expect(
+      parseCodeEvent({ type: "session_tree", children: [], wait: null }),
+    ).toEqual({
+      type: "session_tree",
+      children: [],
+      wait: null,
+    });
+  });
+
+  it("preserves child status and validates explicit journal trees", () => {
+    const event = {
+      type: "session_tree",
+      children: [child],
+      wait: { waiting: 1, total: 2 },
+    };
+    expect(parseCodeEvent(event)).toEqual(event);
+    expect(
+      parseCodeSession({ ...SESSION, children: [child], wait: null })?.children,
+    ).toEqual([child]);
+    for (const children of [
+      null,
+      1,
+      {},
+      [{ ...child, status: "unknown" }],
+      [{ ...child, fenced: "false" }],
+    ]) {
+      expect(parseCodeSession({ ...SESSION, children, wait: null })).toBeNull();
+      expect(parseCodeEvent({ ...event, children })).toBeNull();
+    }
+    expect(parseCodeEvent({ type: "session_tree", children: [] })).toBeNull();
+    expect(parseCodeEvent({ type: "session_tree", wait: null })).toBeNull();
+  });
+
+  it("rejects invalid wait counts", () => {
+    for (const wait of [
+      { waiting: -1, total: 2 },
+      { waiting: 0.5, total: 2 },
+      { waiting: 3, total: 2 },
+      { waiting: 1, total: 4_294_967_296 },
+      { waiting: 1, total: 2, other: true },
+    ]) {
+      expect(
+        parseCodeSession({ ...SESSION, children: [child], wait }),
+      ).toBeNull();
+      expect(
+        parseCodeEvent({ type: "session_tree", children: [child], wait }),
+      ).toBeNull();
+    }
+  });
+});
+
 describe("parseCodeSession without a workspace", () => {
   // The in-process engine's session binds no workspace (decision 0048
   // step 5), so the server sends `workspace_id: null`; the key is present.

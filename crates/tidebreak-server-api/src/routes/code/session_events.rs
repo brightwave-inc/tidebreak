@@ -19,7 +19,7 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::db::code::{list_events, MAX_REPLAY_EVENTS};
-use tidebreak_core::{Event, OwnerId, SessionId};
+use tidebreak_core::{CodeGrantId, Event, OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::bus::{CodeLiveUpdate, LiveTail};
@@ -79,7 +79,18 @@ pub(super) enum Viewer {
     /// and their claim can be withdrawn while they watch, so the variant
     /// carries who they are rather than leaving that to a parallel argument.
     Granted(OwnerId),
-    Adapter,
+    Adapter {
+        grant_id: CodeGrantId,
+    },
+}
+
+impl Viewer {
+    fn adapter_grant(&self) -> Option<CodeGrantId> {
+        match self {
+            Self::Adapter { grant_id } => Some(*grant_id),
+            Self::Owner | Self::Granted(_) => None,
+        }
+    }
 }
 
 pub(super) async fn stream_events(
@@ -102,7 +113,7 @@ pub(super) async fn stream_events(
     // neither subscribes.
     let granted = match &viewer {
         Viewer::Granted(principal) => Some(principal.clone()),
-        Viewer::Owner | Viewer::Adapter => None,
+        Viewer::Owner | Viewer::Adapter { .. } => None,
     };
     let mut access_notices = granted
         .as_ref()
@@ -115,9 +126,17 @@ pub(super) async fn stream_events(
         let _ = runtime.mark_session_viewed(&owner, session).await;
     }
     let mut last_seq = after;
-    if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq)
-        .await
-        .is_err()
+    if replay_after(
+        &mut socket,
+        &runtime.db,
+        &owner,
+        session,
+        &mut last_seq,
+        viewer.adapter_grant(),
+        granted.as_ref(),
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -193,7 +212,7 @@ pub(super) async fn stream_events(
                         continue;
                     }
                     if seq > last_seq.saturating_add(1) {
-                        if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq)
+                        if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq, viewer.adapter_grant(), granted.as_ref())
                             .await
                             .is_err()
                         {
@@ -206,7 +225,14 @@ pub(super) async fn stream_events(
                         &mut socket,
                         &SequencedEventFrame {
                             seq,
-                            event: event.event,
+                            event: crate::code::session_tree::authorize_event(
+                                &runtime.db,
+                                &owner,
+                                viewer.adapter_grant(),
+                                granted.as_ref(),
+                                event.event,
+                            )
+                            .await,
                             replayed: None,
                             transient: None,
                             replacement: None,
@@ -220,7 +246,7 @@ pub(super) async fn stream_events(
                     }
                 }
                 Err(RecvError::Lagged(_)) => {
-                    if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq)
+                    if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq, viewer.adapter_grant(), granted.as_ref())
                         .await
                         .is_err()
                     {
@@ -297,6 +323,8 @@ async fn replay_after(
     owner: &OwnerId,
     session: SessionId,
     last_seq: &mut i64,
+    grant_id: Option<CodeGrantId>,
+    principal: Option<&OwnerId>,
 ) -> Result<(), ()> {
     let page = list_events(store, owner, session, *last_seq, MAX_REPLAY_EVENTS)
         .await
@@ -308,7 +336,14 @@ async fn replay_after(
             socket,
             &SequencedEventFrame {
                 seq: event.seq,
-                event: event.event,
+                event: crate::code::session_tree::authorize_event(
+                    store,
+                    owner,
+                    grant_id,
+                    principal,
+                    event.event,
+                )
+                .await,
                 replayed: Some(true),
                 transient: None,
                 replacement: None,

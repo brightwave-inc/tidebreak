@@ -359,6 +359,7 @@ pub async fn note_activity(
 /// cannot enumerate them (decision 0086). The notice is still addressed
 /// per principal, so nothing is filtered on the way out.
 pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
+    super::session_tree::publish_for_child(db, bus, session).await;
     let digest = match build_digest(db, session).await {
         Ok(digest) => digest,
         Err(err) => {

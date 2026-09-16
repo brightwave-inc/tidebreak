@@ -1026,7 +1026,35 @@ impl ScopedCode {
         id: SessionId,
     ) -> Result<(Session, Vec<Turn>, Vec<SequencedEvent>), ServerError> {
         let owner = self.session_owner_for_read(id).await?;
-        self.runtime.session_debug(&owner, id).await
+        let (session, turns, mut events) = self.runtime.session_debug(&owner, id).await?;
+        for entry in &mut events {
+            entry.event = super::session_tree::authorize_event(
+                &self.runtime.db,
+                &owner,
+                None,
+                Some(&self.owner),
+                entry.event.clone(),
+            )
+            .await;
+        }
+        Ok((session, turns, events))
+    }
+
+    /// Populate a snapshot with only the children this reader may inspect.
+    pub async fn attach_session_tree(
+        &self,
+        snapshot: &mut super::types::SessionSnapshot,
+    ) -> Result<(), ServerError> {
+        let owner = self.session_owner_for_read(snapshot.id).await?;
+        super::session_tree::attach_to_snapshot(
+            &self.runtime.db,
+            &owner,
+            snapshot,
+            None,
+            Some(&self.owner),
+        )
+        .await;
+        Ok(())
     }
 
     pub async fn resolve_turn_attachments(
