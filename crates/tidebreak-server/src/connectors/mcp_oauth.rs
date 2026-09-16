@@ -123,9 +123,17 @@ pub struct AuthorizationServerMetadata {
     pub code_challenge_methods_supported: Vec<String>,
 }
 
-/// RFC 7591 dynamic client registration response. Persisted under
-/// [`oauth_client_secret_key`]; a public client gets no `client_secret`, but
-/// the assigned `client_id` still must survive restarts.
+/// The resolved OAuth client for one server, persisted under
+/// [`oauth_client_secret_key`]. It carries the RFC 7591 dynamic-registration
+/// response *plus* the discovery result the runtime needs to mint and refresh
+/// tokens after a restart without repeating discovery on every process start:
+/// the token endpoint and the scopes the authorize request used.
+///
+/// A public client gets no `client_secret`, but the assigned `client_id`, the
+/// token endpoint, and the scopes still must survive restarts, so the whole
+/// record is persisted here. The `token_endpoint`/`scopes` fields default so an
+/// older stored record (registration only) still deserializes; the runtime
+/// treats a record whose `token_endpoint` is absent as needing rediscovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRegistration {
     pub client_id: String,
@@ -135,6 +143,15 @@ pub struct ClientRegistration {
     pub registration_access_token: Option<String>,
     #[serde(default)]
     pub registration_client_uri: Option<String>,
+    /// RFC 8414 token endpoint resolved at Connect time. Absolute `https` URL,
+    /// already passed through [`admit_oauth_endpoint`]. Absent in a record
+    /// written before this field existed.
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    /// Scopes granted at registration/authorize time, carried so a refresh and
+    /// a re-authorize request the same grant. Empty when the server took none.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// The authorization endpoints resolved for one server, parsed and admitted,
