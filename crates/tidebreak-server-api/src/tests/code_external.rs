@@ -4051,6 +4051,411 @@ async fn external_context_refuses_person_grants_even_with_opt_in() {
     );
 }
 
+async fn post_external_message(
+    router: &Router,
+    token: &str,
+    session_id: tidebreak_core::SessionId,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    call_json(
+        router,
+        "POST",
+        &format!("/external/code/sessions/{session_id}/messages"),
+        token,
+        Some(body),
+    )
+    .await
+}
+
+/// A harness without sandbox steering queues the reply and names why.
+#[tokio::test]
+async fn external_messages_steer_queues_when_unsupported() {
+    let (router, fake, runtime, repo_id, _dir) = external_app().await;
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({
+            "external_key": "T1/C-steer-unsupported/1.1",
+            "repo_id": repo_id,
+            "harness": "claude_code",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-steer-unsupported/1.1").await;
+    let (status, first) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "start",
+            "event_id": "Ev-start",
+            "channel_ts": "1700000001.000100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["outcome"], "new_turn");
+    let (status, steered) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "redirect",
+            "event_id": "Ev-steer",
+            "channel_ts": "1700000002.000100",
+            "steer": true,
+            "expected_turn_id": first["turn_id"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{steered}");
+    assert_eq!(steered["outcome"], "queued");
+    assert_eq!(steered["reason"], "steer_unsupported");
+    assert!(steered["steered"].is_null());
+    let (status, replay) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "redirect changed",
+            "event_id": "Ev-steer",
+            "channel_ts": "1700000002.000100",
+            "steer": true,
+            "expected_turn_id": tidebreak_core::TurnId::new(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["outcome"], "queued");
+    assert_eq!(replay["reason"], "steer_unsupported");
+    assert_eq!(replay["turn_id"], steered["turn_id"]);
+    assert!(fake.sends.lock().unwrap().is_empty());
+}
+
+/// Codex with a steering-capable sandbox dispatches once and a native ack
+/// makes the original event replay as `steered`.
+#[tokio::test]
+async fn external_messages_steer_accepted_when_harness_supports_it() {
+    let (router, fake, runtime, repo_id, _dir) = external_app().await;
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({
+            "external_key": "T1/C-steer-ok/1.1",
+            "repo_id": repo_id,
+            "harness": "codex",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-steer-ok/1.1").await;
+    let (status, first) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "start",
+            "event_id": "Ev-start",
+            "channel_ts": "1700000001.000100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["outcome"], "new_turn");
+    let runtime_id = uuid::Uuid::new_v4();
+    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+        sandbox_id: "sb-ext".into(),
+        state: SandboxState::Running,
+        latest_event_seq: 1,
+        events: vec![SandboxEvent {
+            seq: 1,
+            kind: "supervisor_started".into(),
+            payload: serde_json::json!({
+                "agent": "tidebreak-supervised-agent",
+                "steering_protocol": 1,
+                "runtime_id": runtime_id.to_string(),
+            }),
+            created_at: String::new(),
+        }],
+    });
+    let mut session = runtime.get_session(&owner, session_id).await.unwrap();
+    runtime
+        .remote_sessions()
+        .unwrap()
+        .driver(&runtime.db, runtime.bus.as_ref())
+        .pump(&mut session, 0)
+        .await
+        .unwrap();
+    let correlation = uuid::Uuid::new_v4();
+    let (status, pending) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "redirect",
+            "event_id": "Ev-steer",
+            "channel_ts": "1700000002.000100",
+            "steer": true,
+            "expected_turn_id": first["turn_id"],
+            "correlation_uuid": correlation,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["outcome"], "queued");
+    assert_eq!(pending["reason"], "unacknowledged");
+    assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    let target = tidebreak_core::db::code::external_steer_target_by_correlation(
+        &runtime.db,
+        &owner,
+        session_id,
+        correlation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+        sandbox_id: "sb-ext".into(),
+        state: SandboxState::Running,
+        latest_event_seq: 2,
+        events: vec![SandboxEvent {
+            seq: 2,
+            kind: "steer_ack".into(),
+            payload: serde_json::json!({
+                "sandbox_id": target.sandbox_id,
+                "runtime_id": target.runtime_id.to_string(),
+                "native_turn": target.native_turn,
+                "expected_turn_id": target.expected_turn_id.to_string(),
+                "correlation_uuid": correlation.to_string(),
+            }),
+            created_at: String::new(),
+        }],
+    });
+    runtime
+        .remote_sessions()
+        .unwrap()
+        .driver(&runtime.db, runtime.bus.as_ref())
+        .pump(&mut session, 0)
+        .await
+        .unwrap();
+    let (status, accepted) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "redirect",
+            "event_id": "Ev-steer",
+            "channel_ts": "1700000002.000100",
+            "steer": true,
+            "expected_turn_id": tidebreak_core::TurnId::new(),
+            "correlation_uuid": uuid::Uuid::new_v4(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["outcome"], "steered");
+    assert_eq!(accepted["turn_id"], pending["turn_id"]);
+    assert_eq!(accepted["steered"]["expected_turn_id"], first["turn_id"]);
+    assert_eq!(
+        accepted["steered"]["correlation_uuid"],
+        correlation.to_string()
+    );
+    assert_eq!(fake.sends.lock().unwrap().len(), 1);
+}
+
+/// Still-queued deliveries apply in channel `ts` order, not arrival order.
+#[tokio::test]
+async fn external_messages_apply_in_channel_ts_order() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &pair.token,
+        Some(serde_json::json!({
+            "external_key": "T1/C-order/1.1",
+            "repo_id": repo_id,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-order/1.1").await;
+    let (status, first) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "start",
+            "event_id": "Ev-start",
+            "channel_ts": "1700000001.000100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["outcome"], "new_turn");
+    let (status, later) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "message B",
+            "event_id": "EvB",
+            "channel_ts": "1700000003.000100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{later}");
+    assert_eq!(later["outcome"], "queued");
+    let (status, earlier) = post_external_message(
+        &router,
+        &pair.token,
+        session_id,
+        serde_json::json!({
+            "text": "message A",
+            "event_id": "EvA",
+            "channel_ts": "1700000002.000100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{earlier}");
+    assert_eq!(earlier["outcome"], "queued");
+    let queued = tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[0].message, "message A");
+    assert_eq!(queued[1].message, "message B");
+}
+
+/// Opted-in first-turn context is quoted as untrusted input and journaled.
+#[tokio::test]
+async fn external_messages_quote_first_turn_context() {
+    let (router, runtime, repo_id, service, _dir) = workspace_grant_app().await;
+    let (status, started) = call_json(
+        &router,
+        "POST",
+        "/code/grants/workspace",
+        CAROL_TOKEN,
+        Some(serde_json::json!({
+            "channel_kind": "slack",
+            "workspace_identity": "T1",
+            "display": "Acme Corp",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let nonce = started["nonce"].as_str().unwrap();
+    let confirmation_token = started["confirmation_token"].as_str().unwrap();
+    let handshake_id = started["id"].as_str().unwrap();
+    let (status, page) = call_json(
+        &router,
+        "GET",
+        &format!("/deployment/code/grants/workspace/{handshake_id}"),
+        ALICE_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let csrf = page["csrf"].as_str().unwrap();
+    let (status, _) = call_json(
+        &router,
+        "POST",
+        &format!("/deployment/code/grants/workspace/{handshake_id}/approve"),
+        ALICE_TOKEN,
+        Some(serde_json::json!({ "csrf": csrf })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, completed) = call_json(
+        &router,
+        "POST",
+        &format!("/external/connect/{nonce}/complete"),
+        confirmation_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let grant_token = completed["token"].as_str().unwrap().to_owned();
+    let (status, created) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        &grant_token,
+        Some(serde_json::json!({
+            "external_key": "T1/C-quote/1.1",
+            "repo_id": repo_id,
+            "channel_id": "C-quote",
+            "set_by": { "identity": "U1", "display": "Casey" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let session_id: tidebreak_core::SessionId =
+        serde_json::from_value(created["session_id"].clone()).unwrap();
+    let binding =
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &service, session_id)
+            .await
+            .unwrap()
+            .remove(0);
+    let message = serde_json::json!({
+        "text": "Fix the bug",
+        "event_id": "Ev-quote",
+        "channel_ts": "1700000001.000100",
+        "actor": { "external_identity": "U9", "display": "Ines" },
+        "context_opt_in": true,
+        "context_binding_id": binding.id,
+        "context": [{
+            "author": "Reporter",
+            "timestamp": "1700000000.000100",
+            "text": "The button does not submit."
+        }],
+    });
+    let (status, first) =
+        post_external_message(&router, &grant_token, session_id, message.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["outcome"], "new_turn");
+    let turn_id: tidebreak_core::TurnId = serde_json::from_value(first["turn_id"].clone()).unwrap();
+    let turn = tidebreak_core::db::code::get_turn(&runtime.db, &service, turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(turn.user_input.contains("Untrusted thread context"));
+    assert!(turn.user_input.contains("\"author\": \"Reporter\""));
+    assert!(turn.user_input.contains("The button does not submit."));
+    assert!(turn.user_input.ends_with("Current request:\nFix the bug"));
+    assert!(
+        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &service, session_id)
+            .await
+            .unwrap()[0]
+            .context_opt_in
+    );
+    let mut later = message;
+    later["event_id"] = serde_json::json!("Ev-quote-later");
+    let (status, refused) = post_external_message(&router, &grant_token, session_id, later).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(refused["kind"], "context_first_turn_only");
+}
+
 fn long_command_approval_script() -> Vec<tidebreak_harness::HarnessEvent> {
     use tidebreak_harness::{HarnessApprovalRef, HarnessEvent};
     let cmd = "x".repeat(600);
