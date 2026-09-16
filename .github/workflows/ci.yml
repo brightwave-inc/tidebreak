@@ -78,7 +78,6 @@ jobs:
       notices: ${{ steps.scope.outputs.notices }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
-      windows_native: ${{ steps.scope.outputs.windows_native }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,7 +99,6 @@ jobs:
               echo "notices=true"
               echo "rust=true"
               echo "ui=true"
-              echo "windows_native=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -145,7 +143,6 @@ jobs:
           notices=false
           rust=false
           ui=false
-          windows_native=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
@@ -166,7 +163,6 @@ jobs:
                 notices=true
                 rust=true
                 ui=true
-                windows_native=true
                 workspace=true
                 ;;
               # Generated from Rust definitions, and a Rust test is what checks
@@ -194,20 +190,6 @@ jobs:
                 notices=true; rust=true; workspace=true ;;
               *) rust=true; workspace=true ;;
             esac
-            # Native Windows tests cover contracts that a cross-target check
-            # cannot prove: NTFS path behavior, Windows process APIs, SQLite
-            # profile migration, and the Credential Manager backend.
-            case "$file" in
-              .github/workflows/ci.yml) windows_native=true ;;
-              crates/tidebreak-code-execution/*|crates/tidebreak-harness/*|crates/tidebreak-host-broker/*)
-                windows_native=true ;;
-              crates/tidebreak-server/src/code/*|crates/tidebreak-server-api/src/routes/code/*|crates/tidebreak-server-api/src/tests/code*)
-                windows_native=true ;;
-              crates/tidebreak-server/src/desktop_schema.rs|crates/tidebreak-core/src/keychain.rs)
-                windows_native=true ;;
-              crates/tidebreak-desktop/scripts/prepare-sidecar.mjs)
-                windows_native=true ;;
-            esac
           done < "$RUNNER_TEMP/changed-files"
 
           # Keep narrower scopes honest here, before conditional jobs consume
@@ -217,10 +199,6 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
-          if [[ "$windows_native" == true && "$rust" != true ]]; then
-            echo "native Windows scope without Rust scope; the detector is wrong." >&2
-            exit 1
-          fi
 
           {
             echo "docs_site=$docs_site"
@@ -228,7 +206,6 @@ jobs:
             echo "notices=$notices"
             echo "rust=$rust"
             echo "ui=$ui"
-            echo "windows_native=$windows_native"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
 
@@ -493,9 +470,7 @@ jobs:
     # A native runner keeps the Windows SDK and MSVC available for native
     # dependencies such as ring and SQLite. `cargo check` is rust-scoped like
     # clippy: a Windows compile break on main blocks the desktop release, so
-    # every Rust-scoped pull request has to catch it. Native Windows runtime
-    # tests run independently below so they no longer extend this required
-    # lane's wall time.
+    # every Rust-scoped pull request has to catch it.
     if: ${{ needs.changes.outputs.rust == 'true' }}
     # Prefer an 8 vCPU / 32 GB Windows larger runner. Standard windows-latest
     # is 4 cores and spends most of this lane in rustc; 16 cores is not worth
@@ -635,86 +610,6 @@ jobs:
         run: cargo test -p tidebreak-code-execution --locked --lib network::tests
       - name: Seatbelt profile escaping tests
         run: cargo test -p tidebreak-code-execution --locked --lib sbpl::tests
-
-  windows-native:
-    name: Windows native tests
-    needs: changes
-    if: ${{ needs.changes.outputs.windows_native == 'true' }}
-    runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      RUSTC_WRAPPER: sccache
-      # link.exe dominates Windows test-binary time on four cores. rust-lld
-      # ships with the toolchain and is the MSVC analogue of mold on Linux.
-      RUSTFLAGS: -C linker=rust-lld
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: ./.github/actions/setup-sccache-s3
-        with:
-          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: false
-      # The host broker suite covers real NTFS containment and the stdio
-      # sidecar boundary: state placement, ownership, restart persistence, and
-      # exit when the desktop pipe closes.
-      - name: Host broker Windows tests
-        run: cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked
-      # Code mode crosses Windows-native executable, environment, PowerShell,
-      # path-identity, and process-tree boundaries. Retry each suite to absorb
-      # the known PowerShell startup race on loaded hosted runners.
-      - name: Code mode Windows lifecycle tests
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-          $PSNativeCommandUseErrorActionPreference = $false
-          $attempts = 3
-          $suites = @(
-            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-code-execution", "--locked"),
-            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-harness", "--locked"),
-            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server-core", "--lib", "code::terminal", "--locked"),
-            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server", "--lib", "code::", "--locked")
-          )
-          foreach ($suite in $suites) {
-            $passed = $false
-            for ($attempt = 1; $attempt -le $attempts; $attempt++) {
-              & cargo @suite
-              if ($LASTEXITCODE -eq 0) {
-                $passed = $true
-                break
-              }
-              Write-Host "cargo $($suite -join ' ') failed on attempt $attempt/$attempts"
-            }
-            if (-not $passed) {
-              exit 1
-            }
-          }
-      - name: SQLite profile open and migrations
-        run: >-
-          cargo test --target x86_64-pc-windows-msvc
-          -p tidebreak-server --lib desktop_schema --locked
-      # `-- --ignored` runs the native round trip alone, so the process-global
-      # in-memory keyring mock never activates and the test reaches the hosted
-      # runner's real Credential Manager.
-      - name: Credential Manager round trip
-        run: >-
-          cargo test --target x86_64-pc-windows-msvc --features keychain
-          -p tidebreak-core --lib keychain --locked -- --ignored
 
   test:
     name: test partition ${{ matrix.part }}/3

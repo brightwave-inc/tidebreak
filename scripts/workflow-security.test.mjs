@@ -680,7 +680,9 @@ test("Windows cargo check is rust-scoped and skips superseded main pushes", () =
   assert.match(windowsCheck, /cargo check --target x86_64-pc-windows-msvc/);
   assert.doesNotMatch(windowsCheck, /cargo test/);
   assert.doesNotMatch(ci, /windows-ci/);
+  assert.doesNotMatch(ci, /^  windows-native:$/m);
   assert.doesNotMatch(changes, /echo "windows=/);
+  assert.doesNotMatch(changes, /windows_native/);
   assert.ok(
     skipsSupersededPush(windowsCheck),
     "a superseded main push must skip the Windows lane, not cancel it",
