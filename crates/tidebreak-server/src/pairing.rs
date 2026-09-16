@@ -1103,6 +1103,7 @@ mod tests {
                 cwd: None,
                 url: Some(serve_manual_mcp().await),
                 bearer_token_env: None,
+                oauth: false,
                 gateway_endpoint: None,
                 request_timeout_ms: 60_000,
                 enabled: true,

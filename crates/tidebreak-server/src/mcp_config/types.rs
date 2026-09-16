@@ -172,6 +172,15 @@ pub struct McpServerDefinition {
     /// resolved at connect time and never enters this type.
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+    /// Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
+    /// RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
+    /// only with `url`, and mutually exclusive with `bearer_token_env`. The
+    /// obtained tokens live in the OS credential store under
+    /// [`oauth_token_secret_key`], never in this type or the record.
+    ///
+    /// [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key
+    #[serde(default)]
+    pub oauth: bool,
     /// Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
     /// model-gateway session. The endpoint URL and its short-lived bearer are
     /// resolved from the session at every connection and never enter this
@@ -261,6 +270,7 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("cwd", &self.cwd)
             .field("url", &self.url)
             .field("bearer_token_env", &self.bearer_token_env)
+            .field("oauth", &self.oauth)
             .field("gateway_endpoint", &self.gateway_endpoint)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("enabled", &self.enabled)
@@ -385,6 +395,13 @@ impl McpServerDefinition {
             });
         }
         if let Some(url) = &self.url {
+            // OAuth servers (`self.oauth`) carry no static bearer here:
+            // `resolve_bearer_token` returns `None` because `oauth` is mutually
+            // exclusive with `bearer_token_env`. The runtime layers the
+            // refreshing OAuth bearer onto the returned client with
+            // `with_call_bearer_source(McpOAuthCallBearer)` — it owns the
+            // `SecretProvider` and the connected-app id the vault is keyed by,
+            // which this method does not receive. See `mcp_oauth_runtime`.
             let bearer_token = self.resolve_bearer_token()?;
             let headers = match &self.launch {
                 Some(launch) => {
@@ -537,7 +554,7 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// fields in declaration order, and every key is always present):
 ///
 /// ```json
-/// {"v":2,
+/// {"v":3,
 ///  "kind":"mcp_server",
 ///  "namespace":string,
 ///  "transport":"stdio"|"http"|"gateway",
@@ -548,6 +565,7 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 ///  "env_from":[string,...],
 ///  "url":string|null,
 ///  "bearer_token_env_set":bool,
+///  "oauth":bool,
 ///  "gateway_endpoint":string|null}
 /// ```
 ///
@@ -559,8 +577,11 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// bump `v`: the canonical form only ever saw the names, which are unchanged,
 /// so every grant issued before the move still matches after it. `bearer_token_env_set` records
 /// only whether a bearer name is selected. `cwd` is the configured path,
-/// lossily UTF-8. The `v:1` form excluded the server name because grants were
-/// keyed by it; app-keyed grants pin a record id instead, so `namespace`
+/// lossily UTF-8. `oauth` records whether the server hands the endpoint an
+/// OAuth-obtained token rather than a static env bearer — a different thing to
+/// have consented to run, which is why adding it bumped `v` from 2 to 3. The
+/// `v:1` form excluded the server name because grants were keyed by it;
+/// app-keyed grants pin a record id instead, so `namespace`
 /// (the configured name, which decides which `mcp__{namespace}__…` mounted
 /// names the binding covers) is now part of what the user consented to.
 /// `kind` roots the form in the connected-app vocabulary so no two kinds can
@@ -588,6 +609,7 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
         env_from: Vec<&'a str>,
         url: Option<&'a str>,
         bearer_token_env_set: bool,
+        oauth: bool,
         gateway_endpoint: Option<&'a str>,
     }
 
@@ -596,7 +618,7 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
     let mut env_from: Vec<&str> = definition.env_from.iter().map(String::as_str).collect();
     env_from.sort_unstable();
     let canonical = CanonicalDefinition {
-        v: 2,
+        v: 3,
         kind: "mcp_server",
         namespace: &definition.name,
         transport: if definition.gateway_endpoint.is_some() {
@@ -616,6 +638,7 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
         env_from,
         url: definition.url.as_deref(),
         bearer_token_env_set: definition.bearer_token_env.is_some(),
+        oauth: definition.oauth,
         gateway_endpoint: definition.gateway_endpoint.as_deref(),
     };
     let bytes = serde_json::to_vec(&canonical)

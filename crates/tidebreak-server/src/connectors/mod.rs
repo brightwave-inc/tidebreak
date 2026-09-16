@@ -25,7 +25,15 @@
 //! [`SecretProvider`]: tidebreak_core::SecretProvider
 
 mod chatgpt;
+mod mcp_oauth;
 
+pub use mcp_oauth::{
+    admit_oauth_endpoint, build_authorize_url, is_oauth_sign_in_required, oauth_client_secret_key,
+    oauth_token_secret_key, pkce_pair, resource_metadata_from_challenge, AuthorizationServerMetadata,
+    ClientRegistration, CodeExchange, DiscoveredAuthorization, McpOAuthCallBearer, McpOAuthClient,
+    McpOAuthConnection, McpOAuthCredentialVault, McpOAuthCredentials, PendingMcpSignIn, Pkce,
+    ProtectedResourceMetadata, SIGN_IN_TIMEOUT,
+};
 pub use chatgpt::{
     has_stored_chatgpt_credentials, is_chatgpt_sign_in_required, ChatGptAuth, ChatGptAuthConfig,
     ChatGptAuthorizedSession, ChatGptConnection, ChatGptCredentialVault, ChatGptCredentials,

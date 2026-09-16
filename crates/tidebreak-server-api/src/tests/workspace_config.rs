@@ -110,6 +110,7 @@ async fn preview_and_apply_refuse_overwrite_without_replace() {
                 cwd: None,
                 url: None,
                 bearer_token_env: None,
+                oauth: false,
                 gateway_endpoint: None,
                 request_timeout_ms: 60_000,
                 enabled: false,

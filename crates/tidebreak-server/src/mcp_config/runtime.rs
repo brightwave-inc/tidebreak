@@ -640,6 +640,7 @@ impl McpRuntime {
                 cwd: None,
                 url: None,
                 bearer_token_env: None,
+                oauth: false,
                 gateway_endpoint: Some(slug.clone()),
                 request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
                 enabled: true,
@@ -1226,6 +1227,46 @@ impl McpRuntime {
     /// Force a fresh connection and tool discovery for one configured server.
     pub async fn reconnect(&self, name: &str) -> Result<McpServersInfo> {
         self.reconnect_if_epoch(name, None).await
+    }
+
+    /// Begin the OAuth sign-in for one configured server: discover the
+    /// authorization server, register a client if needed, open the system
+    /// browser, and — on return — store the tokens and reconnect. The returned
+    /// [`McpOAuthStatus`] carries the browser URL while `Authorizing`.
+    ///
+    /// Skeleton: the discovery/PKCE/exchange machinery lands in a follow-up
+    /// slice. Until then this reports an explicit, secret-free not-implemented
+    /// error rather than panicking, so the route surface is exercisable.
+    pub async fn oauth_connect(
+        &self,
+        name: &str,
+    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
+        let _ = name;
+        Err(AgentError::config("MCP OAuth connect is not yet implemented"))
+    }
+
+    /// Clear a server's stored OAuth session and drop its live connection.
+    ///
+    /// Skeleton: see [`Self::oauth_connect`].
+    pub async fn oauth_disconnect(
+        &self,
+        name: &str,
+    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
+        let _ = name;
+        Err(AgentError::config(
+            "MCP OAuth disconnect is not yet implemented",
+        ))
+    }
+
+    /// Report one server's current OAuth connection state without mutating it.
+    ///
+    /// Skeleton: see [`Self::oauth_connect`].
+    pub async fn oauth_status(
+        &self,
+        name: &str,
+    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
+        let _ = name;
+        Err(AgentError::config("MCP OAuth status is not yet implemented"))
     }
 
     async fn reconnect_if_epoch(

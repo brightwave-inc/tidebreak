@@ -276,6 +276,7 @@ fn definition_for(
         cwd: None,
         url: None,
         bearer_token_env: None,
+        oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: true,
