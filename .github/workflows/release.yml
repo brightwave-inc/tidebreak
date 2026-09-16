@@ -9,23 +9,24 @@ on:
         description: Leave blank to publish the current draft. Set a tag only to retry a draft or release created with the current artifact contract.
         required: false
         type: string
-      # Windows and Linux packaging is about to pause: nobody is asking for
-      # newer builds, and the macOS lane is the one that gates every release.
-      # `macos` skips their jobs and carries the last published Windows and
-      # Linux downloads forward unchanged. Change this default to `macos` only
-      # after a release containing the desktop updater's TargetNotFound
-      # handling (#3462) has shipped to Windows and Linux; before that, a feed
-      # with no Windows or Linux entry makes every installed client there
-      # report a failed update check on startup. A retry of a release must
-      # repeat the selection its original run used.
+      # Windows and Linux packaging is paused: nobody is asking for newer
+      # builds, and the macOS lane is the one that gates every release. The
+      # jobs stay in this file; dispatch with `all` to build them again for
+      # one release, or change this default to resume them for every release.
+      # `macos` carries the last published Windows and Linux downloads forward
+      # unchanged. v0.109.0 shipped the desktop updater's TargetNotFound
+      # handling (#3462) to Windows and Linux first, so a feed without their
+      # entries reads as "no update" there. A retry of a release must repeat
+      # the selection its original run used; releases before v0.110.0 used
+      # `all`.
       platforms:
         description: Desktop platforms to package. `macos` carries the last published Windows and Linux downloads forward unchanged.
         required: false
         type: choice
-        default: all
+        default: macos
         options:
-          - all
           - macos
+          - all
 
 permissions:
   contents: read
@@ -565,7 +566,7 @@ jobs:
             --sha "$RELEASE_SHA" \
             --published-at "$RELEASE_PUBLISHED_AT" \
             --base-url "$RELEASE_BASE_URL" \
-            --platforms "${{ inputs.platforms || 'all' }}"
+            --platforms "${{ inputs.platforms || 'macos' }}"
 
           manifest_digest="$(sha256sum "$manifest_path" | cut -d ' ' -f 1)"
           [[ "$(jq -r '.Metadata.sha256 // empty' <<<"$manifest_head")" = "$manifest_digest" ]] || {
@@ -2272,7 +2273,7 @@ jobs:
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
       RELEASE_PUBLISHED_AT: ${{ needs.finalize_release.outputs.published_at }}
       RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
-      RELEASE_PLATFORMS: ${{ inputs.platforms || 'all' }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms || 'macos' }}
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
@@ -2653,7 +2654,7 @@ jobs:
     env:
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-      RELEASE_PLATFORMS: ${{ inputs.platforms || 'all' }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms || 'macos' }}
     steps:
       - name: Download the verified macOS build
         if: ${{ needs.validate.outputs.draft == 'true' }}

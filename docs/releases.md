@@ -184,7 +184,7 @@ automatic.
    Debian packages; every package is signed with the Tauri updater key after
    packaging. A fresh release cannot continue unless every operating-system
    and architecture build the dispatch selected succeeds. Windows and Linux
-   can be paused per release; see [Paused platforms](#paused-platforms).
+   are paused by default; see [Paused platforms](#paused-platforms).
 8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
@@ -253,26 +253,24 @@ silently republishing a different release shape.
 
 ### Paused platforms
 
-Windows and Linux packaging can be paused per release. Nobody is asking for
-newer builds, and the macOS lane already gates every release, so building
-three platforms only costs runner time and adds failure surface. The
-`platforms` input on the release workflow records the choice. The Windows and
-Linux jobs, artifact downloads, and manifest entries all key off it: `all`
-builds every platform and `macos` skips the Windows and Linux jobs. The
-input's default is what a draft publishes with; change it to pause or resume
-those platforms for every release, or dispatch the workflow with the other
-value for one release. A retry of an existing release must repeat the
-selection its original run used, because the hosted manifest is validated
-against that platform set.
+Windows and Linux packaging is paused. Nobody is asking for newer builds, and
+the macOS lane already gates every release, so building three platforms only
+costs runner time and adds failure surface. The `platforms` input on the
+release workflow records the choice. The Windows and Linux jobs, artifact
+downloads, and manifest entries all key off it: `all` builds every platform
+and `macos` skips the Windows and Linux jobs. The input's default is what a
+draft publishes with; change it to resume those platforms for every release,
+or dispatch the workflow with `all` for one release. A retry of an existing
+release must repeat the selection its original run used, because the hosted
+manifest is validated against that platform set.
 
-The default stays `all` until a release containing the desktop updater's
-missing-platform handling (`TargetNotFound` reads as "no update", added in
-#3462) has shipped to Windows and Linux. Before that, a `latest.json` with
-no Windows or Linux entry makes every installed client on those platforms
-report a failed update check on startup. Keeping the old entries is not an
-alternative: the feed carries one version, so a client would install the same
-old package on every check. Flip the default to `macos` in the release after
-that one ships.
+The default is `macos`. It flipped after v0.109.0, the release that shipped
+the desktop updater's missing-platform handling (`TargetNotFound` reads as
+"no update", added in #3462) to Windows and Linux; an older client would
+otherwise report a failed update check on startup once `latest.json` dropped
+its platform. Keeping the old entries in the feed was not an alternative: the
+feed carries one version, so a client would install the same old package on
+every check. Retry a release at or before v0.109.0 with `all`.
 
 While paused, a release still keeps the README's permanent download links
 working: the `attach_downloads` job copies the stable-name Windows and Linux
