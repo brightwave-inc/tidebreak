@@ -2,44 +2,22 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { McpOAuthStatus } from "@/generated/wire";
 import { McpHealthChip, McpOAuthControl } from "@/settings/McpPanel";
 import { SettingsSection } from "@/settings/primitives";
+import {
+  mcpOauthAccessDenied,
+  mcpOauthAuthorizing,
+  mcpOauthConnected,
+  mcpOauthExpired,
+  mcpOauthNotConnected,
+  mcpOauthUnsupported,
+} from "./fixtures";
 
 const states: Array<{ label: string; status: McpOAuthStatus }> = [
-  {
-    label: "Not connected",
-    status: { state: "not_connected" },
-  },
-  {
-    label: "Authorizing",
-    status: {
-      state: "authorizing",
-      pending_authorization_url: "https://auth.example.test/authorize",
-    },
-  },
-  {
-    label: "Connected",
-    status: { state: "connected" },
-  },
-  {
-    label: "Expired",
-    status: {
-      state: "expired",
-      error: "Refresh was rejected. Sign in again.",
-    },
-  },
-  {
-    label: "Access denied",
-    status: {
-      state: "access_denied",
-      error: "The authorization server refused this account.",
-    },
-  },
-  {
-    label: "Unsupported",
-    status: {
-      state: "unsupported",
-      error: "This endpoint does not offer OAuth.",
-    },
-  },
+  { label: "Not connected", status: mcpOauthNotConnected },
+  { label: "Authorizing", status: mcpOauthAuthorizing },
+  { label: "Connected", status: mcpOauthConnected },
+  { label: "Expired", status: mcpOauthExpired },
+  { label: "Access denied", status: mcpOauthAccessDenied },
+  { label: "Unsupported", status: mcpOauthUnsupported },
 ];
 
 function OauthStatesShowcase() {
