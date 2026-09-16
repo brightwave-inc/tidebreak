@@ -7483,7 +7483,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "sea-orm",
  "serde",
  "serde_json",
  "tempfile",

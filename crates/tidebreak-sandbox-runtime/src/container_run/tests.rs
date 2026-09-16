@@ -23,7 +23,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
-use sea_orm::ConnectOptions;
 use tidebreak_core::{
     AdmitSandboxAgentRunOutcome, AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation,
     AgentRunId, AgentRunStatus, CallId, CancelToken, Chat, ChatRequest, DbStore, ModelProvider,
@@ -1095,20 +1094,17 @@ impl SandboxBackend for HeldProvisionBackend {
 // --- Store / admission fixture ------------------------------------------------
 
 async fn store() -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
-    store_with_pool(None).await
+    store_with_pool(1).await
 }
 
-async fn store_with_pool(
-    max_connections: Option<u32>,
-) -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
+async fn store_with_pool(max_connections: u32) -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
-    let mut options = ConnectOptions::new(url);
-    options.acquire_timeout(Duration::from_secs(120));
-    if let Some(max_connections) = max_connections {
-        options.max_connections(max_connections);
-    }
-    let store: Arc<dyn Store> = Arc::new(DbStore::connect_with_options(options).await.unwrap());
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect_test_sqlite_fixture_with_max_connections(&url, max_connections)
+            .await
+            .unwrap(),
+    );
     let chat = Chat {
         id: SessionId::new(),
         project_id: None,
@@ -1903,7 +1899,7 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
     // contend for the same writer while eight model steps run, which is what
     // made the hang-guard look like a flake.
     tokio::time::timeout(Duration::from_secs(60), async {
-        let (_dir, store, chat) = store_with_pool(Some(2)).await;
+        let (_dir, store, chat) = store_with_pool(2).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
 
         let backend = MockBackend::spawning();
