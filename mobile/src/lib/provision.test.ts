@@ -13,7 +13,17 @@ describe("parsePairingScan", () => {
     });
   });
 
-  it.each(["tidebreak-staging", "tidebreak-dev"])(
+  it.each([
+    "tidebreak-staging",
+    "tidebreak-dev",
+    // The gateway console's pairing page still encodes its QR with the
+    // Tidewatch schemes (TidewatchPage.tsx predates the merged app). The
+    // session behind the link is client-neutral, so the envelope scheme is
+    // accepted; only the in-app scanner ever reads it.
+    "mg-tidewatch",
+    "mg-tidewatch-staging",
+    "mg-tidewatch-dev",
+  ])(
     "accepts a %s build's scheme too",
     (scheme) => {
       // Deliberate: a staging phone must be able to scan a production
@@ -30,8 +40,8 @@ describe("parsePairingScan", () => {
   );
 
   it.each([
-    "mg-tidewatch://provision?gateway=https%3A%2F%2Fgateway.example&session=mg_ps_abc",
     "tidebreak-other://provision?gateway=https%3A%2F%2Fgateway.example",
+    "mg-tidewatch-other://provision?gateway=https%3A%2F%2Fgateway.example",
     "javascript://provision?gateway=https%3A%2F%2Fgateway.example",
   ])("refuses the unallowlisted scheme in %j", (payload) => {
     expect(parsePairingScan(payload)).toBeNull();
