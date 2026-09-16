@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stageComputerUseHelper } from "./prepare-computer-use-helper.mjs";
@@ -24,6 +24,31 @@ const targetRoot = process.env.CARGO_TARGET_DIR
   : join(workspaceDir, "target");
 const destinationDir = join(desktopDir, "binaries");
 mkdirSync(destinationDir, { recursive: true });
+
+/**
+ * The environment Cargo runs under for the sidecar build.
+ *
+ * Tauri exports `MACOSX_DEPLOYMENT_TARGET` from `bundle.macOS.minimumSystemVersion`
+ * when it compiles the desktop crate. The build scripts of `ring`, `aws-lc-sys`,
+ * `libsqlite3-sys`, and `objc2-exception-helper` declare that variable as an
+ * input, so a sidecar build that ran without it leaves every crate above them,
+ * tidebreak-core included, dirty for Tauri's pass. Setting the same value here
+ * keeps the two passes' fingerprints identical on macOS.
+ */
+function cargoEnvironment() {
+  const env = { ...process.env };
+  if (triple.includes("apple") && !env.MACOSX_DEPLOYMENT_TARGET) {
+    const config = JSON.parse(
+      readFileSync(join(desktopDir, "tauri.conf.json"), "utf8"),
+    );
+    const minimum = config?.bundle?.macOS?.minimumSystemVersion;
+    if (typeof minimum === "string" && minimum) {
+      env.MACOSX_DEPLOYMENT_TARGET = minimum;
+    }
+  }
+  return env;
+}
+const cargoEnv = cargoEnvironment();
 
 // Tauri's synthetic universal target builds the app once per real Rust target
 // and lipo-combines the app executable. Its bundler expects an already-combined
@@ -70,7 +95,11 @@ function buildSidecars(target) {
   cargoArgs.push("--locked");
   if (release) cargoArgs.push("--release", "--features", "tauri/custom-protocol");
   if (configuredTarget) cargoArgs.push("--target", target);
-  execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
+  execFileSync("cargo", cargoArgs, {
+    cwd: workspaceDir,
+    stdio: "inherit",
+    env: cargoEnv,
+  });
 }
 
 /**
