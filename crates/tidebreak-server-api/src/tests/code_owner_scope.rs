@@ -1319,6 +1319,83 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
 
 const SLACK_TOKEN: &str = "slack-service-token-for-workspace-management";
 
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_parent_snapshots_and_debug_hide_private_children() {
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (_, workspace) = register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
+    let sessions = create_sibling_sessions(&client, addr, ALICE_TOKEN, &workspace, 3).await;
+    let owner = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let parent_id = sessions[0].parse().unwrap();
+    for child in &sessions[1..] {
+        tidebreak_core::db::code::set_session_context(
+            &runtime.db,
+            &owner,
+            child.parse().unwrap(),
+            None,
+            Some(parent_id),
+            Some(child),
+        )
+        .await
+        .unwrap();
+    }
+    for visible in &sessions[..2] {
+        grant_access(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            visible,
+            "principal:user:bob",
+            "view",
+        )
+        .await;
+    }
+    crate::code::session_tree::publish_for_parent(&runtime.db, &runtime.bus, &owner, parent_id)
+        .await;
+
+    for (token, count) in [(ALICE_TOKEN, 2), (BOB_TOKEN, 1)] {
+        for suffix in ["", "/debug"] {
+            let body: serde_json::Value = client
+                .get(format!("http://{addr}/sessions/{parent_id}{suffix}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let snapshot = if suffix.is_empty() {
+                &body
+            } else {
+                &body["session"]
+            };
+            let children = snapshot["children"].as_array().unwrap();
+            assert_eq!(children.len(), count, "{body}");
+            assert!(snapshot["wait"].is_null());
+            if token == BOB_TOKEN {
+                assert_eq!(children[0]["id"], sessions[1]);
+            }
+            if suffix == "/debug" {
+                let trees: Vec<_> = body["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|frame| frame["event"]["type"] == "session_tree")
+                    .collect();
+                assert_eq!(trees.len(), 1, "{body}");
+                let children = trees[0]["event"]["children"].as_array().unwrap();
+                assert_eq!(children.len(), count, "{body}");
+                if token == BOB_TOKEN {
+                    assert_eq!(children[0]["id"], sessions[1]);
+                }
+            }
+        }
+    }
+}
+
 /// Management borrows only a Slack service workspace. Ownership, host execution,
 /// sibling transcripts, and sharing remain separate permissions.
 #[tokio::test(flavor = "multi_thread")]

@@ -23,11 +23,22 @@ pub async fn attach_to_snapshot(
     owner: &OwnerId,
     snapshot: &mut SessionSnapshot,
     grant_id: Option<CodeGrantId>,
+    principal: Option<&OwnerId>,
 ) {
     match compute(db, owner, snapshot.id, grant_id).await {
         Ok((children, wait)) => {
-            snapshot.children = children;
-            snapshot.wait = wait;
+            let event = authorize_event(
+                db,
+                owner,
+                None,
+                principal,
+                Event::SessionTree { children, wait },
+            )
+            .await;
+            if let Event::SessionTree { children, wait } = event {
+                snapshot.children = children;
+                snapshot.wait = wait;
+            }
         }
         Err(error) => {
             tracing::warn!(
