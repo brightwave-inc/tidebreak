@@ -195,6 +195,8 @@ fn session() -> SessionSnapshot {
             channel_kind: "slack".to_owned(),
             external_key: "T0/C1/1756700000.000100".to_owned(),
         }),
+        children: Vec::new(),
+        wait: None,
     }
 }
 
@@ -1106,6 +1108,22 @@ fn event_frames() -> Vec<Fixture> {
         (
             "event: compaction_finished (internal engine)",
             frame(65, Event::CompactionFinished { compacted: true }),
+        ),
+        (
+            "event: session_tree",
+            frame(
+                66,
+                Event::SessionTree {
+                    children: vec![tidebreak_core::SessionTreeChild {
+                        id: session_id(),
+                        title: Some("Inspect the parser".to_owned()),
+                        status: tidebreak_core::SessionTreeChildStatus::Running,
+                        attention: false,
+                        fenced: false,
+                    }],
+                    wait: None,
+                },
+            ),
         ),
     ];
     frames

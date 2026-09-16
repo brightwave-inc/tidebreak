@@ -1284,8 +1284,12 @@ export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;
 export type WorkspaceTitleProposal = WireWorkspaceTitleProposal;
 export type WorkspaceId = WireWorkspaceId;
 export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
-/** One durable conversation with an external coding engine. */
-export type CodeSessionSnapshot = WireCodeSessionSnapshot;
+/** One durable conversation. Older servers omit the child-tree fields. */
+export type CodeSessionSnapshot = Omit<
+  WireCodeSessionSnapshot,
+  "children" | "wait"
+> &
+  Partial<Pick<WireCodeSessionSnapshot, "children" | "wait">>;
 export type CodeApprovalDecisionBody = WireApprovalDecisionBody;
 export type CodeApprovalDecision = WireApprovalDecisionBody["decision"];
 export type CodeGrantSnapshot = WireCodeGrantSnapshot;

@@ -24,8 +24,8 @@ use tidebreak_core::{
     CodeTriggerCondition, CodeTriggerId, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace,
     CodeWorkspaceStatus, Diffstat, Event, ExecutionLocation, FenceReason, FileChangeKind,
     HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction,
-    ReasoningEffort, RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus,
-    WorkspaceId,
+    ReasoningEffort, RepoId, Session, SessionKind, SessionLifecycle, SessionTreeChild,
+    SessionTreeWait, Turn, TurnId, TurnStatus, WorkspaceId,
 };
 
 /// One adapter grant, as the desktop grants list renders it. Carries no
@@ -320,6 +320,14 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub acts_as: Option<tidebreak_core::ActsAs>,
+    /// Direct children this viewer may see. Always present so a reconnect
+    /// can tell an empty tree from a legacy snapshot that omitted the field.
+    #[serde(default)]
+    pub children: Vec<SessionTreeChild>,
+    /// A parent wait that is actually known. Always present (`null` when
+    /// none); never inferred by counting children.
+    #[serde(default)]
+    pub wait: Option<SessionTreeWait>,
 }
 
 impl SessionSnapshot {
@@ -370,6 +378,8 @@ impl From<Session> for SessionSnapshot {
             external_origins: None,
             execution_location: session.execution_location,
             acts_as: Some(acts_as),
+            children: Vec::new(),
+            wait: None,
         }
     }
 }

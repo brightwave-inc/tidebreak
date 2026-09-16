@@ -1118,6 +1118,13 @@ pub async fn external_events(
             .into_iter()
             .filter(|binding| binding.grant_id == grant.id),
     );
+    crate::code::session_tree::attach_to_snapshot(
+        &runtime.db,
+        &grant.owner,
+        &mut session_snapshot,
+        Some(grant.id),
+    )
+    .await;
     let owner = grant.owner.clone();
     let grant_id = grant.id;
     // Subscribe before deciding to serve, then re-read the durable row while
@@ -1156,7 +1163,7 @@ pub async fn external_events(
             id,
             query.after,
             None,
-            super::session_events::Viewer::Adapter,
+            super::session_events::Viewer::Adapter { grant_id },
         );
         tokio::pin!(stream);
         loop {
