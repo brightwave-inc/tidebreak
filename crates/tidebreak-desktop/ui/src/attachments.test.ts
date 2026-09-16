@@ -101,6 +101,22 @@ describe("attachHeldChatFiles", () => {
     ).toEqual(["notes.md", "data.csv"]);
   });
 
+  it("keeps mislabeled markdown and csv on the document path", async () => {
+    const ingest = vi.fn(async () => ({ document_id: "doc-md" }));
+    const held = await attachHeldChatFiles(clientWith(ingest), "chat-1", [
+      new File(["# Notes\n"], "notes.md", { type: "image/heic" }),
+      new File(["a,b\n1,2\n"], "data.csv", { type: "image/png" }),
+    ]);
+
+    expect(held.images).toEqual([]);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    expect(
+      held.documents?.results.map((result) =>
+        result.status === "imported" ? result.document.displayName : result,
+      ),
+    ).toEqual(["notes.md", "data.csv"]);
+  });
+
   it("posts nothing when the selection is all images", async () => {
     const ingest = vi.fn(async () => ({ document_id: "doc-4" }));
     const held = await attachHeldChatFiles(clientWith(ingest), "chat-1", [

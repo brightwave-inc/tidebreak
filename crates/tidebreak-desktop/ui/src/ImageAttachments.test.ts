@@ -194,6 +194,15 @@ describe("attaching images", () => {
     expect(
       imageAttachmentRejection(
         [],
+        [
+          { name: "notes.md", type: "image/heic", size: 10 },
+          { name: "data.csv", type: "image/tiff", size: 10 },
+        ],
+      ),
+    ).toBeNull();
+    expect(
+      imageAttachmentRejection(
+        [],
         [{ type: "image/png", size: 17 * 1024 * 1024 }],
       ),
     ).toMatch(/16 MB or smaller/);
@@ -246,6 +255,17 @@ describe("drags and drops", () => {
       "chart.png",
     ]);
     expect(imageFilesFrom(null)).toEqual([]);
+    const mislabeled = {
+      types: ["Files"],
+      files: [
+        new File(["# Notes\n"], "notes.md", { type: "image/heic" }),
+        new File(["a,b\n1,2\n"], "data.csv", { type: "image/tiff" }),
+        new File([""], "chart.png", { type: "image/png" }),
+      ],
+    } as unknown as DataTransfer;
+    expect(imageFilesFrom(mislabeled).map((file) => file.name)).toEqual([
+      "chart.png",
+    ]);
   });
 
   it("makes a drop the app did not claim inert instead of navigating", () => {
