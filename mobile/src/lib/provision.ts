@@ -10,10 +10,14 @@
  * with a payload from an untrusted source, and that is entirely this module's
  * job:
  *
- * - **Scheme allowlist.** Only this app's own schemes are provision links.
- *   All three variants are accepted rather than just the running build's, so
- *   a staging phone can scan a production console's code — the payload is
- *   inert either way, and the gateway URL is re-validated before use.
+ * - **Scheme allowlist.** This app's own schemes are provision links, plus
+ *   the Tidewatch schemes the gateway console still encodes its pairing QR
+ *   with (`TidewatchPage.tsx` predates the merged app; the payload is inert
+ *   and only the in-app scanner reads it — none of the foreign schemes are
+ *   registered with the OS). All variants are accepted rather than just the
+ *   running build's, so a staging phone can scan a production console's code
+ *   — the payload is inert either way, and the gateway URL is re-validated
+ *   before use.
  * - **Handle shape.** Anything that is not an `mg_ps_` session handle is
  *   dropped rather than passed on, so a crafted link cannot smuggle an
  *   arbitrary string into the claim form.
@@ -28,11 +32,20 @@
 import { PAIRING_SESSION_PREFIX } from "./pairing";
 import { UrlValidationError, validatedBaseUrl } from "./url";
 
-/** This app's registered schemes, across all three build variants. */
+/**
+ * Schemes accepted as provision links: this app's registered schemes across
+ * all three build variants, and the Tidewatch schemes the gateway console
+ * renders in its pairing QR. The pairing session behind either is
+ * client-neutral (the claim names its own client_id), so the envelope scheme
+ * carries no meaning beyond "this is a pairing invitation".
+ */
 const PROVISION_SCHEMES = new Set([
   "tidebreak:",
   "tidebreak-staging:",
   "tidebreak-dev:",
+  "mg-tidewatch:",
+  "mg-tidewatch-staging:",
+  "mg-tidewatch-dev:",
 ]);
 
 /** The deep-link host that means "pair with this gateway". */
