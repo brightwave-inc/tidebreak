@@ -3064,14 +3064,17 @@ test("Windows and Linux packaging is paused behind the platforms input", () => {
   const release = workflows["release.yml"];
 
   // The pause is a dispatch input, so one release can build every platform
-  // without a code change, and `macos` is the default every draft publishes.
+  // without a code change. The default is what every draft publishes with;
+  // the jobs that read it fall back to the same value.
   const input = release.match(
     /^      platforms:\n(?:        .*\n)+?        options:\n(?:          - .*\n)+/m,
   )?.[0];
   assert.ok(input, "release.yml must declare the platforms input");
   assert.match(input, /type: choice/);
-  assert.match(input, /default: macos/);
-  assert.match(input, /- macos\n\s+- all/);
+  const platformDefault = /default: (all|macos)\n/.exec(input)?.[1];
+  assert.ok(platformDefault, "the platforms input must default to all or macos");
+  assert.match(input, /- all\n/);
+  assert.match(input, /- macos\n/);
 
   for (const jobName of [
     "prepare_windows",
@@ -3100,11 +3103,12 @@ test("Windows and Linux packaging is paused behind the platforms input", () => {
         `${jobName} must accept a skipped ${build} only when the platforms input paused it`,
       );
     }
-    assert.match(job, /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \|\| 'macos' \}\}/);
-    assert.doesNotMatch(
+    assert.match(
       job,
-      /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \}\}\n/,
-      `${jobName} must default an unset platforms input to macos`,
+      new RegExp(
+        `RELEASE_PLATFORMS: \\$\\{\\{ inputs\\.platforms \\|\\| '${platformDefault}' \\}\\}`,
+      ),
+      `${jobName} must fall back to the input's default, ${platformDefault}`,
     );
   }
 
@@ -3114,7 +3118,9 @@ test("Windows and Linux packaging is paused behind the platforms input", () => {
   assert.match(publishJob, /prepare-published-release\.mjs[\s\S]*?--platforms "\$RELEASE_PLATFORMS"/);
   assert.match(
     workflowJob(release, "inspect_hosted"),
-    /prepare-published-release\.mjs[\s\S]*?--platforms "\$\{\{ inputs\.platforms \|\| 'macos' \}\}"/,
+    new RegExp(
+      `prepare-published-release\\.mjs[\\s\\S]*?--platforms "\\$\\{\\{ inputs\\.platforms \\|\\| '${platformDefault}' \\}\\}"`,
+    ),
   );
 
   // Paused platforms download nothing, and the README's permanent links keep
