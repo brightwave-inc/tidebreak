@@ -1,3 +1,4 @@
+import type { McpOAuthStatus } from "@/generated/wire";
 import type {
   Attention,
   CodeDeliveryPullRequestDetail,
@@ -2419,3 +2420,25 @@ export const memoryTracking: MemoryRecord = {
   },
   observation_count: 2,
 };
+
+export function mcpOAuthStatus(
+  state: McpOAuthStatus["state"],
+  extras: Omit<McpOAuthStatus, "state"> = {},
+): McpOAuthStatus {
+  return { state, ...extras };
+}
+
+export const mcpOauthNotConnected = mcpOAuthStatus("not_connected");
+export const mcpOauthAuthorizing = mcpOAuthStatus("authorizing", {
+  pending_authorization_url: "https://auth.example.test/authorize",
+});
+export const mcpOauthConnected = mcpOAuthStatus("connected");
+export const mcpOauthExpired = mcpOAuthStatus("expired", {
+  error: "Refresh was rejected. Sign in again.",
+});
+export const mcpOauthAccessDenied = mcpOAuthStatus("access_denied", {
+  error: "The authorization server refused this account.",
+});
+export const mcpOauthUnsupported = mcpOAuthStatus("unsupported", {
+  error: "This endpoint does not offer OAuth.",
+});
