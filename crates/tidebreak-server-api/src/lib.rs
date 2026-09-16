@@ -19,8 +19,9 @@ pub(crate) use core::{
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
     exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment,
     managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
-    model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal, providers,
-    runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames, workspace_config,
+    model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
+    providers, runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames,
+    workspace_config,
 };
 #[cfg(test)]
 pub(crate) use core::{

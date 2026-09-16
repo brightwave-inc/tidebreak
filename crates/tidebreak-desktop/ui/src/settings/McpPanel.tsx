@@ -243,8 +243,7 @@ export function McpOAuthControl({
 
 function oauthStatusOf(server: McpServerInfo): McpOAuthStatus | null {
   if (transportOf(server) !== "http" || !server.oauth) return null;
-  const extra = server as McpServerInfo & { oauth_status?: McpOAuthStatus };
-  return extra.oauth_status ?? { state: "not_connected" };
+  return server.oauth_status ?? { state: "not_connected" };
 }
 
 /**

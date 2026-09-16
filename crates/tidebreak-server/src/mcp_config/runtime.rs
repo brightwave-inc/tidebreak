@@ -476,33 +476,70 @@ impl McpRuntime {
     }
 
     pub async fn info(&self) -> McpServersInfo {
-        let state = self.state.lock().await;
-        McpServersInfo {
-            servers: state
-                .definitions
-                .iter()
-                .map(|definition| {
-                    let managed = state.servers.get(&definition.name);
-                    McpServerInfo {
-                        health: managed.map_or(
-                            if definition.enabled {
-                                McpHealth::Initializing
-                            } else {
-                                McpHealth::Disabled
-                            },
-                            |server| server.health,
-                        ),
-                        tool_count: managed
-                            .and_then(|server| server.client.as_ref())
-                            .map_or(0, |client| client.tools().count()),
-                        diagnostic: managed.and_then(|server| server.diagnostic.clone()),
-                        resolved_command: managed
-                            .and_then(|server| server.resolved_command.clone()),
-                        curated: curation(definition),
-                        definition: definition.clone(),
-                    }
-                })
-                .collect(),
+        // Snapshot the projection under a short lock, recording the
+        // connected-app id of every OAuth server, then release the lock before
+        // touching the credential store. `oauth_status_for_id` reads the OS
+        // keychain, which must never run while the state lock is held, and
+        // re-locking to call `oauth_status` from here would deadlock.
+        let (mut servers, oauth_ids) = {
+            let state = self.state.lock().await;
+            let mut servers = Vec::with_capacity(state.definitions.len());
+            let mut oauth_ids: Vec<(usize, Option<ConnectedAppId>)> = Vec::new();
+            for (index, definition) in state.definitions.iter().enumerate() {
+                let managed = state.servers.get(&definition.name);
+                if definition.oauth {
+                    oauth_ids.push((index, state.ids.get(&definition.name).copied()));
+                }
+                servers.push(McpServerInfo {
+                    health: managed.map_or(
+                        if definition.enabled {
+                            McpHealth::Initializing
+                        } else {
+                            McpHealth::Disabled
+                        },
+                        |server| server.health,
+                    ),
+                    tool_count: managed
+                        .and_then(|server| server.client.as_ref())
+                        .map_or(0, |client| client.tools().count()),
+                    diagnostic: managed.and_then(|server| server.diagnostic.clone()),
+                    resolved_command: managed.and_then(|server| server.resolved_command.clone()),
+                    curated: curation(definition),
+                    oauth_status: None,
+                    definition: definition.clone(),
+                });
+            }
+            (servers, oauth_ids)
+        };
+        for (index, id) in oauth_ids {
+            servers[index].oauth_status = Some(self.oauth_status_for_id(id).await);
+        }
+        McpServersInfo { servers }
+    }
+
+    /// The OAuth status of one server given its resolved connected-app id,
+    /// read from the credential store with no state lock held. `None` id, a
+    /// missing session, or a vault error all read as `NotConnected`: the user
+    /// has no usable session and Connect is the next step. A stored session is
+    /// `Connected` while its access token is fresh or it still holds a refresh
+    /// token, and `Expired` once neither remains.
+    async fn oauth_status_for_id(&self, id: Option<ConnectedAppId>) -> McpOAuthStatus {
+        let Some(id) = id else {
+            return McpOAuthStatus::not_connected();
+        };
+        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
+        match vault.load().await {
+            Ok(Some(credentials)) => {
+                if credentials.access_is_fresh() || credentials.refresh_token.is_some() {
+                    McpOAuthStatus::connected()
+                } else {
+                    McpOAuthStatus::failed(
+                        McpOAuthState::Expired,
+                        "the MCP OAuth session has expired",
+                    )
+                }
+            }
+            Ok(None) | Err(_) => McpOAuthStatus::not_connected(),
         }
     }
 
@@ -1274,6 +1311,18 @@ impl McpRuntime {
                 .ok_or_else(|| AgentError::config("MCP server record is missing"))?;
             (definition, id)
         };
+        // Managed lockdown gates every other connect and reconnect path, and an
+        // OAuth server is a remote (`url`, no `command`) definition — exactly
+        // what `RemoteManual` locks. Refuse the sign-in before it opens a
+        // browser or stores credentials, so authorization cannot smuggle a
+        // remote mount past the egress restriction lockdown enforces.
+        let lockdown = self.manual_lockdown().await;
+        if manual_lockdown_applies(&definition, lockdown) {
+            return Ok(McpOAuthStatus::failed(
+                McpOAuthState::Unsupported,
+                "managed policy has locked this MCP server",
+            ));
+        }
         let resource = definition
             .url
             .as_deref()
@@ -1301,14 +1350,19 @@ impl McpRuntime {
 
         let (listeners, redirect_uri) = bind_mcp_loopback().await?;
         let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
-        let mut registration = match vault.load_registration().await? {
-            Some(existing) if !existing.client_id.is_empty() => existing,
-            _ => {
-                client
-                    .register(registration_endpoint, &redirect_uri)
-                    .await?
-            }
-        };
+        // Register a fresh public client for this sign-in rather than reusing a
+        // stored one. A loopback redirect binds an ephemeral port (RFC 8252
+        // §7.3), so a client registered for an earlier sign-in carries a
+        // different port than the one just bound. Reusing it would send an
+        // authorize request whose `redirect_uri` the authorization server never
+        // registered — it may reject the request or fall back to a different
+        // registered redirect, and neither PKCE nor state makes an unregistered
+        // redirect safe. Registering per sign-in keeps the redirect and the
+        // client the server has on file in lockstep. Refresh needs no redirect
+        // and still reuses the stored registration.
+        let mut registration = client
+            .register(registration_endpoint, &redirect_uri)
+            .await?;
         registration.token_endpoint = Some(discovered.token_endpoint.as_str().to_string());
         if registration.scopes.is_empty() {
             registration.scopes = discovered.scopes_supported.clone();
@@ -1654,6 +1708,11 @@ impl McpRuntime {
                         resolved_command: managed
                             .and_then(|server| server.resolved_command.clone()),
                         curated: curation(definition),
+                        // This projection is synchronous and holds the state
+                        // lock, so it cannot read the credential store. Callers
+                        // that need the OAuth status use the async `info`; the
+                        // reconnect paths that build this only render health.
+                        oauth_status: None,
                         definition: definition.clone(),
                     }
                 })

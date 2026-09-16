@@ -14,6 +14,7 @@ use tidebreak_mcp::McpClient;
 use tokio::process::Command;
 
 use crate::mcp_curated::McpCuration;
+use crate::mcp_oauth_runtime::McpOAuthStatus;
 
 use super::validation::validate_servers;
 
@@ -801,6 +802,13 @@ pub struct McpServerInfo {
     /// usable, just not something we have driven ourselves. Derived from the
     /// definition on every read, never stored.
     pub curated: Option<McpCuration>,
+    /// OAuth connection status for a remote HTTP server that authenticates
+    /// with OAuth. Absent for stdio, gateway, and static-token servers. Read
+    /// from the OS credential store per request, never stored in the
+    /// definition. The status carries no token material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub oauth_status: Option<McpOAuthStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]

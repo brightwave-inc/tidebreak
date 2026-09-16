@@ -1599,6 +1599,7 @@ mod tests {
                         tested_on: "2026-08-01".into(),
                         notes: "Read and write under one root.".into(),
                     }),
+                    oauth_status: None,
                 },
                 McpServerInfo {
                     definition: gateway,
@@ -1607,6 +1608,7 @@ mod tests {
                     diagnostic: Some("turned off".into()),
                     resolved_command: None,
                     curated: None,
+                    oauth_status: None,
                 },
             ],
         };

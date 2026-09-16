@@ -3301,7 +3301,14 @@ resolved_command?: string,
  * usable, just not something we have driven ourselves. Derived from the
  * definition on every read, never stored.
  */
-curated: McpCuration | null, name: string, command: string | null, args: Array<string>,
+curated: McpCuration | null,
+/**
+ * OAuth connection status for a remote HTTP server that authenticates
+ * with OAuth. Absent for stdio, gateway, and static-token servers. Read
+ * from the OS credential store per request, never stored in the
+ * definition. The status carries no token material.
+ */
+oauth_status?: McpOAuthStatus, name: string, command: string | null, args: Array<string>,
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never

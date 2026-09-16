@@ -14,7 +14,7 @@
 //!
 //! [`McpHealth`]: crate::mcp_config::McpHealth
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Connection state for a remote MCP server that authenticates with OAuth.
 ///
@@ -23,7 +23,7 @@ use serde::Serialize;
 /// `NotConnected` → `Authorizing` → `Connected`, and from `Connected` can fall
 /// to `Expired` (refresh rejected) or `AccessDenied` (the authorization server
 /// refused this user).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum McpOAuthState {
     /// The endpoint offers no OAuth authorization path this client can drive
@@ -44,16 +44,16 @@ pub enum McpOAuthState {
 /// Renderer-safe OAuth status for one server. Carries no token material: the
 /// only URL it ever holds is the system-browser authorization URL shown while
 /// `Authorizing`, and that URL never contains a token.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct McpOAuthStatus {
     pub state: McpOAuthState,
     /// The system-browser URL to open while `Authorizing`. Absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pending_authorization_url: Option<String>,
     /// A bounded, secret-free reason shown for `Expired`, `AccessDenied`, or
     /// `Unsupported`. Never echoes a URL, token, or upstream body.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
 }
