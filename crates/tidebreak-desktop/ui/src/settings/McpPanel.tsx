@@ -10,12 +10,15 @@ import {
   type McpServerDefinition,
   type McpServerInfo,
 } from "../api";
+import type { McpOAuthStatus } from "../generated/wire";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
+import { Spinner } from "@/components/ui/spinner";
 import { hostMachineLabel } from "@/remoteMachine";
+import { openInBrowser } from "@/openInBrowser";
 import {
   SettingsError,
   SettingsField,
@@ -55,6 +58,7 @@ function emptyServer(index: number): McpServerInfo {
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
     plugin: null,
+    oauth: false,
     health: "initializing",
     tool_count: 0,
     diagnostic: null,
@@ -102,6 +106,148 @@ function chipLabel(health: McpHealth): string {
 }
 
 /**
+ * OAuth connection control for one HTTP MCP server. Health stays on
+ * {@link McpHealthChip}; this is the authorization path beside it.
+ */
+export function McpOAuthControl({
+  status,
+  busy = false,
+  disabled = false,
+  onConnect,
+  onDisconnect,
+}: {
+  status: McpOAuthStatus;
+  busy?: boolean;
+  disabled?: boolean;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+}) {
+  const error = status.error;
+  switch (status.state) {
+    case "unsupported":
+      return (
+        <span className="text-xs text-muted-foreground">
+          OAuth unsupported
+          {error ? ` — ${error}` : ""}
+        </span>
+      );
+    case "not_connected":
+      return (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled || busy}
+            onClick={onConnect}
+          >
+            {busy ? "Connecting…" : "Connect"}
+          </Button>
+        </span>
+      );
+    case "authorizing":
+      return (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <Spinner className="size-3" />
+            Authorizing…
+          </span>
+          {status.pending_authorization_url ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled}
+              onClick={() => {
+                const url = status.pending_authorization_url;
+                if (url) void openInBrowser(url);
+              }}
+            >
+              Reopen sign-in
+            </Button>
+          ) : null}
+        </span>
+      );
+    case "connected":
+      return (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <span aria-hidden className="text-success">
+              ●
+            </span>
+            Connected
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled || busy}
+            onClick={onDisconnect}
+          >
+            {busy ? "Disconnecting…" : "Disconnect"}
+          </Button>
+        </span>
+      );
+    case "expired":
+      return (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <span aria-hidden className="text-warning">
+              ●
+            </span>
+            Expired
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled || busy}
+            onClick={onConnect}
+          >
+            {busy ? "Connecting…" : "Reconnect"}
+          </Button>
+          {error ? (
+            <span className="text-xs text-critical-foreground break-words">
+              {error}
+            </span>
+          ) : null}
+        </span>
+      );
+    case "access_denied":
+      return (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <span aria-hidden className="text-destructive">
+              ●
+            </span>
+            Access denied
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled || busy}
+            onClick={onConnect}
+          >
+            {busy ? "Connecting…" : "Try again"}
+          </Button>
+          {error ? (
+            <span className="text-xs text-critical-foreground break-words">
+              {error}
+            </span>
+          ) : null}
+        </span>
+      );
+  }
+}
+
+function oauthStatusOf(server: McpServerInfo): McpOAuthStatus | null {
+  if (transportOf(server) !== "http" || !server.oauth) return null;
+  const extra = server as McpServerInfo & { oauth_status?: McpOAuthStatus };
+  return extra.oauth_status ?? { state: "not_connected" };
+}
+
+/**
  * The two-tier honesty label: "Tested" for a server on the curated list,
  * "Community" for everything else. A label only — both tiers mount, connect,
  * and call identically. The server decides the tier from the *saved*
@@ -145,12 +291,14 @@ function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
         url: "",
         bearer_token_env: null,
         gateway_endpoint: null,
+        oauth: false,
       }
     : {
         command: "",
         url: null,
         bearer_token_env: null,
         gateway_endpoint: null,
+        oauth: false,
       };
 }
 
@@ -204,6 +352,7 @@ export function McpPanel({
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+  const [oauthWorking, setOauthWorking] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -489,7 +638,54 @@ export function McpPanel({
     }
   }
 
-  const working = saving || importing || reconnecting !== null || mounting;
+  async function connectOauth(name: string) {
+    setOauthWorking(name);
+    setError(null);
+    try {
+      const result = await client.connectMcpServer(name);
+      requestRef.current += 1;
+      setServers(result.servers);
+    } catch (err) {
+      setError(errorMessage(err));
+      try {
+        const result = await client.listMcpServers();
+        requestRef.current += 1;
+        setServers(result.servers);
+      } catch {
+        // Preserve the connect error; reopening Settings performs a full load.
+      }
+    } finally {
+      setOauthWorking(null);
+    }
+  }
+
+  async function disconnectOauth(name: string) {
+    setOauthWorking(name);
+    setError(null);
+    try {
+      const result = await client.disconnectMcpServer(name);
+      requestRef.current += 1;
+      setServers(result.servers);
+    } catch (err) {
+      setError(errorMessage(err));
+      try {
+        const result = await client.listMcpServers();
+        requestRef.current += 1;
+        setServers(result.servers);
+      } catch {
+        // Preserve the disconnect error; reopening Settings performs a full load.
+      }
+    } finally {
+      setOauthWorking(null);
+    }
+  }
+
+  const working =
+    saving ||
+    importing ||
+    reconnecting !== null ||
+    oauthWorking !== null ||
+    mounting;
 
   const entitledSlugs = new Set(
     apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? [],
@@ -768,6 +964,18 @@ export function McpPanel({
                 />
 
                 <McpTierChip curated={server.curated} />
+                {(() => {
+                  const oauthStatus = oauthStatusOf(server);
+                  return oauthStatus ? (
+                    <McpOAuthControl
+                      status={oauthStatus}
+                      busy={oauthWorking === server.name}
+                      disabled={working && oauthWorking !== server.name}
+                      onConnect={() => void connectOauth(server.name)}
+                      onDisconnect={() => void disconnectOauth(server.name)}
+                    />
+                  ) : null;
+                })()}
 
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
@@ -1237,6 +1445,7 @@ function mountDefinition(slug: string, name: string): McpServerDefinition {
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
     plugin: null,
+    oauth: false,
   };
 }
 

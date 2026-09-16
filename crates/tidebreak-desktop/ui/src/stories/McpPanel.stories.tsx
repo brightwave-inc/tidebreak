@@ -19,6 +19,7 @@ function stdioServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
     cwd: null,
     url: null,
     bearer_token_env: null,
+    oauth: false,
     gateway_endpoint: null,
     request_timeout_ms: 60_000,
     enabled: true,
@@ -38,6 +39,8 @@ function stubClient(servers: McpServerInfo[]): ApiClient {
     listMcpServers: async () => listing,
     putMcpServers: async () => listing,
     reconnectMcpServer: async () => listing,
+    connectMcpServer: async () => listing,
+    disconnectMcpServer: async () => listing,
     getGatewayStatus: async () => signedOut,
     getGatewayApps: async () => ({ supported: true, apps: [] }),
   } as unknown as ApiClient;
