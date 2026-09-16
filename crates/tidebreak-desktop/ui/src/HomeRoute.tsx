@@ -267,7 +267,15 @@ export function HomeRoute() {
    * selection the reader abandoned.
    */
   async function attachHeldFiles() {
-    const chosen = await pickHeldFiles();
+    await attachChosenHeldFiles(await pickHeldFiles());
+  }
+
+  /**
+   * Route files the renderer already holds — picker, drop, or paste — the same
+   * way the hosted picker does. Creating the pending chat is part of ingesting
+   * a source; images still upload through the composer once that chat exists.
+   */
+  async function attachChosenHeldFiles(chosen: readonly File[]) {
     if (chosen.length === 0) return;
     setAttaching(true);
     setAttachError(null);
@@ -505,6 +513,9 @@ export function HomeRoute() {
                 items: pendingFiles,
                 attaching,
                 onAttach,
+                onAttachHeld: (chosen) => {
+                  void attachChosenHeldFiles(chosen);
+                },
                 onRemove: (documentId) =>
                   setPendingFiles((current) =>
                     current.filter((file) => file.documentId !== documentId),
