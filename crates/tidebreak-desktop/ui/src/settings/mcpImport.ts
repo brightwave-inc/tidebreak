@@ -622,6 +622,7 @@ function parseEntry(
         request_timeout_ms: timeout.value,
         enabled: enabled.value,
         plugin: null,
+        oauth: false,
         health: "initializing",
         tool_count: 0,
         diagnostic: null,

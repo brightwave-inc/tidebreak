@@ -126,6 +126,20 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       });
     }
 
+    connectMcpServer(name: string): Promise<McpServersInfo> {
+      return this.json(`/mcp/servers/${encodeURIComponent(name)}/connect`, {
+        method: "POST",
+        headers: this.headers(),
+      });
+    }
+
+    disconnectMcpServer(name: string): Promise<McpServersInfo> {
+      return this.json(`/mcp/servers/${encodeURIComponent(name)}/disconnect`, {
+        method: "POST",
+        headers: this.headers(),
+      });
+    }
+
     /** Trade the bearer for a single-use iframe address for one view. */
     createMcpViewFrame(server: string, uri: string): Promise<McpViewSession> {
       return this.json(
