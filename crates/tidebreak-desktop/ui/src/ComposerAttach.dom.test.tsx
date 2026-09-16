@@ -115,6 +115,24 @@ function pasteFiles(target: HTMLElement, pasted: File[]) {
   return event;
 }
 
+it("does not send mislabeled markdown or csv through the image validator", () => {
+  const onAttachHeld = vi.fn();
+  const onAttachFiles = vi.fn();
+  renderComposer({
+    images: images({ onAttachFiles }),
+    files: files({ onAttachHeld }),
+  });
+
+  dropFiles([markdownFile("image/heic"), csvFile("image/tiff")]);
+
+  expect(onAttachHeld).toHaveBeenCalledOnce();
+  expect(onAttachHeld.mock.calls[0][0].map((file: File) => file.name)).toEqual([
+    "notes.md",
+    "data.csv",
+  ]);
+  expect(onAttachFiles).not.toHaveBeenCalled();
+});
+
 it("routes dropped markdown and csv through document attach, not the image validator", () => {
   const onAttachHeld = vi.fn();
   const onAttachFiles = vi.fn();

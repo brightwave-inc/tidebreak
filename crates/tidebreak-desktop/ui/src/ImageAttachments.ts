@@ -345,26 +345,51 @@ export function isSupportedImageType(type: string): type is ImageMediaType {
 }
 
 /**
+ * Markdown and CSV stay documents even when the OS or browser labels them as
+ * an image. That mislabel is what sent them through image-only validation.
+ */
+export function isTextDocumentAttachmentName(name: string): boolean {
+  const separator = name.lastIndexOf(".");
+  if (separator <= 0 || separator === name.length - 1) return false;
+  const extension = name.slice(separator + 1).toLowerCase();
+  return extension === "md" || extension === "markdown" || extension === "csv";
+}
+
+/** Pixels for the model: supported image MIME, and not a named text source. */
+export function isImageAttachmentFile(file: {
+  name?: string;
+  type: string;
+}): boolean {
+  if (file.name && isTextDocumentAttachmentName(file.name)) return false;
+  return isSupportedImageType(file.type);
+}
+
+/**
  * Why this batch of files cannot be attached, or `null` when it can.
  *
  * Checked before any bytes move so the reader learns the file is too large from
- * the file they just dropped, not from a failed chip a second later.
+ * the file they just dropped, not from a failed chip a second later. Named
+ * Markdown and CSV files are not part of this batch: they are sources, not
+ * images, even if their declared type looks like one.
  */
 export function imageAttachmentRejection(
   attached: readonly ImageAttachment[],
-  files: readonly { type: string; size: number }[],
+  files: readonly { name?: string; type: string; size: number }[],
 ): string | null {
-  if (files.length === 0) return null;
-  if (attached.length + files.length > MAX_IMAGE_ATTACHMENTS) {
+  const images = files.filter(
+    (file) => !isTextDocumentAttachmentName(file.name ?? ""),
+  );
+  if (images.length === 0) return null;
+  if (attached.length + images.length > MAX_IMAGE_ATTACHMENTS) {
     return `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} images.`;
   }
-  if (files.some((file) => !isSupportedImageType(file.type))) {
+  if (images.some((file) => !isSupportedImageType(file.type))) {
     return "Attach a PNG, JPEG, WebP, or GIF image.";
   }
-  if (files.some((file) => file.size > MAX_IMAGE_ATTACHMENT_BYTES)) {
+  if (images.some((file) => file.size > MAX_IMAGE_ATTACHMENT_BYTES)) {
     return "Images must be 16 MB or smaller.";
   }
-  if (files.some((file) => file.size === 0)) {
+  if (images.some((file) => file.size === 0)) {
     return "That image file is empty.";
   }
   return null;
@@ -399,7 +424,7 @@ export function refuseStrayFileDrops(target: EventTarget): () => void {
 /** The image files carried by a drop or a paste, in the order they arrived. */
 export function imageFilesFrom(transfer: DataTransfer | null): File[] {
   if (!transfer) return [];
-  return [...transfer.files].filter((file) => file.type.startsWith("image/"));
+  return [...transfer.files].filter(isImageAttachmentFile);
 }
 
 /**

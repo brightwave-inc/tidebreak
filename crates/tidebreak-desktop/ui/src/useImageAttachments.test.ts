@@ -194,6 +194,20 @@ describe("useImageAttachments", () => {
     expect(FakeUpload.opened).toHaveLength(0);
   });
 
+  it("does not image-validate markdown or csv even with an image MIME type", () => {
+    const { result } = renderHook(() => useImageAttachments(client, "chat-1"));
+
+    act(() =>
+      result.current.attachFiles([
+        new File(["# Notes\n"], "notes.md", { type: "image/heic" }),
+        new File(["a,b\n1,2\n"], "data.csv", { type: "image/png" }),
+      ]),
+    );
+    expect(result.current.error).toBeNull();
+    expect(result.current.attachments).toEqual([]);
+    expect(FakeUpload.opened).toHaveLength(0);
+  });
+
   // Regression: the packaged app has no bearer for the publish endpoint, so a
   // pasted image posted from the renderer came back 401 with an empty body and
   // reached the reader as the generic "Could not attach that image".

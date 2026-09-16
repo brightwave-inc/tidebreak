@@ -7,6 +7,7 @@ import { hasLocalHostAuthority } from "./host";
 import {
   imageAttachmentName,
   imageAttachmentRejection,
+  isTextDocumentAttachmentName,
   queuedImageAttachment,
   readyImageAttachment,
   uploadImageAttachment,
@@ -216,8 +217,11 @@ export function useImageAttachments(
   }
 
   function attachFiles(files: readonly File[]) {
-    if (files.length === 0) return;
-    const rejection = imageAttachmentRejection(attachmentsRef.current, files);
+    const images = files.filter(
+      (file) => !isTextDocumentAttachmentName(file.name),
+    );
+    if (images.length === 0) return;
+    const rejection = imageAttachmentRejection(attachmentsRef.current, images);
     if (rejection) {
       setError(rejection);
       return;
@@ -225,7 +229,7 @@ export function useImageAttachments(
     setError(null);
     const backing = backingFor(draftKey);
     const now = new Date();
-    const queued = files.map((file) => {
+    const queued = images.map((file) => {
       const id = crypto.randomUUID();
       backing.files.set(id, file);
       const previewUrl =
