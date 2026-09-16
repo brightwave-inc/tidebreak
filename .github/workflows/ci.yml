@@ -433,6 +433,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: cargo-nextest@0.9.143
       - name: Set up compiler cache
         uses: ./.github/actions/setup-sccache-s3
         with:
@@ -455,14 +459,21 @@ jobs:
           cache-bin: false
           cache-targets: false
           save-if: false
-      - name: desktop tests
-        run: cargo test -p tidebreak-desktop --locked
-      - name: Desktop credential integration tests
-        run: |
-          cargo test -p tidebreak-cli --locked setup::tests
-          cargo test -p tidebreak-cli --locked --test serve
-          cargo test -p tidebreak-server --features keychain --locked tests::listener
-          cargo test -p tidebreak-core --features keychain --locked keychain
+      # One nextest run over one package selection compiles the shared
+      # dependency graph once. Separate `cargo test -p` commands resolve
+      # different feature sets and rebuild tidebreak-core for each of them.
+      # The desktop's default features already turn on the keychain backends
+      # the credential tests exercise.
+      - name: desktop and credential integration tests
+        run: >-
+          cargo nextest run --locked -p tidebreak-desktop
+          -p tidebreak-cli
+          -p tidebreak-server
+          -p tidebreak-core
+          -E 'package(tidebreak-desktop)
+          | (package(tidebreak-cli) & (test(setup::tests) | binary(serve)))
+          | (package(tidebreak-server) & test(tests::listener))
+          | (package(tidebreak-core) & test(keychain))'
 
   windows-check:
     name: Windows cargo check
