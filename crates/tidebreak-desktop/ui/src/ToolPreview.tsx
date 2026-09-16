@@ -82,6 +82,18 @@ export function toolPreviewPresentation(
     ].join("\n");
     return { headline, detail };
   }
+  if (preview.tool === "code_session") {
+    const headline = `${preview.operation === "create" ? "Start work in" : "Continue session"} ${preview.target}`;
+    const detail = [
+      headline,
+      preview.task,
+      preview.harness && `Harness: ${preview.harness}`,
+      preview.model && `Model: ${preview.model}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return { headline, detail };
+  }
   const headline = execCommandHeadline(preview.command, preview.args);
   // Everything below the command is a fact *about* it, so it reads as a
   // comment rather than as something a shell would run. There is no shell here

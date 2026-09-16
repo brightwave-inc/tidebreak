@@ -3111,6 +3111,7 @@ const TOOL_APPROVAL_KINDS = new Set([
   "external_mcp_may_call_server",
   "workspace_may_modify_files",
   "delegate_may_run_background_agent",
+  "code_session_may_run_repository_agent",
   "computer_may_control_app",
   "unsupported",
 ]);

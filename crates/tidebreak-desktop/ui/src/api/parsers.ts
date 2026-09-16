@@ -1486,6 +1486,20 @@ export function parseToolActionPreview(
     }
     return { tool: "delegate_agent", task, network };
   }
+  if (value.tool === "code_session") {
+    const { operation, target, task, harness, model } = value;
+    if (
+      (operation !== "create" && operation !== "continue") ||
+      typeof target !== "string" ||
+      target.length === 0 ||
+      typeof task !== "string" ||
+      task.length === 0 ||
+      !nullableNonEmptyString(harness) ||
+      !nullableNonEmptyString(model)
+    )
+      return null;
+    return { tool: "code_session", operation, target, task, harness, model };
+  }
   if (value.tool !== "exec") return null;
   const { command, args, cwd, files } = value;
   // `files` joined the projection after previews were already being stored, so
@@ -1956,6 +1970,7 @@ const RENDERER_APPROVAL_KINDS = {
   external_mcp_may_call_server: true,
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
+  code_session_may_run_repository_agent: true,
   computer_may_control_app: true,
   unsupported: true,
 } as const satisfies Record<RendererApprovalKind, true>;

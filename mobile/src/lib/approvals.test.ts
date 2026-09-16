@@ -25,6 +25,27 @@ function approval(
 }
 
 describe("code approval presentation", () => {
+  it("names repository work and exposes the task and requested runtime", () => {
+    const kind = {
+      type: "tool_use",
+      offered_grants: [],
+      preview: {
+        tool: "code_session",
+        operation: "create",
+        target: "example/repository",
+        task: "Inspect tests.",
+        harness: "codex",
+        model: "example-model",
+      },
+    } as const;
+    expect(approvalTitle({ ...kind, offered_grants: [] })).toBe(
+      "Start repository work",
+    );
+    expect(approvalSummary({ ...kind, offered_grants: [] })).toBe(
+      "Repository: example/repository\nInspect tests.\nHarness: codex\nModel: example-model",
+    );
+  });
+
   it("filters settled rows and orders the oldest decision first", () => {
     expect(
       pendingApprovals([

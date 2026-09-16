@@ -3,6 +3,7 @@ import { fn } from "storybook/test";
 
 import { ApprovalCard } from "@/ApprovalCard";
 import { execPreview } from "./fixtures";
+import { toolApprovalPresentation } from "@/ToolCallCard";
 
 const meta = {
   title: "Conversation/Approval",
@@ -31,6 +32,21 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const NetworkedCommand: Story = {};
+
+export const RepositoryWork: Story = {
+  args: {
+    ...toolApprovalPresentation("code_session_may_run_repository_agent"),
+    grantRungs: [],
+    preview: {
+      tool: "code_session",
+      operation: "create",
+      target: "example/repository",
+      task: "Inspect the failing test and report the cause.",
+      harness: "codex",
+      model: "example-model",
+    },
+  },
+};
 
 export const AutoModeJudging: Story = {
   args: { autoJudging: true },

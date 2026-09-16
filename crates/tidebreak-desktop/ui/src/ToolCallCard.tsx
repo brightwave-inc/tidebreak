@@ -639,6 +639,14 @@ export function toolApprovalPresentation(
       canRemember: true,
     };
   }
+  if (kind === "code_session_may_run_repository_agent") {
+    return {
+      summary:
+        "Allow this request to start or continue repository work using this conversation's permissions?",
+      canApprove: true,
+      canRemember: false,
+    };
+  }
   if (kind === "computer_may_control_app") {
     return {
       summary:

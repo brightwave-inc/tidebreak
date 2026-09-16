@@ -1014,6 +1014,7 @@ const APPROVABLE_KINDS = {
   external_mcp_may_call_server: true,
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
+  code_session_may_run_repository_agent: true,
   // Approvable once per app; the durable consent is the broker's per-app grant,
   // not a standing grant here.
   computer_may_control_app: true,
@@ -1032,6 +1033,7 @@ export function isRememberableKind(kind: RendererApprovalKind): boolean {
   return (
     isApprovableKind(kind) &&
     kind !== "external_mcp_may_call_server" &&
+    kind !== "code_session_may_run_repository_agent" &&
     kind !== "computer_may_control_app"
   );
 }

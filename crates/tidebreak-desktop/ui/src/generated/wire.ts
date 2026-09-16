@@ -1497,6 +1497,11 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
 
 /**
+ * Whether the request creates a child session or continues an existing one.
+ */
+export type CodeSessionOperation = "create" | "continue";
+
+/**
  * Status of a harness subagent, derived from its spanning `Task` call
  * (decision 52): the call's start is the subagent's start, its result is
  * the end and outcome.
@@ -5378,7 +5383,7 @@ task: string,
 /**
  * The network policy the child inherits from this chat.
  */
-network: NetworkPolicy, };
+network: NetworkPolicy, } | { "tool": "code_session", operation: CodeSessionOperation, target: string, task: string, harness: string | null, model: string | null, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.
@@ -5388,7 +5393,7 @@ network: NetworkPolicy, };
  * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "computer_may_control_app" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "code_session_may_run_repository_agent" | "computer_may_control_app" | "unsupported";
 
 /**
  * Display-oriented classification of a tool the engine started.

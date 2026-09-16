@@ -16,6 +16,11 @@ export function approvalTitle(kind: CodeApprovalKind): string {
     case "other":
       return "Allow action";
     case "tool_use":
+      if (kind.preview.tool === "code_session") {
+        return kind.preview.operation === "create"
+          ? "Start repository work"
+          : "Send follow-up";
+      }
       return "Run tool";
     case "questions":
       return "Answer questions";
@@ -46,7 +51,6 @@ export function approvalSummary(kind: CodeApprovalKind): string {
   }
 }
 
-
 /**
  * The literal action a tool_use approval asks consent for, one fact per
  * line. Mirrors the desktop's `toolPreviewPresentation().detail`; the
@@ -54,6 +58,15 @@ export function approvalSummary(kind: CodeApprovalKind): string {
  */
 function toolActionDetail(preview: ToolActionPreview): string {
   switch (preview.tool) {
+    case "code_session":
+      return [
+        `${preview.operation === "create" ? "Repository" : "Session"}: ${preview.target}`,
+        preview.task,
+        preview.harness && `Harness: ${preview.harness}`,
+        preview.model && `Model: ${preview.model}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
     case "search":
       return `${preview.query}\n# searched against this conversation's sources`;
     case "web_search":
@@ -72,10 +85,9 @@ function toolActionDetail(preview: ToolActionPreview): string {
     case "write_file":
       return `${preview.path}\n# written into this work's workspace`;
     case "delegate_agent":
-      return [
-        preview.task,
-        `# network: ${networkLabel(preview.network)}`,
-      ].join("\n");
+      return [preview.task, `# network: ${networkLabel(preview.network)}`].join(
+        "\n",
+      );
     case "exec":
       return [
         [preview.command, ...preview.args].map(quoteArgument).join(" "),
@@ -97,7 +109,9 @@ function networkLabel(policy: NetworkPolicy): string {
       return "package managers only";
     case "allowed_hosts": {
       const hosts = policy.allowed_hosts.join(", ") || "listed hosts only";
-      return policy.package_managers ? `${hosts}, plus package managers` : hosts;
+      return policy.package_managers
+        ? `${hosts}, plus package managers`
+        : hosts;
     }
     case "open":
       return "open";
@@ -109,7 +123,10 @@ function networkLabel(policy: NetworkPolicy): string {
  * open at both ends. Dates stay as the model wrote them: the card's job is
  * to show what the provider is actually told.
  */
-function publishedWindow(from: string | null, to: string | null): string | null {
+function publishedWindow(
+  from: string | null,
+  to: string | null,
+): string | null {
   if (from && to) return `# published between ${from} and ${to}`;
   if (from) return `# published on or after ${from}`;
   if (to) return `# published on or before ${to}`;

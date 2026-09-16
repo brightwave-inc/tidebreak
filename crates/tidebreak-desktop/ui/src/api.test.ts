@@ -610,6 +610,47 @@ describe("pending approval recovery", () => {
     grant_rungs: ["whole_tool"],
   };
 
+  it("recovers repository work approval only without a standing grant", () => {
+    const action = {
+      ...safe,
+      action: "other",
+      approval: "code_session_may_run_repository_agent",
+      can_remember: false,
+      grant_rungs: [],
+      preview: {
+        tool: "code_session",
+        operation: "create",
+        target: "example/repository",
+        task: "Inspect tests.",
+        harness: "codex",
+        model: null,
+      },
+    };
+    expect(parsePendingToolApproval(action)).toMatchObject({
+      canApprove: true,
+      canRemember: false,
+      grantRungs: [],
+      preview: action.preview,
+    });
+    expect(
+      parsePendingToolApproval({
+        ...action,
+        can_remember: true,
+        grant_rungs: ["whole_tool"],
+      }),
+    ).toBeNull();
+    expect(
+      parseToolActionPreview({ ...action.preview, operation: "delete" }),
+    ).toBeNull();
+    expect(
+      parseToolActionPreview({ ...action.preview, target: "" }),
+    ).toBeNull();
+    expect(parseToolActionPreview({ ...action.preview, task: "" })).toBeNull();
+    expect(
+      parseToolActionPreview({ ...action.preview, harness: {} }),
+    ).toBeNull();
+  });
+
   it("parses only the closed renderer projection", () => {
     expect(parsePendingToolApproval(safe)).toEqual({
       callId: "call-1",

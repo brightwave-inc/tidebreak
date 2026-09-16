@@ -104,6 +104,9 @@ pub enum ToolApprovalKind {
     /// or chat attachments — so the card names the network policy the child
     /// inherits.
     DelegateMayRunBackgroundAgent,
+    /// Start or continue repository work under this conversation's authority.
+    /// Approval covers this request only, not later child work.
+    CodeSessionMayRunRepositoryAgent,
     /// The agent may drive a specific native app — click, type, press keys —
     /// after the user grants control of that app. Consent is per app and the
     /// card decision is written to the host broker's grant store; standing
@@ -132,6 +135,7 @@ impl ToolApprovalKind {
             // card the renderer presents and then 409s the approval itself.
             "create_app" => Self::WorkspaceMayModifyFiles,
             crate::SPAWN_SANDBOX_AGENT_TOOL => Self::DelegateMayRunBackgroundAgent,
+            "code_session_create" | "code_run_turn" => Self::CodeSessionMayRunRepositoryAgent,
             name if crate::is_computer_use_control_tool(name) => Self::ComputerMayControlApp,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
@@ -183,6 +187,7 @@ impl ToolApprovalKind {
             // Same closed-constraint fold. `approval_from_model` recovers the
             // delegation kind from the exact tool name stored beside it.
             Self::DelegateMayRunBackgroundAgent => "unsupported",
+            Self::CodeSessionMayRunRepositoryAgent => "unsupported",
             // Same closed-constraint fold: stored as the legacy spelling, and
             // the exact computer-use tool name stored beside it recovers the
             // control kind on read (the same recovery `for_tool_name` performs).
@@ -208,6 +213,7 @@ impl ToolApprovalKind {
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
             Self::WorkspaceMayModifyFiles => "workspace_may_modify_files",
             Self::DelegateMayRunBackgroundAgent => "delegate_may_run_background_agent",
+            Self::CodeSessionMayRunRepositoryAgent => "code_session_may_run_repository_agent",
             Self::ComputerMayControlApp => "computer_may_control_app",
             Self::Unsupported => "unsupported",
         }
@@ -224,6 +230,7 @@ impl ToolApprovalKind {
             "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
             "workspace_may_modify_files" => Some(Self::WorkspaceMayModifyFiles),
             "delegate_may_run_background_agent" => Some(Self::DelegateMayRunBackgroundAgent),
+            "code_session_may_run_repository_agent" => Some(Self::CodeSessionMayRunRepositoryAgent),
             "computer_may_control_app" => Some(Self::ComputerMayControlApp),
             "unsupported" => Some(Self::Unsupported),
             _ => None,
@@ -241,6 +248,7 @@ impl ToolApprovalKind {
                 | Self::ExternalMcpMayCallServer
                 | Self::WorkspaceMayModifyFiles
                 | Self::DelegateMayRunBackgroundAgent
+                | Self::CodeSessionMayRunRepositoryAgent
                 | Self::ComputerMayControlApp
         )
     }
@@ -288,7 +296,9 @@ impl ToolApprovalKind {
         self.is_approvable()
             && !matches!(
                 self,
-                Self::ExternalMcpMayCallServer | Self::ComputerMayControlApp
+                Self::ExternalMcpMayCallServer
+                    | Self::ComputerMayControlApp
+                    | Self::CodeSessionMayRunRepositoryAgent
             )
     }
 
@@ -1210,6 +1220,51 @@ impl ApprovalGate for AutoApproveGate {
 #[cfg(test)]
 mod standing_grant_tests {
     use super::*;
+
+    #[test]
+    fn code_session_consent_is_approvable_once_without_auto_judging() {
+        for tool in ["code_session_create", "code_run_turn"] {
+            let kind = ToolApprovalKind::for_call(tool, crate::ApprovalClass::Sensitive);
+            assert_eq!(kind, ToolApprovalKind::CodeSessionMayRunRepositoryAgent);
+            assert!(kind.is_approvable());
+            assert!(!kind.is_standing_grantable());
+            assert!(!kind.is_auto_judgeable());
+            assert!(StandingGrant::new(
+                GrantLevel::Chat {
+                    chat_id: SessionId::new()
+                },
+                tool,
+                kind,
+                Utc::now()
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn code_session_preview_names_the_real_target_and_bounds_the_task() {
+        for (tool, args, expected) in [
+            (
+                "code_session_create",
+                serde_json::json!({"repository":"acme/tools","task":"x".repeat(900),"harness":"codex","model":"chosen-model"}),
+                "acme/tools",
+            ),
+            (
+                "code_run_turn",
+                serde_json::json!({"session_id":"child-1","text":"x".repeat(900)}),
+                "child-1",
+            ),
+        ] {
+            let ToolActionPreview::CodeSession { target, task, .. } =
+                ToolActionPreview::build(tool, &args).unwrap()
+            else {
+                panic!("missing code-session preview")
+            };
+            assert_eq!(target, expected);
+            assert!(task.chars().count() <= crate::preview::MAX_ACTION_FIELD_CHARS);
+            assert!(!ToolActionPreview::describes_exactly(tool, &args));
+        }
+    }
 
     fn grant(chat_id: SessionId, tool: &str) -> StandingGrant {
         StandingGrant::new(

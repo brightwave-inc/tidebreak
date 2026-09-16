@@ -107,6 +107,9 @@ export function grantScopeLabel(
       if (scope.tool === "delegate_agent") {
         return scope.task;
       }
+      if (scope.tool === "code_session") {
+        return `${scope.target}: ${scope.task}`;
+      }
       return `“${scope.query}”`;
     }
     case "any_args_for":
