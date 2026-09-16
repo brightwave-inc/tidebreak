@@ -72,6 +72,7 @@ type WorkspaceScenario =
   | "shared"
   | "managed-slack"
   | "managed-slack-remote"
+  | "archived-remote"
   | "nested"
   | "start"
   | "workspace-starting"
@@ -621,27 +622,35 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
 }
 
 function storyClient(scenario: WorkspaceScenario): ApiClient {
-  const currentWorkspace = isWorkspaceStartupScenario(scenario)
-    ? startupWorkspace
-    : scenario === "shared"
-      ? { ...workspace, read_only: true, is_owner: false }
-      : scenario === "managed-slack" || scenario === "managed-slack-remote"
-        ? {
-            ...workspace,
-            read_only: false,
-            is_owner: false,
-            ...(scenario === "managed-slack-remote"
-              ? { worktree_path: `remote:${workspace.id}` }
-              : {}),
-          }
-        : isSetupFailedScenario(scenario)
-          ? {
-              ...workspace,
-              status: "setup_failed" as const,
-              pr: undefined,
-              setup_error: setupFailureOutput[scenario],
-            }
-          : workspace;
+  const currentWorkspace =
+    scenario === "archived-remote"
+      ? {
+          ...workspace,
+          status: "archived" as const,
+          worktree_path: `remote:${workspace.id}`,
+          archived_at: "2026-08-20T14:00:00.000Z",
+        }
+      : isWorkspaceStartupScenario(scenario)
+        ? startupWorkspace
+        : scenario === "shared"
+          ? { ...workspace, read_only: true, is_owner: false }
+          : scenario === "managed-slack" || scenario === "managed-slack-remote"
+            ? {
+                ...workspace,
+                read_only: false,
+                is_owner: false,
+                ...(scenario === "managed-slack-remote"
+                  ? { worktree_path: `remote:${workspace.id}` }
+                  : {}),
+              }
+            : isSetupFailedScenario(scenario)
+              ? {
+                  ...workspace,
+                  status: "setup_failed" as const,
+                  pr: undefined,
+                  setup_error: setupFailureOutput[scenario],
+                }
+              : workspace;
   const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
     ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
     : scenario === "managed-slack-remote"
@@ -657,17 +666,19 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     isSetupFailedScenario(scenario)
       ? []
       : [
-          scenario === "shared"
-            ? { ...session, access: "view" as const, is_owner: false }
-            : scenario === "managed-slack" ||
-                scenario === "managed-slack-remote"
-              ? {
-                  ...session,
-                  access: "contribute" as const,
-                  is_owner: false,
-                  owner_kind: "service",
-                }
-              : session,
+          scenario === "archived-remote"
+            ? { ...session, lifecycle: "ended" as const }
+            : scenario === "shared"
+              ? { ...session, access: "view" as const, is_owner: false }
+              : scenario === "managed-slack" ||
+                  scenario === "managed-slack-remote"
+                ? {
+                    ...session,
+                    access: "contribute" as const,
+                    is_owner: false,
+                    owner_kind: "service",
+                  }
+                : session,
         ];
   const firstTurnFails =
     scenario === "first-turn-failure" || scenario === "fork-first-turn-failure";
@@ -1165,6 +1176,18 @@ type Story = StoryObj<typeof meta>;
 
 /** The default: one stable conversation, with workflow state always in reach. */
 export const ConversationAlone: Story = {};
+
+/** Archive opens the retained conversation without restarting its agent. */
+export const ArchivedRemoteConversation: Story = {
+  args: { scenario: "archived-remote", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText(/Tabs now move on pointer events/),
+    ).toBeVisible();
+    await expect(canvas.queryByRole("textbox")).not.toBeInTheDocument();
+  },
+};
 
 /** One setting write marks the full related control cluster until it settles. */
 export const SettingsPending: Story = {

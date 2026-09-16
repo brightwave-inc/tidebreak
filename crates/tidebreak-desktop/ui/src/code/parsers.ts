@@ -2867,14 +2867,17 @@ export function parseCodeSessionList(
  * A workspace runs several agents (record 55). The list arrives newest first,
  * but the tab strip reads left to right in the order the agents were started,
  * so the first one keeps its place and a new one appends to the right.
+ * Archived workspaces include ended conversations so their transcripts stay readable.
  */
-export function liveCodeSessions(
+export function workspaceCodeSessions(
   sessions: readonly CodeSessionSnapshot[],
+  includeEnded = false,
 ): CodeSessionSnapshot[] {
   return sessions
     .filter(
       (session) =>
-        session.kind === "interactive" && session.lifecycle !== "ended",
+        session.kind === "interactive" &&
+        (includeEnded || session.lifecycle !== "ended"),
     )
     .sort(
       (left, right) =>

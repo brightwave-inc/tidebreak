@@ -24,7 +24,8 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
 } from "../labels";
-import { liveCodeSessions } from "../parsers";
+import { workspaceCodeSessions } from "../parsers";
+import { isPutAway } from "../workspaceCards";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { useCodeUiStore } from "../CodeUiStore";
@@ -150,9 +151,10 @@ export function useWorkspaceSessions({
     }
     return [rememberedSession, ...sessions];
   }, [rememberedSession, sessions]);
+  const includeEnded = workspace !== null && isPutAway(workspace);
   const conversations = useMemo(
-    () => liveCodeSessions(listedSessions),
-    [listedSessions],
+    () => workspaceCodeSessions(listedSessions, includeEnded),
+    [listedSessions, includeEnded],
   );
   const session = useMemo(() => {
     const selected = listedSessions.find(
@@ -248,7 +250,7 @@ export function useWorkspaceSessions({
         setSessionsLoaded(true);
         // The card and the rail show one agent per workspace, so the catalog
         // remembers the first — the one the workspace was started with.
-        const first = liveCodeSessions(listed)[0];
+        const first = workspaceCodeSessions(listed, isPutAway(next))[0];
         if (first) catalogState.rememberSession(first);
         if (next.is_owner === false) return;
         const nextRepo = await client.getCodeRepo(next.repo_id);

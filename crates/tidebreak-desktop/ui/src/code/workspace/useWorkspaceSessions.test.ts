@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodeSessionSnapshot } from "../../api/types";
+import type {
+  CodeSessionSnapshot,
+  CodeWorkspaceSnapshot,
+} from "../../api/types";
 import {
   codeSession,
   codeWorkspace,
@@ -25,14 +28,14 @@ const sibling: CodeSessionSnapshot = {
 function setup(
   listed: CodeSessionSnapshot[],
   taskParam?: string,
-  options: { failFirstLoad?: boolean } = {},
+  options: { failFirstLoad?: boolean; workspace?: CodeWorkspaceSnapshot } = {},
 ) {
   let loads = 0;
   const client = {
     getCodeWorkspace: vi.fn(async () => {
       loads += 1;
       if (options.failFirstLoad && loads === 1) throw new Error("offline");
-      return codeWorkspace;
+      return options.workspace ?? codeWorkspace;
     }),
     listCodeWorkspaceSessions: vi.fn(async () => listed),
     getCodeRepo: vi.fn(async () => deliveryCodeRepo),
@@ -114,6 +117,35 @@ describe("useWorkspaceSessions", () => {
     expect(useCodeCatalogStore.getState().sessionsByWorkspace["ws-1"]?.id).toBe(
       "sess-main",
     );
+  });
+
+  it.each(["archived", "released"] as const)(
+    "opens the retained conversation when the workspace is %s",
+    async (status) => {
+      const ended = { ...main, lifecycle: "ended" as const };
+      const { result } = setup([ended], undefined, {
+        workspace: { ...codeWorkspace, status, worktree_path: "remote:ws-1" },
+      });
+      await waitFor(() =>
+        expect(result.current.workspace?.status).toBe(status),
+      );
+      expect(result.current.session?.id).toBe("sess-main");
+      expect(result.current.startingNewAgent).toBe(false);
+      expect(result.current.conversationTabs.map((tab) => tab.id)).toEqual([
+        "sess-main",
+      ]);
+    },
+  );
+
+  it("keeps ended conversations out of active workspace tabs", async () => {
+    const ended = { ...main, lifecycle: "ended" as const };
+    const { result } = setup([ended, sibling]);
+    await waitFor(() =>
+      expect(result.current.session?.id).toBe("sess-sibling"),
+    );
+    expect(result.current.conversationTabs.map((tab) => tab.id)).toEqual([
+      "sess-sibling",
+    ]);
   });
 
   it("lets ?task= name the agent, and drops a param nothing answers to", async () => {
