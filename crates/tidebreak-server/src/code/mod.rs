@@ -45,6 +45,7 @@ pub mod sandbox_tools;
 pub mod scoped;
 pub mod scratch;
 pub mod session_tools;
+pub mod session_tree;
 pub mod session_worker;
 pub mod setup_script;
 pub mod terminal;

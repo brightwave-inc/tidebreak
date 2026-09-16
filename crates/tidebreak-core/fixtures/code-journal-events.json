@@ -166,5 +166,10 @@
   {
     "type": "model_reported",
     "model": "effective-model"
+  },
+  {
+    "type": "session_tree",
+    "children": [],
+    "wait": null
   }
 ]

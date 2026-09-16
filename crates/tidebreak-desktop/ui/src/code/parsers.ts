@@ -2649,6 +2649,63 @@ export function parseCodeAction(value: unknown): CodeActionSnapshot | null {
   };
 }
 
+
+const SESSION_TREE_CHILD_STATUSES = new Set([
+  "running",
+  "queued",
+  "completed",
+  "fenced",
+  "failed",
+  "interrupted",
+]);
+
+function parseSessionTreeChildren(
+  value: unknown,
+): CodeSessionSnapshot["children"] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  const children: NonNullable<CodeSessionSnapshot["children"]> = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys(item, ["id", "title", "status", "attention", "fenced"]) ||
+      !wireId(item.id) ||
+      (item.title !== undefined && !nonEmptyLine(item.title)) ||
+      typeof item.status !== "string" ||
+      !SESSION_TREE_CHILD_STATUSES.has(item.status) ||
+      typeof item.attention !== "boolean" ||
+      typeof item.fenced !== "boolean"
+    ) {
+      return undefined;
+    }
+    children.push({
+      id: item.id,
+      ...(item.title !== undefined ? { title: item.title } : {}),
+      status: item.status as NonNullable<
+        CodeSessionSnapshot["children"]
+      >[number]["status"],
+      attention: item.attention,
+      fenced: item.fenced,
+    });
+  }
+  return children;
+}
+
+function parseSessionTreeWait(
+  value: unknown,
+): CodeSessionSnapshot["wait"] | undefined {
+  if (value === undefined || value === null) return null;
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, ["waiting", "total"]) ||
+    !isFiniteNumber(value.waiting) ||
+    !isFiniteNumber(value.total)
+  ) {
+    return undefined;
+  }
+  return { waiting: value.waiting, total: value.total };
+}
+
 export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
   if (
     !isRecord(value) ||
@@ -2677,6 +2734,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "owner_kind",
       "acts_as",
       "inference_resolutions",
+      "children",
+      "wait",
     ]) ||
     (value.access !== undefined &&
       value.access !== "view" &&
@@ -2808,6 +2867,11 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       });
     }
   }
+  const children = parseSessionTreeChildren(value.children);
+  if (value.children !== undefined && children === undefined) return null;
+  const wait = parseSessionTreeWait(value.wait);
+  if (value.wait !== undefined && wait === undefined && value.wait !== null)
+    return null;
   return {
     id: value.id,
     ...(value.access !== undefined ? { access: value.access } : {}),
@@ -2844,6 +2908,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     ...(value.acts_as !== undefined
       ? { acts_as: value.acts_as as "person" | "bot" }
       : {}),
+    ...(children !== undefined ? { children } : {}),
+    ...(value.wait !== undefined ? { wait } : {}),
   };
 }
 

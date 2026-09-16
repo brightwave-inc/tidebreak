@@ -36,8 +36,8 @@ use chrono::{DateTime, Utc};
 use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{
     Attention, CodeSubagentSummary, CodeWatchState, Event, HarnessKind, OwnerId, PullRequestDigest,
-    RepoId, SessionActivity, SessionId, SessionKind, SessionLifecycle, TurnId, WorkspaceId,
-    MAX_EVENT_TEXT_CHARS,
+    RepoId, SessionActivity, SessionId, SessionKind, SessionLifecycle, SessionTreeChild,
+    SessionTreeWait, TurnId, WorkspaceId, MAX_EVENT_TEXT_CHARS,
 };
 use tokio::sync::{broadcast, Notify};
 
@@ -160,6 +160,11 @@ pub enum TurnRewriteState {
 pub struct CodeEventBus {
     channels: Mutex<HashMap<SessionId, LiveSession>>,
     updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
+    /// Last `session_tree` published on each parent, so a child persist that
+    /// did not change the projection does not journal another copy.
+    session_trees: Mutex<HashMap<SessionId, (Vec<SessionTreeChild>, Option<SessionTreeWait>)>>,
+    /// One gate per parent covering compute → compare → journal → remember.
+    session_tree_gates: Mutex<HashMap<SessionId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// Fires when a client subscribes to `/updates`, so background work
     /// that slows down while nobody is looking can speed back up at once.
     updates_attached: Notify,
@@ -232,6 +237,8 @@ impl Default for CodeEventBus {
         Self {
             channels: Mutex::new(HashMap::new()),
             updates: Mutex::new(HashMap::new()),
+            session_trees: Mutex::new(HashMap::new()),
+            session_tree_gates: Mutex::new(HashMap::new()),
             updates_attached: Notify::new(),
         }
     }
@@ -329,6 +336,53 @@ impl CodeEventBus {
             .lock()
             .expect("code event bus lock")
             .remove(&session);
+        self.session_trees
+            .lock()
+            .expect("code session tree lock")
+            .remove(&session);
+        self.session_tree_gates
+            .lock()
+            .expect("code session tree gate lock")
+            .remove(&session);
+    }
+
+    /// Lock covering one parent's tree compute and journal write.
+    pub fn session_tree_gate(&self, session: SessionId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.session_tree_gates
+            .lock()
+            .expect("code session tree gate lock")
+            .entry(session)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Whether this parent already journaled this exact tree.
+    pub fn session_tree_is_current(
+        &self,
+        session: SessionId,
+        children: &[SessionTreeChild],
+        wait: &Option<SessionTreeWait>,
+    ) -> bool {
+        self.session_trees
+            .lock()
+            .expect("code session tree lock")
+            .get(&session)
+            .is_some_and(|(current_children, current_wait)| {
+                current_children == children && current_wait == wait
+            })
+    }
+
+    /// Remember the tree just journaled on this parent.
+    pub fn remember_session_tree(
+        &self,
+        session: SessionId,
+        children: Vec<SessionTreeChild>,
+        wait: Option<SessionTreeWait>,
+    ) {
+        self.session_trees
+            .lock()
+            .expect("code session tree lock")
+            .insert(session, (children, wait));
     }
 
     /// Whether this session might be carrying [`AttentionState::Stalled`].

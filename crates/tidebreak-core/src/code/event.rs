@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{ApprovalId, ApprovalKind, HarnessKind, TurnId};
+use super::{ApprovalId, ApprovalKind, HarnessKind, SessionId, TurnId};
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
 use crate::preview::{ToolActionPreview, ToolResultPreview, MAX_ACTION_FIELD_CHARS};
@@ -568,6 +568,52 @@ fn class_for_preview(preview: &ToolActionPreview) -> ApprovalClass {
     }
 }
 
+/// Status of one direct child session on a parent tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTreeChildStatus {
+    /// An engine child is servicing a turn.
+    Running,
+    /// The child has not started, or a turn is queued.
+    Queued,
+    /// The child's latest work finished successfully, or the session ended cleanly.
+    Completed,
+    /// Crash recovery parked the child until an explicit reap.
+    Fenced,
+    /// The child's latest turn failed.
+    Failed,
+    /// The child's latest turn was interrupted.
+    Interrupted,
+}
+
+/// One direct child on a parent session tree. `id` is the only required field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTreeChild {
+    /// Child session id. Open and, if fenced, reap use this id.
+    pub id: SessionId,
+    /// Workspace or conversation title, when one is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    /// Closed status vocabulary the Slack parent card renders.
+    pub status: SessionTreeChildStatus,
+    /// Whether the child needs a person (approval, fence, stall, or pin).
+    pub attention: bool,
+    /// Whether the child is fenced.
+    pub fenced: bool,
+}
+
+/// A parent wait that is actually parked, never inferred by counting children.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTreeWait {
+    /// How many named children have not settled.
+    pub waiting: u32,
+    /// How many children the wait named.
+    pub total: u32,
+}
+
 /// One event in an external agent-engine session's journal.
 ///
 /// Serialized as an internally-tagged union (a `type` field selects the
@@ -821,6 +867,16 @@ pub enum Event {
         /// Whether a new (or confirmed) checkpoint was stored.
         compacted: bool,
     },
+    /// Direct children of this session, restated when that set changes.
+    ///
+    /// The reconnect snapshot recomputes the same objects from persisted
+    /// child rows. `wait` is null unless a parent wait is actually known.
+    SessionTree {
+        /// Direct children, same objects as `SessionSnapshot.children`.
+        children: Vec<SessionTreeChild>,
+        /// Present only when a parent wait is known; never inferred.
+        wait: Option<SessionTreeWait>,
+    },
 }
 
 /// Whether to omit a defaulted `false` flag from a journal row.
@@ -1053,6 +1109,7 @@ mod tests {
             Event::CompactionFinished { .. } => 23,
             Event::CredentialRefused { .. } => 24,
             Event::ModelReported { .. } => 25,
+            Event::SessionTree { .. } => 26,
         }
     }
 
@@ -1200,6 +1257,10 @@ mod tests {
             Event::CompactionFinished { compacted: true },
             Event::ModelReported {
                 model: "effective-model".into(),
+            },
+            Event::SessionTree {
+                children: Vec::new(),
+                wait: None,
             },
         ]
     }

@@ -72,6 +72,7 @@ pub async fn persist_session(
             matches!(stored.attention.state, AttentionState::Stalled { .. }),
         );
         emit_digest(db, bus, &stored).await;
+        super::session_tree::publish_for_child(db, bus, &stored).await;
     }
     Ok(ok)
 }
@@ -98,6 +99,7 @@ pub async fn apply_attention(
         matches!(session.attention.state, AttentionState::Stalled { .. }),
     );
     emit_digest(db, bus, &session).await;
+    super::session_tree::publish_for_child(db, bus, &session).await;
     Ok(Some(changed))
 }
 

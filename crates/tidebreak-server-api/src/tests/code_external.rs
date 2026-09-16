@@ -22,6 +22,7 @@ use crate::code::remote::wire::{
 };
 use crate::code::remote::{RemoteSandboxError, SandboxProvisioner};
 use crate::code::CodeRuntime;
+use sea_orm::ConnectionTrait;
 use tidebreak_core::db::code::insert_repo;
 use tidebreak_core::{CodeRepo, OwnerId, RepoId};
 use tidebreak_server_core::obo_gateway::{
@@ -5634,4 +5635,291 @@ async fn personal_inference_preferences_are_owner_only_and_negotiate_legacy_gate
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+async fn connect_external_events(
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: tidebreak_core::SessionId,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let mut request = format!("ws://{addr}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    connect_async(request).await.unwrap().0
+}
+
+fn tree_child(session: &tidebreak_core::Session) -> tidebreak_core::Session {
+    let mut child = session.clone();
+    child.id = tidebreak_core::SessionId::new();
+    child.lifecycle = tidebreak_core::SessionLifecycle::Running;
+    child.fence_reason = None;
+    child.attention =
+        tidebreak_core::Attention::working(tidebreak_core::AttentionSource::Lifecycle);
+    child
+}
+
+/// Slack's parent follower reads children on the snapshot, live `session_tree`
+/// events while the parent is quiet, and the same objects after reconnect.
+#[tokio::test]
+async fn external_parent_events_carry_authorized_child_trees() {
+    let (router, _fake, runtime, repo_id, dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-tree/1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let parent_id = bound_session_id(&runtime, &owner, "T1/C-tree/1").await;
+    let parent_id_text = parent_id.to_string();
+    assert_eq!(
+        created["session_id"].as_str(),
+        Some(parent_id_text.as_str())
+    );
+    let mut empty = connect_external_events(addr, &pair.token, parent_id).await;
+    let empty_snapshot = next_external_json(&mut empty).await;
+    assert_authoritative_empty_tree(&empty_snapshot);
+    drop(empty);
+    let parent = runtime.get_session(&owner, parent_id).await.unwrap();
+
+    let mut visible = tree_child(&parent);
+    let hidden = tree_child(&parent);
+    let visible_id_text = visible.id.to_string();
+    tidebreak_core::db::code::insert_session(&runtime.db, &visible)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::insert_session(&runtime.db, &hidden)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::set_session_context(
+        &runtime.db,
+        &owner,
+        visible.id,
+        None,
+        Some(parent_id),
+        Some("visible"),
+    )
+    .await
+    .unwrap();
+    tidebreak_core::db::code::set_session_context(
+        &runtime.db,
+        &owner,
+        hidden.id,
+        None,
+        Some(parent_id),
+        Some("hidden"),
+    )
+    .await
+    .unwrap();
+    tidebreak_core::db::code::bind_external_session(
+        &runtime.db,
+        &owner,
+        grant.id,
+        "slack",
+        &format!("child/{parent_id}/visible"),
+        visible.id,
+    )
+    .await
+    .unwrap();
+    crate::code::attention::persist_session(&runtime.db, &runtime.bus, &visible)
+        .await
+        .unwrap();
+
+    let mut socket = connect_external_events(addr, &pair.token, parent_id).await;
+    let snapshot = next_external_json(&mut socket).await;
+    let children = snapshot["snapshot"]["children"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    assert_eq!(children.len(), 1, "{snapshot}");
+    assert_eq!(children[0]["id"].as_str(), Some(visible_id_text.as_str()));
+    assert_eq!(children[0]["status"], "running");
+    assert_eq!(children[0]["fenced"], false);
+    assert_eq!(children[0]["attention"], false);
+    assert!(
+        snapshot["snapshot"]
+            .as_object()
+            .unwrap()
+            .contains_key("wait"),
+        "wait must be present so a reconnect can clear it: {snapshot}"
+    );
+    assert!(
+        snapshot["snapshot"]["wait"].is_null(),
+        "must not invent a parent wait: {snapshot}"
+    );
+
+    visible.lifecycle = tidebreak_core::SessionLifecycle::Fenced;
+    visible.fence_reason = Some(tidebreak_core::FenceReason::OrphanAlive);
+    visible.attention = tidebreak_core::Attention::new(
+        tidebreak_core::AttentionState::Fenced {
+            reason: tidebreak_core::FenceReason::OrphanAlive,
+        },
+        tidebreak_core::AttentionSource::Lifecycle,
+    );
+    crate::code::attention::persist_session(&runtime.db, &runtime.bus, &visible)
+        .await
+        .unwrap();
+
+    let mut saw_tree = false;
+    for _ in 0..20 {
+        let Ok(value) =
+            tokio::time::timeout(Duration::from_secs(5), next_external_json(&mut socket)).await
+        else {
+            break;
+        };
+        if value["event"]["type"] == "session_tree" {
+            let live = value["event"]["children"].as_array().cloned().unwrap();
+            assert_eq!(live.len(), 1, "{value}");
+            assert_eq!(live[0]["id"].as_str(), Some(visible_id_text.as_str()));
+            assert_eq!(live[0]["status"], "fenced");
+            assert_eq!(live[0]["fenced"], true);
+            assert_eq!(live[0]["attention"], true);
+            assert!(value["event"]["wait"].is_null(), "{value}");
+            saw_tree = true;
+            break;
+        }
+    }
+    assert!(saw_tree, "child fence must reach the quiet parent follower");
+
+    let mut reconnect = connect_external_events(addr, &pair.token, parent_id).await;
+    let again = next_external_json(&mut reconnect).await;
+    let children = again["snapshot"]["children"].as_array().cloned().unwrap();
+    assert_eq!(children.len(), 1, "{again}");
+    assert_eq!(children[0]["status"], "fenced");
+    assert_eq!(children[0]["fenced"], true);
+
+    let mut ended = runtime.get_session(&owner, parent_id).await.unwrap();
+    ended.lifecycle = tidebreak_core::SessionLifecycle::Ended;
+    crate::code::attention::persist_session(&runtime.db, &runtime.bus, &ended)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .get_session(&owner, visible.id)
+            .await
+            .unwrap()
+            .lifecycle,
+        tidebreak_core::SessionLifecycle::Fenced
+    );
+    assert_eq!(
+        runtime
+            .get_session(&owner, hidden.id)
+            .await
+            .unwrap()
+            .lifecycle,
+        tidebreak_core::SessionLifecycle::Running
+    );
+    let mut after_end = connect_external_events(addr, &pair.token, parent_id).await;
+    let ended_snapshot = next_external_json(&mut after_end).await;
+    assert_eq!(ended_snapshot["snapshot"]["lifecycle"], "ended");
+    let children = ended_snapshot["snapshot"]["children"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    assert_eq!(children.len(), 1, "{ended_snapshot}");
+    assert_eq!(children[0]["id"].as_str(), Some(visible_id_text.as_str()));
+
+    let (_foreign, foreign_pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U2", "T1")
+        .await
+        .unwrap();
+    let mut denied = format!("ws://{addr}/external/code/sessions/{parent_id}/events")
+        .into_client_request()
+        .unwrap();
+    denied.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", foreign_pair.token).parse().unwrap(),
+    );
+    assert!(connect_async(denied).await.is_err());
+
+    let reap_ok = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{}/reap",
+            visible.id
+        ))
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reap_ok.status(), reqwest::StatusCode::OK);
+
+    let reap_hidden = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{}/reap",
+            hidden.id
+        ))
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        reap_hidden.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "reap must not widen the grant to an unbound child"
+    );
+
+    let connection = sea_orm::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        dir.path().join("code.db").display(),
+    ))
+    .await
+    .unwrap();
+    let deleted = connection
+        .execute_unprepared(&format!(
+            "DELETE FROM code_external_binding WHERE session_id = '{visible_id_text}'"
+        ))
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(deleted, 1, "the authorized child binding must drop");
+    connection.close().await.unwrap();
+    let mut cleared = connect_external_events(addr, &pair.token, parent_id).await;
+    let cleared_snapshot = next_external_json(&mut cleared).await;
+    assert_authoritative_empty_tree(&cleared_snapshot);
+}
+
+fn assert_authoritative_empty_tree(frame: &serde_json::Value) {
+    let snapshot = frame["snapshot"]
+        .as_object()
+        .unwrap_or_else(|| panic!("snapshot object: {frame}"));
+    assert!(
+        snapshot.contains_key("children"),
+        "reconnect must send children: [] to clear stale rows: {frame}"
+    );
+    assert!(
+        snapshot.contains_key("wait"),
+        "reconnect must send wait: null to clear a stale wait: {frame}"
+    );
+    assert_eq!(snapshot["children"], serde_json::json!([]), "{frame}");
+    assert_eq!(snapshot["wait"], serde_json::Value::Null, "{frame}");
+}
+
+async fn next_external_json<S>(socket: &mut S) -> serde_json::Value
+where
+    S: futures::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }

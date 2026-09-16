@@ -374,6 +374,7 @@ impl SessionTool {
             if context.request_key.as_deref() == Some(key) {
                 require_child_repository(runtime, &auth.parent.owner, child, &origin).await?;
                 send(runtime, &auth, child, task, key).await?;
+                publish_parent_tree(runtime, &auth.parent).await;
                 return snapshot(runtime, &auth.parent.owner, child.clone()).await;
             }
         }
@@ -486,6 +487,7 @@ impl SessionTool {
                     .await?;
                 }
                 send(runtime, &auth, &child, task, key).await?;
+                publish_parent_tree(runtime, &auth.parent).await;
                 return snapshot(runtime, &auth.parent.owner, child).await;
             }
             let inherited = tidebreak_core::db::code::session_inference(
@@ -586,8 +588,19 @@ impl SessionTool {
             .await?;
         }
         send(runtime, &auth, &child, task, key).await?;
+        publish_parent_tree(runtime, &auth.parent).await;
         snapshot(runtime, &auth.parent.owner, child).await
     }
+}
+
+async fn publish_parent_tree(runtime: &CodeRuntime, parent: &Session) {
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
 }
 
 async fn require_child(
