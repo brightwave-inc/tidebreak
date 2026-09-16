@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::id::ConnectedAppId;
-use tidebreak_core::{AgentError, Result};
+use tidebreak_core::{AgentError, Result, SecretProvider};
 use tidebreak_mcp::McpClient;
 use tokio::process::Command;
 
@@ -296,6 +296,28 @@ impl tidebreak_mcp::CallBearerSource for GatewayCallBearer {
     }
 }
 
+/// Load a live OAuth connection when a client registration and tokens are
+/// already stored. Missing credentials mean the user has not Connected yet:
+/// the HTTP client is built without a bearer rather than failing the connect.
+async fn live_oauth_connection(
+    secrets: Arc<dyn SecretProvider>,
+    id: ConnectedAppId,
+) -> Option<Arc<crate::connectors::McpOAuthConnection>> {
+    let vault = crate::connectors::McpOAuthCredentialVault::new(secrets, id);
+    let registration = vault.load_registration().await.ok().flatten()?;
+    let token_endpoint = registration.token_endpoint.as_deref()?;
+    let token_endpoint = url::Url::parse(token_endpoint).ok()?;
+    let _tokens = vault.load().await.ok().flatten()?;
+    let client = crate::connectors::McpOAuthClient::new().ok()?;
+    Some(Arc::new(crate::connectors::McpOAuthConnection::new(
+        client,
+        vault,
+        token_endpoint,
+        registration.client_id,
+        registration.client_secret,
+    )))
+}
+
 /// One prefetched MCP Apps view document, served to the renderer only through
 /// the dedicated view route and rendered only inside its sandboxed frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -369,6 +391,8 @@ impl McpServerDefinition {
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
+        secrets: Option<&Arc<dyn SecretProvider>>,
+        app_id: Option<ConnectedAppId>,
     ) -> Result<McpClient> {
         let request_timeout = Duration::from_millis(self.request_timeout_ms);
         let initialization_timeout = request_timeout.min(INITIALIZATION_TIMEOUT);
@@ -395,13 +419,9 @@ impl McpServerDefinition {
             });
         }
         if let Some(url) = &self.url {
-            // OAuth servers (`self.oauth`) carry no static bearer here:
-            // `resolve_bearer_token` returns `None` because `oauth` is mutually
-            // exclusive with `bearer_token_env`. The runtime layers the
-            // refreshing OAuth bearer onto the returned client with
-            // `with_call_bearer_source(McpOAuthCallBearer)` — it owns the
-            // `SecretProvider` and the connected-app id the vault is keyed by,
-            // which this method does not receive. See `mcp_oauth_runtime`.
+            // OAuth servers (`self.oauth`) carry no static bearer: the
+            // refreshing access token is the only credential, loaded from
+            // the OS credential store and attached as a per-call bearer.
             let bearer_token = self.resolve_bearer_token()?;
             let headers = match &self.launch {
                 Some(launch) => {
@@ -410,15 +430,36 @@ impl McpServerDefinition {
                 }
                 None => BTreeMap::new(),
             };
+            let oauth_connection = if self.oauth {
+                match (secrets, app_id) {
+                    (Some(secrets), Some(id)) => {
+                        live_oauth_connection(Arc::clone(secrets), id).await
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let handshake_bearer = if let Some(connection) = &oauth_connection {
+                connection.access_token().await.ok()
+            } else {
+                bearer_token
+            };
             return McpClient::connect_http_with_headers(
                 self.name.clone(),
                 url,
-                bearer_token.as_deref(),
+                handshake_bearer.as_deref(),
                 &headers,
                 initialization_timeout,
                 request_timeout,
             )
-            .await;
+            .await
+            .map(|client| match oauth_connection {
+                Some(connection) => client.with_call_bearer_source(std::sync::Arc::new(
+                    crate::connectors::McpOAuthCallBearer::new(connection),
+                )),
+                None => client,
+            });
         }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
@@ -439,8 +480,10 @@ impl McpServerDefinition {
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
+        secrets: Option<&Arc<dyn SecretProvider>>,
+        app_id: Option<ConnectedAppId>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect(gateway, env).await?;
+        let client = self.connect(gateway, env, secrets, app_id).await?;
         let uris: HashSet<String> = client
             .tools()
             .filter_map(|spec| client.ui_resource_uri(&spec.name))

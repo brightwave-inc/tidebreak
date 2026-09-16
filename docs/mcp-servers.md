@@ -110,6 +110,55 @@ and call identically. See
 [Tested and community MCP servers](mcp-tested-servers.md) for what the tested
 claim covers and how a server earns an entry.
 
+## OAuth for remote HTTP servers
+
+Mark an HTTP server as OAuth when the endpoint authenticates with a discovered
+authorization server instead of a static bearer. You Connect from Settings; you
+never paste a token into the definition.
+
+The flow follows the MCP authorization specification:
+
+1. A `401` `WWW-Authenticate` challenge may name protected-resource metadata
+   (RFC 9728). If it does not, Tidebreak fetches
+   `<resource-origin>/.well-known/oauth-protected-resource`.
+2. That document names authorization servers. Tidebreak takes the first and
+   fetches RFC 8414 metadata (`/.well-known/oauth-authorization-server`).
+3. The authorization server must advertise a dynamic-registration endpoint
+   (RFC 7591). Without one, the server is **Unsupported** — a desktop install
+   has no pre-issued client id.
+4. Tidebreak registers a public client (`token_endpoint_auth_method: none`, no
+   client secret) for an ephemeral loopback redirect, then opens the system
+   browser on an authorization-code + PKCE S256 request (RFC 8252 §7.3).
+5. After you approve, the loopback listener exchanges the code and stores the
+   tokens. Later calls present a refreshing access token as the per-call
+   bearer.
+
+Connection states:
+
+- **Unsupported** — the endpoint offers no OAuth path this client can drive.
+- **Not connected** — OAuth is required and no session is stored; Connect.
+- **Authorizing** — a browser authorization is in flight.
+- **Connected** — a usable session is stored (a fresh access token, or a stale
+  access token that still has a refresh token).
+- **Expired** — the stored access token is stale and there is no refresh token.
+- **Access denied** — the authorization server refused this user.
+
+Security posture:
+
+- Access tokens, refresh tokens, and the registered client record live only in
+  the OS credential store, keyed by the connected-app id. They never enter
+  SQLite, the definition, logs, error strings, arguments, or API responses.
+- Every discovery, registration, token, and refresh fetch is admitted before
+  the request is sent. Server-controlled metadata (`resource_metadata`, each
+  `authorization_servers` entry) gets the same check. There is no loopback
+  exception: an OAuth token never leaves for a private or loopback address
+  named by the server.
+- The HTTP client refuses redirects. Diagnostics never echo a URL, token,
+  argument value, or environment value.
+
+Disconnect clears the stored session and registration and drops the live
+connection. Status is a read: it never mutates tokens.
+
 ## Health and refresh
 
 Settings reports `initializing`, `healthy`, `degraded`, `reconnecting`, or
