@@ -93,17 +93,6 @@ pub async fn set_session_context(
     transaction.commit().await.map_err(store_err)
 }
 
-/// The parent this session names, if any. Does not load the parent row.
-pub async fn parent_session_id(store: &DbStore, session: SessionId) -> Result<Option<SessionId>> {
-    Ok(
-        entities::code_session_context::Entity::find_by_id(session.0)
-            .one(&store.conn)
-            .await
-            .map_err(store_err)?
-            .and_then(|row| row.parent_session_id.map(SessionId)),
-    )
-}
-
 pub async fn child_sessions(
     store: &DbStore,
     owner: &OwnerId,

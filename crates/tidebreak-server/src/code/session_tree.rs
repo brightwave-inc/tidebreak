@@ -7,7 +7,7 @@
 
 use tidebreak_core::db::code::{
     append_event, child_sessions, get_session, get_workspace, latest_turn, list_queued_turns,
-    parent_session_id, session_bound_to_grant,
+    session_bound_to_grant, session_context,
 };
 use tidebreak_core::{
     AttentionState, CodeGrantId, DbStore, Event, OwnerId, Session, SessionId, SessionLifecycle,
@@ -92,7 +92,10 @@ pub async fn authorize_event(
 
 /// Publish a parent `session_tree` event when this session is a child.
 pub async fn publish_for_child(db: &DbStore, bus: &CodeEventBus, child: &Session) {
-    match parent_session_id(db, child.id).await {
+    match session_context(db, &child.owner, child.id)
+        .await
+        .map(|context| context.and_then(|context| context.parent_session_id))
+    {
         Ok(Some(parent_id)) => publish_for_parent(db, bus, &child.owner, parent_id).await,
         Ok(None) => {}
         Err(error) => {
