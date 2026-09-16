@@ -327,7 +327,8 @@ mod tests {
             "sqlite://{}?mode=rwc",
             dir.path().join("oplog.db").display()
         );
-        let store: Arc<dyn Store> = Arc::new(DbStore::connect(&url).await.unwrap());
+        let store: Arc<dyn Store> =
+            Arc::new(DbStore::connect_test_sqlite_fixture(&url).await.unwrap());
         (dir, store)
     }
 
