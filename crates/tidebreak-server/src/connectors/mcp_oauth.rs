@@ -28,15 +28,22 @@
 //!
 //! [`SecretProvider`]: tidebreak_core::SecretProvider
 
+use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::extract::{Query, State};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tidebreak_core::id::{ConnectedAppId, SessionId};
 use tidebreak_core::{AgentError, Result, SecretProvider};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 /// Grace applied to the stored access-token expiry so a token is refreshed
 /// before it is actually rejected. Matches the ChatGPT connector.
@@ -45,6 +52,10 @@ const EXPIRY_LEEWAY_SECONDS: u64 = 60;
 /// How long a pending browser authorization is awaited before the loopback
 /// listener is torn down and the sign-in reported as failed.
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Access-token lifetime used when a token response omits `expires_in`.
+/// Short so a missing expiry never becomes "never expires".
+const DEFAULT_ACCESS_TTL_SECONDS: u64 = 300;
 
 /// Secret-store key holding one server's registered OAuth client (RFC 7591).
 ///
@@ -195,7 +206,10 @@ impl std::fmt::Debug for McpOAuthCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpOAuthCredentials")
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("expires_at_unix", &self.expires_at_unix)
             .field("scope", &self.scope)
             .finish()
@@ -226,14 +240,15 @@ impl McpOAuthCredentialVault {
         let Some(raw) = self.secrets.get_secret(&self.token_key).await? else {
             return Ok(None);
         };
-        serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|error| AgentError::config(format!("stored MCP OAuth token is unreadable: {error}")))
+        serde_json::from_str(&raw).map(Some).map_err(|error| {
+            AgentError::config(format!("stored MCP OAuth token is unreadable: {error}"))
+        })
     }
 
     pub async fn save(&self, credentials: &McpOAuthCredentials) -> Result<()> {
-        let raw = serde_json::to_string(credentials)
-            .map_err(|error| AgentError::config(format!("could not serialize MCP OAuth token: {error}")))?;
+        let raw = serde_json::to_string(credentials).map_err(|error| {
+            AgentError::config(format!("could not serialize MCP OAuth token: {error}"))
+        })?;
         self.secrets.set_secret(&self.token_key, &raw).await
     }
 
@@ -246,13 +261,17 @@ impl McpOAuthCredentialVault {
             return Ok(None);
         };
         serde_json::from_str(&raw).map(Some).map_err(|error| {
-            AgentError::config(format!("stored MCP OAuth client registration is unreadable: {error}"))
+            AgentError::config(format!(
+                "stored MCP OAuth client registration is unreadable: {error}"
+            ))
         })
     }
 
     pub async fn save_registration(&self, registration: &ClientRegistration) -> Result<()> {
         let raw = serde_json::to_string(registration).map_err(|error| {
-            AgentError::config(format!("could not serialize MCP OAuth client registration: {error}"))
+            AgentError::config(format!(
+                "could not serialize MCP OAuth client registration: {error}"
+            ))
         })?;
         self.secrets.set_secret(&self.client_key, &raw).await
     }
@@ -279,7 +298,10 @@ pub struct Pkce {
 pub fn pkce_pair() -> Pkce {
     let verifier = random_token();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 /// Build the RFC 6749 authorization-code request URL with a PKCE S256
@@ -317,7 +339,10 @@ pub fn build_authorize_url(
 /// back to the well-known path under the resource origin.
 #[must_use]
 pub fn resource_metadata_from_challenge(header: &str) -> Option<String> {
-    let rest = header.trim().strip_prefix("Bearer ").or_else(|| header.trim().strip_prefix("bearer "))?;
+    let rest = header
+        .trim()
+        .strip_prefix("Bearer ")
+        .or_else(|| header.trim().strip_prefix("bearer "))?;
     for param in rest.split(',') {
         let param = param.trim();
         let Some((key, value)) = param.split_once('=') else {
@@ -359,7 +384,9 @@ pub async fn admit_oauth_endpoint(url: &url::Url) -> Result<()> {
         .map_err(|_| AgentError::config("MCP OAuth endpoint host could not be resolved"))?
         .collect();
     if addresses.is_empty() {
-        return Err(AgentError::config("MCP OAuth endpoint host resolved to no addresses"));
+        return Err(AgentError::config(
+            "MCP OAuth endpoint host resolved to no addresses",
+        ));
     }
     for address in addresses {
         admit_fetch_address(address.ip()).map_err(|_| refused())?;
@@ -392,7 +419,11 @@ impl McpOAuthClient {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|error| AgentError::config(format!("could not build the MCP OAuth HTTP client: {error}")))?;
+            .map_err(|error| {
+                AgentError::config(format!(
+                    "could not build the MCP OAuth HTTP client: {error}"
+                ))
+            })?;
         Ok(Self { http })
     }
 
@@ -406,13 +437,44 @@ impl McpOAuthClient {
         resource: &url::Url,
         resource_metadata_hint: Option<&str>,
     ) -> Result<DiscoveredAuthorization> {
-        let _ = (&self.http, resource, resource_metadata_hint);
-        todo!(
-            "RFC 9728/8414: admit + GET protected-resource metadata (hint or \
-             /.well-known/oauth-protected-resource), select an authorization \
-             server, admit + GET its RFC 8414 metadata, and parse+admit the \
-             authorize/token/registration/revocation endpoints"
-        )
+        let metadata_url = match resource_metadata_hint {
+            Some(hint) => parse_oauth_url(hint)?,
+            None => protected_resource_metadata_url(resource),
+        };
+        admit_oauth_endpoint(&metadata_url).await?;
+        let resource_metadata: ProtectedResourceMetadata = self.get_json(&metadata_url).await?;
+        let issuer = resource_metadata
+            .authorization_servers
+            .first()
+            .ok_or_else(|| {
+                AgentError::config("MCP OAuth resource named no authorization server")
+            })?;
+        let issuer_url = parse_oauth_url(issuer)?;
+        admit_oauth_endpoint(&issuer_url).await?;
+        let as_metadata_url = authorization_server_metadata_url(&issuer_url);
+        admit_oauth_endpoint(&as_metadata_url).await?;
+        let as_metadata: AuthorizationServerMetadata = self.get_json(&as_metadata_url).await?;
+        let authorization_endpoint = parse_and_admit(&as_metadata.authorization_endpoint).await?;
+        let token_endpoint = parse_and_admit(&as_metadata.token_endpoint).await?;
+        let registration_endpoint = match as_metadata.registration_endpoint.as_deref() {
+            Some(value) => Some(parse_and_admit(value).await?),
+            None => {
+                return Err(AgentError::config(
+                    "this MCP server does not support dynamic client registration",
+                ));
+            }
+        };
+        let revocation_endpoint = match as_metadata.revocation_endpoint.as_deref() {
+            Some(value) => Some(parse_and_admit(value).await?),
+            None => None,
+        };
+        Ok(DiscoveredAuthorization {
+            authorization_endpoint,
+            token_endpoint,
+            registration_endpoint,
+            revocation_endpoint,
+            scopes_supported: as_metadata.scopes_supported,
+        })
     }
 
     /// RFC 7591 dynamic client registration. Register a public client for the
@@ -423,12 +485,30 @@ impl McpOAuthClient {
         registration_endpoint: &url::Url,
         redirect_uri: &str,
     ) -> Result<ClientRegistration> {
-        let _ = (&self.http, registration_endpoint, redirect_uri);
-        todo!(
-            "RFC 7591: admit + POST client metadata (redirect_uris, \
-             token_endpoint_auth_method=none, grant_types=authorization_code + \
-             refresh_token, response_types=code) and parse the registration"
-        )
+        admit_oauth_endpoint(registration_endpoint).await?;
+        let body = serde_json::json!({
+            "redirect_uris": [redirect_uri],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "client_name": "Tidebreak",
+        });
+        let response = self
+            .http
+            .post(registration_endpoint.clone())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth client registration request failed"))?;
+        if !response.status().is_success() {
+            return Err(AgentError::config(
+                "MCP OAuth client registration was rejected",
+            ));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth client registration response is unreadable"))
     }
 
     /// Exchange an authorization code for tokens (RFC 6749 §4.1.3 + PKCE
@@ -438,8 +518,19 @@ impl McpOAuthClient {
         token_endpoint: &url::Url,
         exchange: CodeExchange<'_>,
     ) -> Result<McpOAuthCredentials> {
-        let _ = (&self.http, token_endpoint, exchange.client_id, exchange.code);
-        todo!("RFC 6749 §4.1.3 + RFC 7636: admit + POST grant_type=authorization_code with code_verifier")
+        admit_oauth_endpoint(token_endpoint).await?;
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", exchange.code),
+            ("redirect_uri", exchange.redirect_uri),
+            ("code_verifier", exchange.verifier),
+            ("client_id", exchange.client_id),
+        ];
+        if let Some(secret) = exchange.client_secret {
+            form.push(("client_secret", secret));
+        }
+        let token = self.post_token(token_endpoint, &form).await?;
+        credentials_from_token(token, None)
     }
 
     /// Refresh an access token (RFC 6749 §6). A rotated refresh token in the
@@ -452,14 +543,211 @@ impl McpOAuthClient {
         client_secret: Option<&str>,
         refresh_token: &str,
     ) -> Result<McpOAuthCredentials> {
-        let _ = (&self.http, token_endpoint, client_id, client_secret, refresh_token);
-        todo!("RFC 6749 §6: admit + POST grant_type=refresh_token, carry a rotated refresh token forward")
+        admit_oauth_endpoint(token_endpoint).await?;
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ];
+        if let Some(secret) = client_secret {
+            form.push(("client_secret", secret));
+        }
+        let token = self.post_token(token_endpoint, &form).await?;
+        credentials_from_token(token, Some(refresh_token))
     }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &url::Url) -> Result<T> {
+        let response = self
+            .http
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth discovery request failed"))?;
+        if !response.status().is_success() {
+            return Err(AgentError::config("MCP OAuth discovery request failed"));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth discovery response is unreadable"))
+    }
+
+    async fn post_token(
+        &self,
+        token_endpoint: &url::Url,
+        form: &[(&str, &str)],
+    ) -> Result<TokenResponse> {
+        let response = self
+            .http
+            .post(token_endpoint.clone())
+            .form(form)
+            .send()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth token request failed"))?;
+        let status = response.status();
+        if !status.is_success() {
+            if status.is_client_error() {
+                return Err(AgentError::SignInRequired(
+                    "the MCP OAuth session is no longer valid".to_string(),
+                ));
+            }
+            return Err(AgentError::config("MCP OAuth token request failed"));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| AgentError::config("MCP OAuth token response is unreadable"))
+    }
+}
+
+fn parse_oauth_url(value: &str) -> Result<url::Url> {
+    url::Url::parse(value).map_err(|_| AgentError::config("MCP OAuth endpoint is not a valid URL"))
+}
+
+fn protected_resource_metadata_url(resource: &url::Url) -> url::Url {
+    let mut url = resource.clone();
+    url.set_path("/.well-known/oauth-protected-resource");
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+fn authorization_server_metadata_url(issuer: &url::Url) -> url::Url {
+    let mut url = issuer.clone();
+    let path = url.path().trim_end_matches('/');
+    let next = if path.is_empty() {
+        "/.well-known/oauth-authorization-server".to_string()
+    } else {
+        format!("{path}/.well-known/oauth-authorization-server")
+    };
+    url.set_path(&next);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+async fn parse_and_admit(value: &str) -> Result<url::Url> {
+    let url = parse_oauth_url(value)?;
+    admit_oauth_endpoint(&url).await?;
+    Ok(url)
+}
+
+fn credentials_from_token(
+    token: TokenResponse,
+    previous_refresh: Option<&str>,
+) -> Result<McpOAuthCredentials> {
+    if token.access_token.is_empty() {
+        return Err(AgentError::config(
+            "MCP OAuth token response did not include an access token",
+        ));
+    }
+    let refresh_token = token
+        .refresh_token
+        .filter(|value| !value.is_empty())
+        .or_else(|| previous_refresh.map(str::to_string));
+    let ttl = token
+        .expires_in
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ACCESS_TTL_SECONDS);
+    Ok(McpOAuthCredentials {
+        access_token: token.access_token,
+        refresh_token,
+        expires_at_unix: unix_time().saturating_add(ttl),
+        scope: token.scope.filter(|value| !value.is_empty()),
+    })
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Pending sign-in (loopback listener) + live connection
 // ---------------------------------------------------------------------------
+
+/// Bind an ephemeral loopback listener (IPv4, plus IPv6 on the same port when
+/// available) and return it with the `redirect_uri` that must be registered
+/// and sent on the authorize request.
+pub async fn bind_mcp_loopback() -> Result<(LoopbackListeners, String)> {
+    let v4 = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|_| AgentError::config("could not bind a loopback port for MCP OAuth"))?;
+    let port = v4
+        .local_addr()
+        .map_err(|_| AgentError::config("could not read the MCP OAuth loopback port"))?
+        .port();
+    let v6 = match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await {
+        Ok(listener) => Some(listener),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            None
+        }
+        Err(_) => None,
+    };
+    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
+    Ok((LoopbackListeners { v4, v6 }, redirect_uri))
+}
+
+/// Open `url` in the system browser. The URL is never written to logs or errors.
+pub fn open_system_browser(url: &url::Url) -> Result<()> {
+    let as_str = url.as_str();
+    let result = {
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open").arg(as_str).spawn()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", as_str])
+                .spawn()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            std::process::Command::new("xdg-open").arg(as_str).spawn()
+        }
+    };
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) => Err(AgentError::config(
+            "could not open the system browser for MCP OAuth",
+        )),
+    }
+}
+
+/// The loopback callback port, held on both families the browser might use.
+pub struct LoopbackListeners {
+    v4: TcpListener,
+    v6: Option<TcpListener>,
+}
+
+impl LoopbackListeners {
+    async fn serve(self, app: Router) {
+        match self.v6 {
+            Some(v6) => {
+                let v6_app = app.clone();
+                tokio::select! {
+                    _ = axum::serve(self.v4, app).into_future() => {}
+                    _ = axum::serve(v6, v6_app).into_future() => {}
+                }
+            }
+            None => {
+                let _ = axum::serve(self.v4, app).into_future().await;
+            }
+        }
+    }
+}
 
 /// A browser authorization in flight: an ephemeral loopback listener is bound
 /// (RFC 8252 §7.3), the authorize URL is open in the system browser, and
@@ -470,26 +758,125 @@ pub struct PendingMcpSignIn {
     /// The loopback redirect the listener is bound to, echoed into the
     /// authorize request and the token exchange so they match.
     pub redirect_uri: String,
-    // Retained: the bound listener, PKCE verifier, CSRF `state`, discovered
-    // token endpoint, and client id. These carry no `Debug`-safe token
-    // material, so the struct intentionally derives none.
-    #[allow(dead_code)]
+    pub(crate) listeners: LoopbackListeners,
     pub(crate) verifier: String,
-    #[allow(dead_code)]
     pub(crate) state: String,
+    pub(crate) token_endpoint: url::Url,
+    pub(crate) client_id: String,
+    pub(crate) client_secret: Option<String>,
 }
 
 impl PendingMcpSignIn {
     /// Await the loopback redirect, validate `state`, and exchange the code for
     /// tokens. Times out after [`SIGN_IN_TIMEOUT`]. On success the tokens are
     /// the caller's to persist through [`McpOAuthCredentialVault::save`].
-    pub async fn finish(self, _client: &McpOAuthClient) -> Result<McpOAuthCredentials> {
-        todo!(
-            "RFC 8252: accept one loopback GET on the bound listener, reject a \
-             mismatched state, serve the shared callback page, then \
-             McpOAuthClient::exchange_code with the retained verifier"
-        )
+    pub async fn finish(self, client: &McpOAuthClient) -> Result<McpOAuthCredentials> {
+        let Self {
+            listeners,
+            verifier,
+            state,
+            token_endpoint,
+            client_id,
+            client_secret,
+            redirect_uri,
+            ..
+        } = self;
+
+        let (sender, mut receiver) = mpsc::channel::<CallbackResult>(1);
+        let callback_app = Router::new()
+            .route("/auth/callback", get(callback))
+            .with_state(CallbackState {
+                expected_state: state,
+                sender,
+            });
+        let outcome = tokio::select! {
+            outcome = tokio::time::timeout(SIGN_IN_TIMEOUT, receiver.recv()) => outcome,
+            () = listeners.serve(callback_app) => Ok(None),
+        };
+
+        let callback = outcome
+            .map_err(|_| AgentError::config("MCP OAuth browser authorization timed out"))?
+            .ok_or_else(|| AgentError::config("the MCP OAuth authorization callback closed"))?;
+        if let Some(_error) = callback.error {
+            return Err(AgentError::config("MCP OAuth authorization was denied"));
+        }
+        let code = callback
+            .code
+            .ok_or_else(|| AgentError::config("MCP OAuth authorization returned no code"))?;
+
+        client
+            .exchange_code(
+                &token_endpoint,
+                CodeExchange {
+                    client_id: &client_id,
+                    client_secret: client_secret.as_deref(),
+                    code: &code,
+                    redirect_uri: &redirect_uri,
+                    verifier: &verifier,
+                },
+            )
+            .await
     }
+}
+
+async fn callback(
+    State(state): State<CallbackState>,
+    Query(query): Query<CallbackQuery>,
+) -> Response {
+    if query.state.as_deref() != Some(state.expected_state.as_str()) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Html(super::callback_page::callback_page(
+                super::callback_page::CallbackOutcome::Failed,
+                "Sign-in failed",
+                "The authorization state did not match. Return to Tidebreak and try again.",
+            )),
+        )
+            .into_response();
+    }
+    let success = query.code.is_some() && query.error.is_none();
+    let _ = state.sender.try_send(CallbackResult {
+        code: query.code,
+        error: query.error,
+    });
+    let (outcome, heading, message) = if success {
+        (
+            super::callback_page::CallbackOutcome::Success,
+            "You're signed in",
+            "",
+        )
+    } else {
+        (
+            super::callback_page::CallbackOutcome::Denied,
+            "Sign-in was denied",
+            "Nothing was connected. Return to Tidebreak for details, or try again.",
+        )
+    };
+    (
+        axum::http::StatusCode::OK,
+        Html(super::callback_page::callback_page(
+            outcome, heading, message,
+        )),
+    )
+        .into_response()
+}
+
+#[derive(Clone)]
+struct CallbackState {
+    expected_state: String,
+    sender: mpsc::Sender<CallbackResult>,
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+struct CallbackResult {
+    code: Option<String>,
+    error: Option<String>,
 }
 
 /// A live, refreshing OAuth session for one connected server. The runtime holds
@@ -497,17 +884,11 @@ impl PendingMcpSignIn {
 /// bearer. Refresh is serialized under `token_motion` so concurrent calls make
 /// at most one refresh.
 pub struct McpOAuthConnection {
-    #[allow(dead_code)]
     client: McpOAuthClient,
-    #[allow(dead_code)]
     vault: McpOAuthCredentialVault,
-    #[allow(dead_code)]
     token_endpoint: url::Url,
-    #[allow(dead_code)]
     client_id: String,
-    #[allow(dead_code)]
     client_secret: Option<String>,
-    #[allow(dead_code)]
     token_motion: tokio::sync::Mutex<()>,
 }
 
@@ -536,11 +917,40 @@ impl McpOAuthConnection {
     /// refresh token is rejected, which is the signal the Connect flow must run
     /// again.
     pub async fn access_token(&self) -> Result<String> {
-        todo!(
-            "load from vault; if access_is_fresh return it; else take \
-             token_motion, re-check, McpOAuthClient::refresh, save the rotated \
-             credentials, and map a rejected refresh to AgentError::SignInRequired"
-        )
+        let loaded = self.vault.load().await?;
+        let Some(credentials) = loaded else {
+            return Err(AgentError::SignInRequired(
+                "no MCP OAuth session is stored".to_string(),
+            ));
+        };
+        if credentials.access_is_fresh() {
+            return Ok(credentials.access_token);
+        }
+        let _guard = self.token_motion.lock().await;
+        let Some(credentials) = self.vault.load().await? else {
+            return Err(AgentError::SignInRequired(
+                "no MCP OAuth session is stored".to_string(),
+            ));
+        };
+        if credentials.access_is_fresh() {
+            return Ok(credentials.access_token);
+        }
+        let Some(refresh_token) = credentials.refresh_token.as_deref() else {
+            return Err(AgentError::SignInRequired(
+                "the MCP OAuth session has expired".to_string(),
+            ));
+        };
+        let refreshed = self
+            .client
+            .refresh(
+                &self.token_endpoint,
+                &self.client_id,
+                self.client_secret.as_deref(),
+                refresh_token,
+            )
+            .await?;
+        self.vault.save(&refreshed).await?;
+        Ok(refreshed.access_token)
     }
 }
 
@@ -595,9 +1005,18 @@ mod tests {
         );
         let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
-        assert_eq!(pairs.get("code_challenge_method").map(String::as_str), Some("S256"));
-        assert_eq!(pairs.get("client_id").map(String::as_str), Some("client-123"));
-        assert_eq!(pairs.get("code_challenge").map(String::as_str), Some("challenge-abc"));
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(
+            pairs.get("client_id").map(String::as_str),
+            Some("client-123")
+        );
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some("challenge-abc")
+        );
         assert_eq!(pairs.get("state").map(String::as_str), Some("state-xyz"));
         assert!(!pairs.contains_key("scope"), "empty scope must be omitted");
 
@@ -611,7 +1030,10 @@ mod tests {
         );
         let scoped_pairs: std::collections::HashMap<_, _> =
             scoped.query_pairs().into_owned().collect();
-        assert_eq!(scoped_pairs.get("scope").map(String::as_str), Some("mcp profile"));
+        assert_eq!(
+            scoped_pairs.get("scope").map(String::as_str),
+            Some("mcp profile")
+        );
     }
 
     #[test]
@@ -622,7 +1044,10 @@ mod tests {
             Some("https://api.example/.well-known/oauth-protected-resource")
         );
         assert_eq!(resource_metadata_from_challenge("Basic realm=x"), None);
-        assert_eq!(resource_metadata_from_challenge("Bearer realm=\"mcp\""), None);
+        assert_eq!(
+            resource_metadata_from_challenge("Bearer realm=\"mcp\""),
+            None
+        );
     }
 
     #[test]
@@ -637,5 +1062,54 @@ mod tests {
         assert!(!rendered.contains("super-secret-access"), "{rendered}");
         assert!(!rendered.contains("super-secret-refresh"), "{rendered}");
         assert!(rendered.contains("expires_at_unix: 42"), "{rendered}");
+    }
+
+    #[test]
+    fn missing_expires_in_uses_a_conservative_ttl() {
+        let before = unix_time();
+        let credentials = credentials_from_token(
+            TokenResponse {
+                access_token: "access".to_string(),
+                refresh_token: Some("refresh".to_string()),
+                expires_in: None,
+                scope: None,
+            },
+            None,
+        )
+        .unwrap();
+        let after = unix_time();
+        assert!(
+            credentials.expires_at_unix >= before.saturating_add(DEFAULT_ACCESS_TTL_SECONDS)
+                && credentials.expires_at_unix <= after.saturating_add(DEFAULT_ACCESS_TTL_SECONDS)
+        );
+        assert_ne!(credentials.expires_at_unix, 0);
+        assert!(credentials.expires_at_unix <= after.saturating_add(DEFAULT_ACCESS_TTL_SECONDS));
+    }
+
+    #[test]
+    fn refresh_rotation_carries_a_new_refresh_token_forward() {
+        let rotated = credentials_from_token(
+            TokenResponse {
+                access_token: "new-access".to_string(),
+                refresh_token: Some("rotated-refresh".to_string()),
+                expires_in: Some(3600),
+                scope: None,
+            },
+            Some("old-refresh"),
+        )
+        .unwrap();
+        assert_eq!(rotated.refresh_token.as_deref(), Some("rotated-refresh"));
+
+        let kept = credentials_from_token(
+            TokenResponse {
+                access_token: "new-access".to_string(),
+                refresh_token: None,
+                expires_in: Some(3600),
+                scope: None,
+            },
+            Some("old-refresh"),
+        )
+        .unwrap();
+        assert_eq!(kept.refresh_token.as_deref(), Some("old-refresh"));
     }
 }

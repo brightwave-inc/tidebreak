@@ -13,7 +13,12 @@ use tidebreak_core::{AgentError, Result, SecretProvider, Store, ToolRegistry};
 use tidebreak_mcp::{McpClient, McpProbe, MAX_SERVER_NAME_BYTES};
 use tokio::sync::Mutex;
 
+use crate::connectors::{
+    bind_mcp_loopback, build_authorize_url, open_system_browser, pkce_pair, McpOAuthClient,
+    McpOAuthCredentialVault, PendingMcpSignIn,
+};
 use crate::mcp_curated::{curation_for, McpCuration};
+use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
 use super::types::*;
 use super::validation::{connection_diagnostic, validate_servers};
@@ -789,12 +794,17 @@ impl McpRuntime {
         let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
+        let secrets = &self.secrets;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| {
             let env = envs.get(&definition.name).cloned().unwrap_or_default();
+            let app_id = ids.get(&definition.name).copied();
             async move {
                 if connects(definition, lockdown) {
-                    definition.connect_with_views(gateway, &env).await.map(Some)
+                    definition
+                        .connect_with_views(gateway, &env, Some(secrets), app_id)
+                        .await
+                        .map(Some)
                 } else {
                     Ok(None)
                 }
@@ -926,12 +936,17 @@ impl McpRuntime {
         let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
+        let secrets = &self.secrets;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| {
             let env = envs.get(&definition.name).cloned().unwrap_or_default();
+            let app_id = ids.get(&definition.name).copied();
             async move {
                 if connects(definition, lockdown) {
-                    definition.connect_with_views(gateway, &env).await.map(Some)
+                    definition
+                        .connect_with_views(gateway, &env, Some(secrets), app_id)
+                        .await
+                        .map(Some)
                 } else {
                     Ok(None)
                 }
@@ -1023,14 +1038,18 @@ impl McpRuntime {
             .iter()
             .filter(|definition| !live.contains(definition))
             .collect();
-        let connections = join_all(fresh.iter().map(|definition| async move {
-            if connects(definition, lockdown) {
-                definition
-                    .connect_with_views(gateway, &BTreeMap::new())
-                    .await
-                    .map(Some)
-            } else {
-                Ok(None)
+        let secrets = &self.secrets;
+        let connections = join_all(fresh.iter().map(|definition| {
+            let app_id = ids.get(&definition.name).copied();
+            async move {
+                if connects(definition, lockdown) {
+                    definition
+                        .connect_with_views(gateway, &BTreeMap::new(), Some(secrets), app_id)
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
             }
         }))
         .await;
@@ -1233,40 +1252,155 @@ impl McpRuntime {
     /// authorization server, register a client if needed, open the system
     /// browser, and — on return — store the tokens and reconnect. The returned
     /// [`McpOAuthStatus`] carries the browser URL while `Authorizing`.
-    ///
-    /// Skeleton: the discovery/PKCE/exchange machinery lands in a follow-up
-    /// slice. Until then this reports an explicit, secret-free not-implemented
-    /// error rather than panicking, so the route surface is exercisable.
-    pub async fn oauth_connect(
-        &self,
-        name: &str,
-    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
-        let _ = name;
-        Err(AgentError::config("MCP OAuth connect is not yet implemented"))
+    pub async fn oauth_connect(&self, name: &str) -> Result<McpOAuthStatus> {
+        let (definition, id) = {
+            let state = self.state.lock().await;
+            let definition = state
+                .definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .cloned()
+                .ok_or_else(|| AgentError::config("MCP server not found"))?;
+            if !definition.oauth {
+                return Ok(McpOAuthStatus::failed(
+                    McpOAuthState::Unsupported,
+                    "this server does not use OAuth",
+                ));
+            }
+            let id = state
+                .ids
+                .get(name)
+                .copied()
+                .ok_or_else(|| AgentError::config("MCP server record is missing"))?;
+            (definition, id)
+        };
+        let resource = definition
+            .url
+            .as_deref()
+            .ok_or_else(|| AgentError::config("this MCP server has no HTTP endpoint"))?;
+        let resource = url::Url::parse(resource)
+            .map_err(|_| AgentError::config("this MCP server has no HTTP endpoint"))?;
+
+        let client = McpOAuthClient::new()?;
+        let discovered = match client.discover(&resource, None).await {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("dynamic client registration") {
+                    return Ok(McpOAuthStatus::failed(
+                        McpOAuthState::Unsupported,
+                        "this server does not support dynamic client registration",
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let registration_endpoint = discovered.registration_endpoint.as_ref().ok_or_else(|| {
+            AgentError::config("this MCP server does not support dynamic client registration")
+        })?;
+
+        let (listeners, redirect_uri) = bind_mcp_loopback().await?;
+        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
+        let mut registration = match vault.load_registration().await? {
+            Some(existing) if !existing.client_id.is_empty() => existing,
+            _ => {
+                client
+                    .register(registration_endpoint, &redirect_uri)
+                    .await?
+            }
+        };
+        registration.token_endpoint = Some(discovered.token_endpoint.as_str().to_string());
+        if registration.scopes.is_empty() {
+            registration.scopes = discovered.scopes_supported.clone();
+        }
+        vault.save_registration(&registration).await?;
+
+        let pkce = pkce_pair();
+        let state = format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let authorization_url = build_authorize_url(
+            &discovered.authorization_endpoint,
+            &registration.client_id,
+            &redirect_uri,
+            &pkce.challenge,
+            &state,
+            &registration.scopes,
+        );
+        let pending = PendingMcpSignIn {
+            authorization_url: authorization_url.clone(),
+            redirect_uri,
+            listeners,
+            verifier: pkce.verifier,
+            state,
+            token_endpoint: discovered.token_endpoint,
+            client_id: registration.client_id,
+            client_secret: registration.client_secret,
+        };
+        open_system_browser(&authorization_url)?;
+        let credentials = pending.finish(&client).await?;
+        vault.save(&credentials).await?;
+        let _ = self.reconnect(name).await;
+        Ok(McpOAuthStatus::connected())
     }
 
     /// Clear a server's stored OAuth session and drop its live connection.
-    ///
-    /// Skeleton: see [`Self::oauth_connect`].
-    pub async fn oauth_disconnect(
-        &self,
-        name: &str,
-    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
-        let _ = name;
-        Err(AgentError::config(
-            "MCP OAuth disconnect is not yet implemented",
-        ))
+    pub async fn oauth_disconnect(&self, name: &str) -> Result<McpOAuthStatus> {
+        let id = {
+            let state = self.state.lock().await;
+            let definition = state
+                .definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .ok_or_else(|| AgentError::config("MCP server not found"))?;
+            if !definition.oauth {
+                return Ok(McpOAuthStatus::failed(
+                    McpOAuthState::Unsupported,
+                    "this server does not use OAuth",
+                ));
+            }
+            state
+                .ids
+                .get(name)
+                .copied()
+                .ok_or_else(|| AgentError::config("MCP server record is missing"))?
+        };
+        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
+        vault.clear().await?;
+        vault.clear_registration().await?;
+        let _ = self.reconnect(name).await;
+        Ok(McpOAuthStatus::not_connected())
     }
 
     /// Report one server's current OAuth connection state without mutating it.
-    ///
-    /// Skeleton: see [`Self::oauth_connect`].
-    pub async fn oauth_status(
-        &self,
-        name: &str,
-    ) -> Result<crate::mcp_oauth_runtime::McpOAuthStatus> {
-        let _ = name;
-        Err(AgentError::config("MCP OAuth status is not yet implemented"))
+    pub async fn oauth_status(&self, name: &str) -> Result<McpOAuthStatus> {
+        let (oauth, id) = {
+            let state = self.state.lock().await;
+            let definition = state
+                .definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .ok_or_else(|| AgentError::config("MCP server not found"))?;
+            (definition.oauth, state.ids.get(name).copied())
+        };
+        if !oauth {
+            return Ok(McpOAuthStatus::of(McpOAuthState::Unsupported));
+        }
+        let Some(id) = id else {
+            return Ok(McpOAuthStatus::not_connected());
+        };
+        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
+        let Some(credentials) = vault.load().await? else {
+            return Ok(McpOAuthStatus::not_connected());
+        };
+        if credentials.access_is_fresh() {
+            return Ok(McpOAuthStatus::connected());
+        }
+        if credentials.refresh_token.is_some() {
+            return Ok(McpOAuthStatus::connected());
+        }
+        Ok(McpOAuthStatus::failed(
+            McpOAuthState::Expired,
+            "the MCP OAuth session has expired",
+        ))
     }
 
     async fn reconnect_if_epoch(
@@ -1339,7 +1473,10 @@ impl McpRuntime {
             Some(id) if !definition.env.is_empty() => self.stored_env(id).await,
             _ => BTreeMap::new(),
         };
-        match definition.connect_with_views(&self.gateway, &env).await {
+        match definition
+            .connect_with_views(&self.gateway, &env, Some(&self.secrets), app_id)
+            .await
+        {
             Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.

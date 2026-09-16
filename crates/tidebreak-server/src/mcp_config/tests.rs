@@ -443,7 +443,7 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new())
+        .connect(&gateway, &BTreeMap::new(), None, None)
         .await
         .err()
         .unwrap();
@@ -920,7 +920,7 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new())
+        .connect(&gateway, &BTreeMap::new(), None, None)
         .await
         .err()
         .unwrap();
