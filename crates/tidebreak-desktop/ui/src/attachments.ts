@@ -4,7 +4,7 @@ import type { ApiClient } from "./api";
 import { isRecord } from "./lib/guards";
 import { parseLibraryImportBatch, type LibraryImportBatch } from "./documents";
 import {
-  isSupportedImageType,
+  isImageAttachmentFile,
   parseAttachedImage,
   parseHostPublishedImage,
   type PickedImage,
@@ -95,8 +95,8 @@ export async function attachHeldChatFiles(
   chatId: string,
   files: readonly File[],
 ): Promise<HeldFiles> {
-  const images = files.filter((file) => isSupportedImageType(file.type));
-  const sources = files.filter((file) => !isSupportedImageType(file.type));
+  const images = files.filter(isImageAttachmentFile);
+  const sources = files.filter((file) => !isImageAttachmentFile(file));
   if (sources.length === 0) return { images, documents: null };
   const results = await Promise.all(
     sources.map(async (file) => {
