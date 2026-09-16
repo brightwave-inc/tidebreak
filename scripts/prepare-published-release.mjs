@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
   createLatestDocument,
   RELEASE_PLATFORMS,
+  releasePlatforms,
 } from "./create-release-manifests.mjs";
 
 function requiredOption(options, name) {
@@ -22,7 +23,7 @@ function parseOptions(args) {
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
       throw new Error(
-        "usage: prepare-published-release.mjs --manifest <path> --latest <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url>",
+        "usage: prepare-published-release.mjs --manifest <path> --latest <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url> [--platforms all|macos]",
       );
     }
     options.set(flag.slice(2), value);
@@ -48,6 +49,7 @@ export function validatePublishedReleaseManifest({
   sha,
   publishedAt,
   baseUrl,
+  platforms = RELEASE_PLATFORMS,
 }) {
   requireExact(manifest.schema_version, 1, "schema version");
   requireExact(manifest.version, version, "version");
@@ -57,7 +59,7 @@ export function validatePublishedReleaseManifest({
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const expected = new Map();
-  for (const platformDescriptor of RELEASE_PLATFORMS) {
+  for (const platformDescriptor of platforms) {
     for (const arch of platformDescriptor.architectures) {
       for (const descriptor of platformDescriptor.formats) {
         const filename = path.posix.join(
@@ -152,7 +154,9 @@ export function preparePublishedRelease({
   sha,
   publishedAt,
   baseUrl,
+  platformSelection = "all",
 }) {
+  const platforms = releasePlatforms("production", platformSelection);
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   validatePublishedReleaseManifest({
     manifest,
@@ -161,11 +165,13 @@ export function preparePublishedRelease({
     sha,
     publishedAt,
     baseUrl,
+    platforms,
   });
   const latest = createLatestDocument({
     version,
     publishedAt,
     artifacts: manifest.artifacts,
+    platforms,
   });
   writeFileSync(latestPath, `${JSON.stringify(latest, null, 2)}\n`);
   return { manifest, latest };
@@ -181,6 +187,7 @@ function main() {
     sha: requiredOption(options, "sha"),
     publishedAt: requiredOption(options, "published-at"),
     baseUrl: requiredOption(options, "base-url"),
+    platformSelection: options.get("platforms") || "all",
   });
   console.log(JSON.stringify(result.latest, null, 2));
 }

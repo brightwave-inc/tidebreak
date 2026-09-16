@@ -604,9 +604,11 @@ test("PR lanes are scope-gated, never label-gated", () => {
   assert.doesNotMatch(e2bCli, /npm install|@latest/);
 
   const desktop = workflowJob(ci, "desktop");
+  // The lane may run the desktop tests under cargo test or, once its
+  // credential tests fold into the same build, under one nextest invocation.
   assert.match(
     desktop,
-    /cargo test -p tidebreak-desktop --locked/,
+    /cargo (?:test|nextest run) (?:--locked )?-p tidebreak-desktop/,
   );
   for (const [name, step] of [
     ["lint", "Install system deps (Tauri)"],
@@ -3056,4 +3058,101 @@ test("Linux release dependencies use the workflow helper without moving applicat
     "patchelf",
     "xdg-utils",
   ]);
+});
+
+test("Windows and Linux packaging is paused behind the platforms input", () => {
+  const release = workflows["release.yml"];
+
+  // The pause is a dispatch input, so one release can build every platform
+  // without a code change, and `macos` is the default every draft publishes.
+  const input = release.match(
+    /^      platforms:\n(?:        .*\n)+?        options:\n(?:          - .*\n)+/m,
+  )?.[0];
+  assert.ok(input, "release.yml must declare the platforms input");
+  assert.match(input, /type: choice/);
+  assert.match(input, /default: macos/);
+  assert.match(input, /- macos\n\s+- all/);
+
+  for (const jobName of [
+    "prepare_windows",
+    "prepare_windows_desktop",
+    "build_windows",
+    "build_linux",
+  ]) {
+    assert.match(
+      workflowJob(release, jobName),
+      /inputs\.platforms == 'all'/,
+      `${jobName} must only run when the dispatch selected every platform`,
+    );
+  }
+
+  // Downstream jobs accept a skipped Windows or Linux build only while the run
+  // was dispatched without those platforms; a failed or missing build still
+  // blocks publication when they were requested.
+  for (const jobName of ["publish", "attach_downloads"]) {
+    const job = workflowJob(release, jobName);
+    for (const build of ["build_windows", "build_linux"]) {
+      assert.match(
+        job,
+        new RegExp(
+          `needs\\.${build}\\.result == 'success'\\n\\s+\\|\\| \\(inputs\\.platforms != 'all' && needs\\.${build}\\.result == 'skipped'\\)`,
+        ),
+        `${jobName} must accept a skipped ${build} only when the platforms input paused it`,
+      );
+    }
+    assert.match(job, /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \|\| 'macos' \}\}/);
+    assert.doesNotMatch(
+      job,
+      /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \}\}\n/,
+      `${jobName} must default an unset platforms input to macos`,
+    );
+  }
+
+  // Manifests follow the selection everywhere they are created or checked.
+  const publishJob = workflowJob(release, "publish");
+  assert.match(publishJob, /create-release-manifests\.mjs[\s\S]*?--platforms "\$RELEASE_PLATFORMS"/);
+  assert.match(publishJob, /prepare-published-release\.mjs[\s\S]*?--platforms "\$RELEASE_PLATFORMS"/);
+  assert.match(
+    workflowJob(release, "inspect_hosted"),
+    /prepare-published-release\.mjs[\s\S]*?--platforms "\$\{\{ inputs\.platforms \|\| 'macos' \}\}"/,
+  );
+
+  // Paused platforms download nothing, and the README's permanent links keep
+  // serving the last builds that shipped.
+  const attachJob = workflowJob(release, "attach_downloads");
+  for (const label of ["x86_64 Windows", "ARM64 Windows", "x86_64 Linux", "ARM64 Linux"]) {
+    assert.match(
+      publishJob,
+      new RegExp(
+        `- name: Download ${label} artifacts\\n\\s+if: >-\\n\\s+\\$\\{\\{\\n\\s+inputs\\.platforms == 'all'`,
+      ),
+    );
+    assert.match(
+      attachJob,
+      new RegExp(
+        `- name: Download the verified ${label} build\\n\\s+if: \\$\\{\\{ inputs\\.platforms == 'all' && `,
+      ),
+    );
+  }
+  const carryForward = attachJob.match(
+    /- name: Carry forward the paused Windows and Linux downloads[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(carryForward, "attach_downloads must carry paused downloads forward");
+  assert.match(carryForward, /inputs\.platforms != 'all'/);
+  assert.match(carryForward, /releases\/latest" --jq \.tag_name/);
+  assert.match(carryForward, /"\$previous" != "\$RELEASE_TAG"/);
+  for (const name of [
+    "Tidebreak-windows-x86_64-setup.exe",
+    "Tidebreak-windows-aarch64-setup.exe",
+    "Tidebreak-linux-x86_64.AppImage",
+    "Tidebreak-linux-x86_64.deb",
+    "Tidebreak-linux-aarch64.AppImage",
+    "Tidebreak-linux-aarch64.deb",
+  ]) {
+    assert.ok(carryForward.includes(name), `carry-forward must cover ${name}`);
+  }
+  assert.match(carryForward, /--pattern "\$name\.sha256"/);
+  // Versioned packages and updater signatures never travel with the carried
+  // downloads, so the updater feed cannot offer a stale Windows or Linux build.
+  assert.doesNotMatch(carryForward, /\.sig|Tidebreak_\$\{TIDEBREAK_VERSION\}/);
 });

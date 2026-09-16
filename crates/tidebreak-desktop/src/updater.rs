@@ -244,6 +244,9 @@ async fn perform_update_check(app: &AppHandle) {
 
     let update = match updater.check().await {
         Ok(update) => update,
+        // The feed lists only the platforms a release ships. A platform with
+        // no entry is up to date as far as it can be, not a failed check.
+        Err(tauri_plugin_updater::Error::TargetNotFound(_)) => None,
         Err(error) => {
             eprintln!("tidebreak-desktop: update check failed: {error}");
             if !silent {
@@ -345,6 +348,8 @@ async fn resolve_latest_for_install(
 
     let update = match updater.check().await {
         Ok(update) => update,
+        // See the background check: a platform the feed omits has no update.
+        Err(tauri_plugin_updater::Error::TargetNotFound(_)) => None,
         Err(error) => {
             eprintln!("tidebreak-desktop: install-time update check failed: {error}");
             return Ok(staged);

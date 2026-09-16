@@ -9,6 +9,19 @@ on:
         description: Leave blank to publish the current draft. Set a tag only to retry a draft or release created with the current artifact contract.
         required: false
         type: string
+      # Windows and Linux packaging is paused: nobody is asking for newer
+      # builds, and the macOS lane is the one that gates every release. The
+      # jobs stay in this file; dispatch with `all` to build them again for one
+      # release, or change this default to resume them for every release. A
+      # retry of a release must repeat the selection the original run used.
+      platforms:
+        description: Desktop platforms to package. `macos` carries the last published Windows and Linux downloads forward unchanged.
+        required: false
+        type: choice
+        default: macos
+        options:
+          - macos
+          - all
 
 permissions:
   contents: read
@@ -547,7 +560,8 @@ jobs:
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
             --published-at "$RELEASE_PUBLISHED_AT" \
-            --base-url "$RELEASE_BASE_URL"
+            --base-url "$RELEASE_BASE_URL" \
+            --platforms "${{ inputs.platforms || 'macos' }}"
 
           manifest_digest="$(sha256sum "$manifest_path" | cut -d ' ' -f 1)"
           [[ "$(jq -r '.Metadata.sha256 // empty' <<<"$manifest_head")" = "$manifest_digest" ]] || {
@@ -1360,7 +1374,8 @@ jobs:
     needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
-        needs.validate.outputs.draft == 'true'
+        inputs.platforms == 'all'
+        && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
     runs-on: ${{ matrix.runner }}
@@ -1533,7 +1548,8 @@ jobs:
     needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
-        needs.validate.outputs.draft == 'true'
+        inputs.platforms == 'all'
+        && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
     runs-on: ${{ matrix.runner }}
@@ -1740,6 +1756,7 @@ jobs:
     if: >-
       ${{
         always()
+        && inputs.platforms == 'all'
         && needs.validate.result == 'success'
         && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
@@ -1967,7 +1984,8 @@ jobs:
     needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
-        needs.validate.outputs.draft == 'true'
+        inputs.platforms == 'all'
+        && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
     # The x86_64 baseline remains `runs-on: ubuntu-22.04`; the matrix adds the
@@ -2211,6 +2229,8 @@ jobs:
   publish:
     name: publish downloads.brightwave.io
     needs: [validate, inspect_hosted, build_macos, build_windows, build_linux, source_sbom, finalize_release]
+    # Paused platforms report `skipped`; that only counts as success while the
+    # run was dispatched without them.
     if: >-
       ${{
         always()
@@ -2222,8 +2242,14 @@ jobs:
           || needs.validate.outputs.draft != 'true'
           || (
             needs.build_macos.result == 'success'
-            && needs.build_windows.result == 'success'
-            && needs.build_linux.result == 'success'
+            && (
+              needs.build_windows.result == 'success'
+              || (inputs.platforms != 'all' && needs.build_windows.result == 'skipped')
+            )
+            && (
+              needs.build_linux.result == 'success'
+              || (inputs.platforms != 'all' && needs.build_linux.result == 'skipped')
+            )
             && needs.source_sbom.result == 'success'
           )
         )
@@ -2242,6 +2268,7 @@ jobs:
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
       RELEASE_PUBLISHED_AT: ${{ needs.finalize_release.outputs.published_at }}
       RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
+      RELEASE_PLATFORMS: ${{ inputs.platforms || 'macos' }}
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
@@ -2281,7 +2308,8 @@ jobs:
       - name: Download x86_64 Windows artifacts
         if: >-
           ${{
-            needs.validate.outputs.draft == 'true'
+            inputs.platforms == 'all'
+            && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -2292,7 +2320,8 @@ jobs:
       - name: Download ARM64 Windows artifacts
         if: >-
           ${{
-            needs.validate.outputs.draft == 'true'
+            inputs.platforms == 'all'
+            && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -2303,7 +2332,8 @@ jobs:
       - name: Download x86_64 Linux artifacts
         if: >-
           ${{
-            needs.validate.outputs.draft == 'true'
+            inputs.platforms == 'all'
+            && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -2314,7 +2344,8 @@ jobs:
       - name: Download ARM64 Linux artifacts
         if: >-
           ${{
-            needs.validate.outputs.draft == 'true'
+            inputs.platforms == 'all'
+            && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -2358,27 +2389,31 @@ jobs:
             cp "recovery/$file" "dist/macos/universal/$file"
           done
 
-          for arch in x86_64 aarch64; do
-            windows_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
-            for suffix in setup.exe setup.exe.sig; do
-              file="$windows_base-$suffix"
-              [[ -f "recovery/$file" ]] || {
-                echo "Immutable GitHub Release is missing recovery asset: $file" >&2
-                exit 1
-              }
-              cp "recovery/$file" "dist/windows/$arch/$file"
-            done
+          # A macOS-only release never had these; a retry must repeat the
+          # platform selection of the run that created the release.
+          if [[ "$RELEASE_PLATFORMS" == all ]]; then
+            for arch in x86_64 aarch64; do
+              windows_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+              for suffix in setup.exe setup.exe.sig; do
+                file="$windows_base-$suffix"
+                [[ -f "recovery/$file" ]] || {
+                  echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+                  exit 1
+                }
+                cp "recovery/$file" "dist/windows/$arch/$file"
+              done
 
-            linux_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
-            for suffix in AppImage AppImage.sig deb deb.sig; do
-              file="$linux_base.$suffix"
-              [[ -f "recovery/$file" ]] || {
-                echo "Immutable GitHub Release is missing recovery asset: $file" >&2
-                exit 1
-              }
-              cp "recovery/$file" "dist/linux/$arch/$file"
+              linux_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+              for suffix in AppImage AppImage.sig deb deb.sig; do
+                file="$linux_base.$suffix"
+                [[ -f "recovery/$file" ]] || {
+                  echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+                  exit 1
+                }
+                cp "recovery/$file" "dist/linux/$arch/$file"
+              done
             done
-          done
+          fi
 
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
           cp "recovery/$sbom" "dist/$sbom"
@@ -2395,6 +2430,7 @@ jobs:
           --sha "$RELEASE_SHA"
           --published-at "$RELEASE_PUBLISHED_AT"
           --base-url "$RELEASE_BASE_URL"
+          --platforms "$RELEASE_PLATFORMS"
 
       - name: Download the checksummed source SBOM
         if: >-
@@ -2452,7 +2488,8 @@ jobs:
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
             --published-at "$RELEASE_PUBLISHED_AT" \
-            --base-url "$RELEASE_BASE_URL"
+            --base-url "$RELEASE_BASE_URL" \
+            --platforms "$RELEASE_PLATFORMS"
 
       - name: Prevent latest-version regression
         run: |
@@ -2594,8 +2631,14 @@ jobs:
           needs.validate.outputs.draft != 'true'
           || (
             needs.build_macos.result == 'success'
-            && needs.build_windows.result == 'success'
-            && needs.build_linux.result == 'success'
+            && (
+              needs.build_windows.result == 'success'
+              || (inputs.platforms != 'all' && needs.build_windows.result == 'skipped')
+            )
+            && (
+              needs.build_linux.result == 'success'
+              || (inputs.platforms != 'all' && needs.build_linux.result == 'skipped')
+            )
             && needs.source_sbom.result == 'success'
           )
         )
@@ -2606,6 +2649,7 @@ jobs:
     env:
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms || 'macos' }}
     steps:
       - name: Download the verified macOS build
         if: ${{ needs.validate.outputs.draft == 'true' }}
@@ -2615,28 +2659,28 @@ jobs:
           path: release-artifacts/macos
 
       - name: Download the verified x86_64 Windows build
-        if: ${{ needs.validate.outputs.draft == 'true' }}
+        if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: release-artifacts/windows/x86_64
 
       - name: Download the verified ARM64 Windows build
-        if: ${{ needs.validate.outputs.draft == 'true' }}
+        if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-windows-aarch64-${{ needs.validate.outputs.version }}
           path: release-artifacts/windows/aarch64
 
       - name: Download the verified x86_64 Linux build
-        if: ${{ needs.validate.outputs.draft == 'true' }}
+        if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
           path: release-artifacts/linux/x86_64
 
       - name: Download the verified ARM64 Linux build
-        if: ${{ needs.validate.outputs.draft == 'true' }}
+        if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-linux-aarch64-${{ needs.validate.outputs.version }}
@@ -2673,6 +2717,7 @@ jobs:
             (cd downloads && sha256sum "$file" > "$file.sha256")
           done
 
+          if [[ "$RELEASE_PLATFORMS" == all ]]; then
           for arch in x86_64 aarch64; do
             windows_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
             windows_installer="$windows_base-setup.exe"
@@ -2708,11 +2753,51 @@ jobs:
             (cd downloads && sha256sum "Tidebreak-linux-${arch}.deb" \
               > "Tidebreak-linux-${arch}.deb.sha256")
           done
+          fi
 
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
           cp "release-artifacts/sbom/$sbom" "downloads/$sbom"
           cp "release-artifacts/sbom/$sbom.sha256" "downloads/$sbom.sha256"
           (cd downloads && sha256sum --check --strict "$sbom.sha256")
+
+      # While Windows and Linux packaging is paused, the README's permanent
+      # /releases/latest/download/ links keep serving the last builds that
+      # shipped: the stable-name installers and their checksum sidecars are
+      # copied unchanged from the previous published release. Versioned
+      # packages and updater signatures are not carried, so `latest.json`
+      # advertises no Windows or Linux update and installed apps stay put.
+      - name: Carry forward the paused Windows and Linux downloads
+        if: >-
+          ${{
+            inputs.platforms != 'all'
+            && needs.validate.outputs.draft == 'true'
+          }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          [[ -n "$previous" && "$previous" != "$RELEASE_TAG" ]] || {
+            echo "No earlier published release to carry Windows and Linux downloads from." >&2
+            exit 1
+          }
+          echo "Carrying Windows and Linux downloads forward from $previous."
+          for name in \
+            Tidebreak-windows-x86_64-setup.exe \
+            Tidebreak-windows-aarch64-setup.exe \
+            Tidebreak-linux-x86_64.AppImage \
+            Tidebreak-linux-x86_64.deb \
+            Tidebreak-linux-aarch64.AppImage \
+            Tidebreak-linux-aarch64.deb; do
+            gh release download "$previous" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir downloads \
+              --pattern "$name" \
+              --pattern "$name.sha256"
+            [[ -f "downloads/$name" && -f "downloads/$name.sha256" ]] || {
+              echo "Release $previous does not carry $name and its checksum." >&2
+              exit 1
+            }
+          done
 
       - name: Download existing immutable GitHub assets
         if: ${{ needs.validate.outputs.draft != 'true' }}
@@ -2776,6 +2861,7 @@ jobs:
                 exit 1
               }
             done
+            if [[ "$RELEASE_PLATFORMS" == all ]]; then
             for file in \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe.sig" \
@@ -2794,6 +2880,7 @@ jobs:
                 exit 1
               }
             done
+            fi
           fi
 
       # Version-free asset names give the README permanent one-click download
