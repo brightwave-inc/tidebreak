@@ -59,6 +59,7 @@ pub mod logging;
 pub mod managed_policy;
 pub mod mcp_config;
 pub mod mcp_curated;
+pub mod mcp_oauth_runtime;
 /// Trusted decision about what imported bytes actually are, made from the
 /// bytes rather than from whoever named them.
 pub mod media_type;

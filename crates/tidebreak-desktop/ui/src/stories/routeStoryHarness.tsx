@@ -489,6 +489,7 @@ const routeMcpServer = {
   cwd: null,
   url: null,
   bearer_token_env: null,
+  oauth: false,
   gateway_endpoint: null,
   request_timeout_ms: 60_000,
   enabled: true,

@@ -18,9 +18,10 @@ pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
     exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment,
-    managed_policy, mcp_config, mcp_curated, memory_sweep, model_registry, model_roles,
-    obo_gateway, openapi_discovery, plugin_install, plugin_state, principal, providers,
-    runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames, workspace_config,
+    managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
+    model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
+    providers, runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames,
+    workspace_config,
 };
 #[cfg(test)]
 pub(crate) use core::{
@@ -304,6 +305,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/mcp/servers/{name}/reconnect",
             post(routes::post_mcp_server_reconnect),
+        )
+        .route(
+            "/mcp/servers/{name}/connect",
+            post(routes::post_mcp_server_connect),
+        )
+        .route(
+            "/mcp/servers/{name}/disconnect",
+            post(routes::post_mcp_server_disconnect),
         )
         .route(
             "/plugins/install",

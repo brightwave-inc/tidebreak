@@ -414,6 +414,9 @@ mod tests {
         generate::collect_from::<crate::code_execution::ExecConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::code_execution::ExecCredentialReadiness>(&cfg, &mut out);
         generate::collect_from::<crate::mcp_config::McpServersInfo>(&cfg, &mut out);
+        // The per-server OAuth connection status the Connect action renders,
+        // projected beside each server's health rather than merged into it.
+        generate::collect_from::<crate::mcp_oauth_runtime::McpOAuthStatus>(&cfg, &mut out);
         // The installed plugin/skill catalog, its host-derived capability
         // badges, and the toggle body the management surface sends back.
         generate::collect_from::<crate::routes::PluginCatalog>(&cfg, &mut out);
@@ -1554,6 +1557,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             url: None,
             bearer_token_env: None,
+            oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: 30_000,
             enabled: true,
@@ -1575,6 +1579,7 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: None,
+            oauth: false,
             gateway_endpoint: Some("linear".into()),
             request_timeout_ms: 30_000,
             enabled: false,
@@ -1594,6 +1599,7 @@ mod tests {
                         tested_on: "2026-08-01".into(),
                         notes: "Read and write under one root.".into(),
                     }),
+                    oauth_status: None,
                 },
                 McpServerInfo {
                     definition: gateway,
@@ -1602,6 +1608,7 @@ mod tests {
                     diagnostic: Some("turned off".into()),
                     resolved_command: None,
                     curated: None,
+                    oauth_status: None,
                 },
             ],
         };

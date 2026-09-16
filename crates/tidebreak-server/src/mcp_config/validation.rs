@@ -39,10 +39,18 @@ pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
                 validate_process_string(&server.name, "url", url)?;
                 tidebreak_mcp::validate_http_url_with_credentials(
                     url,
-                    server.bearer_token_env.is_some(),
+                    server.bearer_token_env.is_some() || server.oauth,
                 )
                 .map_err(|error| server_error(&server.name, error))?;
                 validate_no_process_fields(server)?;
+                if server.oauth && server.bearer_token_env.is_some() {
+                    return Err(server_error(
+                        &server.name,
+                        "oauth and bearer_token_env are mutually exclusive; an OAuth \
+                         server obtains its bearer through sign-in, not a static \
+                         environment variable",
+                    ));
+                }
                 if let Some(bearer_name) = &server.bearer_token_env {
                     validate_environment_name(&server.name, bearer_name)?;
                 }
@@ -64,6 +72,12 @@ pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
                     "must configure exactly one of command, url, or gateway endpoint",
                 ));
             }
+        }
+        if server.oauth && server.url.is_none() {
+            return Err(server_error(
+                &server.name,
+                "oauth applies only to url servers",
+            ));
         }
         if server.args.len() > MAX_ARGS {
             return Err(server_error(
@@ -314,6 +328,7 @@ mod tests {
             cwd: None,
             url: Some(url.to_string()),
             bearer_token_env: bearer_token_env.map(str::to_string),
+            oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             enabled: true,

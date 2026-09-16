@@ -85,6 +85,12 @@ pub struct ExportedMcpServer {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub bearer_token_env: Option<String>,
+    /// Whether the server authenticates with OAuth. An exported definition
+    /// carries the flag but never a token: the credential stays in the OS
+    /// store, so an imported OAuth server is authenticatable but not yet
+    /// authorized. Omitted from the document when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oauth: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub gateway_endpoint: Option<String>,
@@ -256,6 +262,7 @@ pub fn export_mcp_servers(definitions: &[McpServerDefinition]) -> Vec<ExportedMc
                 .map(|path| path.to_string_lossy().into_owned()),
             url: definition.url.clone(),
             bearer_token_env: definition.bearer_token_env.clone(),
+            oauth: definition.oauth,
             gateway_endpoint: definition.gateway_endpoint.clone(),
             request_timeout_ms: definition.request_timeout_ms,
             enabled: definition.enabled,
@@ -432,6 +439,9 @@ fn mcp_diff(exported: &ExportedMcpServer, existing: &McpServerDefinition) -> Vec
     if exported.bearer_token_env != existing.bearer_token_env {
         fields.push("bearer_token_env".into());
     }
+    if exported.oauth != existing.oauth {
+        fields.push("oauth".into());
+    }
     if exported.gateway_endpoint != existing.gateway_endpoint {
         fields.push("gateway_endpoint".into());
     }
@@ -493,6 +503,7 @@ pub fn exported_mcp_to_definition(exported: &ExportedMcpServer) -> McpServerDefi
         cwd: exported.cwd.as_ref().map(PathBuf::from),
         url: exported.url.clone(),
         bearer_token_env: exported.bearer_token_env.clone(),
+        oauth: exported.oauth,
         gateway_endpoint: exported.gateway_endpoint.clone(),
         request_timeout_ms: exported.request_timeout_ms,
         enabled: exported.enabled,
@@ -576,6 +587,7 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: None,
+            oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: 60_000,
             enabled: true,
@@ -622,6 +634,7 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: Some("BEARER".into()),
+            oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: 60_000,
             enabled: true,

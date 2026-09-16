@@ -2533,7 +2533,14 @@ export type ExportedCodeRepository = { display_name: string, origin_url?: string
 /**
  * Portable MCP server definition. Environment *names* only.
  */
-export type ExportedMcpServer = { name: string, command?: string, args: Array<string>, env: Array<string>, env_from: Array<string>, cwd?: string, url?: string, bearer_token_env?: string, gateway_endpoint?: string, request_timeout_ms: number, enabled: boolean, };
+export type ExportedMcpServer = { name: string, command?: string, args: Array<string>, env: Array<string>, env_from: Array<string>, cwd?: string, url?: string, bearer_token_env?: string,
+/**
+ * Whether the server authenticates with OAuth. An exported definition
+ * carries the flag but never a token: the credential stays in the OS
+ * store, so an imported OAuth server is authenticatable but not yet
+ * authorized. Omitted from the document when false.
+ */
+oauth?: boolean, gateway_endpoint?: string, request_timeout_ms: number, enabled: boolean, };
 
 /**
  * Why a session is fenced: observed but not controlled, until an explicit
@@ -3189,6 +3196,33 @@ notes: string, };
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
 
 /**
+ * Connection state for a remote MCP server that authenticates with OAuth.
+ *
+ * The states are exhaustive and ordered by the user's path through them:
+ * a server is `Unsupported` or, once OAuth is detected, moves
+ * `NotConnected` → `Authorizing` → `Connected`, and from `Connected` can fall
+ * to `Expired` (refresh rejected) or `AccessDenied` (the authorization server
+ * refused this user).
+ */
+export type McpOAuthState = "unsupported" | "not_connected" | "authorizing" | "connected" | "expired" | "access_denied";
+
+/**
+ * Renderer-safe OAuth status for one server. Carries no token material: the
+ * only URL it ever holds is the system-browser authorization URL shown while
+ * `Authorizing`, and that URL never contains a token.
+ */
+export type McpOAuthStatus = { state: McpOAuthState,
+/**
+ * The system-browser URL to open while `Authorizing`. Absent otherwise.
+ */
+pending_authorization_url?: string,
+/**
+ * A bounded, secret-free reason shown for `Expired`, `AccessDenied`, or
+ * `Unsupported`. Never echoes a URL, token, or upstream body.
+ */
+error?: string, };
+
+/**
  * One external MCP server definition: a local stdio process (`command`), a
  * remote Streamable HTTP endpoint (`url`), or a gateway-managed endpoint
  * (`gateway_endpoint`). Exactly one of the three is set;
@@ -3225,6 +3259,16 @@ url: string | null,
  */
 bearer_token_env: string | null,
 /**
+ * Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
+ * RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
+ * only with `url`, and mutually exclusive with `bearer_token_env`. The
+ * obtained tokens live in the OS credential store under
+ * [`oauth_token_secret_key`], never in this type or the record.
+ *
+ * [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key
+ */
+oauth: boolean,
+/**
  * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
  * model-gateway session. The endpoint URL and its short-lived bearer are
  * resolved from the session at every connection and never enter this
@@ -3257,7 +3301,14 @@ resolved_command?: string,
  * usable, just not something we have driven ourselves. Derived from the
  * definition on every read, never stored.
  */
-curated: McpCuration | null, name: string, command: string | null, args: Array<string>,
+curated: McpCuration | null,
+/**
+ * OAuth connection status for a remote HTTP server that authenticates
+ * with OAuth. Absent for stdio, gateway, and static-token servers. Read
+ * from the OS credential store per request, never stored in the
+ * definition. The status carries no token material.
+ */
+oauth_status?: McpOAuthStatus, name: string, command: string | null, args: Array<string>,
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never
@@ -3286,6 +3337,16 @@ url: string | null,
  * resolved at connect time and never enters this type.
  */
 bearer_token_env: string | null,
+/**
+ * Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
+ * RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
+ * only with `url`, and mutually exclusive with `bearer_token_env`. The
+ * obtained tokens live in the OS credential store under
+ * [`oauth_token_secret_key`], never in this type or the record.
+ *
+ * [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key
+ */
+oauth: boolean,
 /**
  * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
  * model-gateway session. The endpoint URL and its short-lived bearer are

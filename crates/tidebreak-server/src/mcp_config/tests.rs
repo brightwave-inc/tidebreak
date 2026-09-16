@@ -115,6 +115,7 @@ fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         cwd: None,
         url: None,
         bearer_token_env: None,
+        oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: false,
@@ -134,6 +135,7 @@ fn http_definition(name: &str, url: &str) -> McpServerDefinition {
         cwd: None,
         url: Some(url.to_string()),
         bearer_token_env: None,
+        oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: true,
@@ -153,6 +155,7 @@ fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
         cwd: None,
         url: None,
         bearer_token_env: None,
+        oauth: false,
         gateway_endpoint: Some(slug.to_string()),
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: true,
@@ -440,7 +443,7 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new())
+        .connect(&gateway, &BTreeMap::new(), None, None)
         .await
         .err()
         .unwrap();
@@ -917,7 +920,7 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new())
+        .connect(&gateway, &BTreeMap::new(), None, None)
         .await
         .err()
         .unwrap();
