@@ -3911,6 +3911,8 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
         "external:slack:U9"
     );
 
+    let bob = OwnerId::new("user:bob").unwrap();
+    let mut updates = runtime.bus.subscribe_updates(&bob);
     let (status, _) = call_json(
         &router,
         "PUT",
@@ -3920,6 +3922,13 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        matches!(
+            updates.try_recv().unwrap(),
+            crate::code::bus::CodeLiveUpdate::AccessChanged(id) if id == session_id
+        ),
+        "a Slack visibility downgrade must notify prior public readers"
+    );
     let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
     assert_eq!(
         status,

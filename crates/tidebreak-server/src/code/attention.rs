@@ -354,10 +354,9 @@ pub async fn note_activity(
 /// Publish one session's digest to everyone who may read it.
 ///
 /// The owner, every principal an access row resolves for, and — when the
-/// session is `deployment` — every principal currently watching `/updates`,
-/// because that visibility admits any authenticated principal and the store
-/// cannot enumerate them (decision 0086). The notice is still addressed
-/// per principal, so nothing is filtered on the way out.
+/// session has direct or inherited `deployment` access — every principal
+/// watching `/updates`. Deployment visibility admits any authenticated
+/// principal, which the store cannot enumerate (decision 0086).
 pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
     super::session_tree::publish_for_child(db, bus, session).await;
     let digest = match build_digest(db, session).await {
@@ -410,7 +409,11 @@ async fn digest_readers(db: &DbStore, bus: &CodeEventBus, session: &Session) -> 
                 vec![session.owner.clone()]
             }
         };
-    if session.visibility == tidebreak_core::SessionVisibility::Deployment {
+    if session.visibility == tidebreak_core::SessionVisibility::Deployment
+        || tidebreak_core::db::code::session_has_deployment_access_all_owners(db, session.id)
+            .await
+            .unwrap_or(false)
+    {
         for attached in bus.attached_owners() {
             if !readers.contains(&attached) {
                 readers.push(attached);

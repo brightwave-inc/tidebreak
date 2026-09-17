@@ -2,8 +2,11 @@
 //!
 //! Decision 0086. A session keeps one owner, who stays its execution identity
 //! and its lifecycle authority. Everything else a second person may do comes
-//! from a `session_access` row or from `deployment` visibility, and this
-//! module is the only place that decides which.
+//! from a `session_access` row, from `deployment` visibility, or — for a
+//! private, externally bound direct child — from the parent's live access
+//! under a shared live grant. This module is the only place that decides
+//! which. Children keep their own visibility and access rows; inheritance
+//! is computed, never copied.
 
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
@@ -129,6 +132,12 @@ pub async fn resolve_session_access(
         level.get_or_insert(candidate);
     }
 
+    if level != Some(SessionAccessLevel::Contribute) {
+        level = strongest_level(
+            level,
+            inherit_bound_child_level(store, principal, &row).await?,
+        );
+    }
     let Some(level) = level else {
         return Ok(None);
     };
@@ -139,23 +148,190 @@ pub async fn resolve_session_access(
     }))
 }
 
+fn strongest_level(
+    direct: Option<SessionAccessLevel>,
+    inherited: Option<SessionAccessLevel>,
+) -> Option<SessionAccessLevel> {
+    if direct == Some(SessionAccessLevel::Contribute)
+        || inherited == Some(SessionAccessLevel::Contribute)
+    {
+        Some(SessionAccessLevel::Contribute)
+    } else {
+        direct.or(inherited)
+    }
+}
+
+/// Resolve the direct parent's live rows and deployment visibility.
+async fn inherit_bound_child_level(
+    store: &DbStore,
+    principal: &OwnerId,
+    child: &entities::session::Model,
+) -> Result<Option<SessionAccessLevel>> {
+    let Some(parent) = bound_inherit_parent(store, child).await? else {
+        return Ok(None);
+    };
+    let rows =
+        access_level_for_subjects(store, parent.id, &subjects_for(store, principal).await?).await?;
+    Ok(strongest_level(
+        rows,
+        (parent.visibility == SessionVisibility::Deployment.as_str())
+            .then_some(SessionAccessLevel::View),
+    ))
+}
+
+/// The synthetic binding proves delegation from this parent and request key.
+/// A shared grant alone does not prove that two sessions share a conversation.
+async fn bound_inherit_parent(
+    store: &DbStore,
+    child: &entities::session::Model,
+) -> Result<Option<entities::session::Model>> {
+    let Some(context) = entities::code_session_context::Entity::find_by_id(child.id)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let (Some(parent_id), Some(key)) = (context.parent_session_id, context.request_key) else {
+        return Ok(None);
+    };
+    let Some(parent) = entities::session::Entity::find_by_id(parent_id)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if parent.id == child.id || parent.owner != child.owner {
+        return Ok(None);
+    }
+    let parent_context = entities::code_session_context::Entity::find_by_id(parent_id)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if let (Some(child_channel), Some(parent_channel)) = (
+        context.channel_id.as_deref(),
+        parent_context
+            .as_ref()
+            .and_then(|context| context.channel_id.as_deref()),
+    ) {
+        if child_channel != parent_channel {
+            return Ok(None);
+        }
+    }
+    let Some(parent_binding) = sole_live_binding(store, &parent.owner, parent.id).await? else {
+        return Ok(None);
+    };
+    let Some(child_binding) = sole_live_binding(store, &child.owner, child.id).await? else {
+        return Ok(None);
+    };
+    if parent_binding.grant_id != child_binding.grant_id
+        || parent_binding.channel_kind != child_binding.channel_kind
+        || child_binding.external_key
+            != super::delegated_child_external_key(SessionId(parent_id), &key)
+    {
+        return Ok(None);
+    }
+    Ok(Some(parent))
+}
+
+/// Require one binding backed by a live grant owned by the session's owner.
+async fn sole_live_binding(
+    store: &DbStore,
+    owner: &str,
+    session_id: uuid::Uuid,
+) -> Result<Option<entities::code_external_binding::Model>> {
+    let mut bindings = entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::SessionId.eq(session_id))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if bindings.len() != 1 {
+        return Ok(None);
+    }
+    let binding = bindings.pop().expect("one binding");
+    let Some(grant) = entities::code_external_grant::Entity::find_by_id(binding.grant_id)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if binding.owner != owner
+        || grant.owner != owner
+        || grant.channel_kind != binding.channel_kind
+        || grant.revoked_at.is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(binding))
+}
+
+/// Whether deployment visibility applies directly or through a delegated parent.
+///
+/// This system path supplies the digest audience across owners. Request paths
+/// must resolve access for their authenticated principal instead.
+pub async fn session_has_deployment_access_all_owners(
+    store: &DbStore,
+    id: SessionId,
+) -> Result<bool> {
+    let Some(session) = entities::session::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(false);
+    };
+    if session.visibility == SessionVisibility::Deployment.as_str() {
+        return Ok(true);
+    }
+    Ok(bound_inherit_parent(store, &session)
+        .await?
+        .is_some_and(|parent| parent.visibility == SessionVisibility::Deployment.as_str()))
+}
+
+async fn access_level_for_subjects(
+    store: &DbStore,
+    session_id: uuid::Uuid,
+    subjects: &[String],
+) -> Result<Option<SessionAccessLevel>> {
+    if subjects.is_empty() {
+        return Ok(None);
+    }
+    let rows = entities::session_access::Entity::find()
+        .filter(entities::session_access::Column::SessionId.eq(session_id))
+        .filter(entities::session_access::Column::Subject.is_in(subjects.to_vec()))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let mut level = None;
+    for access in rows {
+        let candidate = access_level(&access.level)?;
+        if candidate == SessionAccessLevel::Contribute {
+            return Ok(Some(candidate));
+        }
+        level.get_or_insert(candidate);
+    }
+    Ok(level)
+}
+
 /// Every session this principal may read, newest first.
 ///
 /// One query rather than a resolve per session: their own, every
 /// `deployment` session, and every session a subject they answer to holds a
-/// row on.
+/// row on. Delegated direct children are included when the parent's live
+/// rows or deployment visibility resolve them.
 pub async fn list_accessible_sessions(
     store: &DbStore,
     principal: &OwnerId,
 ) -> Result<Vec<Session>> {
+    let subjects = subjects_for(store, principal).await?;
     let granted = sea_orm::sea_query::Query::select()
         .column(entities::session_access::Column::SessionId)
         .from(entities::session_access::Entity)
-        .and_where(
-            entities::session_access::Column::Subject.is_in(subjects_for(store, principal).await?),
-        )
+        .and_where(entities::session_access::Column::Subject.is_in(subjects.clone()))
         .to_owned();
-    entities::session::Entity::find()
+    let mut sessions: Vec<Session> = entities::session::Entity::find()
         .filter(code_runtime_sessions())
         .filter(
             Condition::any()
@@ -172,7 +348,40 @@ pub async fn list_accessible_sessions(
         .map_err(store_err)?
         .into_iter()
         .map(session_from_row)
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let mut seen: std::collections::HashSet<uuid::Uuid> =
+        sessions.iter().map(|session| session.id.0).collect();
+    let parent_ids: Vec<uuid::Uuid> = sessions.iter().map(|session| session.id.0).collect();
+    if !parent_ids.is_empty() {
+        let contexts = entities::code_session_context::Entity::find()
+            .filter(entities::code_session_context::Column::ParentSessionId.is_in(parent_ids))
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?;
+        for context in contexts {
+            if seen.contains(&context.session_id) {
+                continue;
+            }
+            let Some(row) = entities::session::Entity::find_by_id(context.session_id)
+                .filter(code_runtime_sessions())
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?
+            else {
+                continue;
+            };
+            if inherit_bound_child_level(store, principal, &row)
+                .await?
+                .is_none()
+            {
+                continue;
+            }
+            seen.insert(row.id);
+            sessions.push(session_from_row(row)?);
+        }
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+    }
+    Ok(sessions)
 }
 
 /// Every principal that reads this session right now: its owner, plus each
@@ -206,14 +415,28 @@ pub async fn session_readers_all_owners(store: &DbStore, id: SessionId) -> Resul
         .all(&store.conn)
         .await
         .map_err(store_err)?;
-    if rows.is_empty() {
-        return Ok(principals);
-    }
     let grants = entities::code_external_grant::Entity::find()
         .filter(entities::code_external_grant::Column::RevokedAt.is_null())
         .all(&store.conn)
         .await
         .map_err(store_err)?;
+    extend_readers_from_access_rows(&mut principals, &rows, &grants)?;
+    if let Some(parent) = bound_inherit_parent(store, &session).await? {
+        let parent_rows = entities::session_access::Entity::find()
+            .filter(entities::session_access::Column::SessionId.eq(parent.id))
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?;
+        extend_readers_from_access_rows(&mut principals, &parent_rows, &grants)?;
+    }
+    Ok(principals)
+}
+
+fn extend_readers_from_access_rows(
+    principals: &mut Vec<OwnerId>,
+    rows: &[entities::session_access::Model],
+    grants: &[entities::code_external_grant::Model],
+) -> Result<()> {
     for row in rows {
         if let Some(key) = row.subject.strip_prefix("principal:") {
             let principal = OwnerId::new(key)?;
@@ -222,7 +445,7 @@ pub async fn session_readers_all_owners(store: &DbStore, id: SessionId) -> Resul
             }
             continue;
         }
-        for grant in &grants {
+        for grant in grants {
             if external_subject(&grant.channel_kind, &grant.external_identity) != row.subject {
                 continue;
             }
@@ -232,7 +455,7 @@ pub async fn session_readers_all_owners(store: &DbStore, id: SessionId) -> Resul
             }
         }
     }
-    Ok(principals)
+    Ok(())
 }
 
 /// One session's access list, oldest grant first. Owner-only: a caller who
@@ -472,6 +695,17 @@ fn access_from_row(row: entities::session_access::Model) -> Result<SessionAccess
 #[cfg(test)]
 mod tests {
     use super::dedupe_identities;
+    use crate::attention::{Attention, AttentionSource};
+    use crate::code::{
+        CodeGrantKind, ExecutionLocation, HarnessKind, Session, SessionAccessLevel, SessionKind,
+        SessionLifecycle,
+    };
+    use crate::db::code::{
+        bind_external_session, grant_session_access, insert_session, list_accessible_sessions,
+        mint_external_grant, resolve_session_access, revoke_external_grant, revoke_session_access,
+        session_readers_all_owners, set_session_context, set_session_visibility, MintGrantSubject,
+    };
+    use crate::{DbStore, OwnerId, PermissionMode, SessionVisibility};
 
     #[test]
     fn duplicate_external_identities_are_kept_once_in_input_order() {
@@ -481,5 +715,610 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(kept, ["alice", "bob"]);
+    }
+
+    fn session(owner: &OwnerId) -> Session {
+        Session {
+            visibility: SessionVisibility::Private,
+            id: crate::SessionId::new(),
+            owner: owner.clone(),
+            owner_kind: None,
+            workspace_id: None,
+            kind: SessionKind::Interactive,
+            harness_kind: HarnessKind::Internal,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: PermissionMode::Allow,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: SessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: chrono::Utc::now(),
+            execution_location: ExecutionLocation::Machine,
+            acts_as: None,
+        }
+    }
+
+    async fn store() -> (tempfile::TempDir, DbStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("session-access.db").display()
+        ))
+        .await
+        .unwrap();
+        (dir, db)
+    }
+
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    async fn bound_tree(
+        db: &DbStore,
+        owner: &OwnerId,
+        identity: &str,
+    ) -> (Session, Session, crate::code::CodeGrantId) {
+        let parent = session(owner);
+        let child = session(owner);
+        insert_session(db, &parent).await.unwrap();
+        insert_session(db, &child).await.unwrap();
+        set_session_context(db, owner, child.id, None, Some(parent.id), Some("one"))
+            .await
+            .unwrap();
+        let grant = mint_external_grant(
+            db,
+            owner,
+            MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: identity,
+                workspace_identity: "W",
+                kind: CodeGrantKind::Person,
+            },
+            HASH_A,
+            HASH_B,
+        )
+        .await
+        .unwrap();
+        bind_external_session(db, owner, grant.id, "slack", "W/C/1", parent.id)
+            .await
+            .unwrap();
+        bind_external_session(
+            db,
+            owner,
+            grant.id,
+            "slack",
+            &format!("child/{}/one", parent.id),
+            child.id,
+        )
+        .await
+        .unwrap();
+        (parent, child, grant.id)
+    }
+
+    #[tokio::test]
+    async fn bound_children_inherit_parent_access_without_copied_rows() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, _) = bound_tree(&db, &owner, "U-alice").await;
+
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::View,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let parent_access = resolve_session_access(&db, &reader, parent.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!parent_access.owner);
+        assert_eq!(parent_access.level, SessionAccessLevel::View);
+        let child_access = resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .expect("a parent viewer must read the bound child");
+        assert!(!child_access.owner);
+        assert_eq!(child_access.level, SessionAccessLevel::View);
+        assert_eq!(
+            list_session_access_len(&db, &owner, child.id).await,
+            0,
+            "inheritance must not copy access rows onto the child"
+        );
+        let listed = list_accessible_sessions(&db, &reader).await.unwrap();
+        assert!(listed.iter().any(|session| session.id == child.id));
+        let readers = session_readers_all_owners(&db, child.id).await.unwrap();
+        assert!(readers.contains(&reader));
+
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::Contribute,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        let contributed = resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(contributed.level, SessionAccessLevel::Contribute);
+        assert!(!contributed.owner);
+        let owner_access = resolve_session_access(&db, &owner, child.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(owner_access.owner);
+    }
+
+    async fn list_session_access_len(db: &DbStore, owner: &OwnerId, id: crate::SessionId) -> usize {
+        crate::db::code::list_session_access(db, owner, id)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn parent_revoke_and_privacy_drop_bound_children() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, grant_id) = bound_tree(&db, &owner, "U-alice").await;
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::Contribute,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Deployment)
+            .await
+            .unwrap();
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Private)
+            .await
+            .unwrap();
+        assert!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "access rows still inherit after a visibility downgrade"
+        );
+
+        revoke_session_access(&db, &owner, parent.id, "principal:user:bob")
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!list_accessible_sessions(&db, &reader)
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == child.id));
+
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::View,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        revoke_external_grant(&db, &owner, grant_id, "disconnected")
+            .await
+            .unwrap();
+        assert!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a revoked connection drops inherited child access"
+        );
+        assert!(
+            resolve_session_access(&db, &reader, parent.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "a principal row on the parent still resolves after the grant is fenced"
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_visibility_reaches_only_delegated_children() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let stranger = OwnerId::new("user:carol").unwrap();
+        let other = OwnerId::new("user:dana").unwrap();
+        let (parent, child, _) = bound_tree(&db, &owner, "U-alice").await;
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Deployment)
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &stranger, parent.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            resolve_session_access(&db, &stranger, child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "deployment on the parent includes delegated children"
+        );
+        assert!(list_accessible_sessions(&db, &stranger)
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == child.id));
+        assert!(
+            super::session_has_deployment_access_all_owners(&db, child.id)
+                .await
+                .unwrap()
+        );
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Private)
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &stranger, child.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            !super::session_has_deployment_access_all_owners(&db, child.id)
+                .await
+                .unwrap()
+        );
+        assert!(!list_accessible_sessions(&db, &stranger)
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == child.id));
+
+        let private = session(&owner);
+        insert_session(&db, &private).await.unwrap();
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:carol",
+            SessionAccessLevel::View,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(resolve_session_access(&db, &stranger, private.id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let foreign_parent = session(&other);
+        let foreign_child = session(&other);
+        insert_session(&db, &foreign_parent).await.unwrap();
+        insert_session(&db, &foreign_child).await.unwrap();
+        assert!(resolve_session_access(&db, &stranger, foreign_child.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(resolve_session_access(&db, &owner, foreign_child.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn mixed_bindings_do_not_inherit() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let parent = session(&owner);
+        let child = session(&owner);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(&db, &owner, child.id, None, Some(parent.id), Some("one"))
+            .await
+            .unwrap();
+        let first = mint_external_grant(
+            &db,
+            &owner,
+            MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U-a",
+                workspace_identity: "W",
+                kind: CodeGrantKind::Person,
+            },
+            HASH_A,
+            HASH_B,
+        )
+        .await
+        .unwrap();
+        let second = mint_external_grant(
+            &db,
+            &owner,
+            MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U-b",
+                workspace_identity: "W",
+                kind: CodeGrantKind::Person,
+            },
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .await
+        .unwrap();
+        bind_external_session(&db, &owner, first.id, "slack", "W/C/1", parent.id)
+            .await
+            .unwrap();
+        bind_external_session(
+            &db,
+            &owner,
+            second.id,
+            "slack",
+            &format!("child/{}/one", parent.id),
+            child.id,
+        )
+        .await
+        .unwrap();
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::Contribute,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a child bound to a different grant must not inherit"
+        );
+    }
+    #[tokio::test]
+    async fn direct_view_does_not_suppress_inherited_contribution() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, _) = bound_tree(&db, &owner, "U-alice").await;
+        for (id, level) in [
+            (child.id, SessionAccessLevel::View),
+            (parent.id, SessionAccessLevel::Contribute),
+        ] {
+            grant_session_access(
+                &db,
+                &owner,
+                id,
+                "principal:user:bob",
+                level,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .level,
+            SessionAccessLevel::Contribute
+        );
+        revoke_session_access(&db, &owner, parent.id, "principal:user:bob")
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .level,
+            SessionAccessLevel::View
+        );
+    }
+
+    #[tokio::test]
+    async fn same_grant_does_not_authorize_unrelated_or_mixed_bindings() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, grant) = bound_tree(&db, &owner, "U-alice").await;
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Deployment)
+            .await
+            .unwrap();
+        let unrelated = session(&owner);
+        insert_session(&db, &unrelated).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            unrelated.id,
+            None,
+            Some(parent.id),
+            Some("other"),
+        )
+        .await
+        .unwrap();
+        bind_external_session(&db, &owner, grant, "slack", "W/OTHER/1", unrelated.id)
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, unrelated.id)
+            .await
+            .unwrap()
+            .is_none());
+        bind_external_session(&db, &owner, grant, "slack", "W/OTHER/2", child.id)
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!list_accessible_sessions(&db, &reader)
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == child.id || s.id == unrelated.id));
+    }
+
+    #[tokio::test]
+    async fn channel_context_must_match_but_older_children_can_omit_it() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, old_child, grant) = bound_tree(&db, &owner, "U-alice").await;
+        set_session_context(&db, &owner, parent.id, Some("C"), None, None)
+            .await
+            .unwrap();
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Deployment)
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, old_child.id)
+            .await
+            .unwrap()
+            .is_some());
+        let child = session(&owner);
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            child.id,
+            Some("OTHER"),
+            Some(parent.id),
+            Some("other"),
+        )
+        .await
+        .unwrap();
+        bind_external_session(
+            &db,
+            &owner,
+            grant,
+            "slack",
+            &super::super::delegated_child_external_key(parent.id, "other"),
+            child.id,
+        )
+        .await
+        .unwrap();
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn unbound_children_and_mismatched_owners_do_not_inherit() {
+        use sea_orm::{EntityTrait, Set};
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, _) = bound_tree(&db, &owner, "U-alice").await;
+        set_session_visibility(&db, &owner, parent.id, SessionVisibility::Deployment)
+            .await
+            .unwrap();
+        let local = session(&owner);
+        insert_session(&db, &local).await.unwrap();
+        set_session_context(&db, &owner, local.id, None, Some(parent.id), Some("local"))
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, local.id)
+            .await
+            .unwrap()
+            .is_none());
+        // Corrupt provenance must fail closed even though normal writes reject it.
+        super::entities::session::Entity::update(super::entities::session::ActiveModel {
+            id: Set(child.id.0),
+            owner: Set("user:other".into()),
+            ..Default::default()
+        })
+        .exec(&db.conn)
+        .await
+        .unwrap();
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn external_identity_revocation_removes_child_access_and_readers() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let (parent, child, _) = bound_tree(&db, &owner, "U-alice").await;
+        let reader_grant = mint_external_grant(
+            &db,
+            &reader,
+            MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U-bob",
+                workspace_identity: "W",
+                kind: CodeGrantKind::Person,
+            },
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .await
+        .unwrap();
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "external:slack:U-bob",
+            SessionAccessLevel::Contribute,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolve_session_access(&db, &reader, child.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .level,
+            SessionAccessLevel::Contribute
+        );
+        assert!(session_readers_all_owners(&db, child.id)
+            .await
+            .unwrap()
+            .contains(&reader));
+        revoke_external_grant(&db, &reader, reader_grant.id, "disconnected")
+            .await
+            .unwrap();
+        assert!(resolve_session_access(&db, &reader, child.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!session_readers_all_owners(&db, child.id)
+            .await
+            .unwrap()
+            .contains(&reader));
+        assert!(!list_accessible_sessions(&db, &reader)
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == child.id));
     }
 }

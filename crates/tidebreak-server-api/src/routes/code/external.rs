@@ -1036,17 +1036,15 @@ pub async fn external_session_access(
         .into_iter()
         .map(|row| row.external_identity)
         .collect();
-    tidebreak_core::db::code::replace_external_session_contributors(
-        &runtime.db,
-        &grant.owner,
-        id,
-        &grant.channel_kind,
-        &identities,
-        body.visibility,
-        chrono::Utc::now(),
-    )
-    .await?
-    .ok_or_else(|| ServerError::not_found("code session not found"))?;
+    runtime
+        .replace_external_session_contributors(
+            &grant.owner,
+            id,
+            &grant.channel_kind,
+            &identities,
+            body.visibility,
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

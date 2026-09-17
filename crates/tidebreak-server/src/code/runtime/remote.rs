@@ -21,6 +21,37 @@ pub struct ExternalActsAsView {
 }
 
 impl CodeRuntime {
+    /// Replace an owner's external access rows and notify every affected reader.
+    pub async fn replace_external_session_contributors(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        channel_kind: &str,
+        identities: &[String],
+        visibility: Option<tidebreak_core::SessionVisibility>,
+    ) -> Result<(), ServerError> {
+        let before = self.get_session(owner, session_id).await?;
+        let readers =
+            tidebreak_core::db::code::session_readers_all_owners(&self.db, session_id).await?;
+        tidebreak_core::db::code::replace_external_session_contributors(
+            &self.db,
+            owner,
+            session_id,
+            channel_kind,
+            identities,
+            visibility,
+            chrono::Utc::now(),
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("code session not found"))?;
+        let session = self.get_session(owner, session_id).await?;
+        // Prior public readers must hear about a downgrade and its children.
+        crate::code::attention::emit_access_changed(&self.db, &self.bus, &before, &readers).await;
+        crate::code::attention::emit_access_changed(&self.db, &self.bus, &session, &[]).await;
+        crate::code::attention::emit_digest(&self.db, &self.bus, &session).await;
+        Ok(())
+    }
+
     /// Resolve the original Slack consent before creating or queueing work.
     async fn validated_external_delegation(
         &self,
