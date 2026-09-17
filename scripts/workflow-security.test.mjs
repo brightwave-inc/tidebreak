@@ -1649,6 +1649,11 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(build, /^    needs: validate$/m);
   assert.doesNotMatch(build, /^    environment:/m);
   assert.match(publish, /^    needs: \[validate, build_docs, finalize_release\]$/m);
+  assert.match(
+    publish,
+    /if: >-\n      \$\{\{\n        !cancelled\(\)\n        && needs\.validate\.result == 'success'\n        && needs\.build_docs\.result == 'success'\n        && needs\.finalize_release\.result == 'success'\n      \}\}/,
+    "docs publication must tolerate skipped platform ancestors while requiring its direct prerequisites",
+  );
   assert.match(publish, /^    environment:\n      name: docs-production$/m);
   assert.match(build, /^    permissions:\n      contents: read$/m);
   assert.match(publish, /^    permissions:\n      contents: read$/m);
