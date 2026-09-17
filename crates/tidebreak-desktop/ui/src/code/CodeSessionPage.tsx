@@ -94,7 +94,10 @@ export function CodeSessionContent({
   onRetry: () => void;
   onRecovered?: (session: CodeSessionSnapshot) => void;
 }) {
-  const digest = useSessionDigest(undefined, session?.id ?? null);
+  const digest = useSessionDigest(
+    session?.workspace_id ?? undefined,
+    session?.id ?? null,
+  );
   const recovery = sessionRecoveryState(session, digest);
   const [retrying, setRetrying] = useState(false);
   async function retryRecovery() {

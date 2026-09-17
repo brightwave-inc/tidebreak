@@ -2363,6 +2363,22 @@ pub mod code_session_context {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_parent_wait {
+    use sea_orm::entity::prelude::*;
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+    #[sea_orm(table_name = "code_parent_wait")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub parent_session_id: Uuid,
+        pub generation: Uuid,
+        pub child_ids: String,
+        pub expires_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Durable receipts for native tools requested by a sandbox incarnation.
 pub mod code_native_tool_receipt {
     use sea_orm::entity::prelude::*;

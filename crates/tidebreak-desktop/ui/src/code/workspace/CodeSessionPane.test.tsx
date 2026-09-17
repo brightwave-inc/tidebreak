@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/api/client";
 import type {
@@ -11,6 +11,11 @@ import { codeSession } from "@/stories/fixtures";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { resetCodeSessionRegistry } from "../CodeSessionRegistry";
 import { CodeSessionPane } from "./CodeSessionPane";
+
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => navigate,
+}));
 
 const composer = vi.hoisted(() => ({
   props: null as null | {
@@ -87,6 +92,7 @@ function setup(session: CodeSessionSnapshot) {
   };
 }
 beforeEach(() => {
+  navigate.mockReset();
   composer.props = null;
   transcript.props = null;
   useCodeCatalogStore.getState().reset();
@@ -188,4 +194,35 @@ it("passes structured answers to the client and keeps failure attached after sen
   expect(transcript.props?.decidingId).toBeNull();
   expect(transcript.props?.approvalErrorId).toBe("approval-one");
   expect(transcript.props?.approvalError).toBeTruthy();
+});
+
+it("opens a child session from the parent tree in one click", async () => {
+  setup({
+    ...codeSession,
+    children: [
+      {
+        id: "child-session",
+        title: "Inspect the parser",
+        status: "fenced",
+        attention: true,
+        fenced: true,
+        workspace_id: "ws-child",
+        execution_location: "sandbox",
+      },
+    ],
+    wait: { waiting: 1, total: 1 },
+  });
+  expect(screen.getByText("Waiting on 1 of 1")).toBeTruthy();
+  expect(screen.getByText("Needs attention").parentElement).toHaveTextContent(
+    "Needs attention · Sandbox",
+  );
+  expect(screen.queryByText("fenced")).toBeNull();
+  await act(async () => {
+    screen.getByRole("button", { name: "Open Inspect the parser" }).click();
+  });
+  expect(navigate).toHaveBeenCalledWith({
+    to: "/code/w/$workspaceId",
+    params: { workspaceId: "ws-child" },
+    search: { task: "child-session" },
+  });
 });

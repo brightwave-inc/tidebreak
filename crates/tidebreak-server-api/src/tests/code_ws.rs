@@ -77,7 +77,9 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
             // cursor rather than advancing it. The ordering contract is about
             // the journal.
             if value["transient"] == true {
-                streamed.push_str(value["event"]["text"].as_str().unwrap());
+                if value["event"]["type"] == "assistant_delta" {
+                    streamed.push_str(value["event"]["text"].as_str().unwrap());
+                }
                 continue;
             }
             let seq = value["seq"].as_i64().unwrap();
@@ -438,7 +440,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     );
 
     let mut assembled = String::new();
-    for _ in 0..2 {
+    while assembled != "first second " {
         let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
             .await
             .expect("a live delta timed out")
@@ -450,7 +452,9 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
         let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
         assert_eq!(value["seq"], cursor);
         assert_eq!(value["transient"], true);
-        assembled.push_str(value["event"]["text"].as_str().unwrap());
+        if value["event"]["type"] == "assistant_delta" {
+            assembled.push_str(value["event"]["text"].as_str().unwrap());
+        }
     }
     assert_eq!(assembled, "first second ");
     drop(socket);
@@ -485,6 +489,10 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     assert_eq!(value["transient"], true);
     assert_eq!(value["replacement"], true);
     assembled = value["event"]["text"].as_str().unwrap().to_owned();
+    let tree = next_json(&mut resumed).await;
+    assert_eq!(tree["event"]["type"], "session_tree");
+    assert_eq!(tree["transient"], true);
+    assert_eq!(tree["seq"], cursor);
 
     runtime.bus.publish_transient(
         parsed,
@@ -637,4 +645,403 @@ async fn updates_channel_restates_the_full_digest_on_reconnect() {
     assert_eq!(sessions[0]["session"], session_id);
     assert_eq!(sessions[0]["turn_count"], 1);
     assert_eq!(sessions[0]["attention"]["state"]["type"], "done_unreviewed");
+}
+
+async fn seed_wait_tree(
+    runtime: &crate::code::CodeRuntime,
+) -> (tidebreak_core::Session, tidebreak_core::Session) {
+    use tidebreak_core::{
+        Attention, AttentionSource, ExecutionLocation, HarnessKind, OwnerId, PermissionMode,
+        Session, SessionKind, SessionLifecycle, SessionVisibility,
+    };
+    let parent = Session {
+        visibility: SessionVisibility::Private,
+        id: SessionId::new(),
+        owner: OwnerId::local(),
+        owner_kind: None,
+        workspace_id: None,
+        kind: SessionKind::Interactive,
+        harness_kind: HarnessKind::Internal,
+        harness_version: None,
+        harness_resume_ref: None,
+        permission_mode: PermissionMode::Allow,
+        model: None,
+        reasoning_effort: None,
+        fast_mode: false,
+        lifecycle: SessionLifecycle::Idle,
+        fence_reason: None,
+        child_pid: None,
+        child_process_identity: None,
+        spawn_epoch: 1,
+        attention: Attention::working(AttentionSource::Lifecycle),
+        unrecognized_event_count: 0,
+        subagents: Vec::new(),
+        created_at: chrono::Utc::now(),
+        execution_location: ExecutionLocation::Machine,
+        acts_as: None,
+    };
+    let mut child = parent.clone();
+    child.id = SessionId::new();
+    child.lifecycle = SessionLifecycle::Running;
+    tidebreak_core::db::code::insert_session(&runtime.db, &parent)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::insert_session(&runtime.db, &child)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::set_session_context(
+        &runtime.db,
+        &parent.owner,
+        child.id,
+        None,
+        Some(parent.id),
+        Some("wait"),
+    )
+    .await
+    .unwrap();
+    (parent, child)
+}
+
+async fn wait_tree_cursor(
+    runtime: &crate::code::CodeRuntime,
+    parent: &tidebreak_core::Session,
+) -> i64 {
+    tidebreak_core::db::code::list_events(&runtime.db, &parent.owner, parent.id, 0, 100)
+        .await
+        .unwrap()
+        .events
+        .last()
+        .unwrap()
+        .seq
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_tree_reconnect_at_journal_tail_clears_an_expired_wait() {
+    let (router, token, runtime, _dir) = code_app(plain_text_script()).await;
+    let (parent, child) = seed_wait_tree(&runtime).await;
+    let generation = uuid::Uuid::new_v4();
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        generation,
+        &[child.id],
+        chrono::Utc::now() + chrono::Duration::seconds(20),
+    )
+    .await
+    .unwrap();
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
+    let cursor = wait_tree_cursor(&runtime, &parent).await;
+    // Process loss leaves the last journal row unchanged when the lease expires.
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        generation,
+        &[child.id],
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let addr = serve(router).await;
+    let mut request = format!("ws://{addr}/sessions/{}/events?after={cursor}", parent.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let tree = tokio::time::timeout(Duration::from_secs(5), next_json(&mut socket))
+        .await
+        .unwrap();
+    assert_eq!(tree["seq"], cursor);
+    assert_eq!(tree["transient"], true);
+    assert_eq!(tree["event"]["type"], "session_tree");
+    assert_eq!(tree["event"]["wait"], serde_json::Value::Null);
+    assert_eq!(tree["event"]["children"][0]["id"], child.id.to_string());
+    assert_eq!(tree["event"]["children"][0]["status"], "running");
+    assert_eq!(wait_tree_cursor(&runtime, &parent).await, cursor);
+    assert!(
+        tidebreak_core::db::code::clear_parent_wait(
+            &runtime.db,
+            &parent.owner,
+            parent.id,
+            generation
+        )
+        .await
+        .unwrap(),
+        "restating an expired tree must not mutate the lease"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_tree_connected_wait_expires_without_a_new_journal_event() {
+    let (router, token, runtime, _dir) = code_app(plain_text_script()).await;
+    let (parent, child) = seed_wait_tree(&runtime).await;
+    let generation = uuid::Uuid::new_v4();
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        generation,
+        &[child.id],
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
+    let cursor = wait_tree_cursor(&runtime, &parent).await;
+    let addr = serve(router).await;
+    let mut request = format!("ws://{addr}/sessions/{}/events?after={cursor}", parent.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let active = tokio::time::timeout(Duration::from_secs(5), next_json(&mut socket))
+        .await
+        .unwrap();
+    assert_eq!(
+        active["event"]["wait"],
+        serde_json::json!({"waiting":1,"total":1})
+    );
+    assert_eq!(active["transient"], true);
+    let expired = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let tree = next_json(&mut socket).await;
+            if tree["event"]["type"] == "session_tree" && tree["event"]["wait"].is_null() {
+                break tree;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(expired["seq"], cursor);
+    assert_eq!(expired["transient"], true);
+    assert_eq!(expired["event"]["type"], "session_tree");
+    assert_eq!(expired["event"]["wait"], serde_json::Value::Null);
+    assert_eq!(expired["event"]["children"][0]["status"], "running");
+    assert_eq!(wait_tree_cursor(&runtime, &parent).await, cursor);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_json(&mut socket))
+            .await
+            .is_err(),
+        "an expired wait must disable its timer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_snapshot_wait_expires_without_a_session_socket() {
+    let (router, token, runtime, _dir) = code_app(plain_text_script()).await;
+    let (parent, child) = seed_wait_tree(&runtime).await;
+    let generation = uuid::Uuid::new_v4();
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        generation,
+        &[child.id],
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
+    let cursor = wait_tree_cursor(&runtime, &parent).await;
+    let addr = serve(router).await;
+    let mut request = format!("ws://{addr}/updates")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let active = next_json(&mut socket).await;
+    assert_eq!(active["type"], "snapshot");
+    let parent_digest = active["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|digest| digest["session"] == parent.id.to_string())
+        .unwrap();
+    assert_eq!(
+        parent_digest["wait"],
+        serde_json::json!({"waiting":1,"total":1})
+    );
+
+    let expired = tokio::time::timeout(Duration::from_secs(5), next_json(&mut socket))
+        .await
+        .expect("the updates socket must refresh an expired snapshot wait");
+    assert_eq!(expired["type"], "snapshot");
+    let parent_digest = expired["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|digest| digest["session"] == parent.id.to_string())
+        .unwrap();
+    assert!(parent_digest.get("wait").is_none());
+    let child_digest = expired["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|digest| digest["session"] == child.id.to_string())
+        .unwrap();
+    assert_eq!(child_digest["lifecycle"], "running");
+    assert_eq!(wait_tree_cursor(&runtime, &parent).await, cursor);
+    assert!(
+        tidebreak_core::db::code::clear_parent_wait(
+            &runtime.db,
+            &parent.owner,
+            parent.id,
+            generation,
+        )
+        .await
+        .unwrap(),
+        "refreshing an updates snapshot must not mutate the lease",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_json(&mut socket))
+            .await
+            .is_err(),
+        "a snapshot without waits must disable its timer",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_live_wait_rearms_for_a_replacement_deadline() {
+    let (router, token, runtime, _dir) = code_app(plain_text_script()).await;
+    let (parent, child) = seed_wait_tree(&runtime).await;
+    let addr = serve(router).await;
+    let mut request = format!("ws://{addr}/updates")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let snapshot = next_json(&mut socket).await;
+    assert!(snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|digest| digest.get("wait").is_none()));
+
+    for seconds in [20, 1] {
+        tidebreak_core::db::code::set_parent_wait(
+            &runtime.db,
+            &parent.owner,
+            parent.id,
+            uuid::Uuid::new_v4(),
+            &[child.id],
+            chrono::Utc::now() + chrono::Duration::seconds(seconds),
+        )
+        .await
+        .unwrap();
+        crate::code::attention::emit_digest(&runtime.db, runtime.bus.as_ref(), &parent).await;
+        let digest = tokio::time::timeout(Duration::from_secs(5), next_json(&mut socket))
+            .await
+            .unwrap();
+        assert_eq!(digest["type"], "digest");
+        assert_eq!(digest["session"], parent.id.to_string());
+        assert_eq!(digest["wait"], serde_json::json!({"waiting":1,"total":1}));
+    }
+
+    let expired = tokio::time::timeout(Duration::from_secs(5), next_json(&mut socket))
+        .await
+        .expect("the replacement's earlier deadline must refresh the updates socket");
+    assert_eq!(expired["type"], "snapshot");
+    assert!(expired["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|digest| digest.get("wait").is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_tree_wait_rearms_when_a_replacement_has_the_same_tree() {
+    let (router, token, runtime, _dir) = code_app(plain_text_script()).await;
+    let (parent, child) = seed_wait_tree(&runtime).await;
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        uuid::Uuid::new_v4(),
+        &[child.id],
+        chrono::Utc::now() + chrono::Duration::seconds(20),
+    )
+    .await
+    .unwrap();
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
+    let cursor = wait_tree_cursor(&runtime, &parent).await;
+    let addr = serve(router).await;
+    let mut request = format!("ws://{addr}/sessions/{}/events?after={cursor}", parent.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let active = next_json(&mut socket).await;
+    assert_eq!(
+        active["event"]["wait"],
+        serde_json::json!({"waiting":1,"total":1})
+    );
+
+    tidebreak_core::db::code::set_parent_wait(
+        &runtime.db,
+        &parent.owner,
+        parent.id,
+        uuid::Uuid::new_v4(),
+        &[child.id],
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    crate::code::session_tree::publish_for_parent(
+        &runtime.db,
+        runtime.bus.as_ref(),
+        &parent.owner,
+        parent.id,
+    )
+    .await;
+    crate::code::attention::emit_digest(&runtime.db, runtime.bus.as_ref(), &parent).await;
+    assert_eq!(wait_tree_cursor(&runtime, &parent).await, cursor);
+
+    let expired = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let tree = next_json(&mut socket).await;
+            if tree["event"]["type"] == "session_tree" && tree["event"]["wait"].is_null() {
+                break tree;
+            }
+        }
+    })
+    .await
+    .expect("a replacement deadline must expire even when its tree event is deduplicated");
+    assert_eq!(expired["transient"], true);
+    assert_eq!(expired["seq"], cursor);
+    assert_eq!(wait_tree_cursor(&runtime, &parent).await, cursor);
 }

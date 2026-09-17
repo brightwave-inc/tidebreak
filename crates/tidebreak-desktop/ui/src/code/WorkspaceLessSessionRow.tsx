@@ -8,6 +8,7 @@ import { HARNESS_LABELS } from "./labels";
 import { SessionStateGlyph } from "./WorkspaceCard";
 import { formatCompactAge, sessionActivityLineLabel } from "./workspaceCards";
 import { pointerSelectIntent } from "./workspaceSelection";
+import { sessionTreeWaitLabel } from "./sessionTree";
 
 /**
  * An index row for a conversation that has no repository workspace.
@@ -23,11 +24,17 @@ export function WorkspaceLessSessionRow({
   onOpen,
   active = false,
   density = "detailed",
+  nested = [],
+  activeSessionId = null,
+  childrenByParent,
 }: {
   digest: CodeSessionDigest;
   active?: boolean;
   density?: "compact" | "detailed";
   onOpen: (sessionId: string) => void;
+  nested?: CodeSessionDigest[];
+  activeSessionId?: string | null;
+  childrenByParent?: ReadonlyMap<string, CodeSessionDigest[]>;
 }) {
   digest = recoveryDigest(digest);
   const origin = digest.external_origin;
@@ -46,14 +53,16 @@ export function WorkspaceLessSessionRow({
   // The same copy as a workspace card's activity line: the live tool subject
   // while running, the recap once parked.
   const status =
-    recovering && !showRecovery ? "" : sessionActivityLineLabel(digest);
+    recovering && !showRecovery
+      ? ""
+      : (sessionTreeWaitLabel(digest.wait) ?? sessionActivityLineLabel(digest));
   const harnessKind = digest.harness_kind;
   const HarnessIcon = harnessKind ? HARNESS_ICONS[harnessKind] : null;
   const age = digest.trigger_target_at
     ? formatCompactAge(digest.trigger_target_at)
     : null;
   const detail = [source, status].filter(Boolean).join(" · ");
-  return (
+  const row = (
     <button
       type="button"
       data-workspace-card=""
@@ -113,5 +122,28 @@ export function WorkspaceLessSessionRow({
         )}
       </span>
     </button>
+  );
+  if (nested.length === 0) return row;
+  return (
+    <div className="flex min-w-0 flex-col">
+      {row}
+      <ul className="ml-4 border-l border-border-subtle pl-1">
+        {nested.map((child) => (
+          <li key={child.session}>
+            <WorkspaceLessSessionRow
+              digest={child}
+              onOpen={onOpen}
+              active={
+                activeSessionId ? child.session === activeSessionId : false
+              }
+              density={density}
+              nested={childrenByParent?.get(child.session) ?? []}
+              childrenByParent={childrenByParent}
+              activeSessionId={activeSessionId}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

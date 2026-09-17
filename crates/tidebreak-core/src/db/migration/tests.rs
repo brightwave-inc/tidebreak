@@ -109,6 +109,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260914_000002_native_turn_identity",
             "m20260915_000001_trigger_fire_context",
             "m20260915_000002_trigger_queue_sink",
+            "m20260917_000001_code_parent_wait",
         ]
     );
     assert!(db

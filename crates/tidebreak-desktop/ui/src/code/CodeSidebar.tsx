@@ -35,6 +35,7 @@ import {
   workspaceCommands,
 } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
+import { nestSessionDigests } from "./sessionTree";
 import {
   arrangeWorkspaceSections,
   visibleWorkspaceGroups,
@@ -99,6 +100,7 @@ export function CodeSidebar() {
   // sessions as well as machine-side chats, so `can_open_chat` does not
   // decide whether a conversation appears here.
   const chatConversations = Object.values(conversationsWithoutWorkspace);
+  const nestedConversations = nestSessionDigests(chatConversations);
   const newWorkspaceOpen = useCodeUiStore((state) => state.newWorkspaceOpen);
   const newWorkspaceRepoId = useCodeUiStore(
     (state) => state.newWorkspaceRepoId,
@@ -147,7 +149,7 @@ export function CodeSidebar() {
     workspaces,
     digests,
     sessions,
-    chatConversations,
+    nestedConversations.roots,
   );
   const groups = visibleWorkspaceGroups(
     sections,
@@ -333,7 +335,14 @@ export function CodeSidebar() {
             <WorkspaceLessSessionRow
               key={digest.session}
               digest={digest}
+              nested={nestedConversations.childrenOf.get(digest.session) ?? []}
+              childrenByParent={nestedConversations.childrenOf}
               active={pathname === `/code/s/${digest.session}`}
+              activeSessionId={
+                pathname.startsWith("/code/s/")
+                  ? pathname.slice("/code/s/".length)
+                  : null
+              }
               density={prefs.density}
               onOpen={(sessionId) => {
                 clearWorkspaceSelection();

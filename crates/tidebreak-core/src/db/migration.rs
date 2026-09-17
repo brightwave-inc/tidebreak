@@ -37,6 +37,7 @@ mod native_turn_identity;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
+mod parent_wait;
 mod session_access;
 mod session_acts_as;
 mod session_context;
@@ -122,6 +123,7 @@ impl MigratorTrait for Migrator {
             Box::new(native_turn_identity::NativeTurnIdentity),
             Box::new(trigger_fire_context::TriggerFireContext),
             Box::new(trigger_fire_context::TriggerQueueSink),
+            Box::new(parent_wait::ParentWait),
         ]
     }
 }

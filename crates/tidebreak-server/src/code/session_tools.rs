@@ -270,38 +270,12 @@ impl SessionTool {
                         "Name between one and eight child sessions.",
                     ));
                 }
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
                 let live = authority(runtime, ctx.chat_id).await?;
                 let mut children = Vec::with_capacity(ids.len());
                 for id in &ids {
                     children.push(require_child(runtime, &live, *id).await?);
                 }
-                let mut snapshots = Vec::with_capacity(children.len());
-                for child in &children {
-                    snapshots.push(snapshot(runtime, &live.parent.owner, child.clone()).await?);
-                }
-                loop {
-                    let mut waiting = false;
-                    for (index, child) in children.iter_mut().enumerate() {
-                        let current = runtime.get_session(&live.parent.owner, child.id).await?;
-                        if current.lifecycle != child.lifecycle {
-                            snapshots[index] =
-                                snapshot(runtime, &live.parent.owner, current.clone()).await?;
-                        }
-                        *child = current;
-                        waiting |= snapshots[index]["running"].as_bool().unwrap_or(false);
-                    }
-                    if !waiting || tokio::time::Instant::now() >= deadline {
-                        if waiting {
-                            for (index, child) in children.iter().enumerate() {
-                                snapshots[index] =
-                                    snapshot(runtime, &live.parent.owner, child.clone()).await?;
-                            }
-                        }
-                        return Ok(json!({"waiting":waiting,"sessions":snapshots}));
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                wait_for_children(runtime, &live.parent, &children, Duration::from_secs(20)).await
             }
             _ => {
                 let mut children = Vec::new();
@@ -594,6 +568,144 @@ impl SessionTool {
     }
 }
 
+/// Own one active tool wait. Dropping the tool schedules compare-and-clear;
+/// the persisted deadline also bounds a wait if the process shuts down.
+struct ActiveParentWait {
+    runtime: Arc<CodeRuntime>,
+    parent: Session,
+    generation: uuid::Uuid,
+    active: bool,
+}
+
+impl ActiveParentWait {
+    async fn begin(
+        runtime: &Arc<CodeRuntime>,
+        parent: &Session,
+        children: &[Session],
+        timeout: Duration,
+    ) -> Result<Self, ServerError> {
+        let lease = Self {
+            runtime: runtime.clone(),
+            parent: parent.clone(),
+            generation: uuid::Uuid::new_v4(),
+            active: true,
+        };
+        let mut ids = Vec::with_capacity(children.len());
+        for child in children {
+            if !ids.contains(&child.id) {
+                ids.push(child.id);
+            }
+        }
+        // Construct the guard before writing, so cancellation during the write
+        // still schedules cleanup under the same parent lock.
+        tidebreak_core::db::code::set_parent_wait(
+            &runtime.db,
+            &parent.owner,
+            parent.id,
+            lease.generation,
+            &ids,
+            chrono::Utc::now()
+                + chrono::Duration::from_std(timeout)
+                    .map_err(|error| ServerError::internal(error.to_string()))?,
+        )
+        .await?;
+        publish_parent_tree(runtime, parent).await;
+        Ok(lease)
+    }
+
+    async fn finish(&mut self) -> Result<(), ServerError> {
+        tidebreak_core::db::code::clear_parent_wait(
+            &self.runtime.db,
+            &self.parent.owner,
+            self.parent.id,
+            self.generation,
+        )
+        .await?;
+        publish_parent_tree(&self.runtime, &self.parent).await;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for ActiveParentWait {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let parent = self.parent.clone();
+        let generation = self.generation;
+        handle.spawn(async move {
+            match tidebreak_core::db::code::clear_parent_wait(
+                &runtime.db,
+                &parent.owner,
+                parent.id,
+                generation,
+            )
+            .await
+            {
+                Ok(_) => publish_parent_tree(&runtime, &parent).await,
+                Err(error) => tracing::warn!(session = %parent.id, %error,
+                    "could not clear a canceled parent wait"),
+            }
+        });
+    }
+}
+
+async fn wait_for_children(
+    runtime: &Arc<CodeRuntime>,
+    parent: &Session,
+    children: &[Session],
+    timeout: Duration,
+) -> Result<Value, ServerError> {
+    let mut snapshots = Vec::with_capacity(children.len());
+    for child in children {
+        snapshots.push(snapshot(runtime, &parent.owner, child.clone()).await?);
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut lease = ActiveParentWait::begin(runtime, parent, children, timeout).await?;
+    let outcome = tokio::time::timeout_at(deadline, async {
+        loop {
+            // Approval and output changes do not always change lifecycle.
+            // Refresh every child instead of waiting for a lifecycle change.
+            for (index, child) in children.iter().enumerate() {
+                snapshots[index] = snapshot(runtime, &parent.owner, child.clone()).await?;
+            }
+            if !snapshots
+                .iter()
+                .any(|value| value["running"].as_bool().unwrap_or(false))
+            {
+                return Ok::<_, ServerError>(json!({"waiting":false,"sessions":snapshots}));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await;
+    let result = match outcome {
+        Ok(result) => result,
+        // The tool has returned; the active wait ends even when children run.
+        // `waiting` tells the caller to check those children again.
+        Err(_) => Ok(json!({"waiting":true,"sessions":snapshots})),
+    };
+    let cleanup = lease.finish().await;
+    match result {
+        Ok(value) => {
+            cleanup?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup {
+                tracing::warn!(session = %parent.id, error = cleanup_error.message(),
+                    "could not clear a failed parent wait");
+            }
+            Err(error)
+        }
+    }
+}
+
 async fn publish_parent_tree(runtime: &CodeRuntime, parent: &Session) {
     crate::code::session_tree::publish_for_parent(
         &runtime.db,
@@ -602,6 +714,9 @@ async fn publish_parent_tree(runtime: &CodeRuntime, parent: &Session) {
         parent.id,
     )
     .await;
+    if let Ok(parent) = runtime.get_session(&parent.owner, parent.id).await {
+        super::attention::emit_digest(&runtime.db, runtime.bus.as_ref(), &parent).await;
+    }
 }
 
 async fn require_child(
@@ -884,6 +999,187 @@ mod tests {
             .unwrap();
         }
         (dir, runtime, host, parent)
+    }
+
+    async fn wait_child(runtime: &CodeRuntime, parent: &Session, key: &str) -> Session {
+        let mut child = parent.clone();
+        child.id = SessionId::new();
+        child.lifecycle = SessionLifecycle::Running;
+        insert_session(&runtime.db, &child).await.unwrap();
+        set_session_context(
+            &runtime.db,
+            &parent.owner,
+            child.id,
+            None,
+            Some(parent.id),
+            Some(key),
+        )
+        .await
+        .unwrap();
+        child
+    }
+
+    async fn expect_wait(
+        runtime: &CodeRuntime,
+        parent: &Session,
+        expected: Option<Vec<SessionId>>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if tidebreak_core::db::code::parent_wait_ids(&runtime.db, &parent.owner, parent.id)
+                    .await
+                    .unwrap()
+                    == expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("parent wait did not reach the expected state");
+    }
+
+    fn spawn_wait(
+        runtime: &Arc<CodeRuntime>,
+        parent: &Session,
+        child: &Session,
+    ) -> tokio::task::JoinHandle<Result<Value, ServerError>> {
+        let runtime = runtime.clone();
+        let parent = parent.clone();
+        let child = child.clone();
+        tokio::spawn(async move {
+            wait_for_children(&runtime, &parent, &[child], Duration::from_secs(10)).await
+        })
+    }
+
+    #[tokio::test]
+    async fn parent_wait_timeout_clears_the_lease_without_stopping_children() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let child = wait_child(&runtime, &parent, "timeout").await;
+        let result = wait_for_children(
+            &runtime,
+            &parent,
+            std::slice::from_ref(&child),
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["waiting"], true);
+        assert_eq!(result["sessions"][0]["running"], true);
+        expect_wait(&runtime, &parent, None).await;
+        assert_eq!(
+            runtime
+                .get_session(&parent.owner, child.id)
+                .await
+                .unwrap()
+                .lifecycle,
+            SessionLifecycle::Running
+        );
+        let events =
+            tidebreak_core::db::code::list_events(&runtime.db, &parent.owner, parent.id, 0, 100)
+                .await
+                .unwrap();
+        let trees = events
+            .events
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                tidebreak_core::Event::SessionTree { wait, .. } => Some(wait),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            trees.iter().any(|wait| wait.is_some()),
+            "the active wait must reach the journal"
+        );
+        assert_eq!(
+            trees.last(),
+            Some(&&None),
+            "timeout must clear the journal's wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_wait_completion_clears_the_lease() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let mut child = wait_child(&runtime, &parent, "complete").await;
+        let task = spawn_wait(&runtime, &parent, &child);
+        expect_wait(&runtime, &parent, Some(vec![child.id])).await;
+        child.lifecycle = SessionLifecycle::Ended;
+        tidebreak_core::db::code::save_session(&runtime.db, &child)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["waiting"], false);
+        assert_eq!(result["sessions"][0]["status"], "ended");
+        expect_wait(&runtime, &parent, None).await;
+    }
+
+    #[tokio::test]
+    async fn parent_wait_cancellation_clears_the_lease_without_stopping_children() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let child = wait_child(&runtime, &parent, "cancel").await;
+        let task = spawn_wait(&runtime, &parent, &child);
+        expect_wait(&runtime, &parent, Some(vec![child.id])).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        expect_wait(&runtime, &parent, None).await;
+        assert_eq!(
+            runtime
+                .get_session(&parent.owner, child.id)
+                .await
+                .unwrap()
+                .lifecycle,
+            SessionLifecycle::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_wait_polling_error_clears_the_lease() {
+        use tidebreak_core::Store;
+        let (_dir, runtime, _host, parent) = setup().await;
+        let child = wait_child(&runtime, &parent, "error").await;
+        let task = spawn_wait(&runtime, &parent, &child);
+        expect_wait(&runtime, &parent, Some(vec![child.id])).await;
+        assert_eq!(
+            runtime.db.delete_chat(child.id).await.unwrap(),
+            tidebreak_core::DeleteChatOutcome::Deleted {
+                background_run_ids: vec![]
+            }
+        );
+        let error = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), "not_found");
+        expect_wait(&runtime, &parent, None).await;
+    }
+
+    #[tokio::test]
+    async fn parent_wait_older_completion_preserves_its_replacement() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let first = wait_child(&runtime, &parent, "first").await;
+        let second = wait_child(&runtime, &parent, "second").await;
+        let mut old = ActiveParentWait::begin(&runtime, &parent, &[first], Duration::from_secs(10))
+            .await
+            .unwrap();
+        let mut replacement = ActiveParentWait::begin(
+            &runtime,
+            &parent,
+            std::slice::from_ref(&second),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        old.finish().await.unwrap();
+        expect_wait(&runtime, &parent, Some(vec![second.id])).await;
+        replacement.finish().await.unwrap();
+        expect_wait(&runtime, &parent, None).await;
     }
 
     #[tokio::test]

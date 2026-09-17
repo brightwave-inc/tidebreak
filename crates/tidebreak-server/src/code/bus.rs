@@ -92,6 +92,10 @@ pub struct SessionDigest {
     pub recap: Option<String>,
     /// Pending memory proposals that originated in this session.
     pub memory_proposal_count: Option<u64>,
+    /// Direct parent session, when this conversation was started as a child.
+    pub parent_session: Option<SessionId>,
+    /// Authoritative parent wait, never inferred from running children.
+    pub wait: Option<SessionTreeWait>,
 }
 
 /// Progress of one in-flight `git clone` job.

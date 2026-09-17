@@ -15,13 +15,16 @@
 //! that snapshot, which is how a revoked session leaves a live client's list
 //! without waiting for a reconnect.
 
+use std::collections::HashMap;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Extension;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::time::Instant;
 
-use tidebreak_core::OwnerId;
+use tidebreak_core::{OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::attention::list_accessible_digests;
@@ -63,10 +66,11 @@ async fn stream_updates(
     let mut live = runtime.bus.subscribe_updates(&owner);
     let mut grant_notices = runtime.grant_revocations().subscribe();
     let mut terminals = state.terminals.subscribe(&owner);
-    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+    let Ok(mut wait_deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
         return;
-    }
+    };
     loop {
+        let next_wait_deadline = wait_deadlines.values().copied().min();
         tokio::select! {
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
@@ -82,22 +86,36 @@ async fn stream_updates(
                     break;
                 }
             },
+            () = super::session_events::wait_for_tree_deadline(next_wait_deadline) => {
+                let Ok(deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
+                    break;
+                };
+                wait_deadlines = deadlines;
+            },
             notice = grant_notices.recv() => {
                 if matches!(notice, Err(RecvError::Closed)) {
                     break;
                 }
-                if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                let Ok(deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
                     break;
-                }
+                };
+                wait_deadlines = deadlines;
             },
             update = live.recv() => match update {
                 Ok(CodeLiveUpdate::Digest(digest)) => {
                     if !super::session_events::reader_still_authorized(
                         &runtime.db, Some(&owner), digest.session,
                     ).await {
+                        wait_deadlines.remove(&digest.session);
                         continue;
                     }
-                    if send_notice(&mut socket, &UpdateNotice::digest(*digest))
+                    let digest = crate::code::session_tree::authorize_digest(&runtime.db, &owner, *digest).await;
+                    if digest.wait.is_some() {
+                        wait_deadlines.insert(digest.session, digest_wait_deadline(&runtime.db, &owner, digest.session).await);
+                    } else {
+                        wait_deadlines.remove(&digest.session);
+                    }
+                    if send_notice(&mut socket, &UpdateNotice::digest(digest))
                         .await
                         .is_err()
                     {
@@ -145,14 +163,16 @@ async fn stream_updates(
                     // A row was granted or revoked, or visibility moved. The
                     // snapshot is what says which sessions this principal may
                     // see now, so restate it rather than patch one digest.
-                    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                    let Ok(deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
                         break;
-                    }
+                    };
+                    wait_deadlines = deadlines;
                 }
                 Err(RecvError::Lagged(_)) => {
-                    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                    let Ok(deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
                         break;
-                    }
+                    };
+                    wait_deadlines = deadlines;
                 }
                 Err(RecvError::Closed) => break,
             },
@@ -216,14 +236,41 @@ async fn send_snapshot(
     socket: &mut WebSocket,
     runtime: &crate::code::runtime::CodeRuntime,
     owner: &OwnerId,
-) -> Result<(), ()> {
+) -> Result<HashMap<SessionId, Instant>, ()> {
     let sessions = list_accessible_digests(&runtime.db, owner)
         .await
         .map_err(|_| ())?;
-    let notice = UpdateNotice::Snapshot {
-        sessions: authorized_snapshot_sessions(&runtime.db, owner, sessions).await,
-    };
-    send_notice(socket, &notice).await.map_err(|_| ())
+    let sessions = authorized_snapshot_sessions(&runtime.db, owner, sessions).await;
+    let mut wait_deadlines = HashMap::new();
+    for digest in sessions.iter().filter(|digest| digest.wait.is_some()) {
+        wait_deadlines.insert(
+            digest.session,
+            digest_wait_deadline(&runtime.db, owner, digest.session).await,
+        );
+    }
+    send_notice(socket, &UpdateNotice::Snapshot { sessions })
+        .await
+        .map_err(|_| ())?;
+    Ok(wait_deadlines)
+}
+
+/// Only visible waits arm a refresh. Resolve the owner for shared sessions too.
+async fn digest_wait_deadline(
+    store: &tidebreak_core::DbStore,
+    principal: &OwnerId,
+    session: SessionId,
+) -> Instant {
+    match tidebreak_core::db::code::resolve_session_access(store, principal, session).await {
+        Ok(Some(access)) => {
+            super::session_events::wait_refresh_deadline(store, &access.session.owner, session)
+                .await
+        }
+        Ok(None) => Instant::now(),
+        Err(error) => {
+            tracing::warn!(session = %session, %error, "could not resolve the parent wait owner");
+            Instant::now() + std::time::Duration::from_secs(1)
+        }
+    }
 }
 
 async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<(), axum::Error> {
@@ -242,7 +289,9 @@ async fn authorized_snapshot_sessions(
         if super::session_events::reader_still_authorized(store, Some(principal), digest.session)
             .await
         {
-            authorized.push(SessionDigest::from(digest));
+            authorized.push(SessionDigest::from(
+                crate::code::session_tree::authorize_digest(store, principal, digest).await,
+            ));
         }
     }
     authorized

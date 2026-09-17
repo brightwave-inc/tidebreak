@@ -7,7 +7,7 @@
 
 use tidebreak_core::db::code::{
     append_event, child_sessions, get_session, get_workspace, latest_turn, list_queued_turns,
-    session_bound_to_grant, session_context,
+    parent_wait_ids, session_bound_to_grant, session_context,
 };
 use tidebreak_core::{
     AttentionState, CodeGrantId, DbStore, Event, OwnerId, Session, SessionId, SessionLifecycle,
@@ -16,6 +16,19 @@ use tidebreak_core::{
 
 use super::bus::CodeEventBus;
 use super::types::SessionSnapshot;
+
+/// Authoritative wait for a parent digest. Never inferred from running children.
+pub async fn wait_for_parent(
+    db: &DbStore,
+    owner: &OwnerId,
+    parent_id: SessionId,
+) -> Option<SessionTreeWait> {
+    parent_wait_ids(db, owner, parent_id).await.ok().flatten()?;
+    compute(db, owner, parent_id, None)
+        .await
+        .ok()
+        .and_then(|(_, wait)| wait)
+}
 
 /// Fill `children` / `wait` on a snapshot from persisted child rows.
 pub async fn attach_to_snapshot(
@@ -27,7 +40,7 @@ pub async fn attach_to_snapshot(
 ) {
     match compute(db, owner, snapshot.id, grant_id).await {
         Ok((children, wait)) => {
-            let event = authorize_event(
+            let event = filter_tree_event(
                 db,
                 owner,
                 None,
@@ -50,8 +63,38 @@ pub async fn attach_to_snapshot(
     }
 }
 
-/// Keep only children the adapter grant or shared-session reader can read.
+/// Restate the current tree before delivering a live or replayed projection.
+/// Historical journal rows must not restore an expired or replaced wait.
 pub async fn authorize_event(
+    db: &DbStore,
+    owner: &OwnerId,
+    parent_id: SessionId,
+    grant_id: Option<CodeGrantId>,
+    principal: Option<&OwnerId>,
+    event: Event,
+) -> Event {
+    let Event::SessionTree { children, .. } = event else {
+        return event;
+    };
+    let (children, wait) = match compute(db, owner, parent_id, None).await {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!(session = %parent_id, %error, "could not refresh a delivered session tree");
+            (children, None)
+        }
+    };
+    filter_tree_event(
+        db,
+        owner,
+        grant_id,
+        principal,
+        Event::SessionTree { children, wait },
+    )
+    .await
+}
+
+/// Keep only children the adapter grant or shared-session reader can read.
+async fn filter_tree_event(
     db: &DbStore,
     owner: &OwnerId,
     grant_id: Option<CodeGrantId>,
@@ -88,6 +131,52 @@ pub async fn authorize_event(
         },
         children,
     }
+}
+
+/// Filter tree metadata again when delivering a digest to a reader.
+/// Queued digests can outlive child access or the wait that produced them.
+pub async fn authorize_digest(
+    db: &DbStore,
+    principal: &OwnerId,
+    mut digest: super::bus::SessionDigest,
+) -> super::bus::SessionDigest {
+    if let Some(parent) = digest.parent_session {
+        if tidebreak_core::db::code::resolve_session_access(db, principal, parent)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            digest.parent_session = None;
+        }
+    }
+    digest.wait = None;
+    let Ok(Some(access)) =
+        tidebreak_core::db::code::resolve_session_access(db, principal, digest.session).await
+    else {
+        return digest;
+    };
+    // An older digest without a wait can arrive after a replacement begins.
+    // Consult the live lease even when the queued digest had no wait.
+    let Ok(Some(_)) = parent_wait_ids(db, &access.session.owner, digest.session).await else {
+        return digest;
+    };
+    let Ok((children, wait)) = compute(db, &access.session.owner, digest.session, None).await
+    else {
+        return digest;
+    };
+    if let Event::SessionTree { wait, .. } = filter_tree_event(
+        db,
+        &access.session.owner,
+        None,
+        Some(principal),
+        Event::SessionTree { children, wait },
+    )
+    .await
+    {
+        digest.wait = wait;
+    }
+    digest
 }
 
 /// Publish a parent `session_tree` event when this session is a child.
@@ -197,9 +286,40 @@ fn child_is_fenced(session: &Session) -> bool {
         || matches!(session.attention.state, AttentionState::Fenced { .. })
 }
 
-/// Parent wait is never invented by counting running children.
-fn known_parent_wait() -> Option<SessionTreeWait> {
-    None
+fn child_is_settled(status: SessionTreeChildStatus) -> bool {
+    matches!(
+        status,
+        SessionTreeChildStatus::Completed
+            | SessionTreeChildStatus::Failed
+            | SessionTreeChildStatus::Interrupted
+    )
+}
+
+/// Parent wait is never invented by counting every running child.
+fn wait_from_named(
+    children: &[SessionTreeChild],
+    named: Option<&[SessionId]>,
+) -> Option<SessionTreeWait> {
+    let named = named.filter(|ids| !ids.is_empty())?;
+    // A filtered or incomplete projection cannot disclose the named wait.
+    if named
+        .iter()
+        .any(|id| !children.iter().any(|child| child.id == *id))
+    {
+        return None;
+    }
+    let total = u32::try_from(named.len()).unwrap_or(u32::MAX);
+    let waiting = named
+        .iter()
+        .filter(|id| {
+            children
+                .iter()
+                .find(|child| child.id == **id)
+                .is_some_and(|child| !child_is_settled(child.status))
+        })
+        .count();
+    let waiting = u32::try_from(waiting).unwrap_or(u32::MAX);
+    (waiting > 0).then_some(SessionTreeWait { waiting, total })
 }
 
 async fn compute(
@@ -217,7 +337,9 @@ async fn compute(
         }
         children.push(project_child(db, owner, session).await?);
     }
-    Ok((children, known_parent_wait()))
+    let named = parent_wait_ids(db, owner, parent_id).await?;
+    let wait = wait_from_named(&children, named.as_deref());
+    Ok((children, wait))
 }
 
 async fn project_child(
@@ -242,6 +364,8 @@ async fn project_child(
         status: child_status(session.lifecycle, queued, last_turn),
         attention: child_needs_attention(&session),
         fenced: child_is_fenced(&session),
+        workspace_id: session.workspace_id,
+        execution_location: Some(session.execution_location),
     })
 }
 
@@ -340,7 +464,7 @@ mod tests {
                 total: 2,
             }),
         };
-        let authorized = authorize_event(&db, &owner, None, Some(&reader), event).await;
+        let authorized = filter_tree_event(&db, &owner, None, Some(&reader), event).await;
         let Event::SessionTree { children, wait } = authorized else {
             panic!("expected session tree");
         };
@@ -390,7 +514,19 @@ mod tests {
             child_status(SessionLifecycle::Fenced, false, Some(TurnStatus::Running)),
             SessionTreeChildStatus::Fenced
         );
-        assert!(known_parent_wait().is_none());
+        assert!(wait_from_named(
+            &[SessionTreeChild {
+                id: SessionId::new(),
+                title: None,
+                status: SessionTreeChildStatus::Running,
+                attention: false,
+                fenced: false,
+                workspace_id: None,
+                execution_location: None,
+            }],
+            None
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -411,6 +547,11 @@ mod tests {
         assert_eq!(children[0].id, child.id);
         assert_eq!(children[0].status, SessionTreeChildStatus::Running);
         assert!(!children[0].fenced);
+        assert_eq!(children[0].workspace_id, child.workspace_id);
+        assert_eq!(
+            children[0].execution_location,
+            Some(ExecutionLocation::Machine)
+        );
 
         child.lifecycle = SessionLifecycle::Fenced;
         child.fence_reason = Some(FenceReason::OrphanAlive);
@@ -572,12 +713,27 @@ mod tests {
         .await
         .unwrap();
 
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            uuid::Uuid::new_v4(),
+            &[hidden.id],
+            chrono::Utc::now() + chrono::Duration::seconds(20),
+        )
+        .await
+        .unwrap();
         let (children, wait) = compute(&db, &owner, parent.id, Some(grant.id))
             .await
             .unwrap();
         assert!(wait.is_none());
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].id, visible.id);
+        assert_eq!(
+            parent_wait_ids(&db, &owner, parent.id).await.unwrap(),
+            Some(vec![hidden.id]),
+            "grant-filtered reads must not clear the authoritative wait"
+        );
 
         let stranger = OwnerId::new("other").unwrap();
         let mut foreign = session(&stranger, SessionLifecycle::Running);
@@ -668,6 +824,349 @@ mod tests {
                 .iter()
                 .all(|child| child.status != SessionTreeChildStatus::Running),
             "a slower running compute must not land after a terminal update: {last:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_wait_digests_hide_private_children_and_recheck_queued_counts() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::local();
+        let reader = OwnerId::new("reader").unwrap();
+        let mut parent = session(&owner, SessionLifecycle::Idle);
+        parent.visibility = SessionVisibility::Deployment;
+        let child = session(&owner, SessionLifecycle::Running);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            child.id,
+            None,
+            Some(parent.id),
+            Some("private"),
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            uuid::Uuid::new_v4(),
+            &[child.id],
+            chrono::Utc::now() + chrono::Duration::seconds(20),
+        )
+        .await
+        .unwrap();
+        let owner_digest = super::super::attention::list_accessible_digests(&db, &owner)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|digest| digest.session == parent.id)
+            .unwrap();
+        assert_eq!(
+            owner_digest.wait,
+            Some(SessionTreeWait {
+                waiting: 1,
+                total: 1
+            })
+        );
+        let shared = super::super::attention::list_accessible_digests(&db, &reader)
+            .await
+            .unwrap();
+        assert_eq!(shared.len(), 1);
+        assert!(shared[0].wait.is_none());
+        let bus = CodeEventBus::default();
+        let mut notices = bus.subscribe_updates(&reader);
+        super::super::attention::emit_digest(&db, &bus, &parent).await;
+        assert!(
+            matches!(notices.try_recv().unwrap(), super::super::bus::CodeLiveUpdate::Digest(digest)
+            if digest.wait.is_none())
+        );
+        tidebreak_core::db::code::set_session_visibility(
+            &db,
+            &owner,
+            child.id,
+            SessionVisibility::Deployment,
+        )
+        .await
+        .unwrap();
+        let mut old_without_wait = owner_digest.clone();
+        old_without_wait.wait = None;
+        assert!(
+            authorize_digest(&db, &reader, old_without_wait)
+                .await
+                .wait
+                .is_some(),
+            "an older no-wait digest must not hide the active replacement"
+        );
+        let queued = authorize_digest(&db, &reader, owner_digest).await;
+        assert!(queued.wait.is_some());
+        tidebreak_core::db::code::set_session_visibility(
+            &db,
+            &owner,
+            child.id,
+            SessionVisibility::Private,
+        )
+        .await
+        .unwrap();
+        assert!(authorize_digest(&db, &reader, queued).await.wait.is_none());
+        assert_eq!(
+            parent_wait_ids(&db, &owner, parent.id).await.unwrap(),
+            Some(vec![child.id])
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_wait_replay_uses_current_lease_after_restart_for_every_reader() {
+        let (dir, db) = store().await;
+        let owner = OwnerId::local();
+        let reader = OwnerId::new("reader").unwrap();
+        let mut parent = session(&owner, SessionLifecycle::Idle);
+        parent.visibility = SessionVisibility::Deployment;
+        let mut child = session(&owner, SessionLifecycle::Running);
+        child.visibility = SessionVisibility::Deployment;
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            child.id,
+            None,
+            Some(parent.id),
+            Some("restart"),
+        )
+        .await
+        .unwrap();
+        let grant = tidebreak_core::db::code::mint_external_grant(
+            &db,
+            &owner,
+            tidebreak_core::db::code::MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U",
+                workspace_identity: "W",
+                kind: tidebreak_core::CodeGrantKind::Person,
+            },
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::bind_external_session(
+            &db,
+            &owner,
+            grant.id,
+            "slack",
+            &format!("child/{}/restart", parent.id),
+            child.id,
+        )
+        .await
+        .unwrap();
+        let bus = CodeEventBus::default();
+        publish_for_parent(&db, &bus, &owner, parent.id).await;
+        let generation = uuid::Uuid::new_v4();
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            generation,
+            &[child.id],
+            chrono::Utc::now() + chrono::Duration::seconds(20),
+        )
+        .await
+        .unwrap();
+        publish_for_parent(&db, &bus, &owner, parent.id).await;
+        let journal = tidebreak_core::db::code::list_events(&db, &owner, parent.id, 0, 20)
+            .await
+            .unwrap();
+        let before_wait = journal.events.first().unwrap().event.clone();
+        let during_wait = journal.events.last().unwrap().event.clone();
+        assert!(matches!(
+            &before_wait,
+            Event::SessionTree { wait: None, .. }
+        ));
+        assert!(matches!(
+            &during_wait,
+            Event::SessionTree { wait: Some(_), .. }
+        ));
+
+        // Simulate process loss: the lease expires without journaling a clear.
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            generation,
+            &[child.id],
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+        let reopened = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("session-tree.db").display()
+        ))
+        .await
+        .unwrap();
+        for (grant_id, principal) in [(None, None), (Some(grant.id), None), (None, Some(&reader))] {
+            let replayed = authorize_event(
+                &reopened,
+                &owner,
+                parent.id,
+                grant_id,
+                principal,
+                during_wait.clone(),
+            )
+            .await;
+            assert!(
+                matches!(replayed, Event::SessionTree { children, wait: None }
+                if children.len() == 1 && children[0].status == SessionTreeChildStatus::Running),
+                "replay must clear expired wait indicators without dropping active children"
+            );
+        }
+        let replacement = uuid::Uuid::new_v4();
+        tidebreak_core::db::code::set_parent_wait(
+            &reopened,
+            &owner,
+            parent.id,
+            replacement,
+            &[child.id],
+            chrono::Utc::now() + chrono::Duration::seconds(20),
+        )
+        .await
+        .unwrap();
+        for (grant_id, principal) in [(None, None), (Some(grant.id), None), (None, Some(&reader))] {
+            let replayed = authorize_event(
+                &reopened,
+                &owner,
+                parent.id,
+                grant_id,
+                principal,
+                before_wait.clone(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    replayed,
+                    Event::SessionTree {
+                        wait: Some(SessionTreeWait {
+                            waiting: 1,
+                            total: 1
+                        }),
+                        ..
+                    }
+                ),
+                "older journal state must not erase a replacement wait"
+            );
+        }
+        assert!(!tidebreak_core::db::code::clear_parent_wait(
+            &reopened, &owner, parent.id, generation
+        )
+        .await
+        .unwrap());
+        assert!(tidebreak_core::db::code::clear_parent_wait(
+            &reopened,
+            &owner,
+            parent.id,
+            replacement
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn parent_wait_expiry_hides_abandoned_work_without_mutating_the_lease() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::local();
+        let parent = session(&owner, SessionLifecycle::Idle);
+        let child = session(&owner, SessionLifecycle::Running);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            child.id,
+            None,
+            Some(parent.id),
+            Some("expired"),
+        )
+        .await
+        .unwrap();
+        let generation = uuid::Uuid::new_v4();
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            generation,
+            &[child.id],
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+        let (children, wait) = compute(&db, &owner, parent.id, None).await.unwrap();
+        assert!(wait.is_none());
+        assert_eq!(children[0].status, SessionTreeChildStatus::Running);
+        assert!(
+            tidebreak_core::db::code::clear_parent_wait(&db, &owner, parent.id, generation)
+                .await
+                .unwrap(),
+            "reading an expired wait must leave its row untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn named_wait_reads_never_clear_the_authoritative_lease() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::local();
+        let parent = session(&owner, SessionLifecycle::Idle);
+        let mut waited = session(&owner, SessionLifecycle::Running);
+        let extra = session(&owner, SessionLifecycle::Running);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &waited).await.unwrap();
+        insert_session(&db, &extra).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            waited.id,
+            None,
+            Some(parent.id),
+            Some("waited"),
+        )
+        .await
+        .unwrap();
+        set_session_context(&db, &owner, extra.id, None, Some(parent.id), Some("extra"))
+            .await
+            .unwrap();
+
+        tidebreak_core::db::code::set_parent_wait(
+            &db,
+            &owner,
+            parent.id,
+            uuid::Uuid::new_v4(),
+            &[waited.id],
+            chrono::Utc::now() + chrono::Duration::seconds(20),
+        )
+        .await
+        .unwrap();
+        let (children, wait) = compute(&db, &owner, parent.id, None).await.unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            wait,
+            Some(SessionTreeWait {
+                waiting: 1,
+                total: 1
+            })
+        );
+
+        waited.lifecycle = SessionLifecycle::Ended;
+        save_session(&db, &waited).await.unwrap();
+        let (_, wait) = compute(&db, &owner, parent.id, None).await.unwrap();
+        assert!(
+            wait.is_none(),
+            "settled named children need no waiting indicator"
+        );
+        assert_eq!(
+            parent_wait_ids(&db, &owner, parent.id).await.unwrap(),
+            Some(vec![waited.id]),
+            "a stale snapshot must not clear an active or replacement wait"
         );
     }
 }

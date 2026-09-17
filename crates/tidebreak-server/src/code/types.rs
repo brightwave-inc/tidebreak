@@ -1862,6 +1862,14 @@ pub struct SessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub memory_proposal_count: Option<u64>,
+    /// Direct parent session, when this conversation was started as a child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_session: Option<tidebreak_core::SessionId>,
+    /// Authoritative parent wait, never inferred from running children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wait: Option<SessionTreeWait>,
 }
 
 impl From<crate::code::bus::SessionDigest> for SessionDigest {
@@ -1889,6 +1897,8 @@ impl From<crate::code::bus::SessionDigest> for SessionDigest {
             subagents: digest.subagents,
             recap: digest.recap,
             memory_proposal_count: digest.memory_proposal_count,
+            parent_session: digest.parent_session,
+            wait: digest.wait,
         }
     }
 }
@@ -1970,6 +1980,14 @@ pub enum UpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         memory_proposal_count: Option<u64>,
+        /// Direct parent session, when this conversation was started as a child.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        parent_session: Option<tidebreak_core::SessionId>,
+        /// Authoritative parent wait, never inferred from running children.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        wait: Option<SessionTreeWait>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -2074,6 +2092,8 @@ impl UpdateNotice {
             subagents: wire.subagents,
             recap: wire.recap,
             memory_proposal_count: wire.memory_proposal_count,
+            parent_session: wire.parent_session,
+            wait: wire.wait,
         }
     }
 

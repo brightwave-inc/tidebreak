@@ -11,7 +11,9 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{ApprovalId, ApprovalKind, HarnessKind, SessionId, TurnId};
+use super::{
+    ApprovalId, ApprovalKind, ExecutionLocation, HarnessKind, SessionId, TurnId, WorkspaceId,
+};
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
 use crate::preview::{ToolActionPreview, ToolResultPreview, MAX_ACTION_FIELD_CHARS};
@@ -619,6 +621,15 @@ pub struct SessionTreeChild {
     pub attention: bool,
     /// Whether the child is fenced.
     pub fenced: bool,
+    /// Workspace the child binds, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<WorkspaceId>,
+    /// Where the child's engine runs. Absent on journal rows written before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution_location: Option<ExecutionLocation>,
 }
 
 /// A parent wait that is actually parked, never inferred by counting children.

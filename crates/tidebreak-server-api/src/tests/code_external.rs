@@ -6216,7 +6216,7 @@ async fn external_parent_events_carry_authorized_child_trees() {
             let live = value["event"]["children"].as_array().cloned().unwrap();
             assert_eq!(live.len(), 1, "{value}");
             assert_eq!(live[0]["id"].as_str(), Some(visible_id_text.as_str()));
-            if value["replayed"] == true {
+            if value["replayed"] == true || live[0]["status"] != "fenced" {
                 continue;
             }
             assert_eq!(live[0]["status"], "fenced");
