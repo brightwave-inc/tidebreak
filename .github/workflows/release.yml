@@ -2899,16 +2899,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$RELEASE_DRAFT" = true ]]; then
-            gh release upload "$RELEASE_TAG" downloads/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
+            # Retry one file at a time so a transient failure does not restart
+            # successful uploads. --clobber replaces any incomplete asset.
+            for file in downloads/*; do
+              uploaded=false
+              for attempt in 1 2 3 4; do
+                if gh release upload "$RELEASE_TAG" "$file" \
+                  --repo "$GITHUB_REPOSITORY" --clobber; then
+                  uploaded=true
+                  break
+                fi
+                if [[ "$attempt" -lt 4 ]]; then
+                  echo "Upload failed for ${file##*/}; retrying (attempt $((attempt + 1))/4)." >&2
+                  sleep "$((attempt * 5))"
+                fi
+              done
+              if [[ "$uploaded" != true ]]; then
+                echo "Upload failed for ${file##*/} after four attempts." >&2
+                exit 1
+              fi
+            done
           fi
 
           find downloads -type f -exec basename {} \; | sort \
             > "$RUNNER_TEMP/expected-release-assets"
           gh api --paginate \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
-            --jq '.[].name' | sort > "$RUNNER_TEMP/actual-release-assets"
+            --jq '.[] | select(.state == "uploaded") | .name' | sort > "$RUNNER_TEMP/actual-release-assets"
           diff -u \
             "$RUNNER_TEMP/expected-release-assets" \
             "$RUNNER_TEMP/actual-release-assets"
