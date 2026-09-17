@@ -4667,7 +4667,7 @@ export function parseCodeSessionDigest(
     ...(value.parent_session !== undefined
       ? { parent_session: value.parent_session }
       : {}),
-    ...(wait !== undefined ? { wait } : {}),
+    ...(wait ? { wait } : {}),
   };
 }
 
@@ -4808,7 +4808,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         ...(value.parent_session !== undefined
           ? { parent_session: value.parent_session }
           : {}),
-        ...(wait !== undefined ? { wait } : {}),
+        ...(wait ? { wait } : {}),
       };
     }
     case "clone_progress": {

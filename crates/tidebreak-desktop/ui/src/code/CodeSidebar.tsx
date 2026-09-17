@@ -336,6 +336,7 @@ export function CodeSidebar() {
               key={digest.session}
               digest={digest}
               nested={nestedConversations.childrenOf.get(digest.session) ?? []}
+              childrenByParent={nestedConversations.childrenOf}
               active={pathname === `/code/s/${digest.session}`}
               activeSessionId={
                 pathname.startsWith("/code/s/")

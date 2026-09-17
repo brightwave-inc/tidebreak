@@ -1031,6 +1031,7 @@ impl ScopedCode {
             entry.event = super::session_tree::authorize_event(
                 &self.runtime.db,
                 &owner,
+                id,
                 None,
                 Some(&self.owner),
                 entry.event.clone(),

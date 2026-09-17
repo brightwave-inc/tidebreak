@@ -213,10 +213,12 @@ it("opens a child session from the parent tree in one click", async () => {
     wait: { waiting: 1, total: 1 },
   });
   expect(screen.getByText("Waiting on 1 of 1")).toBeTruthy();
-  expect(screen.getByText("Needs attention · Sandbox")).toBeTruthy();
+  expect(screen.getByText("Needs attention").parentElement).toHaveTextContent(
+    "Needs attention · Sandbox",
+  );
   expect(screen.queryByText("fenced")).toBeNull();
   await act(async () => {
-    screen.getByRole("button", { name: "Open" }).click();
+    screen.getByRole("button", { name: "Open Inspect the parser" }).click();
   });
   expect(navigate).toHaveBeenCalledWith({
     to: "/code/w/$workspaceId",

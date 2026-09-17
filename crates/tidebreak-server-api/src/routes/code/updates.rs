@@ -97,7 +97,8 @@ async fn stream_updates(
                     ).await {
                         continue;
                     }
-                    if send_notice(&mut socket, &UpdateNotice::digest(*digest))
+                    let digest = crate::code::session_tree::authorize_digest(&runtime.db, &owner, *digest).await;
+                    if send_notice(&mut socket, &UpdateNotice::digest(digest))
                         .await
                         .is_err()
                     {
@@ -242,7 +243,9 @@ async fn authorized_snapshot_sessions(
         if super::session_events::reader_still_authorized(store, Some(principal), digest.session)
             .await
         {
-            authorized.push(SessionDigest::from(digest));
+            authorized.push(SessionDigest::from(
+                crate::code::session_tree::authorize_digest(store, principal, digest).await,
+            ));
         }
     }
     authorized

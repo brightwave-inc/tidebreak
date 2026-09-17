@@ -1,4 +1,5 @@
 import type { CodeSessionDigest, CodeSessionSnapshot } from "../api/types";
+import type { StatusTone } from "./statusTone";
 
 export const MAX_SESSION_TREE_DEPTH = 3;
 export const MAX_NESTED_SIDEBAR_CHILDREN = 8;
@@ -27,6 +28,22 @@ export function sessionTreeStatusLabel(child: SessionTreeChild): string {
       return "Failed";
     case "interrupted":
       return "Interrupted";
+  }
+}
+
+export function sessionTreeStatusTone(child: SessionTreeChild): StatusTone {
+  if (child.status === "failed") return "critical";
+  if (child.attention) return "warning";
+  switch (child.status) {
+    case "running":
+      return "running";
+    case "queued":
+      return "pending";
+    case "completed":
+      return "ready";
+    case "fenced":
+    case "interrupted":
+      return "warning";
   }
 }
 
@@ -74,44 +91,44 @@ export function nestSessionDigests(
   const byId = new Map(
     conversations.map((digest) => [digest.session, digest] as const),
   );
+  const candidates = new Map<string, CodeSessionDigest[]>();
+  const roots: CodeSessionDigest[] = [];
   const childrenOf = new Map<string, CodeSessionDigest[]>();
-  const nested = new Set<string>();
-  for (const digest of conversations) {
+  const visited = new Set<string>();
+  for (const digest of byId.values()) {
     const parent = digest.parent_session;
     if (!parent || !byId.has(parent) || parent === digest.session) continue;
-    const listed = childrenOf.get(parent) ?? [];
-    if (listed.length >= perParent) continue;
-    listed.push(digest);
-    childrenOf.set(parent, listed);
-    nested.add(digest.session);
+    const children = candidates.get(parent) ?? [];
+    children.push(digest);
+    candidates.set(parent, children);
   }
-  const roots = conversations.filter((digest) => !nested.has(digest.session));
-  pruneDepth(childrenOf, roots, depth);
-  return { roots, childrenOf };
-}
-
-function pruneDepth(
-  childrenOf: Map<string, CodeSessionDigest[]>,
-  roots: readonly CodeSessionDigest[],
-  depth: number,
-): void {
-  const keep = new Set<string>();
-  const walk = (id: string, remaining: number) => {
-    if (remaining <= 0) return;
-    keep.add(id);
-    for (const child of childrenOf.get(id) ?? []) {
-      walk(child.session, remaining - 1);
+  const visit = (digest: CodeSessionDigest, level: number) => {
+    visited.add(digest.session);
+    if (level >= depth) return;
+    const children: CodeSessionDigest[] = [];
+    for (const child of candidates.get(digest.session) ?? []) {
+      if (children.length >= perParent) break;
+      if (visited.has(child.session)) continue;
+      children.push(child);
+      visit(child, level + 1);
     }
+    if (children.length) childrenOf.set(digest.session, children);
   };
-  for (const root of roots) walk(root.session, depth);
-  for (const [parent, children] of [...childrenOf.entries()]) {
-    if (!keep.has(parent)) {
-      childrenOf.delete(parent);
-      continue;
+  const addRoot = (digest: CodeSessionDigest) => {
+    if (visited.has(digest.session)) return;
+    roots.push(digest);
+    visit(digest, 1);
+  };
+  for (const digest of byId.values()) {
+    if (
+      !digest.parent_session ||
+      !byId.has(digest.parent_session) ||
+      digest.parent_session === digest.session
+    ) {
+      addRoot(digest);
     }
-    childrenOf.set(
-      parent,
-      children.filter((child) => keep.has(child.session)),
-    );
   }
+  // Keep overflow and cyclic ancestry visible as additional roots.
+  for (const digest of byId.values()) addRoot(digest);
+  return { roots, childrenOf };
 }

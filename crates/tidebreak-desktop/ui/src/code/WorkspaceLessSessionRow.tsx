@@ -26,6 +26,7 @@ export function WorkspaceLessSessionRow({
   density = "detailed",
   nested = [],
   activeSessionId = null,
+  childrenByParent,
 }: {
   digest: CodeSessionDigest;
   active?: boolean;
@@ -33,6 +34,7 @@ export function WorkspaceLessSessionRow({
   onOpen: (sessionId: string) => void;
   nested?: CodeSessionDigest[];
   activeSessionId?: string | null;
+  childrenByParent?: ReadonlyMap<string, CodeSessionDigest[]>;
 }) {
   digest = recoveryDigest(digest);
   const origin = digest.external_origin;
@@ -135,6 +137,9 @@ export function WorkspaceLessSessionRow({
                 activeSessionId ? child.session === activeSessionId : false
               }
               density={density}
+              nested={childrenByParent?.get(child.session) ?? []}
+              childrenByParent={childrenByParent}
+              activeSessionId={activeSessionId}
             />
           </li>
         ))}

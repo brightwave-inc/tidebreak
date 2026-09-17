@@ -2370,7 +2370,9 @@ pub mod code_parent_wait {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub parent_session_id: Uuid,
+        pub generation: Uuid,
         pub child_ids: String,
+        pub expires_at: DateTimeUtc,
     }
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}

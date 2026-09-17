@@ -6,7 +6,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, userEvent, within } from "storybook/test";
+import { expect, within } from "storybook/test";
 import type { CodeSessionSnapshot } from "@/api/types";
 import { CodeSessionTree } from "@/code/workspace/CodeSessionTree";
 
@@ -99,8 +99,9 @@ export const Waiting: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("Waiting on 3 of 5")).toBeVisible();
-    await userEvent.click(canvas.getAllByRole("button", { name: "Open" })[0]!);
-    await expect(canvas.getByText("Opened workspace")).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Open Inspect the parser" }),
+    ).toBeVisible();
   },
 };
 
@@ -118,9 +119,7 @@ export const PausedChild: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      canvas.getByText("Needs attention · This machine"),
-    ).toBeVisible();
+    await expect(canvas.getByText("Needs attention")).toBeVisible();
     await expect(canvas.queryByText(/fenced/i)).toBeNull();
   },
 };

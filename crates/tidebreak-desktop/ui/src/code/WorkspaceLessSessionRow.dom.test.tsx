@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import type { CodeSessionDigest } from "../api/types";
 import { WorkspaceLessSessionRow } from "./WorkspaceLessSessionRow";
+import { nestSessionDigests } from "./sessionTree";
 
 afterEach(() => {
   cleanup();
@@ -53,4 +54,42 @@ it("absorbs a modifier click instead of opening mid-selection", () => {
   expect(onOpen).not.toHaveBeenCalled();
   fireEvent.click(row);
   expect(onOpen).toHaveBeenCalledWith("s-1");
+});
+
+it("renders and opens grandchildren once within bounded nesting", () => {
+  const rows = [
+    makeDigest({ session: "parent", title: "Parent" }),
+    makeDigest({ session: "child", parent_session: "parent", title: "Child" }),
+    makeDigest({
+      session: "grandchild",
+      parent_session: "child",
+      title: "Grandchild",
+    }),
+    makeDigest({
+      session: "overflow",
+      parent_session: "grandchild",
+      title: "Overflow",
+    }),
+  ];
+  const { roots, childrenOf } = nestSessionDigests(rows);
+  const onOpen = vi.fn();
+  render(
+    <>
+      {roots.map((digest) => (
+        <WorkspaceLessSessionRow
+          key={digest.session}
+          digest={digest}
+          nested={childrenOf.get(digest.session)}
+          childrenByParent={childrenOf}
+          activeSessionId="grandchild"
+          onOpen={onOpen}
+        />
+      ))}
+    </>,
+  );
+  expect(screen.getAllByRole("button")).toHaveLength(4);
+  const grandchild = screen.getByRole("button", { name: /^Grandchild,/ });
+  expect(grandchild.getAttribute("aria-current")).toBe("page");
+  fireEvent.click(grandchild);
+  expect(onOpen).toHaveBeenCalledExactlyOnceWith("grandchild");
 });

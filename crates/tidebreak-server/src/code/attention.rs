@@ -371,7 +371,8 @@ pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
         }
     };
     for reader in digest_readers(db, bus, session).await {
-        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(digest.clone())));
+        let visible = super::session_tree::authorize_digest(db, &reader, digest.clone()).await;
+        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(visible)));
     }
 }
 
@@ -454,7 +455,14 @@ pub async fn list_accessible_digests(
     let mut out = Vec::new();
     for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
         if session.lifecycle != SessionLifecycle::Ended {
-            out.push(build_digest(db, &session).await?);
+            out.push(
+                super::session_tree::authorize_digest(
+                    db,
+                    principal,
+                    build_digest(db, &session).await?,
+                )
+                .await,
+            );
         }
     }
     Ok(out)

@@ -137,6 +137,24 @@ function cloneClient(getCodeCloneJob: ApiClient["getCodeCloneJob"]): {
 }
 
 describe("reduceCodeUpdates", () => {
+  it.each([null, "ws-1"])(
+    "clears a finished wait when a full digest omits it (workspace %s)",
+    (workspace) => {
+      const seeded = reduceCodeUpdates(EMPTY_STATE, {
+        type: "snapshot",
+        sessions: [digest({ workspace, wait: { waiting: 1, total: 2 } })],
+      });
+      const updated = reduceCodeUpdates(seeded, {
+        type: "digest",
+        digest: digest({ workspace }),
+      });
+      const current = workspace
+        ? updated.conversationsByWorkspace[workspace]["sess-1"]
+        : updated.conversationsWithoutWorkspace["sess-1"];
+      expect(current.wait).toBeUndefined();
+    },
+  );
+
   it("replaces the map on snapshot and upserts a digest", () => {
     const afterSnapshot = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",

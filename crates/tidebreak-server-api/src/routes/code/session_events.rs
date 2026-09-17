@@ -235,6 +235,7 @@ pub(super) async fn stream_events(
                             event: crate::code::session_tree::authorize_event(
                                 &runtime.db,
                                 &owner,
+                                session,
                                 viewer.adapter_grant(),
                                 granted.as_ref(),
                                 event.event,
@@ -367,6 +368,7 @@ async fn replay_after(
                 event: crate::code::session_tree::authorize_event(
                     store,
                     owner,
+                    session,
                     grant_id,
                     principal,
                     event.event,

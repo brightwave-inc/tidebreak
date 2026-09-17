@@ -1,4 +1,4 @@
-//! Named children a parent is actually waiting on.
+//! Expiring leases for children an active parent tool call waits on.
 //!
 //! Counts on the session tree are never inferred from every running child.
 use sea_orm_migration::prelude::*;
@@ -25,7 +25,13 @@ impl MigrationTrait for ParentWait {
                             .not_null()
                             .primary_key(),
                     )
+                    .col(ColumnDef::new(Alias::new("generation")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("child_ids")).text().not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("expires_at"))
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_parent_wait_parent")

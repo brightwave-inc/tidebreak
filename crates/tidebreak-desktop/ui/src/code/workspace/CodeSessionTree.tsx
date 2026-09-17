@@ -7,6 +7,7 @@ import {
   sessionTreeChildLabel,
   sessionTreeLocationLabel,
   sessionTreeStatusLabel,
+  sessionTreeStatusTone,
   sessionTreeWaitLabel,
   type SessionTreeChild,
 } from "../sessionTree";
@@ -70,14 +71,26 @@ function SessionTreeRow({
   return (
     <li className="flex min-w-0 items-center gap-2 py-1">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm text-foreground">
+        <p
+          className="truncate text-sm text-foreground"
+          title={sessionTreeChildLabel(child)}
+        >
           {sessionTreeChildLabel(child)}
         </p>
         <p className="text-muted-foreground truncate text-xs">
-          {[status, location].filter(Boolean).join(" · ")}
+          <span className={STATUS_TEXT[sessionTreeStatusTone(child)]}>
+            {status}
+          </span>
+          {location && ` · ${location}`}
         </p>
       </div>
-      <Button type="button" size="sm" variant="ghost" onClick={onOpen}>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        onClick={onOpen}
+        aria-label={`Open ${sessionTreeChildLabel(child)}`}
+      >
         Open
       </Button>
     </li>

@@ -20,7 +20,9 @@ vi.mock("@/RouteFrame", () => ({
 }));
 vi.mock("./CodeSidebar", () => ({ CodeSidebar: () => null }));
 vi.mock("./SessionLifecycleIndicator", () => ({
-  SessionLifecycleIndicator: () => null,
+  SessionLifecycleIndicator: ({ lifecycle }: { lifecycle: string }) => (
+    <span data-testid="session-lifecycle">{lifecycle}</span>
+  ),
 }));
 vi.mock("./workspace/CodeSessionPane", () => ({
   CodeSessionPane: ({
@@ -178,4 +180,41 @@ it("updates workspace-less recovery from the digest without reloading its snapsh
     "data-disabled",
     "false",
   );
+});
+
+it("updates a shared workspace header when its child turn settles", () => {
+  const session = {
+    ...codeSession,
+    id: "shared-child",
+    workspace_id: "shared-workspace",
+    lifecycle: "running" as const,
+    access: "view" as const,
+    is_owner: false,
+  };
+  render(
+    <CodeSessionContent
+      session={session}
+      error={null}
+      client={mocks.client as never}
+      models={[]}
+      defaultModelKey={null}
+      onRetry={() => {}}
+    />,
+  );
+  expect(screen.getByTestId("session-lifecycle")).toHaveTextContent("running");
+  act(() =>
+    useCodeUpdatesStore.getState().apply({
+      type: "digest",
+      digest: {
+        workspace: session.workspace_id,
+        session: session.id,
+        kind: "interactive",
+        lifecycle: "idle",
+        attention: { state: { type: "idle" }, source: "lifecycle" },
+        title: "Shared child",
+        turn_count: 1,
+      },
+    }),
+  );
+  expect(screen.getByTestId("session-lifecycle")).toHaveTextContent("idle");
 });
