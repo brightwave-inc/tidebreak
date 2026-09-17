@@ -2462,6 +2462,137 @@ async fn deleting_a_parent_chat_keeps_independent_session_children() {
 }
 
 #[tokio::test]
+async fn deleting_a_parent_chat_preserves_child_blob_references() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let parent = super::sample_chat();
+    store.create_chat(&parent).await.unwrap();
+    let (child_id, first_turn_id) = seed_owner(&store, &owner, "child-blobs").await;
+    set_session_context(
+        &store,
+        &owner,
+        child_id,
+        None,
+        Some(parent.id),
+        Some("child"),
+    )
+    .await
+    .unwrap();
+
+    let parent_only = published_image();
+    let child_reservation = published_image();
+    let child_attachment = published_image();
+    let shared_reservation = published_image();
+    let shared_attachment = published_image();
+    for (session_id, images) in [
+        (
+            parent.id,
+            vec![parent_only, shared_reservation, shared_attachment],
+        ),
+        (child_id, vec![child_reservation, shared_reservation]),
+    ] {
+        for image in images {
+            assert!(store
+                .publish_code_session_image(&owner, session_id, &image, now())
+                .await
+                .unwrap());
+        }
+    }
+    let mut child_turn = get_turn(&store, &owner, first_turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    child_turn.id = TurnId::new();
+    child_turn.ordinal = 2;
+    child_turn.status = TurnStatus::Completed;
+    child_turn.ended_at = Some(now());
+    child_turn.attachments = vec![child_attachment, shared_attachment];
+    insert_turn(&store, &owner, &child_turn).await.unwrap();
+
+    assert!(matches!(
+        store.delete_chat(parent.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted { .. }
+    ));
+    assert_eq!(
+        get_turn(&store, &owner, child_turn.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attachments,
+        child_turn.attachments,
+        "the child keeps both private and shared turn attachments"
+    );
+    for image in [child_reservation, shared_reservation] {
+        assert_eq!(
+            store
+                .get_published_code_session_image(&owner, child_id, image.blob_id)
+                .await
+                .unwrap(),
+            Some(image),
+            "the child keeps both private and shared image reservations"
+        );
+    }
+    for image in [parent_only, shared_reservation, shared_attachment] {
+        assert!(store
+            .get_published_code_session_image(&owner, parent.id, image.blob_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_blob_retirement(image.blob_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BlobRetirementStatus::Queued,
+            "removing the parent's reservations queues its former blob references"
+        );
+    }
+    for image in [child_reservation, child_attachment] {
+        assert!(
+            store
+                .get_blob_retirement(image.blob_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "deleting the parent must not queue the child's private blobs"
+        );
+        assert!(!store
+            .ensure_orphan_blob_retirement(image.blob_id)
+            .await
+            .unwrap());
+    }
+
+    let claim_at = now() + chrono::Duration::seconds(1);
+    let mut claimed = Vec::new();
+    while let Some(retirement) = store
+        .claim_blob_retirement(claim_at, claim_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+    {
+        claimed.push(retirement.blob_id);
+    }
+    assert_eq!(
+        claimed,
+        vec![parent_only.blob_id],
+        "only the parent's unshared blob can be retired"
+    );
+    for image in [shared_reservation, shared_attachment] {
+        assert_eq!(
+            store
+                .get_blob_retirement(image.blob_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BlobRetirementStatus::Cancelled,
+            "the child's remaining reference cancels retirement of shared bytes"
+        );
+    }
+}
+
+#[tokio::test]
 async fn deleting_a_chat_removes_only_its_managed_decisions_and_native_receipts() {
     use sea_orm::{ActiveModelTrait, PaginatorTrait, Set};
 
