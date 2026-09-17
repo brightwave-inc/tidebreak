@@ -418,8 +418,8 @@ impl ScopedCode {
     }
 
     /// Workspace management is separate from execution and host access.
-    /// A live contributor to a Slack session owned by a service principal may
-    /// manage its workspace. Other shared sessions retain conversation access.
+    /// A live contributor may manage a Slack workspace whose live connection
+    /// proves service ownership. Other shared sessions retain conversation access.
     pub async fn can_manage_workspace(
         &self,
         workspace: &CodeWorkspace,
@@ -431,10 +431,7 @@ impl ScopedCode {
             tidebreak_core::db::code::list_accessible_sessions(&self.runtime.db, &self.owner)
                 .await?
         {
-            if session.workspace_id != Some(workspace.id)
-                || session.owner != workspace.owner
-                || session.owner_kind.as_deref() != Some("service")
-            {
+            if session.workspace_id != Some(workspace.id) || session.owner != workspace.owner {
                 continue;
             }
             let access = self.session_access(session.id).await?;
@@ -445,11 +442,24 @@ impl ScopedCode {
                 .runtime
                 .external_bindings_for_sessions(&session.owner, &[session.id])
                 .await?;
-            if bindings
+            for binding in bindings
                 .iter()
-                .any(|binding| binding.channel_kind == "slack")
+                .filter(|binding| binding.channel_kind == "slack")
             {
-                return Ok(true);
+                let grant = tidebreak_core::db::code::get_external_grant(
+                    &self.runtime.db,
+                    &session.owner,
+                    binding.grant_id,
+                )
+                .await?;
+                if grant.is_some_and(|grant| {
+                    grant.revoked_at.is_none()
+                        && grant.channel_kind == "slack"
+                        && (grant.kind.is_workspace()
+                            || session.owner_kind.as_deref() == Some("service"))
+                }) {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
