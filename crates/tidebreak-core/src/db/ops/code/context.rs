@@ -14,6 +14,11 @@ pub struct SessionContext {
     pub request_key: Option<String>,
 }
 
+/// Stable external binding key for a delegated child request.
+pub fn delegated_child_external_key(parent: SessionId, request_key: &str) -> String {
+    format!("child/{parent}/{request_key}")
+}
+
 /// Read provenance only after resolving the session for its owner.
 pub async fn session_context(
     store: &DbStore,

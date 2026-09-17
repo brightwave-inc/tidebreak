@@ -538,6 +538,408 @@ async fn grant_access(
     );
 }
 
+async fn owned_delegated_tree(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    runtime: &CodeRuntime,
+    repo: &std::path::Path,
+) -> (String, String, tidebreak_core::code::CodeGrantId) {
+    let (_, workspace) = register_and_workspace(client, addr, ALICE_TOKEN, repo).await;
+    let sessions = create_sibling_sessions(client, addr, ALICE_TOKEN, &workspace, 2).await;
+    let parent = sessions[0].parse().unwrap();
+    let child = sessions[1].parse().unwrap();
+    let owner = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let (grant, _) = runtime
+        .mint_adapter_grant(&owner, "slack", "U-alice", "T1")
+        .await
+        .unwrap();
+    tidebreak_core::db::code::set_session_context(
+        &runtime.db,
+        &owner,
+        child,
+        None,
+        Some(parent),
+        Some("review"),
+    )
+    .await
+    .unwrap();
+    for (session, key) in [
+        (parent, "T1/C1/123.45".to_owned()),
+        (child, format!("child/{parent}/review")),
+    ] {
+        tidebreak_core::db::code::bind_external_session(
+            &runtime.db,
+            &owner,
+            grant.id,
+            "slack",
+            &key,
+            session,
+        )
+        .await
+        .unwrap();
+    }
+    let stored = tidebreak_core::db::code::get_session(&runtime.db, &owner, child)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.visibility,
+        tidebreak_core::SessionVisibility::Private
+    );
+    assert!(
+        tidebreak_core::db::code::list_session_access(&runtime.db, &owner, child)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    (sessions[0].clone(), sessions[1].clone(), grant.id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_child_inherits_parent_view_and_contribute_without_ownership() {
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (parent, child, _) = owned_delegated_tree(&client, addr, &runtime, &repo).await;
+
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{child}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+    );
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &parent,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+    for path in [
+        format!("/sessions/{child}"),
+        format!("/sessions/{child}/turns"),
+        format!("/sessions/{child}/queued"),
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &path).await,
+            reqwest::StatusCode::OK,
+            "a parent viewer must read {path}",
+        );
+    }
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{child}/turns"),
+            serde_json::json!({ "message": "viewer cannot send" }),
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+    );
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &parent,
+        "principal:user:bob",
+        "contribute",
+    )
+    .await;
+    for (path, body) in [
+        (format!("/sessions/{child}/reap"), serde_json::json!({})),
+        (
+            format!("/sessions/{child}/turns"),
+            serde_json::json!({ "message": "change model", "model": "other-model" }),
+        ),
+        (
+            format!("/sessions/{child}/mode"),
+            serde_json::json!({ "permission_mode": "allow" }),
+        ),
+        (
+            format!("/sessions/{child}/access"),
+            serde_json::json!({ "subject": "principal:user:carol", "level": "view" }),
+        ),
+        (
+            format!("/sessions/{child}/visibility"),
+            serde_json::json!({ "visibility": "deployment" }),
+        ),
+    ] {
+        assert_eq!(
+            post_status(&client, addr, BOB_TOKEN, &path, body).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a parent contributor must not manage {path}",
+        );
+    }
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{child}/access")
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+    );
+    let submitted = client
+        .post(format!("http://{addr}/sessions/{child}/turns"))
+        .bearer_auth(BOB_TOKEN)
+        .json(&serde_json::json!({ "message": "review the child work" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = submitted.json().await.unwrap();
+    assert_eq!(turn["actor"]["principal"], "user:bob");
+
+    let stored: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{child}"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["visibility"], "private");
+    assert_ne!(stored["model"], "other-model");
+    let rows: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{child}/access"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        serde_json::json!([]),
+        "inheritance must not copy rows"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_parent_access_drops_the_bound_child_live_stream() {
+    use futures::StreamExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    for revocation in ["parent row", "binding grant", "row without notice"] {
+        let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let (parent, child, grant) = owned_delegated_tree(&client, addr, &runtime, &repo).await;
+        let owner = tidebreak_core::OwnerId::new("user:alice").unwrap();
+        let child_id = child.parse().unwrap();
+        grant_access(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            &parent,
+            "principal:user:bob",
+            "view",
+        )
+        .await;
+        let mut request = format!("ws://{addr}/sessions/{child}/events?after=0")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {BOB_TOKEN}").parse().unwrap(),
+        );
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        let marker = tidebreak_core::Event::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Info,
+            message: "child stream ready".into(),
+        };
+        let epoch = tidebreak_core::db::code::get_session(&runtime.db, &owner, child_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .spawn_epoch;
+        let seq =
+            tidebreak_core::db::code::append_event(&runtime.db, &owner, child_id, epoch, &marker)
+                .await
+                .unwrap();
+        runtime.bus.publish(
+            child_id,
+            tidebreak_core::code::SequencedEvent { seq, event: marker },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = next_json(&mut socket).await;
+                if frame["event"]["message"] == "child stream ready" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the child stream must deliver a frame before revocation");
+
+        match revocation {
+            "parent row" => {
+                let revoked = client
+                    .delete(format!(
+                        "http://{addr}/sessions/{parent}/access/principal:user:bob"
+                    ))
+                    .bearer_auth(ALICE_TOKEN)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(revoked.status(), reqwest::StatusCode::NO_CONTENT);
+            }
+            "binding grant" => {
+                runtime
+                    .revoke_adapter_grant(&owner, grant, "the workspace was unlinked")
+                    .await
+                    .unwrap();
+            }
+            "row without notice" => {
+                // A delayed access notice must not let another live frame through.
+                assert!(tidebreak_core::db::code::revoke_session_access(
+                    &runtime.db,
+                    &owner,
+                    parent.parse().unwrap(),
+                    "principal:user:bob",
+                )
+                .await
+                .unwrap());
+                runtime.bus.publish_transient(
+                    child_id,
+                    tidebreak_core::Event::AssistantDelta {
+                        text: "private text after revoke".into(),
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(frame) = socket.next().await {
+                match frame {
+                    Ok(WsMessage::Close(_)) | Err(_) => return,
+                    Ok(WsMessage::Text(text)) => assert!(
+                        !text.contains("private text after revoke"),
+                        "{revocation} must prevent transient text from reaching the reader",
+                    ),
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{revocation} must close the child's open event stream"));
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{child}")).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "{revocation} must remove inherited access",
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_child_streams_public_digests_until_parent_visibility_is_private() {
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (parent, child, _) = owned_delegated_tree(&client, addr, &runtime, &repo).await;
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            &format!("/sessions/{parent}/visibility"),
+            serde_json::json!({ "visibility": "deployment" }),
+        )
+        .await,
+        reqwest::StatusCode::OK,
+    );
+    let snapshot: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{parent}"))
+        .bearer_auth(CAROL_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        snapshot["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == child),
+        "public parent snapshots include the delegated child"
+    );
+    let mut request = format!("ws://{addr}/updates")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {CAROL_TOKEN}").parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), next_json(&mut socket))
+        .await
+        .expect("the inherited reader must receive the initial snapshot");
+    assert_eq!(first["type"], "snapshot");
+    assert!(first["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|digest| digest["session"] == child));
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            &format!("/sessions/{child}/turns"),
+            serde_json::json!({ "message": "publish a child update" }),
+        )
+        .await,
+        reqwest::StatusCode::ACCEPTED,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notice = next_json(&mut socket).await;
+            if notice["type"] == "digest" && notice["session"] == child && notice["turn_count"] == 1
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the inherited public reader must receive the child's live digest");
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            &format!("/sessions/{parent}/visibility"),
+            serde_json::json!({ "visibility": "private" }),
+        )
+        .await,
+        reqwest::StatusCode::OK,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notice = next_json(&mut socket).await;
+            if notice["type"] == "snapshot" {
+                let sessions = notice["sessions"].as_array().unwrap();
+                assert!(sessions.iter().all(|digest| digest["session"] != child));
+                assert!(sessions.iter().all(|digest| digest["session"] != parent));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("narrowing the parent visibility must remove the child from the live snapshot");
+}
+
 /// The drill from decision 0086 on the self-host profile, where a machine has
 /// many principals: a viewer reads and never writes, a contributor writes but
 /// holds no lifecycle authority, and revoking the row puts the session back

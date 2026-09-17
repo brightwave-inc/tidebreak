@@ -1031,6 +1031,8 @@ pub async fn external_session_access(
         return Err(ServerError::not_found("code session not found"));
     }
     let runtime = require_bound(&state, &grant, id).await?;
+    let before = runtime.get_session(&grant.owner, id).await?;
+    let readers = tidebreak_core::db::code::session_readers_all_owners(&runtime.db, id).await?;
     let identities: Vec<String> = body
         .contributors
         .into_iter()
@@ -1047,6 +1049,12 @@ pub async fn external_session_access(
     )
     .await?
     .ok_or_else(|| ServerError::not_found("code session not found"))?;
+    let session = runtime.get_session(&grant.owner, id).await?;
+    // Notify prior readers too, including readers admitted by public visibility.
+    // Their delegated children lose the same inherited access.
+    crate::code::attention::emit_access_changed(&runtime.db, &runtime.bus, &before, &readers).await;
+    crate::code::attention::emit_access_changed(&runtime.db, &runtime.bus, &session, &[]).await;
+    crate::code::attention::emit_digest(&runtime.db, &runtime.bus, &session).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

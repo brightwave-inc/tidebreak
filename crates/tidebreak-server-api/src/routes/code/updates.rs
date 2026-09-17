@@ -4,7 +4,7 @@
 //! [`ScopedCode`] resolves the requesting principal before the upgrade, and
 //! the receiver this socket holds is subscribed to that principal alone. A
 //! digest addressed to someone else is not dropped on the way out — it never
-//! arrives, and no code in this file could publish it if it did. Decision 47
+//! arrives. Queued session notices are revalidated after access changes. Decision 47
 //! names the alternative, filtering an install-wide stream at the route or in
 //! the client, as the wrong implementation.
 //!
@@ -61,6 +61,7 @@ async fn stream_updates(
         return;
     };
     let mut live = runtime.bus.subscribe_updates(&owner);
+    let mut grant_notices = runtime.grant_revocations().subscribe();
     let mut terminals = state.terminals.subscribe(&owner);
     if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
         return;
@@ -81,8 +82,21 @@ async fn stream_updates(
                     break;
                 }
             },
+            notice = grant_notices.recv() => {
+                if matches!(notice, Err(RecvError::Closed)) {
+                    break;
+                }
+                if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                    break;
+                }
+            },
             update = live.recv() => match update {
                 Ok(CodeLiveUpdate::Digest(digest)) => {
+                    if !super::session_events::reader_still_authorized(
+                        &runtime.db, Some(&owner), digest.session,
+                    ).await {
+                        continue;
+                    }
                     if send_notice(&mut socket, &UpdateNotice::digest(*digest))
                         .await
                         .is_err()
@@ -115,6 +129,11 @@ async fn stream_updates(
                     }
                 }
                 Ok(CodeLiveUpdate::TurnRewrite(notice)) => {
+                    if !super::session_events::reader_still_authorized(
+                        &runtime.db, Some(&owner), notice.session,
+                    ).await {
+                        continue;
+                    }
                     if send_notice(&mut socket, &UpdateNotice::turn_rewrite(notice))
                         .await
                         .is_err()
@@ -202,7 +221,7 @@ async fn send_snapshot(
         .await
         .map_err(|_| ())?;
     let notice = UpdateNotice::Snapshot {
-        sessions: sessions.into_iter().map(SessionDigest::from).collect(),
+        sessions: authorized_snapshot_sessions(&runtime.db, owner, sessions).await,
     };
     send_notice(socket, &notice).await.map_err(|_| ())
 }
@@ -210,4 +229,137 @@ async fn send_snapshot(
 async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<(), axum::Error> {
     let json = serde_json::to_string(notice).map_err(axum::Error::new)?;
     socket.send(Message::Text(json.into())).await
+}
+
+/// Drop access lost while the snapshot's digest queries were running.
+async fn authorized_snapshot_sessions(
+    store: &tidebreak_core::DbStore,
+    principal: &OwnerId,
+    sessions: Vec<crate::code::bus::SessionDigest>,
+) -> Vec<SessionDigest> {
+    let mut authorized = Vec::with_capacity(sessions.len());
+    for digest in sessions {
+        if super::session_events::reader_still_authorized(store, Some(principal), digest.session)
+            .await
+        {
+            authorized.push(SessionDigest::from(digest));
+        }
+    }
+    authorized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::db::code::{
+        bind_external_session, delegated_child_external_key, grant_session_access, insert_session,
+        mint_external_grant, revoke_session_access, set_session_context, MintGrantSubject,
+    };
+    use tidebreak_core::{
+        Attention, AttentionSource, CodeGrantKind, DbStore, ExecutionLocation, HarnessKind,
+        PermissionMode, Session, SessionAccessLevel, SessionId, SessionKind, SessionLifecycle,
+        SessionVisibility,
+    };
+
+    fn session(owner: &OwnerId) -> Session {
+        Session {
+            visibility: SessionVisibility::Private,
+            id: SessionId::new(),
+            owner: owner.clone(),
+            owner_kind: None,
+            workspace_id: None,
+            kind: SessionKind::Interactive,
+            harness_kind: HarnessKind::Internal,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: PermissionMode::Plan,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: SessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: chrono::Utc::now(),
+            execution_location: ExecutionLocation::Machine,
+            acts_as: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_drops_child_access_revoked_after_digest_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("snapshot-access.db").display()
+        ))
+        .await
+        .unwrap();
+        let owner = OwnerId::new("user:alice").unwrap();
+        let reader = OwnerId::new("user:bob").unwrap();
+        let parent = session(&owner);
+        let child = session(&owner);
+        let own = session(&reader);
+        for session in [&parent, &child, &own] {
+            insert_session(&db, session).await.unwrap();
+        }
+        let grant = mint_external_grant(
+            &db,
+            &owner,
+            MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "U-alice",
+                workspace_identity: "W",
+                kind: CodeGrantKind::Person,
+            },
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .await
+        .unwrap();
+        set_session_context(&db, &owner, child.id, None, Some(parent.id), Some("review"))
+            .await
+            .unwrap();
+        for (session, key) in [
+            (parent.id, "W/C/1".to_owned()),
+            (child.id, delegated_child_external_key(parent.id, "review")),
+        ] {
+            bind_external_session(&db, &owner, grant.id, "slack", &key, session)
+                .await
+                .unwrap();
+        }
+        grant_session_access(
+            &db,
+            &owner,
+            parent.id,
+            "principal:user:bob",
+            SessionAccessLevel::View,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let built = list_accessible_digests(&db, &reader).await.unwrap();
+        assert_eq!(built.len(), 3);
+        assert!(built.iter().any(|digest| digest.session == child.id));
+        assert_eq!(
+            authorized_snapshot_sessions(&db, &reader, built.clone())
+                .await
+                .len(),
+            3
+        );
+
+        assert!(
+            revoke_session_access(&db, &owner, parent.id, "principal:user:bob")
+                .await
+                .unwrap()
+        );
+        let authorized = authorized_snapshot_sessions(&db, &reader, built).await;
+        assert_eq!(authorized.len(), 1);
+        assert_eq!(authorized[0].session, own.id);
+    }
 }

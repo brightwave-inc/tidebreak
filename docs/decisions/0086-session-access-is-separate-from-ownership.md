@@ -96,14 +96,22 @@ identifiers, personal email addresses, delegation identifiers, or credentials.
 ## Amendment: bound direct children inherit live parent access
 
 Accepted September 17, 2026. A child created under an external conversation
-(`code_session_create`) stays `private` and holds no `session_access` rows.
-Hosted browser reads still resolve it when all of these hold: the child and
-parent share an owner, the child names that parent in
-`code_session_context`, and both sessions name the same live external grant
-with no mixed bindings. The caller's level is the parent's current access
-row (view or contribute), not `deployment` visibility and not a copied
-grant. Revoking the parent row or fencing the grant drops the child
-immediately. Ownership and lifecycle authority stay on the child's owner.
+(`code_session_create`) stays `private` and receives no copied `session_access`
+rows. The child inherits its direct parent's live access when both sessions
+share an owner and a live external grant. Its stored parent and request key
+must produce its exact synthetic `child/<parent>/<key>` binding. Each session
+must have one binding, and the bindings must use the same channel kind.
+Stored channel identifiers must agree when both are present. An older child
+without a channel identifier can inherit through its synthetic binding.
+An unrelated direct binding, including one under the same grant, cannot inherit.
+
+The caller receives the strongest direct or inherited level. Parent access
+rows supply view or contribute; parent `deployment` visibility supplies view.
+A parent downgrade, access-row revocation, or grant revocation removes only
+the access that depended on it. Lists, session trees, and live digests use the
+same resolution. Event sockets revalidate parent access changes, grant
+revocations, replay frames, and queued live frames. Ownership and lifecycle
+authority stay with the child's owner.
 
 ## Alternatives Considered
 

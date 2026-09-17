@@ -446,7 +446,8 @@ impl SessionTool {
             acts_as: Some(auth.parent.acts_as()),
         };
         let child = if let Some(grant) = &auth.grant {
-            let external_key = format!("child/{}/{}", auth.parent.id, key);
+            let external_key =
+                tidebreak_core::db::code::delegated_child_external_key(auth.parent.id, key);
             // A previous attempt may have committed the binding before its
             // context row (a crash between the two writes). Resolve the
             // binding first so a retry repairs the context instead of
@@ -642,7 +643,10 @@ async fn send(
                 child.id,
                 ExternalMessage {
                     text: message.into(),
-                    event_id: format!("child/{}/{}", auth.parent.id, key),
+                    event_id: tidebreak_core::db::code::delegated_child_external_key(
+                        auth.parent.id,
+                        key,
+                    ),
                     channel_ts: chrono::Utc::now().timestamp_micros().to_string(),
                     actor,
                     context: None,
@@ -657,7 +661,7 @@ async fn send(
             &runtime.db,
             &auth.parent.owner,
             child.id,
-            &format!("child/{}/{}", auth.parent.id, key),
+            &tidebreak_core::db::code::delegated_child_external_key(auth.parent.id, key),
             &chrono::Utc::now().timestamp_micros().to_string(),
             message,
             &actor,

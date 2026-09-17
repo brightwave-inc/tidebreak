@@ -118,6 +118,7 @@ pub(super) async fn stream_events(
     let mut access_notices = granted
         .as_ref()
         .map(|principal| runtime.bus.subscribe_updates(principal));
+    let mut grant_notices = runtime.grant_revocations().subscribe();
     let (mut live, tail) = runtime.bus.attach(session);
     // Only the desktop's own socket means the owner is looking at the
     // session. The adapter's follower is a renderer, not a viewer: its
@@ -140,6 +141,10 @@ pub(super) async fn stream_events(
     {
         return;
     }
+    if !reader_still_authorized(&runtime.db, granted.as_ref(), session).await {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
     if send_live_tail(&mut socket, &tail, last_seq).await.is_err() {
         return;
     }
@@ -149,20 +154,17 @@ pub(super) async fn stream_events(
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
             },
-            _ = next_access_change(access_notices.as_mut(), session) => {
-                let principal = granted
-                    .as_ref()
-                    .expect("only a granted reader subscribes to access notices");
-                let still_current = tidebreak_core::db::code::resolve_session_access(
-                    &runtime.db,
-                    principal,
-                    session,
-                )
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-                if !still_current {
+            _ = next_access_change(access_notices.as_mut()) => {
+                if !reader_still_authorized(&runtime.db, granted.as_ref(), session).await {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            },
+            notice = grant_notices.recv(), if granted.is_some() => {
+                if matches!(notice, Err(RecvError::Closed)) {
+                    break;
+                }
+                if !reader_still_authorized(&runtime.db, granted.as_ref(), session).await {
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
@@ -179,6 +181,11 @@ pub(super) async fn stream_events(
             },
             live_event = live.recv() => match live_event {
                 Ok(event) => {
+                    // Revocation may race with an already queued frame or notice.
+                    if !reader_still_authorized(&runtime.db, granted.as_ref(), session).await {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
                     // A live-only event carries no journal position. Stamp it
                     // with this socket's cursor so a client that resumes from
                     // the last `seq` it saw asks for the right place. Drop it
@@ -259,22 +266,19 @@ pub(super) async fn stream_events(
     }
 }
 
-/// Wait until this session's access list moves under the reader's feet.
+/// Recheck after any access change because a child may inherit from its parent.
 ///
 /// Pends forever when there is no channel, which is the owner's and the
 /// adapter's case: neither holds a row that could be revoked. A dropped
 /// notice resolves too, because holding a stream open on a claim this socket
 /// can no longer vouch for is not something a full channel may cause.
-async fn next_access_change(
-    notices: Option<&mut broadcast::Receiver<CodeLiveUpdate>>,
-    session: SessionId,
-) {
+async fn next_access_change(notices: Option<&mut broadcast::Receiver<CodeLiveUpdate>>) {
     let Some(notices) = notices else {
         return std::future::pending().await;
     };
     loop {
         match notices.recv().await {
-            Ok(CodeLiveUpdate::AccessChanged(id)) if id == session => return,
+            Ok(CodeLiveUpdate::AccessChanged(_)) => return,
             Ok(_) => continue,
             Err(RecvError::Lagged(_)) => return,
             // The bus outlives the process, so a closed channel is not a
@@ -282,6 +286,22 @@ async fn next_access_change(
             Err(RecvError::Closed) => return std::future::pending().await,
         }
     }
+}
+
+/// Revalidate the reader before sending each replay or live frame.
+pub(super) async fn reader_still_authorized(
+    store: &tidebreak_core::DbStore,
+    principal: Option<&OwnerId>,
+    session: SessionId,
+) -> bool {
+    let Some(principal) = principal else {
+        return true;
+    };
+    tidebreak_core::db::code::resolve_session_access(store, principal, session)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// Hand a fresh reader the assistant text that has streamed but is not yet
@@ -326,11 +346,19 @@ async fn replay_after(
     grant_id: Option<CodeGrantId>,
     principal: Option<&OwnerId>,
 ) -> Result<(), ()> {
+    if !reader_still_authorized(store, principal, session).await {
+        let _ = socket.send(Message::Close(None)).await;
+        return Err(());
+    }
     let page = list_events(store, owner, session, *last_seq, MAX_REPLAY_EVENTS)
         .await
         .map_err(|_| ())?;
     let mut truncated = page.truncated;
     for event in page.events {
+        if !reader_still_authorized(store, principal, session).await {
+            let _ = socket.send(Message::Close(None)).await;
+            return Err(());
+        }
         *last_seq = event.seq;
         send_frame(
             socket,
