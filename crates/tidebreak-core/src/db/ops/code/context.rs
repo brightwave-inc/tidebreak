@@ -127,20 +127,38 @@ pub async fn parent_wait_ids(
     owner: &OwnerId,
     parent: SessionId,
 ) -> Result<Option<Vec<SessionId>>> {
-    if super::get_session(store, owner, parent).await?.is_none() {
-        return Err(AgentError::InvalidTarget("parent session not found".into()));
-    }
-    let Some(row) = entities::code_parent_wait::Entity::find_by_id(parent.0)
-        .filter(entities::code_parent_wait::Column::ExpiresAt.gt(chrono::Utc::now()))
-        .one(&store.conn)
-        .await
-        .map_err(store_err)?
-    else {
+    let Some(row) = active_parent_wait(store, owner, parent).await? else {
         return Ok(None);
     };
     let ids: Vec<uuid::Uuid> = serde_json::from_str(&row.child_ids)
         .map_err(|error| AgentError::Store(error.to_string()))?;
     Ok(Some(ids.into_iter().map(SessionId).collect()))
+}
+
+/// Deadline for a connected reader's wait refresh. No active lease means no timer.
+pub async fn parent_wait_deadline(
+    store: &DbStore,
+    owner: &OwnerId,
+    parent: SessionId,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    Ok(active_parent_wait(store, owner, parent)
+        .await?
+        .map(|row| row.expires_at))
+}
+
+async fn active_parent_wait(
+    store: &DbStore,
+    owner: &OwnerId,
+    parent: SessionId,
+) -> Result<Option<entities::code_parent_wait::Model>> {
+    if super::get_session(store, owner, parent).await?.is_none() {
+        return Err(AgentError::InvalidTarget("parent session not found".into()));
+    }
+    entities::code_parent_wait::Entity::find_by_id(parent.0)
+        .filter(entities::code_parent_wait::Column::ExpiresAt.gt(chrono::Utc::now()))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)
 }
 
 /// Replace the active wait under the parent's write lock.

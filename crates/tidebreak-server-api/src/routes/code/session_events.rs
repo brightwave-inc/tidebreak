@@ -17,6 +17,7 @@ use axum::response::Response;
 use axum::Extension;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::time::Instant;
 
 use tidebreak_core::db::code::{list_events, MAX_REPLAY_EVENTS};
 use tidebreak_core::{CodeGrantId, Event, OwnerId, SessionId};
@@ -106,18 +107,16 @@ pub(super) async fn stream_events(
     let Some(runtime) = state.code.clone() else {
         return;
     };
-    // A granted reader's claim can be withdrawn while they are watching. The
-    // revoking route publishes on their updates channel, so this socket learns
-    // of it on the same breath rather than by polling the row (decision 0086).
-    // The owner's claim never is, and an adapter's rides on its grant, so
-    // neither subscribes.
+    // Use the reader's channel for access changes. Owner and adapter sockets
+    // also need parent digests: replacing a wait can move its deadline without
+    // changing the tree payload that the journal deduplicates.
     let granted = match &viewer {
         Viewer::Granted(principal) => Some(principal.clone()),
         Viewer::Owner | Viewer::Adapter { .. } => None,
     };
-    let mut access_notices = granted
-        .as_ref()
-        .map(|principal| runtime.bus.subscribe_updates(principal));
+    let mut tree_notices = runtime
+        .bus
+        .subscribe_updates(granted.as_ref().unwrap_or(&owner));
     let mut grant_notices = runtime.grant_revocations().subscribe();
     let (mut live, tail) = runtime.bus.attach(session);
     // Only the desktop's own socket means the owner is looking at the
@@ -148,17 +147,40 @@ pub(super) async fn stream_events(
     if send_live_tail(&mut socket, &tail, last_seq).await.is_err() {
         return;
     }
+    // A resumed cursor can be at the journal tail while its cached tree is
+    // stale. Restate current state even when replay has no rows to send.
+    let Ok(mut tree_deadline) = send_current_tree(
+        &mut socket,
+        &runtime.db,
+        &owner,
+        session,
+        last_seq,
+        viewer.adapter_grant(),
+        granted.as_ref(),
+    )
+    .await
+    else {
+        return;
+    };
     loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
             },
-            _ = next_access_change(access_notices.as_mut()) => {
-                if !reader_still_authorized(&runtime.db, granted.as_ref(), session).await {
-                    let _ = socket.send(Message::Close(None)).await;
-                    break;
-                }
+            _ = next_tree_change(&mut tree_notices, session, tree_deadline.is_some()) => {
+                let Ok(deadline) = send_current_tree(
+                    &mut socket, &runtime.db, &owner, session, last_seq,
+                    viewer.adapter_grant(), granted.as_ref(),
+                ).await else { break; };
+                tree_deadline = deadline;
+            },
+            () = wait_for_tree_deadline(tree_deadline) => {
+                let Ok(deadline) = send_current_tree(
+                    &mut socket, &runtime.db, &owner, session, last_seq,
+                    viewer.adapter_grant(), granted.as_ref(),
+                ).await else { break; };
+                tree_deadline = deadline;
             },
             notice = grant_notices.recv(), if granted.is_some() => {
                 if matches!(notice, Err(RecvError::Closed)) {
@@ -225,22 +247,25 @@ pub(super) async fn stream_events(
                         {
                             break;
                         }
+                        let Ok(deadline) = send_current_tree(
+                            &mut socket, &runtime.db, &owner, session, last_seq,
+                            viewer.adapter_grant(), granted.as_ref(),
+                        ).await else { break; };
+                        tree_deadline = deadline;
                         continue;
                     }
                     last_seq = seq;
+                    let event = crate::code::session_tree::authorize_event(
+                        &runtime.db, &owner, session, viewer.adapter_grant(), granted.as_ref(), event.event,
+                    ).await;
+                    if matches!(&event, Event::SessionTree { .. }) {
+                        tree_deadline = current_tree_deadline(&runtime.db, &owner, session, &event).await;
+                    }
                     if send_frame(
                         &mut socket,
                         &SequencedEventFrame {
                             seq,
-                            event: crate::code::session_tree::authorize_event(
-                                &runtime.db,
-                                &owner,
-                                session,
-                                viewer.adapter_grant(),
-                                granted.as_ref(),
-                                event.event,
-                            )
-                            .await,
+                            event,
                             replayed: None,
                             transient: None,
                             replacement: None,
@@ -260,6 +285,11 @@ pub(super) async fn stream_events(
                     {
                         break;
                     }
+                    let Ok(deadline) = send_current_tree(
+                        &mut socket, &runtime.db, &owner, session, last_seq,
+                        viewer.adapter_grant(), granted.as_ref(),
+                    ).await else { break; };
+                    tree_deadline = deadline;
                 }
                 Err(RecvError::Closed) => break,
             },
@@ -267,23 +297,104 @@ pub(super) async fn stream_events(
     }
 }
 
-/// Recheck after any access change because a child may inherit from its parent.
-///
-/// Pends forever when there is no channel, which is the owner's and the
-/// adapter's case: neither holds a row that could be revoked. A dropped
-/// notice resolves too, because holding a stream open on a claim this socket
-/// can no longer vouch for is not something a full channel may cause.
-async fn next_access_change(notices: Option<&mut broadcast::Receiver<CodeLiveUpdate>>) {
-    let Some(notices) = notices else {
-        return std::future::pending().await;
+/// Send a current tree without changing the durable replay cursor.
+async fn send_current_tree(
+    socket: &mut WebSocket,
+    store: &tidebreak_core::DbStore,
+    owner: &OwnerId,
+    session: SessionId,
+    last_seq: i64,
+    grant_id: Option<CodeGrantId>,
+    principal: Option<&OwnerId>,
+) -> Result<Option<Instant>, ()> {
+    if !reader_still_authorized(store, principal, session).await {
+        let _ = socket.send(Message::Close(None)).await;
+        return Err(());
+    }
+    let event = crate::code::session_tree::authorize_event(
+        store,
+        owner,
+        session,
+        grant_id,
+        principal,
+        Event::SessionTree {
+            children: Vec::new(),
+            wait: None,
+        },
+    )
+    .await;
+    let deadline = current_tree_deadline(store, owner, session, &event).await;
+    send_frame(
+        socket,
+        &SequencedEventFrame {
+            seq: last_seq,
+            event,
+            replayed: None,
+            transient: Some(true),
+            replacement: None,
+            truncated: None,
+        },
+    )
+    .await
+    .map_err(|_| ())?;
+    Ok(deadline)
+}
+
+/// Arm only a visible wait. A replacement lease can move this deadline;
+/// an expired lease that races the read gets an immediate refresh.
+async fn current_tree_deadline(
+    store: &tidebreak_core::DbStore,
+    owner: &OwnerId,
+    session: SessionId,
+    event: &Event,
+) -> Option<Instant> {
+    if !matches!(event, Event::SessionTree { wait: Some(_), .. }) {
+        return None;
+    }
+    Some(wait_refresh_deadline(store, owner, session).await)
+}
+
+pub(super) async fn wait_refresh_deadline(
+    store: &tidebreak_core::DbStore,
+    owner: &OwnerId,
+    session: SessionId,
+) -> Instant {
+    let delay = match tidebreak_core::db::code::parent_wait_deadline(store, owner, session).await {
+        Ok(deadline) => deadline
+            .map(|deadline| (deadline - chrono::Utc::now()).to_std().unwrap_or_default())
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(session = %session, %error, "could not read the parent wait deadline");
+            std::time::Duration::from_secs(1)
+        }
     };
+    Instant::now() + delay
+}
+
+pub(super) async fn wait_for_tree_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Recheck child access and waits whose payload stays the same across leases.
+async fn next_tree_change(
+    notices: &mut broadcast::Receiver<CodeLiveUpdate>,
+    session: SessionId,
+    active_wait: bool,
+) {
     loop {
         match notices.recv().await {
             Ok(CodeLiveUpdate::AccessChanged(_)) => return,
+            Ok(CodeLiveUpdate::Digest(digest))
+                if digest.session == session && (active_wait || digest.wait.is_some()) =>
+            {
+                return;
+            }
             Ok(_) => continue,
             Err(RecvError::Lagged(_)) => return,
-            // The bus outlives the process, so a closed channel is not a
-            // revocation. Stop listening rather than close a live stream.
+            // The bus outlives the process; closure is not a revocation.
             Err(RecvError::Closed) => return std::future::pending().await,
         }
     }

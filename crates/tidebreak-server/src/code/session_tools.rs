@@ -1060,7 +1060,7 @@ mod tests {
         let result = wait_for_children(
             &runtime,
             &parent,
-            &[child.clone()],
+            std::slice::from_ref(&child),
             Duration::from_millis(50),
         )
         .await
@@ -1171,7 +1171,7 @@ mod tests {
         let mut replacement = ActiveParentWait::begin(
             &runtime,
             &parent,
-            &[second.clone()],
+            std::slice::from_ref(&second),
             Duration::from_secs(10),
         )
         .await
