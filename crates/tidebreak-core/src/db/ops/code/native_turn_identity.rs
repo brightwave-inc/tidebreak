@@ -271,6 +271,51 @@ pub async fn native_turn_for_host(
     Ok(result)
 }
 
+/// A delivered remote input waits for its own native start before it can stall.
+/// The receipt scopes the turn to this incarnation. Legacy supervisors prove
+/// their start through the durable journal instead of native input identities.
+pub async fn remote_turn_awaiting_start(
+    store: &DbStore,
+    owner: &OwnerId,
+    session: SessionId,
+    incarnation: CodeIncarnationId,
+    turn: TurnId,
+) -> Result<bool> {
+    let runtime = native_turn_identity_runtime(store, owner, session, incarnation).await?;
+    let receipt = input::Entity::find_by_id(turn.0)
+        .filter(input::Column::IncarnationId.eq(incarnation.0))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if receipt.is_none() {
+        return Ok(false);
+    }
+    if let Some(runtime) = runtime {
+        // The start projection also supplies the journal timestamp that the
+        // silence clock reads, so wait for that transaction to commit.
+        return Ok(observation::Entity::find()
+            .filter(observation::Column::IncarnationId.eq(incarnation.0))
+            .filter(observation::Column::RuntimeId.eq(runtime))
+            .filter(observation::Column::TurnId.eq(turn.0))
+            .one(&store.conn)
+            .await
+            .map_err(store_err)?
+            .is_none_or(|row| !row.start_journaled));
+    }
+    // Do not inspect a bounded journal tail: a long running turn can push its
+    // start beyond that window and must still be eligible for stall detection.
+    Ok(entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session.0))
+        .filter(entities::event::Column::Event.eq(serde_json::to_value(
+            crate::Event::TurnStarted { turn_id: turn },
+        )?))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .is_none())
+}
+
 /// A host receipt may still be in flight while the supervisor requests a decision.
 pub const NATIVE_TURN_INPUT_PENDING: &str = "native turn is waiting for its hosted input receipt";
 
