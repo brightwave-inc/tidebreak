@@ -26,6 +26,7 @@ import { WorkspaceRailToolbar } from "@/code/WorkspaceRailToolbar";
 import { railEntries, railRepositories } from "./fixtures";
 
 export type RailScenario =
+  | "shared-repo"
   | "scratch"
   | "scratch-status"
   | "repository"
@@ -69,35 +70,45 @@ export function WorkspaceRailDraft({
   const [selected, setSelected] = useState("workspace-grouping");
   const [recovered, setRecovered] = useState(false);
   const state = recovered ? "repository" : scenario;
-  const repos = railRepositories.map((repo, index) =>
-    scenario === "long-names" && index === 1
-      ? { ...repo, display_name: "platform-infrastructure-and-model-gateway" }
-      : repo,
+  const repos = (scenario === "shared-repo" ? [] : railRepositories).map(
+    (repo, index) =>
+      scenario === "long-names" && index === 1
+        ? { ...repo, display_name: "platform-infrastructure-and-model-gateway" }
+        : repo,
   );
   const entries =
     state === "empty"
       ? []
       : railEntries
-          .filter(
-            (entry) =>
-              sourceChoice === "mixed" || entry.session.external_origin,
+          .filter((entry) =>
+            scenario === "shared-repo"
+              ? Boolean(entry.session.external_origin)
+              : sourceChoice === "mixed" || entry.session.external_origin,
           )
           .map((entry) =>
-            scenario === "long-names"
+            scenario === "shared-repo"
               ? {
                   ...entry,
                   workspace: {
                     ...entry.workspace,
-                    title: `${entry.workspace.title} across every connected machine and repository`,
+                    repo_display_name: `brightwave-inc/${railRepositories.find((repo) => repo.id === entry.workspace.repo_id)?.display_name}`,
                   },
-                  digest: entry.digest
-                    ? {
-                        ...entry.digest,
-                        title: `${entry.workspace.title} across every connected machine and repository`,
-                      }
-                    : undefined,
                 }
-              : entry,
+              : scenario === "long-names"
+                ? {
+                    ...entry,
+                    workspace: {
+                      ...entry.workspace,
+                      title: `${entry.workspace.title} across every connected machine and repository`,
+                    },
+                    digest: entry.digest
+                      ? {
+                          ...entry.digest,
+                          title: `${entry.workspace.title} across every connected machine and repository`,
+                        }
+                      : undefined,
+                  }
+                : entry,
           );
   const sections = arrangeWorkspaceSections(
     mode,
@@ -261,7 +272,9 @@ export function WorkspaceRailDraft({
                     session={entry.session}
                     repoName={
                       repos.find((repo) => repo.id === workspace.repo_id)
-                        ?.display_name ?? workspace.repo_id
+                        ?.display_name ??
+                      workspace.repo_display_name ??
+                      "Repository"
                     }
                     active={selected === workspace.id}
                     terminalOpen={false}

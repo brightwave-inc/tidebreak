@@ -136,6 +136,29 @@ describe("groupWorkspacesByRepo", () => {
     ]);
   });
 
+  it("groups readable repository labels without adding repository settings", () => {
+    const shared = {
+      ...workspace("shared", "shared-repo"),
+      repo_display_name: "brightwave-inc/tidebreak",
+    };
+    const sameName = {
+      ...workspace("other-shared", "other-repo"),
+      repo_display_name: shared.repo_display_name,
+    };
+    const groups = groupWorkspacesByRepo([], [shared, sameName]);
+    expect(groups.map((group) => group.repo)).toEqual([
+      { id: "shared-repo", display_name: "brightwave-inc/tidebreak" },
+      { id: "other-repo", display_name: "brightwave-inc/tidebreak" },
+    ]);
+    expect(
+      arrangeWorkspaceSections("by-repo", [], [shared], {})[0]?.groups[0],
+    ).toMatchObject({ key: "shared-repo", label: "brightwave-inc/tidebreak" });
+    expect(
+      groupWorkspacesByRepo([repo("shared-repo")], [shared])[0]?.repo
+        ?.display_name,
+    ).toBe("shared-repo");
+  });
+
   it("orders a repo's workspaces by created_at, not catalog array order", () => {
     const groups = groupWorkspacesByRepo(
       [repo("app")],

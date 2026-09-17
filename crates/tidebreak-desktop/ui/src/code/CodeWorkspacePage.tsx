@@ -424,7 +424,7 @@ function CodeWorkspaceBody({
   );
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
   const title = digest?.title ?? workspace?.title;
-  const repoName = repo?.display_name;
+  const repoName = repo?.display_name ?? workspace?.repo_display_name;
   const pr = digest?.pr_state ?? workspace?.pr;
   const headerCommands = workspace
     ? workspaceCommandsForAccess(

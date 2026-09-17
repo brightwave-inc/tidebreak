@@ -171,6 +171,43 @@ afterEach(() => {
 });
 
 describe("CodeSidebar", () => {
+  it("names shared repositories when the owner catalog has no registration", async () => {
+    client.listCodeRepos.mockResolvedValueOnce([]);
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "shared-workspace",
+        repo_id: "aa530dda-private-owner-repo",
+        repo_display_name: "brightwave-inc/tidebreak",
+        title: "Document the child session tree",
+        worktree_path: "remote://shared-workspace",
+        branch_name: "docs/child-session-tree",
+        base_ref: "main",
+        status: "active",
+        created_at: "2026-08-15T00:00:00.000Z",
+      } as Awaited<ReturnType<typeof client.listCodeWorkspaces>>[number],
+    ]);
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "brightwave-inc/tidebreak, 1 workspace",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /Document the child session tree.*brightwave-inc\/tidebreak/,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Other repos")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /aa530dda/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("opens a conversation without a workspace from its live rail row", async () => {
     client.openCodeUpdates.mockImplementationOnce((onNotice) => {
       queueMicrotask(() =>

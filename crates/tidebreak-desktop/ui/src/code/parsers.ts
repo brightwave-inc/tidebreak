@@ -2100,6 +2100,7 @@ export function parseCodeWorkspace(
       "is_owner",
       "id",
       "repo_id",
+      "repo_display_name",
       "title",
       "worktree_path",
       "branch_name",
@@ -2119,6 +2120,8 @@ export function parseCodeWorkspace(
       !nonEmptyLine(value.base_refresh_warning)) ||
     !wireId(value.id) ||
     !wireId(value.repo_id) ||
+    (value.repo_display_name !== undefined &&
+      !nonEmptyLine(value.repo_display_name)) ||
     !nonEmptyLine(value.title) ||
     !nonEmptyLine(value.worktree_path) ||
     !nonEmptyLine(value.branch_name) ||
@@ -2141,6 +2144,9 @@ export function parseCodeWorkspace(
       : {}),
     id: value.id,
     repo_id: value.repo_id,
+    ...(value.repo_display_name !== undefined
+      ? { repo_display_name: value.repo_display_name }
+      : {}),
     title: value.title,
     worktree_path: value.worktree_path,
     branch_name: value.branch_name,
