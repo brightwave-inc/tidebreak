@@ -184,6 +184,9 @@ pub async fn compute_attention(
         ));
     }
     if session.lifecycle == SessionLifecycle::Running {
+        if remote_start_pending(db, session).await? {
+            return Ok(Attention::working(AttentionSource::Lifecycle));
+        }
         let last = last_activity_at(db, bus, session).await?;
         let idle = opts.now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle >= opts.stall_idle_secs && !parked_on_background(db, session).await? {
@@ -292,6 +295,9 @@ pub async fn sweep_stalled(
     let now = Utc::now();
     let running = list_sessions_by_lifecycle_all_owners(db, SessionLifecycle::Running).await?;
     for session in running {
+        if remote_start_pending(db, &session).await? {
+            continue;
+        }
         let last = last_activity_at(db, bus, &session).await?;
         let idle = now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle < idle_secs {
@@ -752,6 +758,39 @@ fn classify_activity(name: &str, detail: &ToolDetail) -> SessionActivity {
     }
 }
 
+/// A sandbox accepts input before provisioning or starting the native turn.
+/// Keep that wait working; terminal startup failures use the remote fence path.
+async fn remote_start_pending(
+    db: &DbStore,
+    session: &Session,
+) -> Result<bool, tidebreak_core::AgentError> {
+    if session.execution_location != tidebreak_core::ExecutionLocation::Sandbox {
+        return Ok(false);
+    }
+    let Some(incarnation) =
+        tidebreak_core::db::code::latest_incarnation(db, &session.owner, session.id).await?
+    else {
+        return Ok(false);
+    };
+    if incarnation.state != tidebreak_core::code::IncarnationState::Active {
+        return Ok(false);
+    }
+    let Some(turn) = latest_turn(db, &session.owner, session.id)
+        .await?
+        .filter(|turn| turn.status == TurnStatus::Running)
+    else {
+        return Ok(false);
+    };
+    tidebreak_core::db::code::remote_turn_awaiting_start(
+        db,
+        &session.owner,
+        session.id,
+        incarnation.id,
+        turn.id,
+    )
+    .await
+}
+
 /// When this session last showed a sign of life.
 ///
 /// The journal answers for anything durable. It cannot answer for assistant
@@ -1022,7 +1061,7 @@ mod tests {
         )
     }
 
-    fn session_with(attention: Attention) -> Session {
+    pub(super) fn session_with(attention: Attention) -> Session {
         Session {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
@@ -1270,3 +1309,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod startup_tests;
