@@ -144,7 +144,7 @@ export const SlackContributor: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.queryByRole("button")).not.toBeInTheDocument();
     await expect(
-      canvas.getByText(/open its Slack thread and select Clear fault/),
+      canvas.getByText(/open its Slack thread and select Discard turn/),
     ).toBeVisible();
   },
 };

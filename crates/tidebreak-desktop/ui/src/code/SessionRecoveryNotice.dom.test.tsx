@@ -203,13 +203,13 @@ it("shows the shared-session recovery path without an owner-only action", () => 
         detail: "Final output missing",
       }}
       allowRetry={false}
-      unavailableHint="To recover this session, open its Slack thread and select Clear fault."
+      unavailableHint="To end the interrupted turn, open its Slack thread and select Discard turn. This does not undo work the agent already performed."
       onRetry={retry}
     />,
   );
   expect(screen.queryByRole("button")).toBeNull();
   expect(screen.getByRole("status")).toHaveTextContent(
-    "open its Slack thread and select Clear fault",
+    "open its Slack thread and select Discard turn",
   );
   expect(screen.getByRole("status")).toHaveTextContent(
     "missing final output will not be recovered",

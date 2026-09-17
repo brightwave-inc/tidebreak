@@ -155,7 +155,7 @@ it("offers recovery only to owners and directs Slack contributors to the thread"
   expect(sessionRecoveryAccess(shared)).toEqual({
     allowRetry: false,
     unavailableHint:
-      "To recover this session, open its Slack thread and select Clear fault.",
+      "To end the interrupted turn, open its Slack thread and select Discard turn. This does not undo work the agent already performed.",
   });
   expect(sessionRecoveryAccess({ ...shared, access: "view" })).toEqual({
     allowRetry: false,
