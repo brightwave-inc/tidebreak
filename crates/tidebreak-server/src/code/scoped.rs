@@ -397,6 +397,21 @@ impl ScopedCode {
         self.runtime.get_workspace(&owner, id).await
     }
 
+    /// Read only the repository label through an already-readable workspace.
+    pub async fn workspace_repo_display_name(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<Option<String>, ServerError> {
+        let workspace = self.read_workspace(id).await?;
+        Ok(tidebreak_core::db::code::get_repo(
+            &self.runtime.db,
+            &workspace.owner,
+            workspace.repo_id,
+        )
+        .await?
+        .map(|repo| repo.display_name))
+    }
+
     /// Read a workspace through ownership or a live grant on one of its sessions.
     pub async fn read_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
         self.get_workspace(id).await

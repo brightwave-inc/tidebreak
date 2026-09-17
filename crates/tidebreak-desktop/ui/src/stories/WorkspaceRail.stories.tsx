@@ -134,3 +134,17 @@ export const SlackWithoutRepository: Story = {
 export const SlackWithoutRepositoryByStatus: Story = {
   args: { scenario: "scratch-status" },
 };
+
+export const SharedRepositoryLabels: Story = {
+  args: { scenario: "shared-repo" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", {
+        name: "brightwave-inc/tidebreak, 3 workspaces",
+      }),
+    ).toBeVisible();
+    await expect(canvas.queryByText("Other repos")).not.toBeInTheDocument();
+    canvasElement.dataset.railReady = "true";
+  },
+};

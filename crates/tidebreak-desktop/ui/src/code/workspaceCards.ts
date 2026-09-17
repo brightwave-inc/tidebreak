@@ -34,8 +34,8 @@ export function isPutAway(workspace: CodeWorkspaceSnapshot): boolean {
 }
 
 export type WorkspaceGroup = {
-  /** Null collects workspaces whose repo is missing from the catalog. */
-  repo: CodeRepoSnapshot | null;
+  /** Null collects workspaces without a readable repository label. */
+  repo: Pick<CodeRepoSnapshot, "id" | "display_name"> | null;
   workspaces: CodeWorkspaceSnapshot[];
 };
 
@@ -65,6 +65,18 @@ export function groupWorkspacesByRepo(
     if (!listed) continue;
     byRepo.delete(repo.id);
     groups.push({ repo, workspaces: sortByCreated(listed, "asc") });
+  }
+  // A shared workspace exposes its label without granting repository settings.
+  for (const [id, listed] of byRepo) {
+    const displayName = listed.find(
+      (workspace) => workspace.repo_display_name,
+    )?.repo_display_name;
+    if (!displayName) continue;
+    byRepo.delete(id);
+    groups.push({
+      repo: { id, display_name: displayName },
+      workspaces: sortByCreated(listed, "asc"),
+    });
   }
   const orphans = sortByCreated([...byRepo.values()].flat(), "asc");
   if (orphans.length > 0) groups.push({ repo: null, workspaces: orphans });

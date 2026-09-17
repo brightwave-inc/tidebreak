@@ -2203,6 +2203,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe("code frames against real server output", () => {
+  it("preserves display-only repository metadata and rejects malformed labels", () => {
+    const workspace = CODE_FRAMES.find(
+      ({ name }) => name === "workspace",
+    )?.value;
+    if (!isRecord(workspace)) throw new Error("Missing workspace fixture");
+    expect(
+      parseCodeWorkspace({
+        ...workspace,
+        repo_display_name: "brightwave-inc/tidebreak",
+      })?.repo_display_name,
+    ).toBe("brightwave-inc/tidebreak");
+    for (const repo_display_name of [
+      42,
+      "",
+      "two\nlines",
+      { root_path: "/private/repo" },
+    ]) {
+      expect(
+        parseCodeWorkspace({ ...workspace, repo_display_name }),
+      ).toBeNull();
+    }
+    const { repo_display_name: _label, ...legacy } = workspace;
+    expect(parseCodeWorkspace(legacy)?.repo_display_name).toBeUndefined();
+  });
+
   it("preserves creation warnings and rejects malformed warning values", () => {
     const workspace = CODE_FRAMES.find(
       ({ name }) => name === "workspace",

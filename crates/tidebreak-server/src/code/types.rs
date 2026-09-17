@@ -187,6 +187,10 @@ pub struct CodeWorkspaceSnapshot {
     pub base_refresh_warning: Option<String>,
     pub id: WorkspaceId,
     pub repo_id: RepoId,
+    /// Repository label available through this workspace's read access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo_display_name: Option<String>,
     pub title: String,
     pub worktree_path: String,
     pub branch_name: String,
@@ -225,6 +229,7 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
             base_refresh_warning: None,
             id: workspace.id,
             repo_id: workspace.repo_id,
+            repo_display_name: None,
             title: workspace.title,
             worktree_path: workspace.worktree_path,
             branch_name: workspace.branch_name,

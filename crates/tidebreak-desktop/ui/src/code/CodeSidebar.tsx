@@ -367,7 +367,9 @@ export function CodeSidebar() {
                 session={sessions[workspace.id]}
                 repoName={
                   repos.find((repo) => repo.id === workspace.repo_id)
-                    ?.display_name ?? workspace.repo_id
+                    ?.display_name ??
+                  workspace.repo_display_name ??
+                  "Repository"
                 }
                 active={pathname === `/code/w/${workspace.id}`}
                 selected={selected}

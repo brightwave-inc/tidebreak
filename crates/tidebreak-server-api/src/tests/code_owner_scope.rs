@@ -1477,10 +1477,13 @@ async fn the_single_owner_profile_keeps_its_default_behavior() {
 /// A shared task reveals its workspace, never sibling sessions or repository settings.
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
-    let (router, _dir, repo) = two_user_code_app().await;
+    let (router, dir, repo) = two_user_code_app().await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let (repo_body, workspace) = register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
+    let private_repo = super::code::init_git_repo_named(dir.path(), "private-repo-not-granted");
+    let (_, private_workspace) =
+        register_and_workspace(&client, addr, ALICE_TOKEN, &private_repo).await;
     let sessions = create_sibling_sessions(&client, addr, ALICE_TOKEN, &workspace, 2).await;
     std::fs::write(
         std::path::Path::new(workspace["worktree_path"].as_str().unwrap())
@@ -1521,6 +1524,47 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         .await
         .unwrap();
     assert_eq!(shared["read_only"], true);
+    assert_eq!(shared["repo_display_name"], repo_body["display_name"]);
+    for field in [
+        "root_path",
+        "setup_script",
+        "archive_script",
+        "quick_actions",
+    ] {
+        assert!(
+            shared.get(field).is_none(),
+            "repository settings must stay private"
+        );
+    }
+    let repos: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/repos"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        repos.is_empty(),
+        "workspace metadata must not widen repository access"
+    );
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!(
+                "/code/workspaces/{}",
+                private_workspace["id"].as_str().unwrap()
+            )
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "ungranted repository labels must stay private"
+    );
     grant_access(
         &client,
         addr,
@@ -1572,6 +1616,13 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0]["id"], workspace_id);
         assert_eq!(discovered[0]["read_only"], true);
+        assert_eq!(
+            discovered[0]["repo_display_name"],
+            repo_body["display_name"]
+        );
+        assert!(!serde_json::to_string(&discovered)
+            .unwrap()
+            .contains("private-repo-not-granted"));
     }
 
     let listed: Vec<serde_json::Value> = client

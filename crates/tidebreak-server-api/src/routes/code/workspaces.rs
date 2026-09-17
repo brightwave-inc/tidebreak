@@ -359,9 +359,11 @@ async fn workspace_snapshot(
 ) -> Result<CodeWorkspaceSnapshot, ServerError> {
     let is_owner = workspace.owner == *code.owner();
     let read_only = !code.can_manage_workspace(&workspace).await?;
+    let repo_display_name = code.workspace_repo_display_name(workspace.id).await?;
     let mut snapshot = CodeWorkspaceSnapshot::from(workspace);
     snapshot.read_only = Some(read_only);
     snapshot.is_owner = Some(is_owner);
+    snapshot.repo_display_name = repo_display_name;
     Ok(snapshot)
 }
 
