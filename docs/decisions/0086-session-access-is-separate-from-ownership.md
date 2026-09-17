@@ -93,6 +93,18 @@ Provider results exposed in shared session snapshots contain scope, provider,
 source, optional reason, and an optional safe label. They contain no account
 identifiers, personal email addresses, delegation identifiers, or credentials.
 
+## Amendment: bound direct children inherit live parent access
+
+Accepted September 17, 2026. A child created under an external conversation
+(`code_session_create`) stays `private` and holds no `session_access` rows.
+Hosted browser reads still resolve it when all of these hold: the child and
+parent share an owner, the child names that parent in
+`code_session_context`, and both sessions name the same live external grant
+with no mixed bindings. The caller's level is the parent's current access
+row (view or contribute), not `deployment` visibility and not a copied
+grant. Revoking the parent row or fencing the grant drops the child
+immediately. Ownership and lifecycle authority stay on the child's owner.
+
 ## Alternatives Considered
 
 **Ownership as a set.** Several owners, each an execution identity. Rejected:
