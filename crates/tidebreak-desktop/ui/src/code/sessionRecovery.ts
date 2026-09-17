@@ -91,7 +91,7 @@ export function sessionRecoveryAccess(
     unavailableHint:
       session?.access === "contribute" &&
       session.external_origin?.channel_kind === "slack"
-        ? "To recover this session, open its Slack thread and select Clear fault."
+        ? "To end the interrupted turn, open its Slack thread and select Discard turn. This does not undo work the agent already performed."
         : "Ask the session owner to recover this session.",
   };
 }
