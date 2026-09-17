@@ -450,6 +450,15 @@ independent workspace sessions (decision [0094](decisions/0094-repository-option
   snapshot.
 - `code_sessions` — list this conversation's direct children.
 
+In the desktop UI, the parent session page shows the resulting tree: it
+lists each child with its status (for example Running, Completed, Paused,
+or Needs attention) and execution location (“Sandbox” or “This machine”),
+with an Open action per child that opens the child's session or its
+workspace. The updates rail nests a parent's child conversations beneath
+it with a bounded depth, keeping deeper or cyclic entries visible rather
+than hiding them. Live child status and wait updates reach the tree from
+snapshots and journal delivery.
+
 Children inherit the parent's owner, grant, and forge identity. Machine children
 retain the parent's permission mode; configured sandbox children use Allow under
 sandbox confinement. Each child appears in its own workspace. These tools expose

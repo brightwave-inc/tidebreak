@@ -847,8 +847,12 @@ The same conversation can then choose repositories with `code_repos`, start
 independent child sessions in new workspaces with `code_session_create` (each
 with a stable
 `request_key`), send follow-ups with `code_run_turn`, list children with
-`code_sessions`, and poll for results with `code_wait`. Children inherit
-the parent's owner, grant, and forge identity. Machine children keep the parent's
+`code_sessions`, and poll for results with `code_wait`. In the desktop UI
+the parent session page lists those children with their status, execution
+location, and an Open action per child, and the updates rail nests child
+conversations beneath their parent with a bounded depth (see
+[Self-drive child sessions](code-mode.md#self-drive-child-sessions)).
+Children inherit the parent's owner, grant, and forge identity. Machine children keep the parent's
 permission mode; configured sandbox children use Allow under sandbox confinement.
 A revoked grant refuses discovery, creation, and child reads. Workspace grants
 use the instance's GitHub App access across channels. The machine checks that
