@@ -1697,7 +1697,11 @@ is_owner?: boolean,
 /**
  * Present only on creation when the base refresh could not complete.
  */
-base_refresh_warning?: string, id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
+base_refresh_warning?: string, id: WorkspaceId, repo_id: RepoId,
+/**
+ * Repository label available through this workspace's read access.
+ */
+repo_display_name?: string, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
 /**
  * Commit the released branch pointed at, so a client can name the work
  * without the branch existing.
