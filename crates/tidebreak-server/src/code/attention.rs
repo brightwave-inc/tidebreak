@@ -410,7 +410,7 @@ async fn digest_readers(db: &DbStore, bus: &CodeEventBus, session: &Session) -> 
             }
         };
     if session.visibility == tidebreak_core::SessionVisibility::Deployment
-        || tidebreak_core::db::code::session_has_deployment_access(db, session.id)
+        || tidebreak_core::db::code::session_has_deployment_access_all_owners(db, session.id)
             .await
             .unwrap_or(false)
     {

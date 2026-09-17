@@ -268,7 +268,13 @@ async fn sole_live_binding(
 }
 
 /// Whether deployment visibility applies directly or through a delegated parent.
-pub async fn session_has_deployment_access(store: &DbStore, id: SessionId) -> Result<bool> {
+///
+/// This system path supplies the digest audience across owners. Request paths
+/// must resolve access for their authenticated principal instead.
+pub async fn session_has_deployment_access_all_owners(
+    store: &DbStore,
+    id: SessionId,
+) -> Result<bool> {
     let Some(session) = entities::session::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
@@ -969,9 +975,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|session| session.id == child.id));
-        assert!(super::session_has_deployment_access(&db, child.id)
-            .await
-            .unwrap());
+        assert!(
+            super::session_has_deployment_access_all_owners(&db, child.id)
+                .await
+                .unwrap()
+        );
         set_session_visibility(&db, &owner, parent.id, SessionVisibility::Private)
             .await
             .unwrap();
@@ -979,9 +987,11 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-        assert!(!super::session_has_deployment_access(&db, child.id)
-            .await
-            .unwrap());
+        assert!(
+            !super::session_has_deployment_access_all_owners(&db, child.id)
+                .await
+                .unwrap()
+        );
         assert!(!list_accessible_sessions(&db, &stranger)
             .await
             .unwrap()
