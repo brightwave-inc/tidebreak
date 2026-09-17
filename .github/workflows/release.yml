@@ -262,6 +262,15 @@ jobs:
   publish_docs:
     name: publish release documentation
     needs: [validate, build_docs, finalize_release]
+    # Platform jobs can be skipped before finalization. Check the direct
+    # prerequisites instead of inheriting the implicit success() condition.
+    if: >-
+      ${{
+        !cancelled()
+        && needs.validate.result == 'success'
+        && needs.build_docs.result == 'success'
+        && needs.finalize_release.result == 'success'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
