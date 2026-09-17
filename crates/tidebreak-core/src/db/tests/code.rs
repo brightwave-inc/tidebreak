@@ -19,7 +19,7 @@ use crate::db::code::{
     list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
     queued_turn_head, recover_interrupted_session, replace_session_attention,
     replace_session_execution_settings, save_session, save_turn, save_workspace,
-    search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
+    search_repo_transcripts, session_context, set_active_workspace_pull_request, set_queue_paused,
     set_session_context, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
     set_turn_rewrite, set_workspace_title_if, settle_approval_claim, update_queued_turn,
     ClaimedApprovalSettlement, CodeTranscriptSearchSource, JournalError, SessionExecutionSettings,
@@ -2344,31 +2344,68 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
 }
 
 #[tokio::test]
-async fn deleting_a_parent_chat_deletes_its_session_children() {
+async fn deleting_a_parent_chat_keeps_independent_session_children() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
+    let stranger = OwnerId::new("someone-else").unwrap();
     let parent = super::sample_chat();
     store.create_chat(&parent).await.unwrap();
-    let (child_id, _) = seed_owner(&store, &owner, "child-session").await;
-    let (grandchild_id, _) = seed_owner(&store, &owner, "grandchild-session").await;
-    let (kept_id, _) = seed_owner(&store, &owner, "unrelated-session").await;
-    set_session_context(
+    let parent_id = SessionId(parent.id.0);
+    append_event(
         &store,
         &owner,
-        child_id,
-        None,
-        Some(SessionId(parent.id.0)),
-        Some("child"),
+        parent_id,
+        0,
+        &Event::SessionStarted {
+            harness_kind: HarnessKind::Internal,
+            harness_version: "internal".into(),
+            resume_ref: None,
+        },
     )
     .await
     .unwrap();
+    let (first_child_id, first_turn_id) = seed_owner(&store, &owner, "child-one").await;
+    let (second_child_id, second_turn_id) = seed_owner(&store, &owner, "child-two").await;
+    let (grandchild_id, grandchild_turn_id) = seed_owner(&store, &owner, "grandchild").await;
+    for (id, key) in [
+        (first_child_id, "child-one"),
+        (second_child_id, "child-two"),
+    ] {
+        set_session_context(&store, &owner, id, None, Some(parent_id), Some(key))
+            .await
+            .unwrap();
+        append_event(
+            &store,
+            &owner,
+            id,
+            0,
+            &Event::AssistantMessage {
+                text: format!("result for {key}"),
+                parent_call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
     set_session_context(
         &store,
         &owner,
         grandchild_id,
         None,
-        Some(child_id),
+        Some(first_child_id),
         Some("grandchild"),
+    )
+    .await
+    .unwrap();
+    append_event(
+        &store,
+        &owner,
+        grandchild_id,
+        0,
+        &Event::AssistantMessage {
+            text: "grandchild result".into(),
+            parent_call_id: None,
+        },
     )
     .await
     .unwrap();
@@ -2378,13 +2415,50 @@ async fn deleting_a_parent_chat_deletes_its_session_children() {
         crate::storage::DeleteChatOutcome::Deleted { .. }
     ));
     assert!(store.get_chat(parent.id).await.unwrap().is_none());
-    for id in [SessionId(parent.id.0), child_id, grandchild_id] {
-        assert!(get_session(&store, &owner, id).await.unwrap().is_none());
-    }
-    assert!(get_session(&store, &owner, kept_id)
+    assert!(get_session(&store, &owner, parent_id)
         .await
         .unwrap()
-        .is_some());
+        .is_none());
+    assert!(list_events(&store, &owner, parent_id, 0, 10)
+        .await
+        .unwrap()
+        .events
+        .is_empty());
+
+    for (id, turn_id, expected_parent, preview) in [
+        (first_child_id, first_turn_id, None, "result for child-one"),
+        (
+            second_child_id,
+            second_turn_id,
+            None,
+            "result for child-two",
+        ),
+        (
+            grandchild_id,
+            grandchild_turn_id,
+            Some(first_child_id),
+            "grandchild result",
+        ),
+    ] {
+        let session = get_session(&store, &owner, id).await.unwrap().unwrap();
+        assert_eq!(session.owner, owner);
+        assert!(get_workspace(&store, &owner, session.workspace_id.unwrap())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(get_turn(&store, &owner, turn_id).await.unwrap().is_some());
+        let context = session_context(&store, &owner, id).await.unwrap().unwrap();
+        assert_eq!(context.parent_session_id, expected_parent);
+        let events = list_events(&store, &owner, id, 0, 10).await.unwrap().events;
+        assert!(events.iter().any(|recorded| matches!(
+            recorded.event,
+            Event::AssistantMessage { ref text, .. } if text == preview
+        )));
+        assert!(
+            get_session(&store, &stranger, id).await.unwrap().is_none(),
+            "deleting the parent must not elevate another owner onto a child"
+        );
+    }
 }
 
 #[tokio::test]
