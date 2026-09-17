@@ -21,7 +21,12 @@ const step = workflow.match(
 assert.ok(step, "release upload step must exist");
 const script = step.replace(/^          /gm, "");
 
-function upload({ failAttempts = 0, draft = true, incomplete = false } = {}) {
+function upload({
+  failAttempts = 0,
+  draft = true,
+  incomplete = false,
+  hang = false,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "tidebreak-release-upload-"));
   try {
     mkdirSync(join(dir, "bin"));
@@ -38,6 +43,10 @@ if (args[0] === "release") {
   const file = args[3];
   fs.appendFileSync("calls", file + "\\n");
   const attempts = fs.readFileSync("calls", "utf8").trim().split("\\n").filter(x => x === file).length;
+  if (file.endsWith("two.deb") && process.env.HANG === "true") {
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (file.endsWith("two.deb") && attempts <= Number(process.env.FAIL_ATTEMPTS)) {
     console.error("HTTP 500: Error saving asset");
     process.exit(1);
@@ -56,6 +65,21 @@ if (args[0] === "release") {
 `,
       { mode: 0o755 },
     );
+    // Emulate the runner's timeout command with a short deadline. The outer
+    // process deadline below makes this regression fail if the wrapper is lost.
+    writeFileSync(
+      join(dir, "bin", "timeout"),
+      `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] !== "--kill-after=15s" || args[1] !== "300s") process.exit(2);
+const result = spawnSync(args[2], args.slice(3), {
+  stdio: "inherit", timeout: process.env.HANG === "true" ? 250 : 5000
+});
+process.exit(result.error?.code === "ETIMEDOUT" ? 124 : result.status ?? 1);
+`,
+      { mode: 0o755 },
+    );
     writeFileSync(
       join(dir, "bin", "sleep"),
       "#!/bin/sh\nprintf '%s\\n' \"$1\" >> delays\n",
@@ -64,6 +88,7 @@ if (args[0] === "release") {
     const result = spawnSync("bash", ["-e", "-c", script], {
       cwd: dir,
       encoding: "utf8",
+      timeout: 8000,
       env: {
         ...process.env,
         PATH: `${join(dir, "bin")}:${process.env.PATH}`,
@@ -74,6 +99,7 @@ if (args[0] === "release") {
         RUNNER_TEMP: dir,
         FAIL_ATTEMPTS: String(failAttempts),
         INCOMPLETE: String(incomplete),
+        HANG: String(hang),
       },
     });
     let calls = [];
@@ -117,4 +143,20 @@ test("refuses a complete list of names if an asset upload is unfinished", () => 
   const result = upload({ draft: false, incomplete: true });
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /two\.deb/);
+});
+
+test("retries a stalled upload and stops after four bounded attempts", () => {
+  const result = upload({ hang: true });
+  assert.equal(result.error, undefined, "the whole upload step must not hang");
+  assert.equal(result.status, 1);
+  assert.equal(
+    result.calls.filter((file) => file === "downloads/one.dmg").length,
+    1,
+  );
+  assert.equal(
+    result.calls.filter((file) => file === "downloads/two.deb").length,
+    4,
+  );
+  assert.match(result.stdout, /Uploading two\.deb \(attempt 4\/4\)/);
+  assert.match(result.stderr, /after four attempts/);
 });

@@ -2913,7 +2913,10 @@ jobs:
             for file in downloads/*; do
               uploaded=false
               for attempt in 1 2 3 4; do
-                if gh release upload "$RELEASE_TAG" "$file" \
+                echo "Uploading ${file##*/} (attempt $attempt/4)."
+                # A stalled HTTP transfer must return control to the retry loop.
+                if timeout --kill-after=15s 300s \
+                  gh release upload "$RELEASE_TAG" "$file" \
                   --repo "$GITHUB_REPOSITORY" --clobber; then
                   uploaded=true
                   break
