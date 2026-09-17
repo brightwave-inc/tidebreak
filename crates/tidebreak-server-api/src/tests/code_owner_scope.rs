@@ -1849,6 +1849,221 @@ async fn shared_parent_snapshots_and_debug_hide_private_children() {
     }
 }
 
+/// Gateway sessions can predate service provenance. Only a live workspace grant
+/// authorizes management through an inherited contributor row.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_slack_child_management_requires_a_live_workspace_grant() {
+    use tidebreak_core::{ActsAs, CodeGrantKind, SessionId};
+
+    for kind in [CodeGrantKind::Person, CodeGrantKind::Workspace] {
+        let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let (repo_body, workspace) =
+            register_and_workspace(&client, addr, SLACK_TOKEN, &repo).await;
+        let owner = tidebreak_core::OwnerId::new("user:slack").unwrap();
+        let parent = runtime
+            .create_session(
+                &owner,
+                None,
+                workspace["id"].as_str().unwrap().parse().unwrap(),
+                tidebreak_core::HarnessKind::ClaudeCode,
+                crate::code::runtime::NewSessionSettings {
+                    permission_mode: tidebreak_core::PermissionMode::Plan,
+                    acts_as: Some(ActsAs::Bot),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(parent.owner_kind.is_none());
+        let child_workspace = runtime
+            .create_workspace(
+                &owner,
+                repo_body["id"].as_str().unwrap().parse().unwrap(),
+                Some("Delegated work".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut child = parent.clone();
+        child.id = SessionId::new();
+        child.workspace_id = Some(child_workspace.id);
+        tidebreak_core::db::code::insert_session(&runtime.db, &child)
+            .await
+            .unwrap();
+        let grant = tidebreak_core::db::code::mint_external_grant(
+            &runtime.db,
+            &owner,
+            tidebreak_core::db::code::MintGrantSubject {
+                channel_kind: "slack",
+                external_identity: "T1",
+                workspace_identity: "T1",
+                kind,
+            },
+            &crate::code::grants::hash_adapter_token("legacy-access"),
+            &crate::code::grants::hash_adapter_token("legacy-refresh"),
+        )
+        .await
+        .unwrap();
+        for (session, key) in [
+            (parent.id, "T1/C1/1.1".to_owned()),
+            (
+                child.id,
+                tidebreak_core::db::code::delegated_child_external_key(parent.id, "child"),
+            ),
+        ] {
+            tidebreak_core::db::code::bind_external_session(
+                &runtime.db,
+                &owner,
+                grant.id,
+                "slack",
+                &key,
+                session,
+            )
+            .await
+            .unwrap();
+        }
+        tidebreak_core::db::code::set_session_context(
+            &runtime.db,
+            &owner,
+            parent.id,
+            Some("C1"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::set_session_context(
+            &runtime.db,
+            &owner,
+            child.id,
+            Some("C1"),
+            Some(parent.id),
+            Some("child"),
+        )
+        .await
+        .unwrap();
+        let path = format!("/code/workspaces/{}", child_workspace.id);
+        for level in ["view", "contribute"] {
+            grant_access(
+                &client,
+                addr,
+                SLACK_TOKEN,
+                &parent.id.to_string(),
+                "principal:user:bob",
+                level,
+            )
+            .await;
+            let can_manage = kind.is_workspace() && level == "contribute";
+            for workspace_id in [
+                workspace["id"].as_str().unwrap().to_owned(),
+                child_workspace.id.to_string(),
+            ] {
+                let snapshot: serde_json::Value = client
+                    .get(format!("http://{addr}/code/workspaces/{workspace_id}"))
+                    .bearer_auth(BOB_TOKEN)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    snapshot["read_only"], !can_manage,
+                    "{kind:?} {level}: {snapshot}"
+                );
+                assert_eq!(snapshot["is_owner"], false);
+            }
+            let renamed = client
+                .patch(format!("http://{addr}{path}"))
+                .bearer_auth(BOB_TOKEN)
+                .json(&serde_json::json!({"title":"Delegated rename"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                renamed.status(),
+                if can_manage {
+                    reqwest::StatusCode::OK
+                } else {
+                    reqwest::StatusCode::NOT_FOUND
+                }
+            );
+        }
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &format!("{path}/terminals")).await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_status(
+                &client,
+                addr,
+                BOB_TOKEN,
+                &format!("{path}/retry-setup"),
+                serde_json::json!({})
+            )
+            .await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+        // A direct contributor row survives disconnect, but management must not.
+        grant_access(
+            &client,
+            addr,
+            SLACK_TOKEN,
+            &child.id.to_string(),
+            "principal:user:bob",
+            "contribute",
+        )
+        .await;
+        runtime
+            .revoke_adapter_grant(&owner, grant.id, "workspace disconnected")
+            .await
+            .unwrap();
+        let snapshot: serde_json::Value = client
+            .get(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(snapshot["read_only"], true);
+        assert_eq!(
+            post_status(
+                &client,
+                addr,
+                BOB_TOKEN,
+                &format!("{path}/archive"),
+                serde_json::json!({"force":true})
+            )
+            .await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+        client
+            .delete(format!(
+                "http://{addr}/sessions/{}/access/principal:user:bob",
+                child.id
+            ))
+            .bearer_auth(SLACK_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &path).await,
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+}
+
 /// Management borrows only a Slack service workspace. Ownership, host execution,
 /// sibling transcripts, and sharing remain separate permissions.
 #[tokio::test(flavor = "multi_thread")]
@@ -2032,6 +2247,23 @@ async fn slack_workspace_management_is_scoped_and_revocable() {
             .unwrap()
             .owner,
         owner
+    );
+
+    runtime
+        .revoke_adapter_grant(&owner, grant.id, "service connection revoked")
+        .await
+        .unwrap();
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("{path}/restore"),
+            serde_json::json!({})
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "service provenance must not bypass a revoked connection"
     );
 
     client

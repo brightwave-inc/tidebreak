@@ -450,7 +450,18 @@ impl CodeRuntime {
         let workspace_grant =
             tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
                 .await?
-                .is_some_and(|grant| grant.kind.is_workspace());
+                .is_some_and(|grant| {
+                    grant.kind.is_workspace()
+                        && grant.revoked_at.is_none()
+                        && grant.channel_kind == channel_kind
+                });
+        // A workspace grant records service ownership even when the authenticator
+        // has no owner roster, including children of older unmarked sessions.
+        let owner_kind = if workspace_grant {
+            Some("service")
+        } else {
+            owner_kind
+        };
         let requested_acts_as = if workspace_grant {
             Some(tidebreak_core::ActsAs::Bot)
         } else {

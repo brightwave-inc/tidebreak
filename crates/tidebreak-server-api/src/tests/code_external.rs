@@ -3013,6 +3013,31 @@ async fn repository_scope_workspace_grant(
 }
 
 #[tokio::test]
+async fn workspace_grants_supply_service_provenance_without_an_owner_roster() {
+    let (router, runtime, template_id, service, _dir) = workspace_grant_app().await;
+    let owner = OwnerId::new("user:gateway-service-without-roster").unwrap();
+    let mut repo = runtime.get_repo(&service, template_id).await.unwrap();
+    repo.id = RepoId::new();
+    repo.owner = owner.clone();
+    insert_repo(&runtime.db, &repo).await.unwrap();
+    let token = "workspace-without-owner-roster";
+    repository_scope_workspace_grant(&runtime, &owner, "T1", token).await;
+    let (status, body) = call_json(
+        &router,
+        "POST",
+        "/external/code/sessions",
+        token,
+        Some(serde_json::json!({"external_key":"T1/C1/1.1", "repo_id":repo.id, "channel_id":"C1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = bound_session_id(&runtime, &owner, "T1/C1/1.1").await;
+    let session = runtime.get_session(&owner, id).await.unwrap();
+    assert_eq!(session.owner_kind.as_deref(), Some("service"));
+    assert_eq!(session.acts_as(), tidebreak_core::ActsAs::Bot);
+}
+
+#[tokio::test]
 async fn workspace_channels_inherit_all_three_github_app_repositories_without_approvals() {
     let lender = Arc::new(FakeLender::offering("channel-bot"));
     let (router, runtime, first, service, dir) =

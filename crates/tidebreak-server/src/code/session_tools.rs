@@ -1282,6 +1282,7 @@ mod tests {
         let (_dir, runtime, host, mut parent) =
             setup_with_lender(true, PermissionMode::Allow, Some(lender.clone())).await;
         parent.acts_as = Some(tidebreak_core::ActsAs::Bot);
+        parent.owner_kind = None;
         tidebreak_core::db::code::save_session(&runtime.db, &parent)
             .await
             .unwrap();
@@ -1307,6 +1308,12 @@ mod tests {
             let mut conversation = parent.clone();
             conversation.id = SessionId::new();
             insert_session(&runtime.db, &conversation).await.unwrap();
+            assert!(runtime
+                .get_session(&parent.owner, conversation.id)
+                .await
+                .unwrap()
+                .owner_kind
+                .is_none());
             tidebreak_core::db::code::bind_external_session(
                 &runtime.db,
                 &parent.owner,
@@ -1336,6 +1343,7 @@ mod tests {
                 let id = serde_json::from_value(view["session_id"].clone()).unwrap();
                 let child = runtime.get_session(&parent.owner, id).await.unwrap();
                 assert_eq!(child.model.as_deref(), Some("explicit-child-model"));
+                assert_eq!(child.owner_kind.as_deref(), Some("service"));
             }
         }
         for origin in ["acme/one", "acme/two"] {
