@@ -4,6 +4,7 @@ import {
   actorLabel,
   applyAcceptedTurn,
   applyCodeTurnSnapshot,
+  applySessionTreeSnapshot,
   applyStoredRewrites,
   applyTurnRewrite,
   hydrateCodeTurns,
@@ -2412,5 +2413,55 @@ describe("actorLabel", () => {
   it("returns undefined for a missing actor", () => {
     expect(actorLabel(null)).toBeUndefined();
     expect(actorLabel(undefined)).toBeUndefined();
+  });
+});
+
+describe("session tree", () => {
+  const child = {
+    id: "child-1",
+    title: "Inspect the parser",
+    status: "running" as const,
+    attention: false,
+    fenced: false,
+    workspace_id: "ws-child",
+    execution_location: "machine" as const,
+  };
+
+  it("keeps snapshot trees until a live session_tree replaces them", () => {
+    const hydrated = applySessionTreeSnapshot(initialCodeSessionState(), {
+      children: [child],
+      wait: { waiting: 1, total: 2 },
+    });
+    expect(hydrated.children).toEqual([child]);
+    expect(hydrated.wait).toEqual({ waiting: 1, total: 2 });
+    const live = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, {
+        type: "session_tree",
+        children: [{ ...child, status: "completed" }],
+        wait: null,
+      }),
+      deps(),
+    );
+    expect(live.state.children[0]?.status).toBe("completed");
+    expect(live.state.wait).toBeNull();
+  });
+
+  it("clears a wait without inferring one from running children", () => {
+    const waiting = applySessionTreeSnapshot(initialCodeSessionState(), {
+      children: [child],
+      wait: { waiting: 1, total: 1 },
+    });
+    const cleared = reduceCodeSessionEvent(
+      waiting,
+      framed(1, {
+        type: "session_tree",
+        children: [child],
+        wait: null,
+      }),
+      deps(),
+    );
+    expect(cleared.state.children).toHaveLength(1);
+    expect(cleared.state.wait).toBeNull();
   });
 });

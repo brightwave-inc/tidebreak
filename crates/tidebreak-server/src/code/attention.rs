@@ -570,6 +570,12 @@ async fn build_digest(
         },
         recap,
         memory_proposal_count: memory_proposal_count(db, session).await,
+        parent_session: tidebreak_core::db::code::session_context(db, &session.owner, session.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|context| context.parent_session_id),
+        wait: super::session_tree::wait_for_parent(db, &session.owner, session.id).await,
     })
 }
 

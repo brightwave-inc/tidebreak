@@ -4945,7 +4945,15 @@ recap?: string,
 /**
  * Pending memory proposals that originated in this session.
  */
-memory_proposal_count?: number, };
+memory_proposal_count?: number,
+/**
+ * Direct parent session, when this conversation was started as a child.
+ */
+parent_session?: SessionId,
+/**
+ * Authoritative parent wait, never inferred from running children.
+ */
+wait?: SessionTreeWait, };
 
 /**
  * Where an externally created session came from. The desktop renders it
@@ -5059,7 +5067,16 @@ attention: boolean,
 /**
  * Whether the child is fenced.
  */
-fenced: boolean, };
+fenced: boolean,
+/**
+ * Workspace the child binds, when it has one.
+ */
+workspace_id?: WorkspaceId,
+/**
+ * Where the child's engine runs. Absent on journal rows written before
+ * the field existed.
+ */
+execution_location?: ExecutionLocation, };
 
 /**
  * Status of one direct child session on a parent tree.
@@ -5941,7 +5958,15 @@ recap?: string,
 /**
  * Pending memory proposals that originated in this session.
  */
-memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: TurnRewriteState, rewrite?: string, };
+memory_proposal_count?: number,
+/**
+ * Direct parent session, when this conversation was started as a child.
+ */
+parent_session?: SessionId,
+/**
+ * Authoritative parent wait, never inferred from running children.
+ */
+wait?: SessionTreeWait, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: TurnRewriteState, rewrite?: string, };
 
 /**
  * One bounded question shown to the user.

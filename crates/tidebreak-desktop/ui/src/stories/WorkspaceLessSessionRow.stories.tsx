@@ -72,6 +72,33 @@ export const LongTitle: Story = {
 export const Untitled: Story = {
   args: { digest: { ...runningDigest, workspace: null, title: "" } },
 };
+export const NestedChildren: Story = {
+  args: {
+    digest: {
+      ...runningDigest,
+      workspace: null,
+      session: "parent-1",
+      title: "Coordinate the review",
+      wait: { waiting: 1, total: 2 },
+    },
+    nested: [
+      {
+        ...runningDigest,
+        workspace: null,
+        session: "child-1",
+        parent_session: "parent-1",
+        title: "Inspect the parser",
+      },
+      {
+        ...idleCompleteDigest,
+        workspace: null,
+        session: "child-2",
+        parent_session: "parent-1",
+        title: "Write the tests",
+      },
+    ],
+  },
+};
 
 const slackOrigin = {
   channel_kind: "slack",

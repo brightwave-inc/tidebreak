@@ -32,10 +32,12 @@ import {
   releaseCodeSession,
 } from "../CodeSessionRegistry";
 import {
+  applySessionTreeSnapshot,
   applyTurnRewrite,
   mainAgentTranscriptItems,
   subagentTranscriptItems,
 } from "../CodeSessionReducer";
+import { CodeSessionTree } from "./CodeSessionTree";
 import {
   clearFirstTurnRecovery,
   updateFirstTurnRecovery,
@@ -113,6 +115,14 @@ export function CodeSessionPane({
   const store = useRegisteredCodeSession(session.id, client);
   const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
   const items = store((state) => state.items);
+  const treeChildren = store((state) => state.children);
+  const treeWait = store((state) => state.wait);
+  useEffect(() => {
+    store.getState().update((state) => {
+      if (state.lastSeq > 0) return state;
+      return applySessionTreeSnapshot(state, session);
+    });
+  }, [session, store]);
   const busy = store((state) => state.busy);
   const hydrated = store((state) => state.hydrated);
   const animateStreaming = store((state) => state.animateStreaming);
@@ -559,6 +569,9 @@ export function CodeSessionPane({
           executionLocation={session.execution_location}
           actsAs={session.acts_as}
         />
+      )}
+      {!subagentCallId && (
+        <CodeSessionTree nodes={treeChildren} wait={treeWait} />
       )}
       <div className={cn("message-view", follow.fadeClass)}>
         {connectionState === "reconnecting" && (

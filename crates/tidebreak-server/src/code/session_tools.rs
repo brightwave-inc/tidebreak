@@ -276,11 +276,20 @@ impl SessionTool {
                 for id in &ids {
                     children.push(require_child(runtime, &live, *id).await?);
                 }
+                tidebreak_core::db::code::set_parent_wait_ids(
+                    &runtime.db,
+                    &live.parent.owner,
+                    live.parent.id,
+                    &ids,
+                )
+                .await
+                .map_err(|error| ServerError::internal(error.to_string()))?;
+                publish_parent_tree(runtime, &live.parent).await;
                 let mut snapshots = Vec::with_capacity(children.len());
                 for child in &children {
                     snapshots.push(snapshot(runtime, &live.parent.owner, child.clone()).await?);
                 }
-                loop {
+                let result = loop {
                     let mut waiting = false;
                     for (index, child) in children.iter_mut().enumerate() {
                         let current = runtime.get_session(&live.parent.owner, child.id).await?;
@@ -297,11 +306,22 @@ impl SessionTool {
                                 snapshots[index] =
                                     snapshot(runtime, &live.parent.owner, child.clone()).await?;
                             }
+                        } else {
+                            tidebreak_core::db::code::set_parent_wait_ids(
+                                &runtime.db,
+                                &live.parent.owner,
+                                live.parent.id,
+                                &[],
+                            )
+                            .await
+                            .map_err(|error| ServerError::internal(error.to_string()))?;
                         }
-                        return Ok(json!({"waiting":waiting,"sessions":snapshots}));
+                        break json!({"waiting":waiting,"sessions":snapshots});
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                };
+                publish_parent_tree(runtime, &live.parent).await;
+                Ok(result)
             }
             _ => {
                 let mut children = Vec::new();

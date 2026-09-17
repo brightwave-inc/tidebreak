@@ -2,6 +2,7 @@ import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
   CodeApprovalState,
   CodeSessionLifecycle,
+  CodeSessionSnapshot,
   CodeTurnSnapshot,
   CodeTurnStatus,
   CodeUsage,
@@ -197,6 +198,10 @@ export type CodeSessionState = {
    * after assistant rows exist.
    */
   storedRewrites: Record<string, string>;
+  /** Direct children from the snapshot and live `session_tree` events. */
+  children: NonNullable<CodeSessionSnapshot["children"]>;
+  /** Authoritative wait; never inferred from running children. */
+  wait: CodeSessionSnapshot["wait"];
 };
 
 export type CodeSessionEffect =
@@ -251,7 +256,54 @@ export function initialCodeSessionState(): CodeSessionState {
     lifecycle: null,
     contentRevision: 0,
     storedRewrites: {},
+    children: [],
+    wait: null,
   };
+}
+
+export function applySessionTreeSnapshot(
+  state: CodeSessionState,
+  snapshot: Pick<CodeSessionSnapshot, "children" | "wait">,
+): CodeSessionState {
+  if (snapshot.children === undefined && snapshot.wait === undefined) {
+    return state;
+  }
+  const children = snapshot.children ?? [];
+  const wait = snapshot.wait === undefined ? null : snapshot.wait;
+  if (sessionTreeUnchanged(state, children, wait)) return state;
+  return { ...state, children, wait };
+}
+
+function sessionTreeUnchanged(
+  state: CodeSessionState,
+  children: CodeSessionState["children"],
+  wait: CodeSessionState["wait"],
+): boolean {
+  const currentWait = state.wait ?? null;
+  const nextWait = wait ?? null;
+  if ((currentWait === null) !== (nextWait === null)) return false;
+  if (
+    currentWait &&
+    nextWait &&
+    (currentWait.waiting !== nextWait.waiting ||
+      currentWait.total !== nextWait.total)
+  ) {
+    return false;
+  }
+  if (state.children.length !== children.length) return false;
+  return state.children.every((child, index) => {
+    const next = children[index];
+    return (
+      next !== undefined &&
+      child.id === next.id &&
+      child.status === next.status &&
+      child.attention === next.attention &&
+      child.fenced === next.fenced &&
+      child.title === next.title &&
+      child.workspace_id === next.workspace_id &&
+      child.execution_location === next.execution_location
+    );
+  });
 }
 
 export function userItemId(turnId: string): string {
@@ -1307,6 +1359,16 @@ export function reduceCodeSessionEvent(
     case "compaction_finished":
       // Only the internal harness emits these, and code mode filters it out.
       return { state, effects };
+
+    case "session_tree":
+      return {
+        state: {
+          ...state,
+          children: event.children,
+          wait: event.wait,
+        },
+        effects,
+      };
 
     default:
       return { state, effects };

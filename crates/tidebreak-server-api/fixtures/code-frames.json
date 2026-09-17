@@ -1392,6 +1392,7 @@
         "children": [
           {
             "attention": false,
+            "execution_location": "machine",
             "fenced": false,
             "id": "00000000-0000-0000-0000-000000000003",
             "status": "running",

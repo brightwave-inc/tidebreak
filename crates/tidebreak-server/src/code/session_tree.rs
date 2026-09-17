@@ -7,7 +7,7 @@
 
 use tidebreak_core::db::code::{
     append_event, child_sessions, get_session, get_workspace, latest_turn, list_queued_turns,
-    session_bound_to_grant, session_context,
+    parent_wait_ids, session_bound_to_grant, session_context, set_parent_wait_ids,
 };
 use tidebreak_core::{
     AttentionState, CodeGrantId, DbStore, Event, OwnerId, Session, SessionId, SessionLifecycle,
@@ -16,6 +16,18 @@ use tidebreak_core::{
 
 use super::bus::CodeEventBus;
 use super::types::SessionSnapshot;
+
+/// Authoritative wait for a parent digest. Never inferred from running children.
+pub async fn wait_for_parent(
+    db: &DbStore,
+    owner: &OwnerId,
+    parent_id: SessionId,
+) -> Option<SessionTreeWait> {
+    compute(db, owner, parent_id, None)
+        .await
+        .ok()
+        .and_then(|(_, wait)| wait)
+}
 
 /// Fill `children` / `wait` on a snapshot from persisted child rows.
 pub async fn attach_to_snapshot(
@@ -197,9 +209,33 @@ fn child_is_fenced(session: &Session) -> bool {
         || matches!(session.attention.state, AttentionState::Fenced { .. })
 }
 
-/// Parent wait is never invented by counting running children.
-fn known_parent_wait() -> Option<SessionTreeWait> {
-    None
+fn child_is_settled(status: SessionTreeChildStatus) -> bool {
+    matches!(
+        status,
+        SessionTreeChildStatus::Completed
+            | SessionTreeChildStatus::Failed
+            | SessionTreeChildStatus::Interrupted
+    )
+}
+
+/// Parent wait is never invented by counting every running child.
+fn wait_from_named(
+    children: &[SessionTreeChild],
+    named: Option<&[SessionId]>,
+) -> Option<SessionTreeWait> {
+    let named = named.filter(|ids| !ids.is_empty())?;
+    let total = u32::try_from(named.len()).unwrap_or(u32::MAX);
+    let waiting = named
+        .iter()
+        .filter(|id| {
+            children
+                .iter()
+                .find(|child| child.id == **id)
+                .is_some_and(|child| !child_is_settled(child.status))
+        })
+        .count();
+    let waiting = u32::try_from(waiting).unwrap_or(u32::MAX);
+    (waiting > 0).then_some(SessionTreeWait { waiting, total })
 }
 
 async fn compute(
@@ -217,7 +253,12 @@ async fn compute(
         }
         children.push(project_child(db, owner, session).await?);
     }
-    Ok((children, known_parent_wait()))
+    let named = parent_wait_ids(db, owner, parent_id).await?;
+    let wait = wait_from_named(&children, named.as_deref());
+    if wait.is_none() && named.is_some() {
+        set_parent_wait_ids(db, owner, parent_id, &[]).await?;
+    }
+    Ok((children, wait))
 }
 
 async fn project_child(
@@ -242,6 +283,8 @@ async fn project_child(
         status: child_status(session.lifecycle, queued, last_turn),
         attention: child_needs_attention(&session),
         fenced: child_is_fenced(&session),
+        workspace_id: session.workspace_id,
+        execution_location: Some(session.execution_location),
     })
 }
 
@@ -390,7 +433,19 @@ mod tests {
             child_status(SessionLifecycle::Fenced, false, Some(TurnStatus::Running)),
             SessionTreeChildStatus::Fenced
         );
-        assert!(known_parent_wait().is_none());
+        assert!(wait_from_named(
+            &[SessionTreeChild {
+                id: SessionId::new(),
+                title: None,
+                status: SessionTreeChildStatus::Running,
+                attention: false,
+                fenced: false,
+                workspace_id: None,
+                execution_location: None,
+            }],
+            None
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -411,6 +466,11 @@ mod tests {
         assert_eq!(children[0].id, child.id);
         assert_eq!(children[0].status, SessionTreeChildStatus::Running);
         assert!(!children[0].fenced);
+        assert_eq!(children[0].workspace_id, child.workspace_id);
+        assert_eq!(
+            children[0].execution_location,
+            Some(ExecutionLocation::Machine)
+        );
 
         child.lifecycle = SessionLifecycle::Fenced;
         child.fence_reason = Some(FenceReason::OrphanAlive);
@@ -669,5 +729,52 @@ mod tests {
                 .all(|child| child.status != SessionTreeChildStatus::Running),
             "a slower running compute must not land after a terminal update: {last:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn named_wait_counts_only_those_children_and_clears_when_they_settle() {
+        let (_dir, db) = store().await;
+        let owner = OwnerId::local();
+        let parent = session(&owner, SessionLifecycle::Idle);
+        let mut waited = session(&owner, SessionLifecycle::Running);
+        let extra = session(&owner, SessionLifecycle::Running);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &waited).await.unwrap();
+        insert_session(&db, &extra).await.unwrap();
+        set_session_context(
+            &db,
+            &owner,
+            waited.id,
+            None,
+            Some(parent.id),
+            Some("waited"),
+        )
+        .await
+        .unwrap();
+        set_session_context(&db, &owner, extra.id, None, Some(parent.id), Some("extra"))
+            .await
+            .unwrap();
+
+        set_parent_wait_ids(&db, &owner, parent.id, &[waited.id])
+            .await
+            .unwrap();
+        let (children, wait) = compute(&db, &owner, parent.id, None).await.unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            wait,
+            Some(SessionTreeWait {
+                waiting: 1,
+                total: 1
+            })
+        );
+
+        waited.lifecycle = SessionLifecycle::Ended;
+        save_session(&db, &waited).await.unwrap();
+        let (_, wait) = compute(&db, &owner, parent.id, None).await.unwrap();
+        assert!(wait.is_none(), "settled named children must clear the wait");
+        assert!(parent_wait_ids(&db, &owner, parent.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

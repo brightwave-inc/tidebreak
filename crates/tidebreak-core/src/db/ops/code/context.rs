@@ -120,3 +120,70 @@ pub async fn child_sessions(
     }
     Ok(sessions)
 }
+
+/// Named children a parent wait is parked on. Empty means no wait.
+pub async fn parent_wait_ids(
+    store: &DbStore,
+    owner: &OwnerId,
+    parent: SessionId,
+) -> Result<Option<Vec<SessionId>>> {
+    if super::get_session(store, owner, parent).await?.is_none() {
+        return Err(AgentError::InvalidTarget("parent session not found".into()));
+    }
+    let Some(row) = entities::code_parent_wait::Entity::find_by_id(parent.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    parse_wait_ids(&row.child_ids)
+}
+
+/// Replace the named wait set. An empty list clears it.
+pub async fn set_parent_wait_ids(
+    store: &DbStore,
+    owner: &OwnerId,
+    parent: SessionId,
+    ids: &[SessionId],
+) -> Result<()> {
+    if super::get_session(store, owner, parent).await?.is_none() {
+        return Err(AgentError::InvalidTarget("parent session not found".into()));
+    }
+    if ids.is_empty() {
+        entities::code_parent_wait::Entity::delete_by_id(parent.0)
+            .exec(&store.conn)
+            .await
+            .map_err(store_err)?;
+        return Ok(());
+    }
+    let child_ids = serde_json::to_string(&ids.iter().map(|id| id.0).collect::<Vec<uuid::Uuid>>())
+        .map_err(|error| AgentError::Store(error.to_string()))?;
+    let existing = entities::code_parent_wait::Entity::find_by_id(parent.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    if let Some(existing) = existing {
+        let mut active: entities::code_parent_wait::ActiveModel = existing.into();
+        active.child_ids = Set(child_ids);
+        active.update(&store.conn).await.map_err(store_err)?;
+    } else {
+        entities::code_parent_wait::ActiveModel {
+            parent_session_id: Set(parent.0),
+            child_ids: Set(child_ids),
+        }
+        .insert(&store.conn)
+        .await
+        .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+fn parse_wait_ids(raw: &str) -> Result<Option<Vec<SessionId>>> {
+    let ids: Vec<uuid::Uuid> =
+        serde_json::from_str(raw).map_err(|error| AgentError::Store(error.to_string()))?;
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ids.into_iter().map(SessionId).collect()))
+}

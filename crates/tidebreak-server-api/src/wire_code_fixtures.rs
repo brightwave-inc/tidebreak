@@ -291,6 +291,8 @@ fn digest() -> SessionDigest {
         }]),
         recap: Some("The parser bounds every field; the tests are next.".to_owned()),
         memory_proposal_count: None,
+        parent_session: None,
+        wait: None,
     }
 }
 
@@ -336,6 +338,8 @@ fn digest_notice(d: SessionDigest) -> UpdateNotice {
         subagents: d.subagents,
         recap: d.recap,
         memory_proposal_count: d.memory_proposal_count,
+        parent_session: d.parent_session,
+        wait: d.wait,
     }
 }
 
@@ -1120,6 +1124,8 @@ fn event_frames() -> Vec<Fixture> {
                         status: tidebreak_core::SessionTreeChildStatus::Running,
                         attention: false,
                         fenced: false,
+                        workspace_id: None,
+                        execution_location: Some(tidebreak_core::ExecutionLocation::Machine),
                     }],
                     wait: None,
                 },

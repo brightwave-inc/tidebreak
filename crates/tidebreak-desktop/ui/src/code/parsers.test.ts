@@ -423,6 +423,8 @@ describe("session tree wire values", () => {
     status: "running",
     attention: false,
     fenced: false,
+    workspace_id: "ws-child",
+    execution_location: "sandbox",
   };
 
   it("distinguishes legacy snapshots from authoritative empty trees", () => {
@@ -465,6 +467,31 @@ describe("session tree wire values", () => {
     }
     expect(parseCodeEvent({ type: "session_tree", children: [] })).toBeNull();
     expect(parseCodeEvent({ type: "session_tree", wait: null })).toBeNull();
+    expect(
+      parseCodeEvent({
+        type: "session_tree",
+        children: [
+          {
+            id: "child-1",
+            status: "running",
+            attention: false,
+            fenced: false,
+          },
+        ],
+        wait: null,
+      }),
+    ).toEqual({
+      type: "session_tree",
+      children: [
+        {
+          id: "child-1",
+          status: "running",
+          attention: false,
+          fenced: false,
+        },
+      ],
+      wait: null,
+    });
   });
 
   it("rejects invalid wait counts", () => {

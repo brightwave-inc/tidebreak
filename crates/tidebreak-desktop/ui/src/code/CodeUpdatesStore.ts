@@ -465,6 +465,10 @@ export function noticeToAction(
           ? { subagents: notice.subagents }
           : {}),
         ...(notice.recap !== undefined ? { recap: notice.recap } : {}),
+        ...(notice.parent_session !== undefined
+          ? { parent_session: notice.parent_session }
+          : {}),
+        ...(notice.wait !== undefined ? { wait: notice.wait } : {}),
       },
     };
   }

@@ -2667,13 +2667,25 @@ function parseSessionTreeChildren(
   for (const item of value) {
     if (
       !isRecord(item) ||
-      !onlyKeys(item, ["id", "title", "status", "attention", "fenced"]) ||
+      !onlyKeys(item, [
+        "id",
+        "title",
+        "status",
+        "attention",
+        "fenced",
+        "workspace_id",
+        "execution_location",
+      ]) ||
       !wireId(item.id) ||
       (item.title !== undefined && !nonEmptyLine(item.title)) ||
       typeof item.status !== "string" ||
       !SESSION_TREE_CHILD_STATUSES.has(item.status) ||
       typeof item.attention !== "boolean" ||
-      typeof item.fenced !== "boolean"
+      typeof item.fenced !== "boolean" ||
+      (item.workspace_id !== undefined && !wireId(item.workspace_id)) ||
+      (item.execution_location !== undefined &&
+        item.execution_location !== "machine" &&
+        item.execution_location !== "sandbox")
     ) {
       return undefined;
     }
@@ -2685,6 +2697,12 @@ function parseSessionTreeChildren(
       >[number]["status"],
       attention: item.attention,
       fenced: item.fenced,
+      ...(item.workspace_id !== undefined
+        ? { workspace_id: item.workspace_id }
+        : {}),
+      ...(item.execution_location !== undefined
+        ? { execution_location: item.execution_location }
+        : {}),
     });
   }
   return children;
@@ -4557,6 +4575,8 @@ export function parseCodeSessionDigest(
       "watch_cycles",
       "subagents",
       "recap",
+      "parent_session",
+      "wait",
     ]) ||
     !nullableWireId(value.workspace) ||
     (value.can_open_chat !== undefined &&
@@ -4581,7 +4601,8 @@ export function parseCodeSessionDigest(
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalBlock(value.watch_detail) ||
     (value.watch_cycles !== undefined && !isFiniteNumber(value.watch_cycles)) ||
-    !optionalBlock(value.recap)
+    !optionalBlock(value.recap) ||
+    (value.parent_session !== undefined && !wireId(value.parent_session))
   ) {
     return null;
   }
@@ -4597,6 +4618,10 @@ export function parseCodeSessionDigest(
   if (value.pr_state !== undefined && !pr_state) return null;
   const subagents =
     value.subagents === undefined ? undefined : parseSubagents(value.subagents);
+  const wait =
+    value.wait === undefined ? undefined : parseSessionTreeWait(value.wait);
+  if (value.wait !== undefined && wait === undefined && value.wait !== null)
+    return null;
   if (value.subagents !== undefined && !subagents) return null;
   return {
     workspace: value.workspace,
@@ -4639,6 +4664,10 @@ export function parseCodeSessionDigest(
       : {}),
     ...(subagents ? { subagents } : {}),
     ...(value.recap !== undefined ? { recap: value.recap } : {}),
+    ...(value.parent_session !== undefined
+      ? { parent_session: value.parent_session }
+      : {}),
+    ...(wait !== undefined ? { wait } : {}),
   };
 }
 
@@ -4688,6 +4717,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "watch_cycles",
           "subagents",
           "recap",
+          "parent_session",
+          "wait",
         ]) ||
         !nullableWireId(value.workspace) ||
         !wireId(value.session) ||
@@ -4711,7 +4742,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !optionalBlock(value.watch_detail) ||
         (value.watch_cycles !== undefined &&
           !isFiniteNumber(value.watch_cycles)) ||
-        !optionalBlock(value.recap)
+        !optionalBlock(value.recap) ||
+        (value.parent_session !== undefined && !wireId(value.parent_session))
       ) {
         return null;
       }
@@ -4730,6 +4762,10 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           ? undefined
           : parseSubagents(value.subagents);
       if (value.subagents !== undefined && !subagents) return null;
+      const wait =
+        value.wait === undefined ? undefined : parseSessionTreeWait(value.wait);
+      if (value.wait !== undefined && wait === undefined && value.wait !== null)
+        return null;
       return {
         type: "digest",
         workspace: value.workspace,
@@ -4769,6 +4805,10 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           : {}),
         ...(subagents ? { subagents } : {}),
         ...(value.recap !== undefined ? { recap: value.recap } : {}),
+        ...(value.parent_session !== undefined
+          ? { parent_session: value.parent_session }
+          : {}),
+        ...(wait !== undefined ? { wait } : {}),
       };
     }
     case "clone_progress": {
