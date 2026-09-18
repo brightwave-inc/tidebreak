@@ -1502,9 +1502,10 @@ export const ManagedSlackRemoteWorkspace: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      canvas.findByText("Retained checkpoint"),
-    ).resolves.toBeVisible();
+    const revisionLabels = await canvas.findAllByText("Retained checkpoint");
+    for (const label of revisionLabels) {
+      await expect(label).toBeVisible();
+    }
     await expect(
       canvas.queryByRole("button", { name: "Terminal" }),
     ).not.toBeInTheDocument();

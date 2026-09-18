@@ -514,7 +514,7 @@ fn validate_git_ref(value: &str) -> Result<&str, ServerError> {
 }
 
 fn tree_limit(limit: u32) -> usize {
-    (limit.max(1)).min(MAX_TREE_LIMIT) as usize
+    limit.clamp(1, MAX_TREE_LIMIT) as usize
 }
 
 fn path_name_matches(path: &str, needle: &str) -> bool {

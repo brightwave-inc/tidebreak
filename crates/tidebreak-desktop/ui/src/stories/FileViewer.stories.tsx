@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, waitFor, within } from "storybook/test";
 
 import type { ApiClient } from "@/api/client";
 import { FileViewer } from "@/code/FileViewer";
@@ -76,7 +77,7 @@ function FileViewerStory({ scenario }: { scenario: FileScenario }) {
         ? "sandbox.txt"
         : "assets/workspace-architecture.svg";
   return (
-    <div className="h-[680px] overflow-hidden rounded-lg border bg-page-background">
+    <div className="flex h-[680px] min-h-0 flex-col overflow-hidden rounded-lg border bg-page-background">
       <FileViewer
         client={clientFor(scenario)}
         workspaceId="workspace-storybook"
@@ -119,6 +120,16 @@ export const UnsupportedBinaryFile: Story = {
 
 export const RetainedCheckpoint: Story = {
   args: { scenario: "retained" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText(/from the checkpoint/),
+    ).resolves.toBeVisible();
+    await waitFor(() => {
+      const editor = canvasElement.querySelector(".monaco-editor");
+      expect(editor?.getBoundingClientRect().height ?? 0).toBeGreaterThan(100);
+    });
+  },
 };
 
 export const SandboxUnavailable: Story = {

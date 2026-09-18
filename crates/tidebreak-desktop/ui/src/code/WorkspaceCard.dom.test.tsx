@@ -1042,8 +1042,8 @@ it("offers management commands without host or session-owner commands", async ()
   expect(onCommand).toHaveBeenCalledWith("archive");
 });
 
-it("does not offer restore or a host path for a remote managed workspace", async () => {
-  renderCard({
+it("restores a remote managed workspace without host path commands", async () => {
+  const { onCommand } = renderCard({
     workspace: {
       read_only: false,
       is_owner: false,
@@ -1055,10 +1055,11 @@ it("does not offer restore or a host path for a remote managed workspace", async
   expect(
     await screen.findByRole("menuitem", { name: "Open workspace" }),
   ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("menuitem", { name: /Restore/ }),
-  ).not.toBeInTheDocument();
+  const restore = screen.getByRole("menuitem", { name: /Restore/ });
+  expect(restore).toBeInTheDocument();
   expect(
     screen.queryByRole("menuitem", { name: /Copy worktree/ }),
   ).not.toBeInTheDocument();
+  fireEvent.click(restore);
+  expect(onCommand).toHaveBeenCalledExactlyOnceWith("restore");
 });

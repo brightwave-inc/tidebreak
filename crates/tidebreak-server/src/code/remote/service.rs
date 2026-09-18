@@ -2731,6 +2731,138 @@ mod tests {
         assert!(!std::path::Path::new(&workspace.worktree_path).exists());
     }
 
+    #[tokio::test]
+    async fn restored_remote_workspace_resumes_its_checkpoint_once() {
+        use tidebreak_core::db::code::{
+            activate_incarnation, create_incarnation_intent, ingest_incarnation_event,
+            save_session, save_workspace, stop_incarnation, IncarnationSideEffects,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let repo_root = std::path::Path::new(&repo.root_path);
+        std::fs::create_dir_all(repo_root).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "checkpoint",
+            ],
+            vec!["branch", "mg-wip/restore-i1"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let mut workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("restore".into()))
+            .await
+            .unwrap();
+        let mut session = runtime
+            .create_remote_session(
+                &owner,
+                None,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::IncarnationAdmission::Admitted(row) =
+            create_incarnation_intent(&runtime.db, &owner, session.id, session.spawn_epoch, 4)
+                .await
+                .unwrap()
+        else {
+            panic!("expected incarnation admission");
+        };
+        activate_incarnation(&runtime.db, &owner, row.id, "previous-sandbox")
+            .await
+            .unwrap();
+        ingest_incarnation_event(
+            &runtime.db,
+            &owner,
+            session.id,
+            session.spawn_epoch,
+            row.id,
+            1,
+            IncarnationSideEffects {
+                wip_ref: Some("mg-wip/restore-i1"),
+                terminal_events_journaled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        stop_incarnation(&runtime.db, &owner, row.id, Some("completed"))
+            .await
+            .unwrap();
+        session.lifecycle = SessionLifecycle::Ended;
+        save_session(&runtime.db, &session).await.unwrap();
+        workspace.status = CodeWorkspaceStatus::Archived;
+        workspace.archived_at = Some(chrono::Utc::now());
+        save_workspace(&runtime.db, &workspace).await.unwrap();
+
+        for _ in 0..2 {
+            runtime
+                .restore_workspace(&owner, workspace.id)
+                .await
+                .unwrap();
+        }
+        assert!(
+            fake.spawns.lock().unwrap().is_empty(),
+            "restore must not start work"
+        );
+        runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "continue from the checkpoint".into(),
+                None,
+                None,
+                vec![],
+                None,
+            )
+            .await
+            .unwrap();
+        runtime
+            .restore_workspace(&owner, workspace.id)
+            .await
+            .unwrap();
+        let spawns = fake.spawns.lock().unwrap();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(
+            spawns[0].repository_ref.as_deref(),
+            Some("mg-wip/restore-i1")
+        );
+        drop(spawns);
+        let sessions = runtime
+            .list_workspace_sessions(&owner, workspace.id)
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, session.id);
+        assert_eq!(
+            sessions[0].execution_location,
+            tidebreak_core::ExecutionLocation::Sandbox
+        );
+        assert!(!std::path::Path::new(&workspace.worktree_path).exists());
+    }
+
     /// Ending a remote session cancels the sandbox so it does not keep spending.
     #[tokio::test]
     async fn ending_a_remote_session_cancels_the_sandbox() {

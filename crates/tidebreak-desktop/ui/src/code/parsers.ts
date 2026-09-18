@@ -136,7 +136,6 @@ import type {
   CodeWorkspaceSearch as WireCodeWorkspaceSearch,
   CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   CodeWorkspaceBlob as WireCodeWorkspaceBlob,
-  CodeWorkspaceTree as WireCodeWorkspaceTree,
   ImageRef as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
