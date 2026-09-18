@@ -1101,6 +1101,9 @@ impl CodeRuntime {
     > {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
+            if turn_id.is_some() {
+                return Err(crate::code::sandbox_checkout::historical_turn_unsupported());
+            }
             let checkout = self.remote_checkout(owner, &workspace).await?;
             let (files, truncated, stat) =
                 crate::code::sandbox_checkout::list_checkout_files(&checkout).await?;
@@ -1176,6 +1179,9 @@ impl CodeRuntime {
     > {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
+            if turn_id.is_some() {
+                return Err(crate::code::sandbox_checkout::historical_turn_unsupported());
+            }
             let checkout = self.remote_checkout(owner, &workspace).await?;
             let (diff, truncated, stat) =
                 crate::code::sandbox_checkout::produce_checkout_diff(&checkout, file).await?;

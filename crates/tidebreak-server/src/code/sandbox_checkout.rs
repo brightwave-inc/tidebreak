@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use tidebreak_core::db::code::{
     latest_incarnation, latest_pushed_wip_ref, list_sessions_for_workspace,
 };
-use tidebreak_core::{CodeWorkspace, CodeWorkspaceStatus, Diffstat, IncarnationState, OwnerId};
+use tidebreak_core::{
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, IncarnationState, OwnerId, WorkspaceId,
+};
 
 use super::checkpoint::{list_changed_files, produce_diff, ChangedFile, DiffBounds};
 use super::git_runner;
@@ -72,7 +74,12 @@ impl CodeRuntime {
             ));
         }
         let checkpoint = required_restore_checkpoint(self, owner, &workspace).await?;
-        let _ = checkpoint;
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let repo_root = PathBuf::from(&repo.root_path);
+        require_local_git_dir(&repo_root)?;
+        // Restore is only recoverable when this ref actually resolves, not
+        // merely because some session stored a string.
+        resolve_commit(&repo_root, &checkpoint).await?;
         workspace.status = CodeWorkspaceStatus::Active;
         workspace.archived_at = None;
         if !tidebreak_core::db::code::save_workspace(&self.db, &workspace).await? {
@@ -128,7 +135,6 @@ async fn required_restore_checkpoint(
     if sessions.is_empty() {
         return Err(checkpoint_missing());
     }
-    let mut chosen: Option<String> = None;
     for session in &sessions {
         if let Some(row) = latest_incarnation(&runtime.db, owner, session.id).await? {
             if let Some((kind, message)) = crate::code::remote::driver::recovery_block(&row, true) {
@@ -141,11 +147,10 @@ async fn required_restore_checkpoint(
                 ));
             }
         }
-        if let Some(reference) = latest_pushed_wip_ref(&runtime.db, owner, session.id).await? {
-            chosen = Some(reference);
-        }
     }
-    chosen.ok_or_else(checkpoint_missing)
+    newest_workspace_checkpoint(runtime, owner, workspace.id)
+        .await?
+        .ok_or_else(checkpoint_missing)
 }
 
 /// The newest WIP ref across the workspace's sessions, and whether a sandbox
@@ -158,28 +163,58 @@ async fn retained_checkpoint(
 ) -> Result<String, ServerError> {
     let sessions = list_sessions_for_workspace(&runtime.db, owner, workspace.id).await?;
     let mut live = false;
-    let mut reference = None;
-    for session in sessions {
+    let mut blocked = None;
+    for session in &sessions {
         if let Some(row) = latest_incarnation(&runtime.db, owner, session.id).await? {
             live |= matches!(
                 row.state,
                 IncarnationState::Active | IncarnationState::Intent
             );
-            if let Some((kind, message)) = crate::code::remote::driver::recovery_block(&row, true) {
-                if reference.is_none() {
-                    return Err(ServerError::conflict_kind(kind, message));
+            if blocked.is_none() {
+                if let Some(block) = crate::code::remote::driver::recovery_block(&row, true) {
+                    blocked = Some(block);
                 }
             }
         }
-        if let Some(wip) = latest_pushed_wip_ref(&runtime.db, owner, session.id).await? {
-            reference = Some(wip);
+    }
+    if let Some(reference) = newest_workspace_checkpoint(runtime, owner, workspace.id).await? {
+        return Ok(reference);
+    }
+    if live {
+        return Err(live_unavailable());
+    }
+    if let Some((kind, message)) = blocked {
+        return Err(ServerError::conflict_kind(kind, message));
+    }
+    Err(checkpoint_missing())
+}
+
+/// Newest retained checkpoint: the most recently created session that pushed
+/// a WIP ref, using that session's latest pushed ref.
+///
+/// `list_sessions_for_workspace` is CreatedAt DESC. Taking the first pushed
+/// ref is the contract; looping and overwriting would select the oldest.
+async fn newest_workspace_checkpoint(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    workspace_id: WorkspaceId,
+) -> Result<Option<String>, ServerError> {
+    let sessions = list_sessions_for_workspace(&runtime.db, owner, workspace_id).await?;
+    for session in sessions {
+        if let Some(reference) = latest_pushed_wip_ref(&runtime.db, owner, session.id).await? {
+            return Ok(Some(reference));
         }
     }
-    match reference {
-        Some(reference) => Ok(reference),
-        None if live => Err(live_unavailable()),
-        None => Err(checkpoint_missing()),
-    }
+    Ok(None)
+}
+
+/// Per-turn file history is a host-worktree contract. Retained sandbox
+/// checkpoints only expose the latest saved ref.
+pub(crate) fn historical_turn_unsupported() -> ServerError {
+    ServerError::bad_request_kind(
+        "sandbox_historical_turn_unsupported",
+        "Retained sandbox checkpoints do not support per-turn file history. Inspect the latest retained checkpoint instead.",
+    )
 }
 
 pub async fn list_checkout_tree(
@@ -350,6 +385,13 @@ async fn tree_entry_mode(repo_root: &Path, oid: &str, path: &str) -> Result<Stri
 
 async fn resolve_commit(repo_root: &Path, reference: &str) -> Result<String, ServerError> {
     let reference = validate_git_ref(reference)?;
+    // Always try the bounded origin fetch so later pushes of the same ref
+    // refresh. Local clones without origin keep the raw-ref fallback.
+    let _ = fetch_origin_ref(repo_root, reference).await;
+    let tracking = format!("refs/remotes/origin/{reference}^{{commit}}");
+    if let Ok(oid) = git_stdout(repo_root, &["rev-parse", "--verify", &tracking]).await {
+        return Ok(oid);
+    }
     if let Ok(oid) = git_stdout(
         repo_root,
         &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
@@ -361,36 +403,50 @@ async fn resolve_commit(repo_root: &Path, reference: &str) -> Result<String, Ser
     Err(checkpoint_missing())
 }
 
+/// Fetch one WIP ref through the same bounded git path workspace creation
+/// uses (`git fetch --no-tags --no-write-fetch-head`). No credentials are
+/// invented; a remote that needs a grant the host does not already have
+/// stays unavailable.
+async fn fetch_origin_ref(repo_root: &Path, reference: &str) -> Result<(), String> {
+    let url = git_stdout(repo_root, &["config", "--get", "remote.origin.url"]).await?;
+    if url.is_empty() {
+        return Err("no origin remote".into());
+    }
+    let tracking = format!("refs/remotes/origin/{reference}");
+    let refspec = format!("+refs/heads/{reference}:{tracking}");
+    git_stdout(
+        repo_root,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            "origin",
+            &refspec,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 async fn merge_base_oid(
     repo_root: &Path,
     base_ref: &str,
     tip: &str,
 ) -> Result<String, ServerError> {
-    let base_ref = validate_git_ref(base_ref).unwrap_or("HEAD");
-    if let Ok(oid) = git_stdout(repo_root, &["merge-base", base_ref, tip]).await {
-        if !oid.is_empty() {
-            return Ok(oid);
+    let Ok(base_ref) = validate_git_ref(base_ref) else {
+        return Err(unavailable_base());
+    };
+    let _ = fetch_origin_ref(repo_root, base_ref).await;
+    let origin_base = format!("refs/remotes/origin/{base_ref}");
+    for candidate in [base_ref, origin_base.as_str()] {
+        if let Ok(oid) = git_stdout(repo_root, &["merge-base", candidate, tip]).await {
+            if !oid.is_empty() {
+                return Ok(oid);
+            }
         }
     }
-    if let Ok(oid) = git_stdout(
-        repo_root,
-        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
-    )
-    .await
-    {
-        return Ok(oid);
-    }
-    git_stdout(
-        repo_root,
-        &["rev-parse", "--verify", &format!("{tip}^{{commit}}")],
-    )
-    .await
-    .map_err(|err| {
-        ServerError::conflict_kind(
-            "workspace_sandbox_unavailable",
-            format!("could not resolve the checkpoint base: {err}"),
-        )
-    })
+    Err(unavailable_base())
 }
 
 fn require_local_git_dir(path: &Path) -> Result<(), ServerError> {
@@ -481,6 +537,13 @@ fn live_unavailable() -> ServerError {
     ServerError::conflict_kind(
         "workspace_sandbox_unavailable",
         "Live sandbox files are not inspectable from this machine. Open the transcript or pull request, or wait until the sandbox checkpoints its work.",
+    )
+}
+
+fn unavailable_base() -> ServerError {
+    ServerError::conflict_kind(
+        "sandbox_checkpoint_unavailable_base",
+        "The retained checkpoint's base revision is not available, so Tidebreak cannot show a diff without inventing an empty one.",
     )
 }
 
@@ -680,5 +743,163 @@ mod tests {
         assert!(validate_git_ref("--output=/tmp/x").is_err());
         assert!(validate_git_ref("mg-wip/sb-1-i1").is_ok());
         assert!(validate_git_ref("main").is_ok());
+    }
+
+    fn git_rev_parse(dir: &Path, spec: &str) -> Option<String> {
+        let output = StdCommand::new("git")
+            .args(["rev-parse", "--verify", spec])
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn clone_repo(src: &Path, dst: &Path) {
+        run(
+            src.parent().unwrap(),
+            &[
+                "git",
+                "clone",
+                "--quiet",
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+            ],
+        );
+        run(dst, &["git", "config", "user.email", "dev@example.com"]);
+        run(dst, &["git", "config", "user.name", "Dev"]);
+        run(dst, &["git", "config", "commit.gpgsign", "false"]);
+        run(dst, &["git", "config", "core.autocrlf", "false"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_commit_fetches_a_wip_ref_from_origin_and_refreshes_later_pushes() {
+        let dir = TempDir::new().unwrap();
+        let seed = dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run(&seed, &["git", "init", "-b", "main"]);
+        run(&seed, &["git", "config", "user.email", "dev@example.com"]);
+        run(&seed, &["git", "config", "user.name", "Dev"]);
+        run(&seed, &["git", "config", "commit.gpgsign", "false"]);
+        run(&seed, &["git", "config", "core.autocrlf", "false"]);
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        run(&seed, &["git", "add", "README.md"]);
+        run(&seed, &["git", "commit", "-m", "init"]);
+
+        let origin = dir.path().join("origin.git");
+        run(
+            dir.path(),
+            &[
+                "git",
+                "clone",
+                "--bare",
+                "--quiet",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        let host = dir.path().join("host");
+        let sandbox = dir.path().join("sandbox");
+        clone_repo(&origin, &host);
+        clone_repo(&origin, &sandbox);
+        // Narrow fetch so ordinary `git fetch` cannot hide the missing raw ref.
+        run(
+            &host,
+            &[
+                "git",
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+
+        std::fs::write(sandbox.join("proof.txt"), "first push\n").unwrap();
+        run(&sandbox, &["git", "add", "proof.txt"]);
+        run(&sandbox, &["git", "commit", "-m", "wip one"]);
+        run(
+            &sandbox,
+            &["git", "push", "origin", "HEAD:refs/heads/mg-wip/proof-i1"],
+        );
+        let first = git_rev_parse(&sandbox, "HEAD").unwrap();
+
+        assert!(git_rev_parse(&host, "mg-wip/proof-i1").is_none());
+        assert!(git_rev_parse(&host, "refs/remotes/origin/mg-wip/proof-i1").is_none());
+        run(&host, &["git", "fetch", "--quiet", "origin"]);
+        assert!(
+            git_rev_parse(&host, "mg-wip/proof-i1").is_none(),
+            "raw ref must stay unresolved after ordinary fetch"
+        );
+        assert!(
+            git_rev_parse(&host, "refs/remotes/origin/mg-wip/proof-i1").is_none(),
+            "narrow ordinary fetch must not take the wip ref"
+        );
+
+        let resolved = resolve_commit(&host, "mg-wip/proof-i1").await.unwrap();
+        assert_eq!(resolved, first);
+        assert!(git_rev_parse(&host, "mg-wip/proof-i1").is_none());
+        assert_eq!(
+            git_rev_parse(&host, "refs/remotes/origin/mg-wip/proof-i1").as_deref(),
+            Some(first.as_str())
+        );
+
+        std::fs::write(sandbox.join("proof.txt"), "second push\n").unwrap();
+        run(&sandbox, &["git", "add", "proof.txt"]);
+        run(&sandbox, &["git", "commit", "-m", "wip two"]);
+        run(
+            &sandbox,
+            &[
+                "git",
+                "push",
+                "--force",
+                "origin",
+                "HEAD:refs/heads/mg-wip/proof-i1",
+            ],
+        );
+        let second = git_rev_parse(&sandbox, "HEAD").unwrap();
+        assert_ne!(first, second);
+
+        let refreshed = resolve_commit(&host, "mg-wip/proof-i1").await.unwrap();
+        assert_eq!(refreshed, second);
+        let from_oid = merge_base_oid(&host, "main", &refreshed).await.unwrap();
+        let checkout = RemoteCheckout {
+            repo_root: host,
+            source: WorkspaceContentSource {
+                revision: WorkspaceContentRevision::Retained,
+                revision_ref: Some("mg-wip/proof-i1".into()),
+            },
+            from_oid,
+            to_oid: refreshed,
+        };
+        let blob = read_checkout_blob(&checkout, "proof.txt").await.unwrap();
+        assert_eq!(blob.content, "second push\n");
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_is_unavailable_when_the_base_is_missing() {
+        let (_dir, repo) = init_repo();
+        std::fs::write(repo.join("changed.txt"), "changed\n").unwrap();
+        run(&repo, &["git", "add", "changed.txt"]);
+        run(&repo, &["git", "commit", "-m", "wip"]);
+        let tip = git_rev_parse(&repo, "HEAD").unwrap();
+        let error = merge_base_oid(&repo, "does-not-exist", &tip)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "sandbox_checkpoint_unavailable_base");
+        // Falling back to the tip would compare the tree with itself.
+        let files = list_changed_files(
+            &repo,
+            &tip,
+            &tip,
+            crate::code::checkpoint::DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            files.files.is_empty(),
+            "a tip-vs-tip range hides changed files"
+        );
     }
 }

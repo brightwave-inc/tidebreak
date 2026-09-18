@@ -782,6 +782,28 @@ it("inspects retained sandbox files without a host worktree", async () => {
   expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
 });
 
+it("does not request a historical turn for a retained sandbox checkpoint", async () => {
+  const client = makeClient();
+  useCodeUiStore.setState({
+    inspectorScope: { turnId: "turn-1", label: "Turn 4" },
+  });
+  render(
+    <CodeInspector
+      client={client as ApiClient}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, worktree_path: "remote:ws-1" }}
+      contentRevision={0}
+      prResource={workspaceResource({ ...CLEAN_PR_SNAPSHOT, remote: true })}
+    />,
+  );
+  await waitFor(() =>
+    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith(
+      "ws-1",
+      undefined,
+    ),
+  );
+});
+
 it("keeps a managed workspace PR on the workspace API and hides remote merge", async () => {
   const client = makeClient();
   const pr = {
