@@ -30,6 +30,7 @@ import { HostedSignIn } from "./HostedSignIn";
 import {
   type AuthDiscovery,
   type HandoffFailure,
+  forgetHostedBrowserSession,
   hostedSession,
   reenterReloadedHostedSession,
 } from "./hostedSession";
@@ -542,6 +543,9 @@ export function AppShell() {
           ) {
             return;
           }
+          // Staying on sign-in is a sign-out of this tab: drop the reload
+          // marker so a later load does not silently start another hand-off.
+          forgetHostedBrowserSession();
           setHostedSignIn({ discovery: err.discovery, failure: err.failure });
           return;
         }
