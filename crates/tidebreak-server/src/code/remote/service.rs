@@ -2783,7 +2783,7 @@ mod tests {
             .await
             .unwrap();
         let tidebreak_core::IncarnationAdmission::Admitted(row) =
-            create_incarnation_intent(&runtime.db, &owner, session.id, session.spawn_epoch, 4)
+            create_incarnation_intent(&runtime.db, &owner, session.id, 1, 4)
                 .await
                 .unwrap()
         else {
@@ -2843,13 +2843,14 @@ mod tests {
             .restore_workspace(&owner, workspace.id)
             .await
             .unwrap();
-        let spawns = fake.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1);
-        assert_eq!(
-            spawns[0].repository_ref.as_deref(),
-            Some("mg-wip/restore-i1")
-        );
-        drop(spawns);
+        {
+            let spawns = fake.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(
+                spawns[0].repository_ref.as_deref(),
+                Some("mg-wip/restore-i1")
+            );
+        }
         let sessions = runtime
             .list_workspace_sessions(&owner, workspace.id)
             .await
