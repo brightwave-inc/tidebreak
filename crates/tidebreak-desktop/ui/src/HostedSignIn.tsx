@@ -16,10 +16,12 @@ import { WindowDragStrip } from "./WindowDragStrip";
  * Why a hosted browser tab has no session to show the app with.
  *
  * `no_session`: the page opened without a bearer — someone typed the
- * machine's address, or reloaded a tab. `session_ended`: the bearer the page
- * held stopped being accepted, which after an hour is simply its lifetime.
- * `handoff_failed`: the page came from the machine's landing route and the
- * route could not turn a sign-in into a bearer; `failure` says why.
+ * machine's address, signed out, or renewal could not continue. A reload of
+ * a tab that already held a session renews instead of landing here.
+ * `session_ended`: the bearer the page held stopped being accepted, which
+ * after an hour is simply its lifetime. `handoff_failed`: the page came from
+ * the machine's landing route and the route could not turn a sign-in into a
+ * bearer; `failure` says why.
  */
 export type HostedSignInReason =
   | "no_session"

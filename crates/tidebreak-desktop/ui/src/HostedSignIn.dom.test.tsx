@@ -48,6 +48,28 @@ describe("HostedSignIn", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("keeps the workspace and task query in the console sign-in URL", () => {
+    window.history.replaceState({}, "", "/#/code/w/workspace-1?task=session-2");
+    render(
+      <HostedSignIn
+        reason="no_session"
+        machineUrl="https://machine.example.test"
+        discovery={{
+          mode: "gateway",
+          gateway_url: "https://gateway.example.test",
+          resource: "tidebreak",
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("link", { name: /Open the console/ }),
+    ).toHaveAttribute(
+      "href",
+      "https://gateway.example.test/tidebreak?return_to=%2Fcode%2Fw%2Fworkspace-1%3Ftask%3Dsession-2",
+    );
+  });
+
   /**
    * A session link opened in a fresh browser has to survive the trip through
    * the issuer, so the current hash route rides along as `return_to`.

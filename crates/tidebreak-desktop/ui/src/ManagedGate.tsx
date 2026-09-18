@@ -9,6 +9,7 @@ import { ManagedPolicyContext } from "./managedPolicy";
 import { hasNativeHost, onPairingChanged } from "./host";
 import { composerKeyForRoute, useComposerDrafts } from "./ComposerDrafts";
 import {
+  forgetHostedBrowserSession,
   hostedHashRoute,
   hostedReentryIsLooping,
   hostedSession,
@@ -380,6 +381,7 @@ export function ManagedGate({
       if (reenterExpiredHostedSession(hosted) === "redirect") {
         return null;
       }
+      forgetHostedBrowserSession();
       return (
         <HostedSignIn
           reason="session_ended"

@@ -33,8 +33,9 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /**
- * Someone opened the machine's address directly, or reloaded a tab that had
- * a session. The page names the console that can send them back signed in.
+ * Someone opened the machine's address directly. A reload of a signed-in tab
+ * renews through the console instead of showing this screen; this is the
+ * first visit, a sign-out, or a renewal that could not continue.
  */
 export const SignInRequired: Story = {};
 

@@ -8,6 +8,7 @@ import {
   hostedSession,
   isHostedBearerShape,
   markHostedSession,
+  noteHostedSessionEstablished,
   rememberHostedBearer,
 } from "./hostedSession";
 
@@ -168,6 +169,7 @@ export async function hostedServerInfo({
       : null;
   markHostedSession({ baseUrl: origin, gatewayUrl, discovery });
   if (!bearer) throw new HostedSignInRequired(discovery, failure);
+  noteHostedSessionEstablished();
   return {
     baseUrl: origin,
     token: bearer,

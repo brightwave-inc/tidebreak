@@ -8,6 +8,10 @@
  * place the two facts a page holds live — the handoff token it arrived with
  * and the machine it is attached to — so the callers that need them outside
  * React (boot, the machine state read, the gate) agree.
+ *
+ * The bearer stays in memory (decision 82). A presence-only sessionStorage
+ * marker lets a reload renew through the existing console or OIDC hand-off
+ * without writing the credential.
  */
 
 /** What the machine's public discovery document says about signing in. */
@@ -33,7 +37,7 @@ export type HostedSession = {
 
 /** Enough of `window` for hash-route and navigation seams in tests. */
 export type HostedLocationWin = {
-  location: { hash: string; href?: string };
+  location: { hash: string; href?: string; origin?: string };
 };
 
 /**
@@ -63,6 +67,18 @@ let handoffReturnedAt: number | null = null;
 const draftsByRoute = new Map<string, string>();
 
 const HOSTED_REENTRY_DRAFT_PREFIX = "tidebreak.hostedReentryDraft:";
+/**
+ * Presence-only marker that this tab held a machine session. Reload reads it
+ * to renew through the console or OIDC start; the bearer never goes here.
+ */
+const HOSTED_CONTINUITY_KEY = "tidebreak.hostedSessionContinuity";
+/**
+ * Presence-only marker that this tab already sent its one automatic renewal.
+ * Survives a slow or abandoned round trip so a missing bearer afterward is
+ * sign-in, not another redirect, until a session is established or the
+ * reader retries.
+ */
+const HOSTED_REENTRY_ATTEMPTED_KEY = "tidebreak.hostedReentryAttempted";
 /** A second refusal this soon after a hand-off is a loop, not a new hour. */
 const REENTRY_LOOP_MS = 15_000;
 
@@ -152,12 +168,14 @@ export function hostedSession(): HostedSession | null {
 }
 
 /** Test seam: forget both facts. */
-export function resetHostedSessionForTests(): void {
+export function resetHostedSessionForTests(storage?: Storage | null): void {
   handoffToken = null;
   failure = null;
   session = null;
   handoffReturnedAt = null;
   draftsByRoute.clear();
+  clearHostedContinuity(storage);
+  clearHostedReentryAttempt(storage);
 }
 
 function sessionStorageOrNull(storage?: Storage | null): Storage | null {
@@ -167,6 +185,83 @@ function sessionStorageOrNull(storage?: Storage | null): Storage | null {
   } catch {
     return null;
   }
+}
+
+function readStorageItem(key: string, storage?: Storage | null): string | null {
+  try {
+    return sessionStorageOrNull(storage)?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorageItem(
+  key: string,
+  value: string,
+  storage?: Storage | null,
+): void {
+  try {
+    sessionStorageOrNull(storage)?.setItem(key, value);
+  } catch {
+    // Continuity and loop-guard writes are best-effort; a blocked store
+    // falls back to the in-memory facts for this document only.
+  }
+}
+
+function removeStorageItem(key: string, storage?: Storage | null): void {
+  try {
+    sessionStorageOrNull(storage)?.removeItem(key);
+  } catch {
+    // Same as a missing key.
+  }
+}
+
+function clearHostedContinuity(storage?: Storage | null): void {
+  removeStorageItem(HOSTED_CONTINUITY_KEY, storage);
+}
+
+function clearHostedReentryAttempt(storage?: Storage | null): void {
+  removeStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, storage);
+}
+
+function hostedSessionHasContinuity(storage?: Storage | null): boolean {
+  return readStorageItem(HOSTED_CONTINUITY_KEY, storage) === "1";
+}
+
+function rememberHostedReentryAttempt(storage?: Storage | null): void {
+  writeStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, "1", storage);
+}
+
+function hostedReentryAttempted(storage?: Storage | null): boolean {
+  return readStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, storage) !== null;
+}
+
+/**
+ * This tab held a bearer the machine accepted. Reload may renew through the
+ * console or OIDC; the bearer itself stays in memory.
+ */
+export function noteHostedSessionEstablished(storage?: Storage | null): void {
+  writeStorageItem(HOSTED_CONTINUITY_KEY, "1", storage);
+  clearHostedReentryAttempt(storage);
+}
+
+/**
+ * The reader asked to try signing in again. Clears the consumed automatic
+ * renewal so the next reload may redirect once more. Continuity stays.
+ */
+export function allowHostedReentryRetry(storage?: Storage | null): void {
+  clearHostedReentryAttempt(storage);
+}
+
+/**
+ * Drop this tab's bearer and the reload-renewal marker. A later load shows
+ * sign-in instead of silently signing back in — the sign-out contract.
+ */
+export function forgetHostedBrowserSession(storage?: Storage | null): void {
+  handoffToken = null;
+  failure = null;
+  clearHostedContinuity(storage);
+  clearHostedReentryAttempt(storage);
 }
 
 function draftStorageKey(route: string): string {
@@ -214,11 +309,18 @@ export function takeComposerDraftForReentry(
   return fromMemory || fromStore;
 }
 
-/** True when a hand-off just landed this tab and another refusal is a loop. */
-export function hostedReentryIsLooping(now: number = Date.now()): boolean {
-  return (
-    handoffReturnedAt !== null && now - handoffReturnedAt < REENTRY_LOOP_MS
-  );
+/**
+ * True when a hand-off just landed this tab, or this tab already used its
+ * one automatic renewal.
+ */
+export function hostedReentryIsLooping(
+  now: number = Date.now(),
+  storage?: Storage | null,
+): boolean {
+  if (handoffReturnedAt !== null && now - handoffReturnedAt < REENTRY_LOOP_MS) {
+    return true;
+  }
+  return hostedReentryAttempted(storage);
 }
 
 /** This tab's hash-router path, or `/` when the fragment is not a route. */
@@ -236,9 +338,64 @@ export function reenterExpiredHostedSession(
   hosted: Pick<HostedSession, "baseUrl" | "gatewayUrl">,
   win: HostedLocationWin = window,
   now: number = Date.now(),
+  storage?: Storage | null,
 ): "redirect" | "sign_in" {
-  if (!hosted.gatewayUrl || hostedReentryIsLooping(now)) return "sign_in";
-  win.location.href = consoleSignInUrl(hosted.gatewayUrl, win);
+  if (!hosted.gatewayUrl || hostedReentryIsLooping(now, storage)) {
+    return "sign_in";
+  }
+  return beginHostedReentry(
+    consoleSignInUrl(hosted.gatewayUrl, win),
+    win,
+    storage,
+  );
+}
+
+/**
+ * Reload of a tab that already held a session: renew through the same
+ * console or OIDC path the sign-in buttons use, keeping the hash route.
+ *
+ * A first visit, a hand-off that already failed, a sign-out, a static-token
+ * machine, or a loop after a missing gateway login stays on sign-in.
+ */
+export function reenterReloadedHostedSession(
+  hosted: HostedSession | null,
+  failure: HandoffFailure | null = null,
+  win: HostedLocationWin = window,
+  now: number = Date.now(),
+  storage?: Storage | null,
+): "redirect" | "sign_in" {
+  if (!hosted || failure || !hostedSessionHasContinuity(storage)) {
+    return "sign_in";
+  }
+  if (hostedReentryIsLooping(now, storage)) return "sign_in";
+  const url = hostedRenewalUrl(hosted, win);
+  if (!url) return "sign_in";
+  return beginHostedReentry(url, win, storage);
+}
+
+function hostedRenewalUrl(
+  hosted: HostedSession,
+  win: HostedLocationWin,
+): string | null {
+  if (hosted.discovery.mode === "gateway" && hosted.gatewayUrl) {
+    return consoleSignInUrl(hosted.gatewayUrl, win);
+  }
+  if (hosted.discovery.mode === "oidc") {
+    const origin = win.location.origin ?? window.location.origin;
+    return oidcSignInUrl(hosted.discovery.start_url, {
+      location: { origin, hash: win.location.hash },
+    });
+  }
+  return null;
+}
+
+function beginHostedReentry(
+  url: string,
+  win: HostedLocationWin,
+  storage?: Storage | null,
+): "redirect" {
+  rememberHostedReentryAttempt(storage);
+  win.location.href = url;
   return "redirect";
 }
 
@@ -269,7 +426,7 @@ export function consoleSignInUrl(
  */
 export function oidcSignInUrl(
   startUrl: string,
-  win: Pick<Window, "location"> = window,
+  win: HostedLocationWin & { location: { origin: string } } = window,
 ): string {
   const url = new URL(startUrl, win.location.origin);
   const here = hostedHashRoute(win);
