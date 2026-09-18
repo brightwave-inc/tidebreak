@@ -740,6 +740,42 @@ describe("reenterReloadedHostedSession", () => {
     expect(handoffBearer()).toBeNull();
   });
 
+  it("staying on the sign-in screen drops continuity so a later reload does not renew", () => {
+    const storage = memoryStorage();
+    noteHostedSessionEstablished(storage);
+    const now = 1_000_000;
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now,
+        storage,
+      ),
+    ).toBe("redirect");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now + 1_000,
+        storage,
+      ),
+    ).toBe("sign_in");
+    forgetHostedBrowserSession(storage);
+    const later = navWindow("#/code/s/session-1");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        later,
+        now + 20_000,
+        storage,
+      ),
+    ).toBe("sign_in");
+    expect(later.location.href).toBe("https://machine.example.test/");
+  });
+
   it("treats a missing gateway login as a loop instead of redirecting again", () => {
     const storage = memoryStorage();
     noteHostedSessionEstablished(storage);

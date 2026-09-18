@@ -7,6 +7,7 @@ import { ManagedGate } from "./ManagedGate";
 import {
   captureHandoffToken,
   markHostedSession,
+  noteHostedSessionEstablished,
   resetHostedSessionForTests,
 } from "./hostedSession";
 import { useManagedPolicy } from "./managedPolicy";
@@ -660,6 +661,7 @@ describe("ManagedGate", () => {
   });
 
   it("a standalone hosted machine whose bearer died shows the session-ended screen", async () => {
+    noteHostedSessionEstablished();
     markHostedSession({
       baseUrl: "https://machine.example.test",
       gatewayUrl: null,
@@ -673,6 +675,9 @@ describe("ManagedGate", () => {
       await screen.findByText("Your session on this machine ended"),
     ).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+    expect(
+      window.sessionStorage.getItem("tidebreak.hostedSessionContinuity"),
+    ).toBeNull();
   });
 
   it("a second refusal after a hand-off shows the session-ended screen", async () => {
