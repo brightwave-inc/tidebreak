@@ -2706,21 +2706,29 @@ mod tests {
             .is_none());
     }
 
-    /// Host worktree reads refuse a remote workspace with the remote marker
-    /// instead of treating the empty path as a missing checkout.
+    /// Host worktree reads refuse a remote workspace instead of treating the
+    /// `remote:` marker as a missing checkout. Without a retained checkpoint
+    /// the tree is explicitly unavailable.
     #[tokio::test]
-    async fn a_remote_workspace_tree_refuses_as_remote() {
+    async fn a_remote_workspace_tree_refuses_a_host_path() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
         let workspace = runtime
             .create_remote_workspace(&owner, repo.id, Some("remote".into()))
             .await
             .unwrap();
+        assert!(!std::path::Path::new(&workspace.worktree_path).exists());
         let error = runtime
             .workspace_tree(&owner, workspace.id, "", None)
             .await
             .unwrap_err();
-        assert!(error.message().contains("remote sandbox"));
+        assert!(
+            error.kind() == "sandbox_checkpoint_missing"
+                || error.kind() == "workspace_sandbox_unavailable",
+            "{}",
+            error.kind()
+        );
+        assert!(!std::path::Path::new(&workspace.worktree_path).exists());
     }
 
     /// Ending a remote session cancels the sandbox so it does not keep spending.

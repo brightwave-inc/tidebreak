@@ -708,6 +708,16 @@ describe("parseCodeWorkspaceTree", () => {
     expect(parseCodeWorkspaceTree(tree)).toEqual(tree);
   });
 
+  it("accepts a retained sandbox revision", () => {
+    const tree = {
+      paths: ["sandbox.txt"],
+      truncated: false,
+      revision: "retained",
+      revision_ref: "mg-wip/sb-1-i1",
+    };
+    expect(parseCodeWorkspaceTree(tree)).toEqual(tree);
+  });
+
   it("rejects contents-shaped payloads", () => {
     expect(
       parseCodeWorkspaceTree({

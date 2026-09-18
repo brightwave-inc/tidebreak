@@ -12,6 +12,8 @@ import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 type InspectorScenario =
   | "sandbox"
   | "sandbox-pr"
+  | "sandbox-unavailable"
+  | "sandbox-empty"
   | "placement-loading"
   | "placement-failure"
   | "ready"
@@ -182,29 +184,33 @@ function pending<T>(): Promise<T> {
 function inspectorClient(scenario: InspectorScenario): ApiClient {
   const fail = () =>
     Promise.reject(new Error("The workspace reader is offline."));
+  const sandboxTree = {
+    paths:
+      scenario === "sandbox-empty" || scenario === "empty"
+        ? []
+        : [
+            "README.md",
+            "package.json",
+            "pnpm-lock.yaml",
+            "crates/tidebreak-desktop/ui/src/code/CodeWorkspacePage.tsx",
+            "crates/tidebreak-desktop/ui/src/code/WorkspaceCard.tsx",
+            "crates/tidebreak-desktop/ui/src/code/editorDrag.ts",
+            "crates/tidebreak-desktop/ui/src/styles.css",
+            "crates/tidebreak-desktop/ui/public/tidebreak.png",
+            "crates/tidebreak-desktop/ui/src/stories/CodeInspector.stories.tsx",
+            "docs/decisions/0052-subagents.md",
+          ],
+    truncated: false,
+    ...(scenario.startsWith("sandbox")
+      ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
+      : {}),
+  };
   const loadTree =
     scenario === "loading"
       ? () => pending<{ paths: string[]; truncated: boolean }>()
-      : scenario === "failure"
+      : scenario === "failure" || scenario === "sandbox-unavailable"
         ? fail
-        : async () => ({
-            paths:
-              scenario === "empty"
-                ? []
-                : [
-                    "README.md",
-                    "package.json",
-                    "pnpm-lock.yaml",
-                    "crates/tidebreak-desktop/ui/src/code/CodeWorkspacePage.tsx",
-                    "crates/tidebreak-desktop/ui/src/code/WorkspaceCard.tsx",
-                    "crates/tidebreak-desktop/ui/src/code/editorDrag.ts",
-                    "crates/tidebreak-desktop/ui/src/styles.css",
-                    "crates/tidebreak-desktop/ui/public/tidebreak.png",
-                    "crates/tidebreak-desktop/ui/src/stories/CodeInspector.stories.tsx",
-                    "docs/decisions/0052-subagents.md",
-                  ],
-            truncated: false,
-          });
+        : async () => sandboxTree;
 
   return {
     listCodeWorkspaceTree: loadTree,
@@ -212,10 +218,10 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
     listCodeWorkspaceFiles:
       scenario === "loading"
         ? () => pending<typeof changedFiles>()
-        : scenario === "failure"
+        : scenario === "failure" || scenario === "sandbox-unavailable"
           ? fail
           : async () =>
-              scenario === "empty"
+              scenario === "empty" || scenario === "sandbox-empty"
                 ? {
                     files: [],
                     truncated: false,
@@ -225,10 +231,24 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
                       deletions: 0,
                       truncated: false,
                     },
+                    ...(scenario.startsWith("sandbox")
+                      ? {
+                          revision: "retained" as const,
+                          revision_ref: "mg-wip/sb-1-i1",
+                        }
+                      : {}),
                   }
                 : scenario === "truncated"
                   ? truncatedChangedFiles
-                  : changedFiles,
+                  : {
+                      ...changedFiles,
+                      ...(scenario.startsWith("sandbox")
+                        ? {
+                            revision: "retained" as const,
+                            revision_ref: "mg-wip/sb-1-i1",
+                          }
+                        : {}),
+                    },
     getCodeWorkspacePr: async () => prSnapshot,
     getCodeWorkspacePullRequests: async () => ({
       items:
@@ -367,11 +387,15 @@ function InspectorStory({
           }
         : pullRequest;
   const storyWorkspace =
-    scenario === "empty" ||
-    scenario === "sandbox" ||
-    scenario.startsWith("placement-")
+    scenario === "empty" || scenario.startsWith("placement-")
       ? workspace
-      : { ...workspace, pr: storyPr };
+      : scenario.startsWith("sandbox")
+        ? {
+            ...workspace,
+            worktree_path: `remote:${workspace.id}`,
+            pr: scenario === "sandbox" ? undefined : storyPr,
+          }
+        : { ...workspace, pr: storyPr };
   const storySnapshot = {
     ...prSnapshot,
     remote: scenario.startsWith("sandbox"),
@@ -500,7 +524,9 @@ export const SandboxFiles: Story = {
   args: { scenario: "sandbox" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("Files are in the sandbox")).toBeVisible();
+    await expect(
+      canvas.findByText("Retained checkpoint"),
+    ).resolves.toBeVisible();
     await expect(canvas.queryByRole("searchbox")).not.toBeInTheDocument();
   },
 };
@@ -511,6 +537,25 @@ export const SandboxChanges: Story = {
 
 export const SandboxWithPullRequest: Story = {
   args: { scenario: "sandbox-pr" },
+};
+
+export const SandboxUnavailable: Story = {
+  args: { scenario: "sandbox-unavailable" },
+};
+
+export const SandboxEmpty: Story = {
+  args: { scenario: "sandbox-empty" },
+};
+
+export const SandboxNarrow: Story = {
+  args: { scenario: "sandbox" },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-[330px]">
+        <Story />
+      </div>
+    ),
+  ],
 };
 
 export const WorkspacePlacementLoading: Story = {

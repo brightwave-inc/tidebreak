@@ -15,6 +15,7 @@ import { CodeFileIcon } from "./CodeFileIcon";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { type LiveResource, useLiveResource } from "./useLiveContent";
+import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 
 const FILE_KIND: Record<
   FileChangeKind,
@@ -153,6 +154,10 @@ export function DiffOverviewContent({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <WorkspaceRevisionChip
+            revision={payload?.revision}
+            revisionRef={payload?.revision_ref}
+          />
           <span className="grid size-3.5 shrink-0 place-items-center">
             {refreshing && (
               <Spinner className="size-3.5" aria-label="Refreshing" />

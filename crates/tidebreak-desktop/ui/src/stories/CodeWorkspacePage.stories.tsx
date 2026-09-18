@@ -778,9 +778,20 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       success: true,
       message: "Done.",
     }),
-    listCodeWorkspaceTree: async () => ({ paths: filePaths, truncated: false }),
+    listCodeWorkspaceTree: async () => ({
+      paths: filePaths,
+      truncated: false,
+      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
+        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
+        : {}),
+    }),
     searchCodeWorkspace: async () => ({ matches: [], truncated: false }),
-    listCodeWorkspaceFiles: async () => changedFiles,
+    listCodeWorkspaceFiles: async () => ({
+      ...changedFiles,
+      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
+        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
+        : {}),
+    }),
     getCodeWorkspaceDiff: async () => ({
       diff: [
         "diff --git a/src/code/editorDrag.ts b/src/code/editorDrag.ts",
@@ -803,6 +814,15 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       ].join("\n"),
       truncated: false,
       binary: false,
+      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
+        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
+        : {}),
+    }),
+    restoreCodeWorkspace: async (id: string) => ({
+      ...currentWorkspace,
+      id,
+      status: "active" as const,
+      archived_at: null,
     }),
     getCodePrComments: async () => ({
       number: pullRequest.number,
@@ -1483,8 +1503,8 @@ export const ManagedSlackRemoteWorkspace: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
-      canvas.findAllByText("Files are in the sandbox"),
-    ).resolves.not.toHaveLength(0);
+      canvas.findByText("Retained checkpoint"),
+    ).resolves.toBeVisible();
     await expect(
       canvas.queryByRole("button", { name: "Terminal" }),
     ).not.toBeInTheDocument();

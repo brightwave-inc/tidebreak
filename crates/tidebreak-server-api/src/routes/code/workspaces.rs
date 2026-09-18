@@ -184,10 +184,15 @@ pub async fn list_workspace_tree(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceTreeQuery>,
 ) -> Result<Json<CodeWorkspaceTree>, ServerError> {
-    let (paths, truncated) = code
+    let (paths, truncated, source) = code
         .workspace_tree(id, query.query.as_deref().unwrap_or(""), query.limit)
         .await?;
-    Ok(Json(CodeWorkspaceTree { paths, truncated }))
+    Ok(Json(CodeWorkspaceTree {
+        paths,
+        truncated,
+        revision: source.as_ref().map(|source| source.revision),
+        revision_ref: source.and_then(|source| source.revision_ref),
+    }))
 }
 
 pub async fn search_workspace(
@@ -277,12 +282,14 @@ pub async fn get_workspace_blob(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceBlobQuery>,
 ) -> Result<Json<CodeWorkspaceBlob>, ServerError> {
-    let blob = code.workspace_blob(id, &query.path).await?;
+    let (blob, source) = code.workspace_blob(id, &query.path).await?;
     Ok(Json(CodeWorkspaceBlob {
         path: blob.path,
         content: blob.content,
         truncated: blob.truncated,
         binary: blob.binary,
+        revision: source.as_ref().map(|source| source.revision),
+        revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
 
@@ -314,7 +321,7 @@ pub async fn list_workspace_files(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceFilesQuery>,
 ) -> Result<Json<CodeWorkspaceFiles>, ServerError> {
-    let (files, truncated, stat, turn_id) = code.workspace_files(id, query.turn).await?;
+    let (files, truncated, stat, turn_id, source) = code.workspace_files(id, query.turn).await?;
     Ok(Json(CodeWorkspaceFiles {
         files: files
             .into_iter()
@@ -329,6 +336,8 @@ pub async fn list_workspace_files(
         truncated,
         stat,
         turn_id,
+        revision: source.as_ref().map(|source| source.revision),
+        revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
 
@@ -338,7 +347,7 @@ pub async fn get_workspace_diff(
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Result<Json<CodeWorkspaceDiff>, ServerError> {
     let file = exact_diff_file(query.file);
-    let (diff, truncated, stat, turn_id) =
+    let (diff, truncated, stat, turn_id, source) =
         code.workspace_diff(id, query.turn, file.as_deref()).await?;
     Ok(Json(CodeWorkspaceDiff {
         diff,
@@ -346,6 +355,8 @@ pub async fn get_workspace_diff(
         stat,
         turn_id,
         file,
+        revision: source.as_ref().map(|source| source.revision),
+        revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
 

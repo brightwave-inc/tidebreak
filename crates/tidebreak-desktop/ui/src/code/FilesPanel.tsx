@@ -29,6 +29,7 @@ import {
 } from "./fileTree";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { useLiveResource } from "./useLiveContent";
+import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 
 const TREE_PAGE = 5000;
 
@@ -43,6 +44,7 @@ export function FilesPanel({
   selected,
   onOpenFile,
   contentRevision = 0,
+  contentSearch = true,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceTree" | "searchCodeWorkspace">;
   workspaceId: string;
@@ -50,6 +52,8 @@ export function FilesPanel({
   onOpenFile: (file: string, line?: number) => void;
   /** Bumped by the session journal when the worktree may have moved. */
   contentRevision?: number;
+  /** Checkpoint inspection has no worktree grep. */
+  contentSearch?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [include, setInclude] = useState("");
@@ -90,7 +94,7 @@ export function FilesPanel({
     setSearchHits(null);
     setSearchTruncated(false);
     setSearchError(null);
-    if (!needle) {
+    if (!contentSearch || !needle) {
       setSearching(false);
       return;
     }
@@ -122,7 +126,15 @@ export function FilesPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [client, workspaceId, query, include, exclude, contentRevision]);
+  }, [
+    client,
+    workspaceId,
+    query,
+    include,
+    exclude,
+    contentRevision,
+    contentSearch,
+  ]);
 
   const visiblePaths = useMemo(() => {
     return filterPaths(tree?.paths ?? [], include, exclude);
@@ -266,34 +278,42 @@ export function FilesPanel({
     >
       <div className="flex items-center justify-between gap-2 px-3 pt-3">
         <h2 className="text-sm font-medium">Files</h2>
-        <span className="grid size-3.5 shrink-0 place-items-center">
-          {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
-        </span>
+        <div className="flex items-center gap-2">
+          <WorkspaceRevisionChip
+            revision={tree?.revision}
+            revisionRef={tree?.revision_ref}
+          />
+          <span className="grid size-3.5 shrink-0 place-items-center">
+            {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
+          </span>
+        </div>
       </div>
-      <div className="flex flex-col gap-1.5 px-3 pb-2 pt-2.5">
-        <SearchInput
-          size="sm"
-          value={query}
-          onValueChange={setQuery}
-          placeholder="Search file contents"
-          aria-label="Search file contents"
-          inputRef={searchInput}
-        />
-        <Input
-          value={include}
-          onChange={(event) => setInclude(event.target.value)}
-          placeholder="Files to include"
-          aria-label="Files to include"
-          className="h-8 text-xs"
-        />
-        <Input
-          value={exclude}
-          onChange={(event) => setExclude(event.target.value)}
-          placeholder="Files to exclude"
-          aria-label="Files to exclude"
-          className="h-8 text-xs"
-        />
-      </div>
+      {contentSearch && (
+        <div className="flex flex-col gap-1.5 px-3 pb-2 pt-2.5">
+          <SearchInput
+            size="sm"
+            value={query}
+            onValueChange={setQuery}
+            placeholder="Search file contents"
+            aria-label="Search file contents"
+            inputRef={searchInput}
+          />
+          <Input
+            value={include}
+            onChange={(event) => setInclude(event.target.value)}
+            placeholder="Files to include"
+            aria-label="Files to include"
+            className="h-8 text-xs"
+          />
+          <Input
+            value={exclude}
+            onChange={(event) => setExclude(event.target.value)}
+            placeholder="Files to exclude"
+            aria-label="Files to exclude"
+            className="h-8 text-xs"
+          />
+        </div>
+      )}
       {!searchMode && error && (
         <p className="text-critical px-3 py-2 text-sm">{error}</p>
       )}

@@ -84,6 +84,7 @@ import {
   workspacePullRequestTarget,
 } from "./workspaceWorkflow";
 import { STATUS_MARK } from "./statusTone";
+import { isRemoteWorktreePath } from "./workspaceRemote";
 import {
   PULL_REQUEST_LIFECYCLE_TONE,
   STATUS_TONE_BADGE_VARIANT,
@@ -146,9 +147,8 @@ export function CodeInspector({
   const turnId = scope?.turnId;
   const remote =
     prResource?.data?.remote === true ||
-    workspace?.worktree_path === "" ||
-    workspace?.worktree_path?.startsWith("remote:") === true;
-  const worktreeReady = !remote && (!prResource || prResource.data !== null);
+    isRemoteWorktreePath(workspace?.worktree_path);
+  const worktreeReady = !prResource || prResource.data !== null || remote;
   const changedFiles = useChangedFilesResource({
     client,
     workspaceId,
@@ -281,6 +281,7 @@ export function CodeInspector({
               contentRevision={contentRevision}
               selected={file}
               onOpenFile={openFile}
+              contentSearch={!remote}
             />
           ) : (
             <WorkspaceFilesUnavailable

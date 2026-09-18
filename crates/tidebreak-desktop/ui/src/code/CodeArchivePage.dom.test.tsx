@@ -94,7 +94,7 @@ it("searches owned archive history even when a shared row appears first for the 
 });
 
 it.each(["remote:slack-workspace", ""])(
-  "keeps an archive at %j browsable without offering unsupported restore",
+  "offers restore for an archived sandbox workspace at %j",
   (worktreePath) => {
     useCodeCatalogStore.setState({
       workspaces: [
@@ -110,11 +110,10 @@ it.each(["remote:slack-workspace", ""])(
       ],
     });
     render(<CodeArchivePage />);
-    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Open Remote archive" }),
     ).toBeVisible();
-    expect(client.restoreCodeWorkspace).not.toHaveBeenCalled();
   },
 );
 

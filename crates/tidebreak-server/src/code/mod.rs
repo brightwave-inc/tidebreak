@@ -41,6 +41,7 @@ pub mod recovery;
 pub mod remote;
 pub mod rewrite;
 pub mod runtime;
+pub mod sandbox_checkout;
 pub mod sandbox_tools;
 pub mod scoped;
 pub mod scratch;

@@ -1528,6 +1528,14 @@ pub struct WorkspaceTreeQuery {
     pub limit: Option<u32>,
 }
 
+/// Whether workspace file bytes came from a live sandbox or a retained checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceContentRevision {
+    Live,
+    Retained,
+}
+
 /// Bounded path listing for `GET /code/workspaces/{id}/tree`.
 ///
 /// Paths only. Never file contents.
@@ -1535,6 +1543,12 @@ pub struct WorkspaceTreeQuery {
 pub struct CodeWorkspaceTree {
     pub paths: Vec<String>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision: Option<WorkspaceContentRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_ref: Option<String>,
 }
 
 /// Query for `GET /code/workspaces/{id}/search`.
@@ -1611,6 +1625,12 @@ pub struct CodeWorkspaceBlob {
     pub content: String,
     pub truncated: bool,
     pub binary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision: Option<WorkspaceContentRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_ref: Option<String>,
 }
 
 /// Query for `GET /code/workspaces/{id}/diff`.
@@ -1645,6 +1665,12 @@ pub struct CodeWorkspaceFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub turn_id: Option<TurnId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision: Option<WorkspaceContentRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_ref: Option<String>,
 }
 
 /// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
@@ -1660,6 +1686,12 @@ pub struct CodeWorkspaceDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision: Option<WorkspaceContentRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_ref: Option<String>,
 }
 
 /// One parked or decided engine approval.
