@@ -385,32 +385,31 @@ async fn tree_entry_mode(repo_root: &Path, oid: &str, path: &str) -> Result<Stri
 
 async fn resolve_commit(repo_root: &Path, reference: &str) -> Result<String, ServerError> {
     let reference = validate_git_ref(reference)?;
-    // Always try the bounded origin fetch so later pushes of the same ref
-    // refresh. Local clones without origin keep the raw-ref fallback.
-    let _ = fetch_origin_ref(repo_root, reference).await;
-    let tracking = format!("refs/remotes/origin/{reference}^{{commit}}");
-    if let Ok(oid) = git_stdout(repo_root, &["rev-parse", "--verify", &tracking]).await {
-        return Ok(oid);
-    }
-    if let Ok(oid) = git_stdout(
-        repo_root,
-        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-    )
-    .await
-    {
-        return Ok(oid);
-    }
-    Err(checkpoint_missing())
+    // A configured origin must confirm a mutable WIP ref. A failed refresh
+    // cannot turn an older cached commit into the final saved checkpoint.
+    let fetched = fetch_origin_ref(repo_root, reference).await.map_err(|_| {
+        ServerError::conflict_kind(
+            "workspace_sandbox_unavailable",
+            "The saved sandbox checkpoint could not be refreshed from its repository. Check repository access or try again.",
+        )
+    })?;
+    let resolved_ref = if fetched {
+        format!("refs/remotes/origin/{reference}^{{commit}}")
+    } else {
+        format!("{reference}^{{commit}}")
+    };
+    git_stdout(repo_root, &["rev-parse", "--verify", &resolved_ref])
+        .await
+        .map_err(|_| checkpoint_missing())
 }
 
 /// Fetch one WIP ref through the same bounded git path workspace creation
-/// uses (`git fetch --no-tags --no-write-fetch-head`). No credentials are
-/// invented; a remote that needs a grant the host does not already have
-/// stays unavailable.
-async fn fetch_origin_ref(repo_root: &Path, reference: &str) -> Result<(), String> {
-    let url = git_stdout(repo_root, &["config", "--get", "remote.origin.url"]).await?;
-    if url.is_empty() {
-        return Err("no origin remote".into());
+/// uses (`git fetch --no-tags --no-write-fetch-head`). Only repositories
+/// without an origin may resolve a local ref without refreshing it.
+async fn fetch_origin_ref(repo_root: &Path, reference: &str) -> Result<bool, String> {
+    let remotes = git_stdout(repo_root, &["remote"]).await?;
+    if !remotes.lines().any(|remote| remote == "origin") {
+        return Ok(false);
     }
     let tracking = format!("refs/remotes/origin/{reference}");
     let refspec = format!("+refs/heads/{reference}:{tracking}");
@@ -426,7 +425,7 @@ async fn fetch_origin_ref(repo_root: &Path, reference: &str) -> Result<(), Strin
         ],
     )
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn merge_base_oid(
@@ -875,6 +874,27 @@ mod tests {
         };
         let blob = read_checkout_blob(&checkout, "proof.txt").await.unwrap();
         assert_eq!(blob.content, "second push\n");
+
+        // Keep the cached ref, then make origin unreachable. Returning that
+        // cached commit would silently substitute an unverified checkpoint.
+        let missing_origin = dir.path().join("unreachable.git");
+        run(
+            &checkout.repo_root,
+            &[
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                missing_origin.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            git_rev_parse(&checkout.repo_root, "refs/remotes/origin/mg-wip/proof-i1").is_some()
+        );
+        let error = resolve_commit(&checkout.repo_root, "mg-wip/proof-i1")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "workspace_sandbox_unavailable");
     }
 
     #[tokio::test]
