@@ -13,6 +13,7 @@ import {
   useComposerDrafts,
 } from "./ComposerDrafts";
 import {
+  allowHostedReentryRetry,
   captureHandoffToken,
   consoleSignInUrl,
   forgetHostedBrowserSession,
@@ -797,7 +798,48 @@ describe("reenterReloadedHostedSession", () => {
     expect(second.location.href).toBe("https://machine.example.test/");
   });
 
-  it("allows another renewal after the loop window", () => {
+  it("consumes one automatic renewal across a round trip longer than the loop window", () => {
+    const storage = memoryStorage();
+    noteHostedSessionEstablished(storage);
+    const first = navWindow("#/code/w/workspace-1?task=session-2");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        first,
+        1_000_000,
+        storage,
+      ),
+    ).toBe("redirect");
+    expect(first.location.href).toBe(
+      "https://gateway.example.test/tidebreak?return_to=%2Fcode%2Fw%2Fworkspace-1%3Ftask%3Dsession-2",
+    );
+    expect(storedValues(storage)).not.toContain("mg_at_token");
+    const second = navWindow("#/code/w/workspace-1?task=session-2");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        second,
+        1_015_001,
+        storage,
+      ),
+    ).toBe("sign_in");
+    expect(second.location.href).toBe("https://machine.example.test/");
+    const third = navWindow("#/code/w/workspace-1?task=session-2");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        third,
+        1_045_002,
+        storage,
+      ),
+    ).toBe("sign_in");
+    expect(third.location.href).toBe("https://machine.example.test/");
+  });
+
+  it("stays on sign-in across repeated reloads with no bearer", () => {
     const storage = memoryStorage();
     noteHostedSessionEstablished(storage);
     const now = 1_000_000;
@@ -810,19 +852,117 @@ describe("reenterReloadedHostedSession", () => {
         storage,
       ),
     ).toBe("redirect");
+    for (const later of [now + 1_000, now + 15_001, now + 120_000]) {
+      const reload = navWindow("#/code/s/session-1");
+      expect(
+        reenterReloadedHostedSession(
+          gatewayHosted,
+          null,
+          reload,
+          later,
+          storage,
+        ),
+      ).toBe("sign_in");
+      expect(reload.location.href).toBe("https://machine.example.test/");
+      expect(storedValues(storage)).not.toContain("mg_at_token");
+    }
+  });
+
+  it("allows another renewal after a successful sign-in", () => {
+    const storage = memoryStorage();
+    noteHostedSessionEstablished(storage);
+    const now = 1_000_000;
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now,
+        storage,
+      ),
+    ).toBe("redirect");
+    noteHostedSessionEstablished(storage);
+    const again = navWindow("#/code/w/workspace-1?task=session-2");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        again,
+        now + 45_002,
+        storage,
+      ),
+    ).toBe("redirect");
+    expect(again.location.href).toBe(
+      "https://gateway.example.test/tidebreak?return_to=%2Fcode%2Fw%2Fworkspace-1%3Ftask%3Dsession-2",
+    );
+    expect(storedValues(storage)).not.toContain("mg_at_token");
+  });
+
+  it("allows another renewal after an explicit retry", () => {
+    const storage = memoryStorage();
+    noteHostedSessionEstablished(storage);
+    const now = 1_000_000;
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now,
+        storage,
+      ),
+    ).toBe("redirect");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now + 15_001,
+        storage,
+      ),
+    ).toBe("sign_in");
+    allowHostedReentryRetry(storage);
+    const retry = navWindow("#/code/w/workspace-1?task=session-2");
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        retry,
+        now + 45_002,
+        storage,
+      ),
+    ).toBe("redirect");
+    expect(retry.location.href).toBe(
+      "https://gateway.example.test/tidebreak?return_to=%2Fcode%2Fw%2Fworkspace-1%3Ftask%3Dsession-2",
+    );
+  });
+
+  it("does not renew after sign-out even after the loop window", () => {
+    const storage = memoryStorage();
+    noteHostedSessionEstablished(storage);
+    const now = 1_000_000;
+    expect(
+      reenterReloadedHostedSession(
+        gatewayHosted,
+        null,
+        navWindow("#/code/s/session-1"),
+        now,
+        storage,
+      ),
+    ).toBe("redirect");
+    forgetHostedBrowserSession(storage);
     const later = navWindow("#/code/w/workspace-1?task=session-2");
     expect(
       reenterReloadedHostedSession(
         gatewayHosted,
         null,
         later,
-        now + 15_001,
+        now + 45_002,
         storage,
       ),
-    ).toBe("redirect");
-    expect(later.location.href).toBe(
-      "https://gateway.example.test/tidebreak?return_to=%2Fcode%2Fw%2Fworkspace-1%3Ftask%3Dsession-2",
-    );
+    ).toBe("sign_in");
+    expect(later.location.href).toBe("https://machine.example.test/");
+    expect(handoffBearer()).toBeNull();
+    expect(storage.getItem("tidebreak.hostedSessionContinuity")).toBeNull();
   });
 
   it("keeps concurrent tabs independent: only the tab that held a session renews", () => {
