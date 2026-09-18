@@ -149,10 +149,13 @@ export function CodeInspector({
     prResource?.data?.remote === true ||
     isRemoteWorktreePath(workspace?.worktree_path);
   const worktreeReady = !prResource || prResource.data !== null || remote;
+  // Retained sandbox checkpoints have no per-turn history. Requesting a turn
+  // would 400; inspect the latest retained ref instead.
+  const filesTurnId = remote ? undefined : turnId;
   const changedFiles = useChangedFilesResource({
     client,
     workspaceId,
-    turnId,
+    turnId: filesTurnId,
     contentRevision,
     enabled: worktreeReady,
   });
@@ -300,8 +303,8 @@ export function CodeInspector({
             {worktreeReady ? (
               <DiffOverviewContent
                 resource={changedFiles}
-                turnId={turnId}
-                turnLabel={scope?.label}
+                turnId={filesTurnId}
+                turnLabel={filesTurnId ? scope?.label : undefined}
                 selected={file}
                 onOpenFile={openDiff}
               />

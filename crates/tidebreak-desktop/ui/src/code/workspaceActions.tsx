@@ -838,7 +838,8 @@ export function useWorkspaceCardCommands(): {
       if (
         error instanceof HttpError &&
         (error.kind === "sandbox_checkpoint_missing" ||
-          error.kind === "sandbox_checkpoint_failed")
+          error.kind === "sandbox_checkpoint_failed" ||
+          error.kind === "sandbox_checkpoint_unavailable_base")
       ) {
         toast.error(
           friendlyErrorMessage(

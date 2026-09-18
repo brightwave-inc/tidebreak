@@ -12,7 +12,7 @@ use tidebreak_core::db::code::{
 use tidebreak_core::{
     Attention, AttentionSource, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, Event,
     ExecutionLocation, HarnessKind, HarnessNoticeLevel, IncarnationAdmission, OwnerId,
-    PermissionMode, QuickAction, RepoId, Session, SessionId, SessionKind, SessionLifecycle,
+    PermissionMode, QuickAction, RepoId, Session, SessionId, SessionKind, SessionLifecycle, TurnId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -144,19 +144,45 @@ fn git(repo: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn write_wip_ref(repo_root: &std::path::Path, file: &str, contents: &str, git_ref: &str) {
+    std::fs::write(repo_root.join(file), contents).unwrap();
+    git(repo_root, &["add", file]);
+    git(repo_root, &["commit", "-m", git_ref]);
+    git(
+        repo_root,
+        &["update-ref", &format!("refs/heads/{git_ref}"), "HEAD"],
+    );
+    git(repo_root, &["reset", "--hard", "HEAD~1"]);
+}
+
 async fn seed_retained_checkpoint(
     runtime: &CodeRuntime,
     workspace: &CodeWorkspace,
     repo_root: &std::path::Path,
 ) -> SessionId {
-    std::fs::write(repo_root.join("sandbox.txt"), "from the checkpoint\n").unwrap();
-    git(repo_root, &["add", "sandbox.txt"]);
-    git(repo_root, &["commit", "-m", "sandbox wip"]);
-    git(
+    write_wip_ref(
         repo_root,
-        &["update-ref", "refs/heads/mg-wip/sb-1-i1", "HEAD"],
+        "sandbox.txt",
+        "from the checkpoint\n",
+        "mg-wip/sb-1-i1",
     );
-    git(repo_root, &["reset", "--hard", "HEAD~1"]);
+    seed_session_checkpoint(
+        runtime,
+        workspace,
+        "mg-wip/sb-1-i1",
+        "sb-1",
+        chrono::Utc::now(),
+    )
+    .await
+}
+
+async fn seed_session_checkpoint(
+    runtime: &CodeRuntime,
+    workspace: &CodeWorkspace,
+    wip_ref: &str,
+    sandbox_id: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> SessionId {
     let session = Session {
         visibility: tidebreak_core::SessionVisibility::Private,
         id: SessionId::new(),
@@ -179,7 +205,7 @@ async fn seed_retained_checkpoint(
         attention: Attention::working(AttentionSource::Lifecycle),
         unrecognized_event_count: 0,
         subagents: Vec::new(),
-        created_at: chrono::Utc::now(),
+        created_at,
         execution_location: ExecutionLocation::Sandbox,
         acts_as: None,
     };
@@ -191,7 +217,7 @@ async fn seed_retained_checkpoint(
     else {
         panic!("expected incarnation admission");
     };
-    activate_incarnation(&runtime.db, &workspace.owner, row.id, "sb-1")
+    activate_incarnation(&runtime.db, &workspace.owner, row.id, sandbox_id)
         .await
         .unwrap();
     let notice = Event::HarnessNotice {
@@ -207,7 +233,7 @@ async fn seed_retained_checkpoint(
         1,
         IncarnationSideEffects {
             journal: std::slice::from_ref(&notice),
-            wip_ref: Some("mg-wip/sb-1-i1"),
+            wip_ref: Some(wip_ref),
             ..Default::default()
         },
     )
@@ -292,4 +318,134 @@ async fn remote_workspace_inspects_and_restores_from_a_retained_checkpoint() {
         .unwrap();
     assert_eq!(session.lifecycle, SessionLifecycle::Idle);
     assert_eq!(session.id, session_id);
+    assert_eq!(
+        tidebreak_core::db::code::latest_pushed_wip_ref(&runtime.db, &workspace.owner, session_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("mg-wip/sb-1-i1")
+    );
+    let sessions = tidebreak_core::db::code::list_sessions_for_workspace(
+        &runtime.db,
+        &workspace.owner,
+        workspace.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, session_id);
+    // Restore is idempotent and does not mint a second session.
+    let restored_again = runtime
+        .restore_workspace(&workspace.owner, workspace.id)
+        .await
+        .unwrap();
+    assert_eq!(restored_again.id, workspace.id);
+    let sessions = tidebreak_core::db::code::list_sessions_for_workspace(
+        &runtime.db,
+        &workspace.owner,
+        workspace.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, session_id);
+    assert_eq!(sessions[0].lifecycle, SessionLifecycle::Idle);
+}
+
+#[tokio::test]
+async fn remote_inspect_uses_the_newest_session_checkpoint() {
+    let (_state, runtime, repo, mut workspace, _dir) = hosted_fixture().await;
+    let repo_root = std::path::PathBuf::from(&repo.root_path);
+    write_wip_ref(
+        &repo_root,
+        "old.txt",
+        "from the older session\n",
+        "mg-wip/old-i1",
+    );
+    write_wip_ref(
+        &repo_root,
+        "new.txt",
+        "from the newer session\n",
+        "mg-wip/new-i1",
+    );
+    let older = chrono::Utc::now() - chrono::Duration::seconds(60);
+    seed_session_checkpoint(&runtime, &workspace, "mg-wip/old-i1", "old", older).await;
+    seed_session_checkpoint(
+        &runtime,
+        &workspace,
+        "mg-wip/new-i1",
+        "new",
+        chrono::Utc::now(),
+    )
+    .await;
+    workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+    save_workspace(&runtime.db, &workspace).await.unwrap();
+
+    let (paths, _, source) = runtime
+        .workspace_tree(&workspace.owner, workspace.id, "", None)
+        .await
+        .unwrap();
+    let source = source.expect("retained revision");
+    assert_eq!(source.revision_ref.as_deref(), Some("mg-wip/new-i1"));
+    assert!(paths.iter().any(|path| path == "new.txt"));
+    let (blob, _) = runtime
+        .workspace_blob(&workspace.owner, workspace.id, "new.txt")
+        .await
+        .unwrap();
+    assert_eq!(blob.content, "from the newer session\n");
+}
+
+#[tokio::test]
+async fn remote_files_and_diff_reject_a_historical_turn() {
+    let (_state, runtime, repo, mut workspace, _dir) = hosted_fixture().await;
+    let repo_root = std::path::PathBuf::from(&repo.root_path);
+    seed_retained_checkpoint(&runtime, &workspace, &repo_root).await;
+    workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+    save_workspace(&runtime.db, &workspace).await.unwrap();
+    let turn = TurnId::new();
+    let files = runtime
+        .workspace_files(&workspace.owner, workspace.id, Some(turn))
+        .await
+        .unwrap_err();
+    assert_eq!(files.kind(), "sandbox_historical_turn_unsupported");
+    let diff = runtime
+        .workspace_diff(
+            &workspace.owner,
+            workspace.id,
+            Some(turn),
+            Some("sandbox.txt"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(diff.kind(), "sandbox_historical_turn_unsupported");
+}
+
+#[tokio::test]
+async fn restore_refuses_a_checkpoint_string_that_is_not_recoverable() {
+    let (_state, runtime, _repo, mut workspace, _dir) = hosted_fixture().await;
+    seed_session_checkpoint(
+        &runtime,
+        &workspace,
+        "mg-wip/ghost-i1",
+        "ghost",
+        chrono::Utc::now(),
+    )
+    .await;
+    workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+    workspace.status = CodeWorkspaceStatus::Archived;
+    workspace.archived_at = Some(chrono::Utc::now());
+    save_workspace(&runtime.db, &workspace).await.unwrap();
+    let error = runtime
+        .restore_workspace(&workspace.owner, workspace.id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "sandbox_checkpoint_missing");
+    assert_eq!(
+        runtime
+            .get_workspace(&workspace.owner, workspace.id)
+            .await
+            .unwrap()
+            .status,
+        CodeWorkspaceStatus::Archived
+    );
 }
