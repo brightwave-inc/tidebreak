@@ -324,12 +324,13 @@ async fn legacy_managed_repo_and_worktree_paths_remain_accessible() {
     assert!(std::path::Path::new(&next_workspace.worktree_path).starts_with(new_worktree_root));
     let reread_workspace = runtime.get_workspace(&owner, workspace_id).await.unwrap();
     assert_eq!(reread_workspace.worktree_path, workspace.worktree_path);
-    let (paths, truncated) = runtime
+    let (paths, truncated, source) = runtime
         .workspace_tree(&owner, workspace_id, "README", Some(10))
         .await
         .unwrap();
     assert_eq!(paths, vec!["README.md"]);
     assert!(!truncated);
+    assert!(source.is_none());
 }
 
 /// The `/code/*` routes reach the store only through the owner-scoped view.
@@ -2227,7 +2228,14 @@ async fn slack_workspace_management_is_scoped_and_revocable() {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{suffix}");
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["kind"], "workspace_remote", "{suffix}: {body}");
+        assert_eq!(
+            body["kind"], "sandbox_checkpoint_missing",
+            "{suffix}: {body}"
+        );
+        assert!(
+            !std::path::Path::new(&remote_workspace.worktree_path).exists(),
+            "remote marker must not become a host path"
+        );
     }
     let archived = client
         .post(format!("http://{addr}{path}/archive"))

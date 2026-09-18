@@ -748,20 +748,6 @@ it("waits for workspace placement before reading files and changes", async () =>
   rerender(
     <CodeInspector
       {...props}
-      prResource={workspaceResource({ ...CLEAN_PR_SNAPSHOT, remote: true })}
-    />,
-  );
-  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
-  expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
-  await userEvent
-    .setup()
-    .click(screen.getByRole("tab", { name: "Source control" }));
-  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
-  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
-  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
-  rerender(
-    <CodeInspector
-      {...props}
       prResource={workspaceResource(CLEAN_PR_SNAPSHOT)}
     />,
   );
@@ -774,27 +760,26 @@ it("waits for workspace placement before reading files and changes", async () =>
   );
 });
 
-it("keeps pull request review available for sandbox workspaces", async () => {
+it("inspects retained sandbox files without a host worktree", async () => {
   const client = makeClient();
+  vi.mocked(client.listCodeWorkspaceTree).mockResolvedValue({
+    paths: ["sandbox.txt"],
+    truncated: false,
+    revision: "retained",
+    revision_ref: "mg-wip/sb-1-i1",
+  });
   render(
     <CodeInspector
       client={client as ApiClient}
       workspaceId="ws-1"
-      workspace={WORKSPACE}
+      workspace={{ ...WORKSPACE, worktree_path: "remote:ws-1" }}
       contentRevision={0}
-      prResource={workspaceResource({
-        ...CLEAN_PR_SNAPSHOT,
-        remote: true,
-        pr: PR,
-      })}
+      prResource={workspaceResource({ ...CLEAN_PR_SNAPSHOT, remote: true })}
     />,
   );
-  await userEvent
-    .setup()
-    .click(screen.getByRole("button", { name: "Review pull request" }));
-  await screen.findByText("Fix login flow");
-  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
-  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+  expect(await screen.findByText("sandbox.txt")).toBeInTheDocument();
+  expect(screen.getByText("Retained checkpoint")).toBeInTheDocument();
+  expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
 });
 
 it("keeps a managed workspace PR on the workspace API and hides remote merge", async () => {
@@ -826,7 +811,7 @@ it("keeps a managed workspace PR on the workspace API and hides remote merge", a
   ).not.toBeInTheDocument();
 });
 
-it("keeps remote Files accurate when its external connection cannot load PR status", () => {
+it("keeps remote Files readable when its external connection cannot load PR status", async () => {
   const client = makeClient();
   render(
     <CodeInspector
@@ -841,7 +826,8 @@ it("keeps remote Files accurate when its external connection cannot load PR stat
       }}
     />,
   );
-  expect(screen.getByText("Files are in the sandbox")).toBeInTheDocument();
-  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
-  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+  await waitFor(() => expect(client.listCodeWorkspaceTree).toHaveBeenCalled());
+  expect(
+    screen.queryByText("Files are in the sandbox"),
+  ).not.toBeInTheDocument();
 });

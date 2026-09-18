@@ -3286,12 +3286,25 @@ export function parseCodeTurnSubmission(
   return queued ? { kind: "queued", queued } : null;
 }
 
+function parseWorkspaceContentRevision(
+  value: unknown,
+): CodeWorkspaceTree["revision"] | false {
+  if (value === undefined) return undefined;
+  if (value === "live" || value === "retained") return value;
+  return false;
+}
+
 export function parseCodeWorkspaceTree(
   value: unknown,
 ): CodeWorkspaceTree | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireCodeWorkspaceTree>(value, ["paths", "truncated"]) ||
+    !onlyKeys<CodeWorkspaceTree>(value, [
+      "paths",
+      "truncated",
+      "revision",
+      "revision_ref",
+    ]) ||
     !Array.isArray(value.paths) ||
     typeof value.truncated !== "boolean"
   ) {
@@ -3302,7 +3315,19 @@ export function parseCodeWorkspaceTree(
     if (!nonEmptyLine(item)) return null;
     paths.push(item);
   }
-  return { paths, truncated: value.truncated };
+  const revision = parseWorkspaceContentRevision(value.revision);
+  if (revision === false) return null;
+  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
+    return null;
+  }
+  return {
+    paths,
+    truncated: value.truncated,
+    ...(revision === undefined ? {} : { revision }),
+    ...(value.revision_ref === undefined
+      ? {}
+      : { revision_ref: value.revision_ref }),
+  };
 }
 
 export function parseCodeWorkspaceSearch(
@@ -3398,6 +3423,8 @@ export function parseCodeWorkspaceFiles(
       "truncated",
       "stat",
       "turn_id",
+      "revision",
+      "revision_ref",
     ]) ||
     !Array.isArray(value.files) ||
     typeof value.truncated !== "boolean"
@@ -3413,11 +3440,20 @@ export function parseCodeWorkspaceFiles(
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
   if (value.turn_id !== undefined && !wireId(value.turn_id)) return null;
+  const revision = parseWorkspaceContentRevision(value.revision);
+  if (revision === false) return null;
+  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
+    return null;
+  }
   return {
     files,
     truncated: value.truncated,
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
+    ...(revision === undefined ? {} : { revision }),
+    ...(value.revision_ref === undefined
+      ? {}
+      : { revision_ref: value.revision_ref }),
   };
 }
 
@@ -3431,6 +3467,8 @@ export function parseCodeWorkspaceBlob(
       "content",
       "truncated",
       "binary",
+      "revision",
+      "revision_ref",
     ]) ||
     !lineText(value.path) ||
     !rawText(value.content) ||
@@ -3439,11 +3477,20 @@ export function parseCodeWorkspaceBlob(
   ) {
     return null;
   }
+  const revision = parseWorkspaceContentRevision(value.revision);
+  if (revision === false) return null;
+  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
+    return null;
+  }
   return {
     path: value.path,
     content: value.content,
     truncated: value.truncated,
     binary: value.binary,
+    ...(revision === undefined ? {} : { revision }),
+    ...(value.revision_ref === undefined
+      ? {}
+      : { revision_ref: value.revision_ref }),
   };
 }
 
@@ -3458,6 +3505,8 @@ export function parseCodeWorkspaceDiff(
       "stat",
       "turn_id",
       "file",
+      "revision",
+      "revision_ref",
     ]) ||
     !rawText(value.diff) ||
     typeof value.truncated !== "boolean" ||
@@ -3468,12 +3517,21 @@ export function parseCodeWorkspaceDiff(
   }
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
+  const revision = parseWorkspaceContentRevision(value.revision);
+  if (revision === false) return null;
+  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
+    return null;
+  }
   return {
     diff: value.diff,
     truncated: value.truncated,
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
     ...(value.file !== undefined ? { file: value.file } : {}),
+    ...(revision === undefined ? {} : { revision }),
+    ...(value.revision_ref === undefined
+      ? {}
+      : { revision_ref: value.revision_ref }),
   };
 }
 

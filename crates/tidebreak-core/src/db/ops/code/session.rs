@@ -996,6 +996,43 @@ pub async fn list_sessions_for_workspace(
         .collect()
 }
 
+/// Return ended sessions in a workspace to idle.
+///
+/// Remote restore keeps session identity. `save_session` will not write Idle
+/// over Ended, so restore uses this explicit revival.
+pub async fn revive_ended_workspace_sessions(
+    store: &DbStore,
+    owner: &OwnerId,
+    workspace_id: WorkspaceId,
+) -> Result<u64> {
+    let updated = entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::Lifecycle,
+            sea_orm::sea_query::Expr::value(SessionLifecycle::Idle.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::session::Column::FenceReason,
+            sea_orm::sea_query::Expr::value(Option::<serde_json::Value>::None),
+        )
+        .col_expr(
+            entities::session::Column::ChildPid,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::session::Column::ChildProcessIdentity,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::WorkspaceId.eq(workspace_id.0))
+        .filter(
+            entities::session::Column::Lifecycle.eq(SessionLifecycle::Ended.as_str().to_owned()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(updated.rows_affected)
+}
+
 /// Every session on the machine, most recently created first.
 ///
 /// A system path, not a request path: boot recovery re-attaches a worker to

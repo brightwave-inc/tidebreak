@@ -835,6 +835,19 @@ export function useWorkspaceCardCommands(): {
       toast.success("Workspace restored");
       await openRestored();
     } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.kind === "sandbox_checkpoint_missing" ||
+          error.kind === "sandbox_checkpoint_failed")
+      ) {
+        toast.error(
+          friendlyErrorMessage(
+            error,
+            "The saved sandbox checkout cannot be restored",
+          ),
+        );
+        return;
+      }
       if (error instanceof HttpError && error.kind === "branch_missing") {
         const ok = await confirm({
           title: "The saved work is gone",

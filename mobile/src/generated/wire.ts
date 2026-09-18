@@ -1601,17 +1601,17 @@ export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopp
 /**
  * One worktree file's text for the center viewer.
  */
-export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean, };
+export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean, revision?: WorkspaceContentRevision, revision_ref?: string, };
 
 /**
  * Bounded unified diff for `GET /code/workspaces/{id}/diff`.
  */
-export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: TurnId, file?: string, };
+export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: TurnId, file?: string, revision?: WorkspaceContentRevision, revision_ref?: string, };
 
 /**
  * Bounded changed-file list for `GET /code/workspaces/{id}/files`.
  */
-export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: TurnId, };
+export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: TurnId, revision?: WorkspaceContentRevision, revision_ref?: string, };
 
 /**
  * Local Git facts, separate from the hosted pull request lifecycle.
@@ -1726,7 +1726,7 @@ export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "arch
  *
  * Paths only. Never file contents.
  */
-export type CodeWorkspaceTree = { paths: Array<string>, truncated: boolean, };
+export type CodeWorkspaceTree = { paths: Array<string>, truncated: boolean, revision?: WorkspaceContentRevision, revision_ref?: string, };
 
 /**
  * Where new worktrees land: `GET`/`PUT /code/worktree-root`.
@@ -6082,6 +6082,11 @@ export type WorkspaceConfigSectionId = "code_repositories" | "mcp_servers";
  * Named sections. Unknown keys fail closed via `deny_unknown_fields`.
  */
 export type WorkspaceConfigSections = { code_repositories: Array<ExportedCodeRepository>, mcp_servers: Array<ExportedMcpServer>, };
+
+/**
+ * Whether workspace file bytes came from a live sandbox or a retained checkpoint.
+ */
+export type WorkspaceContentRevision = "live" | "retained";
 
 /**
  * Identifies one isolated workspace (worktree + branch) on a repo.

@@ -548,7 +548,14 @@ impl ScopedCode {
         id: WorkspaceId,
         query: &str,
         limit: Option<u32>,
-    ) -> Result<(Vec<String>, bool), ServerError> {
+    ) -> Result<
+        (
+            Vec<String>,
+            bool,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let owner = self.workspace_owner_for_read(id).await?;
         self.runtime.workspace_tree(&owner, id, query, limit).await
     }
@@ -594,7 +601,13 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
         path: &str,
-    ) -> Result<worktree::WorktreeBlob, ServerError> {
+    ) -> Result<
+        (
+            worktree::WorktreeBlob,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let owner = self.workspace_owner_for_read(id).await?;
         self.runtime.workspace_blob(&owner, id, path).await
     }
@@ -612,7 +625,16 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
         turn_id: Option<TurnId>,
-    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<TurnId>), ServerError> {
+    ) -> Result<
+        (
+            Vec<ChangedFile>,
+            bool,
+            Diffstat,
+            Option<TurnId>,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let owner = self.workspace_owner_for_read(id).await?;
         self.runtime.workspace_files(&owner, id, turn_id).await
     }
@@ -622,7 +644,16 @@ impl ScopedCode {
         id: WorkspaceId,
         turn_id: Option<TurnId>,
         file: Option<&str>,
-    ) -> Result<(String, bool, Diffstat, Option<TurnId>), ServerError> {
+    ) -> Result<
+        (
+            String,
+            bool,
+            Diffstat,
+            Option<TurnId>,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let owner = self.workspace_owner_for_read(id).await?;
         self.runtime.workspace_diff(&owner, id, turn_id, file).await
     }

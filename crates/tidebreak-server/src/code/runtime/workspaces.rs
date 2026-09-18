@@ -795,7 +795,7 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) async fn restore_workspace(
+    pub async fn restore_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -807,10 +807,7 @@ impl CodeRuntime {
             return Ok(workspace);
         }
         if workspace.is_remote() {
-            return Err(ServerError::conflict_kind(
-                "workspace_remote",
-                "this workspace runs in a remote sandbox; there is no host checkout to restore",
-            ));
+            return self.restore_remote_workspace(owner, workspace).await;
         }
         let released = workspace.status == CodeWorkspaceStatus::Released;
         if !released && workspace.status != CodeWorkspaceStatus::Archived {
@@ -1037,21 +1034,33 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         query: &str,
         limit: Option<u32>,
-    ) -> Result<(Vec<String>, bool), ServerError> {
+    ) -> Result<
+        (
+            Vec<String>,
+            bool,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
-            return Err(ServerError::conflict_kind(
-                "workspace_remote",
-                "this workspace's engine runs in a remote sandbox; there is no host worktree",
-            ));
+            let checkout = self.remote_checkout(owner, &workspace).await?;
+            let (paths, truncated) = crate::code::sandbox_checkout::list_checkout_tree(
+                &checkout,
+                query,
+                limit.unwrap_or(worktree::DEFAULT_TREE_LIMIT),
+            )
+            .await?;
+            return Ok((paths, truncated, Some(checkout.source)));
         }
-        worktree::list_tree_paths(
+        let (paths, truncated) = worktree::list_tree_paths(
             std::path::Path::new(&workspace.worktree_path),
             query,
             limit.unwrap_or(worktree::DEFAULT_TREE_LIMIT),
         )
         .await
-        .map_err(map_worktree)
+        .map_err(map_worktree)?;
+        Ok((paths, truncated, None))
     }
 
     pub(crate) async fn workspace_search(
@@ -1075,18 +1084,27 @@ impl CodeRuntime {
         .map_err(map_worktree)
     }
 
-    pub(crate) async fn workspace_files(
+    pub async fn workspace_files(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
         turn_id: Option<TurnId>,
-    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<TurnId>), ServerError> {
+    ) -> Result<
+        (
+            Vec<ChangedFile>,
+            bool,
+            Diffstat,
+            Option<TurnId>,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
-            return Err(ServerError::conflict_kind(
-                "workspace_remote",
-                "this workspace's engine runs in a remote sandbox; there is no host worktree",
-            ));
+            let checkout = self.remote_checkout(owner, &workspace).await?;
+            let (files, truncated, stat) =
+                crate::code::sandbox_checkout::list_checkout_files(&checkout).await?;
+            return Ok((files, truncated, stat, None, Some(checkout.source)));
         }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
@@ -1094,19 +1112,33 @@ impl CodeRuntime {
         let listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
             .await
             .map_err(map_checkpoint)?;
-        Ok((listed.files, listed.truncated, listed.stat, turn))
+        Ok((listed.files, listed.truncated, listed.stat, turn, None))
     }
 
-    pub(crate) async fn workspace_blob(
+    pub async fn workspace_blob(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
         path: &str,
-    ) -> Result<worktree::WorktreeBlob, ServerError> {
+    ) -> Result<
+        (
+            worktree::WorktreeBlob,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
+        let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            let checkout = self.remote_checkout(owner, &workspace).await?;
+            let blob = crate::code::sandbox_checkout::read_checkout_blob(&checkout, path).await?;
+            return Ok((blob, Some(checkout.source)));
+        }
         let workspace = self.require_live_workspace(owner, workspace_id).await?;
-        worktree::read_worktree_file(std::path::Path::new(&workspace.worktree_path), path)
-            .await
-            .map_err(map_worktree)
+        let blob =
+            worktree::read_worktree_file(std::path::Path::new(&workspace.worktree_path), path)
+                .await
+                .map_err(map_worktree)?;
+        Ok((blob, None))
     }
 
     pub(crate) async fn workspace_file(
@@ -1115,25 +1147,39 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         path: &str,
     ) -> Result<worktree::WorktreeFile, ServerError> {
+        let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            let checkout = self.remote_checkout(owner, &workspace).await?;
+            return crate::code::sandbox_checkout::read_checkout_file(&checkout, path).await;
+        }
         let workspace = self.require_live_workspace(owner, workspace_id).await?;
         worktree::read_worktree_file_bytes(std::path::Path::new(&workspace.worktree_path), path)
             .await
             .map_err(map_worktree)
     }
 
-    pub(crate) async fn workspace_diff(
+    pub async fn workspace_diff(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
         turn_id: Option<TurnId>,
         file: Option<&str>,
-    ) -> Result<(String, bool, Diffstat, Option<TurnId>), ServerError> {
+    ) -> Result<
+        (
+            String,
+            bool,
+            Diffstat,
+            Option<TurnId>,
+            Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+        ),
+        ServerError,
+    > {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
-            return Err(ServerError::conflict_kind(
-                "workspace_remote",
-                "this workspace's engine runs in a remote sandbox; there is no host worktree",
-            ));
+            let checkout = self.remote_checkout(owner, &workspace).await?;
+            let (diff, truncated, stat) =
+                crate::code::sandbox_checkout::produce_checkout_diff(&checkout, file).await?;
+            return Ok((diff, truncated, stat, None, Some(checkout.source)));
         }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
@@ -1141,7 +1187,7 @@ impl CodeRuntime {
         let produced = produce_diff(&worktree, &from, &to, file, DiffBounds::default())
             .await
             .map_err(map_checkpoint)?;
-        Ok((produced.diff, produced.truncated, produced.stat, turn))
+        Ok((produced.diff, produced.truncated, produced.stat, turn, None))
     }
 
     pub(super) async fn refuse_running_sessions(
