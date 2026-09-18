@@ -72,8 +72,12 @@ const HOSTED_REENTRY_DRAFT_PREFIX = "tidebreak.hostedReentryDraft:";
  * to renew through the console or OIDC start; the bearer never goes here.
  */
 const HOSTED_CONTINUITY_KEY = "tidebreak.hostedSessionContinuity";
-/** When this tab last sent the reader to sign-in. Survives the round trip so
- * a missing bearer after that is a loop, not another renewal. */
+/**
+ * Presence-only marker that this tab already sent its one automatic renewal.
+ * Survives a slow or abandoned round trip so a missing bearer afterward is
+ * sign-in, not another redirect, until a session is established or the
+ * reader retries.
+ */
 const HOSTED_REENTRY_ATTEMPTED_KEY = "tidebreak.hostedReentryAttempted";
 /** A second refusal this soon after a hand-off is a loop, not a new hour. */
 const REENTRY_LOOP_MS = 15_000;
@@ -224,18 +228,12 @@ function hostedSessionHasContinuity(storage?: Storage | null): boolean {
   return readStorageItem(HOSTED_CONTINUITY_KEY, storage) === "1";
 }
 
-function rememberHostedReentryAttempt(
-  now: number,
-  storage?: Storage | null,
-): void {
-  writeStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, String(now), storage);
+function rememberHostedReentryAttempt(storage?: Storage | null): void {
+  writeStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, "1", storage);
 }
 
-function hostedReentryAttemptedAt(storage?: Storage | null): number | null {
-  const raw = readStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, storage);
-  if (raw === null) return null;
-  const attempted = Number(raw);
-  return Number.isFinite(attempted) ? attempted : null;
+function hostedReentryAttempted(storage?: Storage | null): boolean {
+  return readStorageItem(HOSTED_REENTRY_ATTEMPTED_KEY, storage) !== null;
 }
 
 /**
@@ -244,6 +242,14 @@ function hostedReentryAttemptedAt(storage?: Storage | null): number | null {
  */
 export function noteHostedSessionEstablished(storage?: Storage | null): void {
   writeStorageItem(HOSTED_CONTINUITY_KEY, "1", storage);
+  clearHostedReentryAttempt(storage);
+}
+
+/**
+ * The reader asked to try signing in again. Clears the consumed automatic
+ * renewal so the next reload may redirect once more. Continuity stays.
+ */
+export function allowHostedReentryRetry(storage?: Storage | null): void {
   clearHostedReentryAttempt(storage);
 }
 
@@ -303,7 +309,10 @@ export function takeComposerDraftForReentry(
   return fromMemory || fromStore;
 }
 
-/** True when a hand-off just landed this tab and another refusal is a loop. */
+/**
+ * True when a hand-off just landed this tab, or this tab already used its
+ * one automatic renewal.
+ */
 export function hostedReentryIsLooping(
   now: number = Date.now(),
   storage?: Storage | null,
@@ -311,8 +320,7 @@ export function hostedReentryIsLooping(
   if (handoffReturnedAt !== null && now - handoffReturnedAt < REENTRY_LOOP_MS) {
     return true;
   }
-  const attempted = hostedReentryAttemptedAt(storage);
-  return attempted !== null && now - attempted < REENTRY_LOOP_MS;
+  return hostedReentryAttempted(storage);
 }
 
 /** This tab's hash-router path, or `/` when the fragment is not a route. */
@@ -338,7 +346,6 @@ export function reenterExpiredHostedSession(
   return beginHostedReentry(
     consoleSignInUrl(hosted.gatewayUrl, win),
     win,
-    now,
     storage,
   );
 }
@@ -363,7 +370,7 @@ export function reenterReloadedHostedSession(
   if (hostedReentryIsLooping(now, storage)) return "sign_in";
   const url = hostedRenewalUrl(hosted, win);
   if (!url) return "sign_in";
-  return beginHostedReentry(url, win, now, storage);
+  return beginHostedReentry(url, win, storage);
 }
 
 function hostedRenewalUrl(
@@ -385,10 +392,9 @@ function hostedRenewalUrl(
 function beginHostedReentry(
   url: string,
   win: HostedLocationWin,
-  now: number,
   storage?: Storage | null,
 ): "redirect" {
-  rememberHostedReentryAttempt(now, storage);
+  rememberHostedReentryAttempt(storage);
   win.location.href = url;
   return "redirect";
 }
