@@ -27,7 +27,12 @@ import {
   resolveServerInfo,
 } from "./boot";
 import { HostedSignIn } from "./HostedSignIn";
-import type { AuthDiscovery, HandoffFailure } from "./hostedSession";
+import {
+  type AuthDiscovery,
+  type HandoffFailure,
+  hostedSession,
+  reenterReloadedHostedSession,
+} from "./hostedSession";
 import {
   BootFailure,
   type BootAttachment,
@@ -528,6 +533,15 @@ export function AppShell() {
       } catch (err) {
         if (cancelled) return;
         if (err instanceof HostedSignInRequired) {
+          // A reload of a tab that already held a session renews through the
+          // console (or OIDC) with the current hash route. First visit, a
+          // failed hand-off, sign-out, and a loop stay on the sign-in screen.
+          if (
+            reenterReloadedHostedSession(hostedSession(), err.failure) ===
+            "redirect"
+          ) {
+            return;
+          }
           setHostedSignIn({ discovery: err.discovery, failure: err.failure });
           return;
         }
