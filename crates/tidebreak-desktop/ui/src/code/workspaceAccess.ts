@@ -1,5 +1,6 @@
 import type { CodeWorkspaceSnapshot } from "../api/types";
 import type { WorkspaceCommand } from "./workspaceActions";
+import { isRemoteWorktreePath } from "./workspaceRemote";
 
 const MANAGEMENT_COMMANDS = new Set<WorkspaceCommand["id"]>([
   "open",
@@ -23,12 +24,11 @@ export function workspaceCommandsForAccess(
   if (workspace.read_only) return [];
   if (
     !workspace.worktree_path ||
-    workspace.worktree_path.startsWith("remote:")
+    isRemoteWorktreePath(workspace.worktree_path)
   ) {
     commands = commands.filter(
       (command) =>
         ![
-          "restore",
           "copy-worktree",
           "open-worktree",
           "open-in-editor",

@@ -10,6 +10,7 @@ import type { FileBytesSource } from "@/document/useFileDownload";
 import { useTheme } from "@/theme";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import { OpenInEditorButton } from "./OpenInEditorButton";
 import { useLiveResource } from "./useLiveContent";
 
@@ -67,6 +68,10 @@ export function FileViewer({
           />
         </div>
         <div className="flex items-center gap-2">
+          <WorkspaceRevisionChip
+            revision={data?.revision}
+            revisionRef={data?.revision_ref}
+          />
           <span className="grid size-3.5 shrink-0 place-items-center">
             {refreshing && (
               <Spinner className="size-3.5" aria-label="Refreshing" />

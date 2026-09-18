@@ -1,4 +1,5 @@
 import { workspaceCommandsForAccess } from "./workspaceAccess";
+import { isRemoteWorktreePath } from "./workspaceRemote";
 import { CodeEditorGroups } from "./CodeEditorGroups";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,11 +33,7 @@ import type {
   CodeSessionSnapshot,
   PermissionMode,
 } from "../api/types";
-import {
-  CodeInspector,
-  WorkspaceDeliveryPrTab,
-  WorkspaceFilesUnavailable,
-} from "./CodeInspector";
+import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { CodeQuickOpen } from "./CodeQuickOpen";
 import { CodeSessionContent } from "./CodeSessionPage";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
@@ -489,19 +486,7 @@ function CodeWorkspaceBody({
         role="tabpanel"
         aria-labelledby={centerEditorTabId(index, region)}
       >
-        {(panel.type === "file" ||
-          panel.type === "diff" ||
-          panel.type === "source_control") &&
-        (workspace?.worktree_path?.startsWith("remote:") ||
-          workspace?.worktree_path === "") ? (
-          <WorkspaceFilesUnavailable
-            remote
-            hasPr={Boolean(pr)}
-            onReview={() =>
-              setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, region))
-            }
-          />
-        ) : panel.type === "file" ? (
+        {panel.type === "file" ? (
           <Suspense fallback={<Skeleton className="h-full w-full" />}>
             <FileViewer
               client={client}
@@ -588,10 +573,7 @@ function CodeWorkspaceBody({
           >
             <WorkspaceDeliveryPrTab
               workspaceOnly={!hostAccess}
-              allowMerge={
-                workspace?.worktree_path !== "" &&
-                !workspace?.worktree_path?.startsWith("remote:")
-              }
+              allowMerge={!isRemoteWorktreePath(workspace?.worktree_path)}
               client={client}
               workspaceId={workspaceId}
               pr={prResource.data === null ? pr : prResource.data.pr}
@@ -958,10 +940,7 @@ function CodeWorkspaceBody({
         client={client}
         workspaceId={workspaceId}
         contentRevision={contentRevision}
-        enabled={
-          workspace?.worktree_path !== "" &&
-          !workspace?.worktree_path?.startsWith("remote:")
-        }
+        enabled={Boolean(workspace)}
         onOpenFile={(path) => openFile(path, undefined, quickOpenTarget)}
         openRequest={quickOpenRequest}
       />

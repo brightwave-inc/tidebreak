@@ -1,9 +1,15 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, waitFor, within } from "storybook/test";
 
 import type { ApiClient } from "@/api/client";
 import { FileViewer } from "@/code/FileViewer";
 
-type FileScenario = "image" | "image-failure" | "unsupported";
+type FileScenario =
+  | "image"
+  | "image-failure"
+  | "unsupported"
+  | "retained"
+  | "unavailable";
 
 const imageSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
   <rect width="1200" height="800" fill="#e8ecef"/>
@@ -28,12 +34,29 @@ const imageSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="8
 function clientFor(scenario: FileScenario) {
   const image = scenario !== "unsupported";
   return {
-    getCodeWorkspaceBlob: async () => ({
-      path: image ? "assets/workspace-architecture.svg" : "build/archive.zip",
-      content: "",
-      truncated: false,
-      binary: true,
-    }),
+    getCodeWorkspaceBlob: async () => {
+      if (scenario === "unavailable") {
+        throw new Error(
+          "Live sandbox files are not inspectable from this machine. Open the transcript or pull request, or wait until the sandbox checkpoints its work.",
+        );
+      }
+      if (scenario === "retained") {
+        return {
+          path: "sandbox.txt",
+          content: "from the checkpoint\n",
+          truncated: false,
+          binary: false,
+          revision: "retained" as const,
+          revision_ref: "mg-wip/sb-1-i1",
+        };
+      }
+      return {
+        path: image ? "assets/workspace-architecture.svg" : "build/archive.zip",
+        content: "",
+        truncated: false,
+        binary: true,
+      };
+    },
     getCodeWorkspaceFile: async () => {
       if (scenario === "image-failure") {
         throw new Error("The workspace file could not be read.");
@@ -50,9 +73,11 @@ function FileViewerStory({ scenario }: { scenario: FileScenario }) {
   const path =
     scenario === "unsupported"
       ? "build/archive.zip"
-      : "assets/workspace-architecture.svg";
+      : scenario === "retained" || scenario === "unavailable"
+        ? "sandbox.txt"
+        : "assets/workspace-architecture.svg";
   return (
-    <div className="h-[680px] overflow-hidden rounded-lg border bg-page-background">
+    <div className="flex h-[680px] min-h-0 flex-col overflow-hidden rounded-lg border bg-page-background">
       <FileViewer
         client={clientFor(scenario)}
         workspaceId="workspace-storybook"
@@ -69,7 +94,13 @@ const meta = {
   argTypes: {
     scenario: {
       control: "select",
-      options: ["image", "image-failure", "unsupported"],
+      options: [
+        "image",
+        "image-failure",
+        "unsupported",
+        "retained",
+        "unavailable",
+      ],
     },
   },
 } satisfies Meta<typeof FileViewerStory>;
@@ -85,6 +116,24 @@ export const ImageLoadFailure: Story = {
 
 export const UnsupportedBinaryFile: Story = {
   args: { scenario: "unsupported" },
+};
+
+export const RetainedCheckpoint: Story = {
+  args: { scenario: "retained" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText(/from the checkpoint/),
+    ).resolves.toBeVisible();
+    await waitFor(() => {
+      const editor = canvasElement.querySelector(".monaco-editor");
+      expect(editor?.getBoundingClientRect().height ?? 0).toBeGreaterThan(100);
+    });
+  },
+};
+
+export const SandboxUnavailable: Story = {
+  args: { scenario: "unavailable" },
 };
 
 export const CompactImageFile: Story = {

@@ -537,6 +537,8 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 truncated: false,
                 stat: diffstat(),
                 turn_id: Some(turn_id()),
+                revision: None,
+                revision_ref: None,
             },
         ),
         fixture(
@@ -553,6 +555,8 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 },
                 turn_id: None,
                 file: Some("README.md".to_owned()),
+                revision: None,
+                revision_ref: None,
             },
         ),
         fixture(
