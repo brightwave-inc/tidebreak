@@ -391,16 +391,27 @@ export async function archiveWorkspaceWithConfirm(options: {
       false,
     );
   } catch (error) {
-    if (!archiveForceKind(error)) {
+    const kind = archiveForceKind(error);
+    if (!kind) {
       options.onOptimisticChange?.(false);
       throw error;
     }
-    const forced = await options.confirm({
-      title: "Discard leftover work?",
-      description: `${error instanceof Error ? error.message : String(error)} Commit and push from the review sidebar, or discard.`,
-      confirmLabel: "Discard and archive",
-      destructive: true,
-    });
+    const detail = error instanceof Error ? error.message : String(error);
+    const forced = await options.confirm(
+      kind === "archive_inspection_uncertain"
+        ? {
+            title: "Archive without inspecting leftover work?",
+            description: `${detail} Discarding deletes whatever is still on disk.`,
+            confirmLabel: "Discard and archive",
+            destructive: true,
+          }
+        : {
+            title: "Discard leftover work?",
+            description: `${detail} Commit and push from the review sidebar, or discard.`,
+            confirmLabel: "Discard and archive",
+            destructive: true,
+          },
+    );
     if (!forced) {
       options.onOptimisticChange?.(false);
       return null;

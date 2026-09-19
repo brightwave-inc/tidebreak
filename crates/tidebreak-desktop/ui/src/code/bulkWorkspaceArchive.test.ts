@@ -28,7 +28,9 @@ describe("bulkArchiveWorkspaces", () => {
     const client = {
       archiveCodeWorkspace: vi.fn(async (id: string, force: boolean) => {
         if (id !== "clean" && !force)
-          throw leftover(id === "dirty" ? "uncommitted" : "ignored_content");
+          throw leftover(
+            id === "dirty" ? "uncommitted" : "archive_inspection_uncertain",
+          );
         return archived(id);
       }),
     };

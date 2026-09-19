@@ -2197,6 +2197,11 @@ describe("archive force kinds", () => {
       archiveForceKind(new HttpError(409, "ignored", "ignored_content")),
     ).toBe("ignored_content");
     expect(
+      archiveForceKind(
+        new HttpError(409, "unreadable git", "archive_inspection_uncertain"),
+      ),
+    ).toBe("archive_inspection_uncertain");
+    expect(
       archiveForceKind(new HttpError(409, "busy", "session_running")),
     ).toBeNull();
   });
