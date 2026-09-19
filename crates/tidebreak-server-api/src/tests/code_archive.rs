@@ -48,6 +48,58 @@ async fn archive_requires_force_when_the_tree_is_dirty() {
 }
 
 #[tokio::test]
+async fn archive_requires_force_when_git_metadata_is_unreadable() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(path.join("stale.txt"), "keep\n").unwrap();
+    std::fs::write(path.join(".git"), "gitdir: (null)\n").unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "archive_inspection_uncertain");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a git repository"),
+        "{body}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("stale.txt")).unwrap(),
+        "keep\n"
+    );
+
+    let forced = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), reqwest::StatusCode::OK);
+    let archived: serde_json::Value = forced.json().await.unwrap();
+    assert_eq!(archived["status"], "released");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn force_archive_skips_ignored_content_inspection() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;

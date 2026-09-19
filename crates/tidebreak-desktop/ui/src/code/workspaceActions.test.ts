@@ -1,13 +1,61 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { HttpError } from "../api/client";
 import { setEditorPreference } from "./editorPreference";
 import {
+  archiveWorkspaceWithConfirm,
   externalEditorOpenFailureNotice,
   workspaceBulkCommands,
   workspaceCommands,
   workspaceHeaderCommands,
   worktreeOpenFailureNotice,
 } from "./workspaceActions";
+
+describe("archiveWorkspaceWithConfirm", () => {
+  const workspace = {
+    id: "ws-1",
+    repo_id: "repo-1",
+    title: "Stale",
+    worktree_path: "/tmp/stale",
+    branch_name: "tidebreak/stale",
+    base_ref: "main",
+    status: "released" as const,
+    created_at: "2026-09-18T00:00:00Z",
+  };
+
+  it("asks to discard when Git state cannot be inspected, then force-archives", async () => {
+    const client = {
+      archiveCodeWorkspace: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new HttpError(
+            409,
+            "409: could not inspect leftover work because this checkout is not a git repository; pass force to discard whatever is still on disk",
+            "archive_inspection_uncertain",
+          ),
+        )
+        .mockResolvedValueOnce(workspace),
+    };
+    const confirm = vi.fn(async () => true);
+    await expect(
+      archiveWorkspaceWithConfirm({
+        client,
+        workspaceId: "ws-1",
+        confirm,
+      }),
+    ).resolves.toEqual(workspace);
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Archive without inspecting leftover work?",
+        destructive: true,
+      }),
+    );
+    expect(client.archiveCodeWorkspace.mock.calls).toEqual([
+      ["ws-1", false],
+      ["ws-1", true],
+    ]);
+  });
+});
 
 describe("workspaceBulkCommands", () => {
   it("names the count and keeps force-archive destructive", () => {

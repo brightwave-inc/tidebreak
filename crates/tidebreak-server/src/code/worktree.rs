@@ -1844,14 +1844,23 @@ pub async fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(
     .await
     {
         Ok(_) => {}
-        Err(err) if already_gone(&err) => {}
+        Err(_) if !worktree_path.exists() => {}
+        Err(err) if worktree_git_unreadable(&err) => {
+            // Git will not delete a checkout whose `.git` is missing or
+            // invalid. Delete the directory so archive can finish, then prune
+            // the stale registration.
+            tokio::fs::remove_dir_all(worktree_path)
+                .await
+                .map_err(|error| {
+                    WorktreeError::internal(format!(
+                        "could not delete checkout after git refused to remove it: {error}"
+                    ))
+                })?;
+        }
         Err(err) => {
-            // Directory may already be missing while git still lists it.
-            if worktree_path.exists() {
-                return Err(WorktreeError::internal(format!(
-                    "git worktree remove failed: {err}"
-                )));
-            }
+            return Err(WorktreeError::internal(format!(
+                "git worktree remove failed: {err}"
+            )));
         }
     }
     prune_worktrees(repo_root).await
@@ -2329,14 +2338,14 @@ pub(crate) async fn head_is(worktree_path: &Path, commit: &str) -> Result<bool, 
         GIT_TIMEOUT,
     )
     .await
-    .map_err(|err| WorktreeError::internal(format!("git rev-parse failed: {err}")))?;
+    .map_err(|err| archive_inspect_failed("git rev-parse failed", &err))?;
     Ok(head.eq_ignore_ascii_case(commit))
 }
 
 async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeError> {
     git_runner::has_uncommitted_work(worktree_path)
         .await
-        .map_err(|err| WorktreeError::internal(format!("git status failed: {err}")))
+        .map_err(|err| archive_inspect_failed("git status failed", &err))
 }
 
 async fn has_non_disposable_ignored_content(worktree_path: &Path) -> Result<bool, WorktreeError> {
@@ -2699,6 +2708,27 @@ fn already_gone(err: &str) -> bool {
         || lower.contains("is not a working tree")
         || lower.contains("no such file")
         || lower.contains("does not exist")
+}
+
+/// Git cannot treat this path as a worktree: missing `.git`, a broken gitfile,
+/// or a registration that no longer matches the directory.
+fn worktree_git_unreadable(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    already_gone(err)
+        || lower.contains("not a git repository")
+        || lower.contains("not a .git file")
+        || lower.contains("validation failed")
+}
+
+fn archive_inspect_failed(what: &str, err: &str) -> WorktreeError {
+    if err.to_ascii_lowercase().contains("not a git repository") {
+        WorktreeError::archive_uncertain(
+            "could not inspect leftover work because this checkout is not a git repository; \
+             pass force to discard whatever is still on disk",
+        )
+    } else {
+        WorktreeError::archive_uncertain(format!("{what}: {err}"))
+    }
 }
 
 fn first_line(text: &str) -> Option<&str> {
@@ -3242,6 +3272,44 @@ mod tests {
             !listed.contains("gone"),
             "prune should drop the stale registration: {listed}"
         );
+    }
+
+    #[tokio::test]
+    async fn archive_treats_unreadable_git_metadata_as_uncertain_and_still_removes() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+
+        let missing_git = scratch_worktree(data.path(), "missing-git");
+        create_ready(&repo, &missing_git, "tidebreak/missing-git", "main").await;
+        std::fs::write(missing_git.join("stale.txt"), "keep\n").unwrap();
+        std::fs::remove_file(missing_git.join(".git")).unwrap();
+        let missing_err = archive_blockers(&missing_git, "main").await.unwrap_err();
+        assert!(
+            matches!(missing_err, WorktreeError::ArchiveUncertain(_)),
+            "{missing_err:?}"
+        );
+        assert!(
+            missing_err.to_string().contains("not a git repository"),
+            "{missing_err}"
+        );
+        remove_worktree(&repo, &missing_git).await.unwrap();
+        assert!(!missing_git.exists());
+
+        let null_gitdir = scratch_worktree(data.path(), "null-gitdir");
+        create_ready(&repo, &null_gitdir, "tidebreak/null-gitdir", "main").await;
+        std::fs::write(null_gitdir.join("stale.txt"), "keep\n").unwrap();
+        std::fs::write(null_gitdir.join(".git"), "gitdir: (null)\n").unwrap();
+        let null_err = archive_blockers(&null_gitdir, "main").await.unwrap_err();
+        assert!(
+            matches!(null_err, WorktreeError::ArchiveUncertain(_)),
+            "{null_err:?}"
+        );
+        assert!(
+            null_err.to_string().contains("not a git repository"),
+            "{null_err}"
+        );
+        remove_worktree(&repo, &null_gitdir).await.unwrap();
+        assert!(!null_gitdir.exists());
     }
 
     #[tokio::test]
