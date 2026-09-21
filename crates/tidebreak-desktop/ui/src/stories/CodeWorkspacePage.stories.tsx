@@ -842,11 +842,14 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     }),
     getCodeWorkspaceBlob: async (_workspaceId: string, path: string) => ({
       path,
-      content: [
-        "export function WorkspaceCard() {",
-        '  return <article className="rounded-xl">…</article>;',
-        "}",
-      ].join("\n"),
+      content:
+        path === hiddenFile
+          ? "CHECKPOINT-OK\n"
+          : [
+              "export function WorkspaceCard() {",
+              '  return <article className="rounded-xl">…</article>;',
+              "}",
+            ].join("\n"),
       truncated: false,
       binary: false,
       ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
