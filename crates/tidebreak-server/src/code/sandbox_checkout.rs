@@ -20,7 +20,7 @@ use tidebreak_core::{
     CodeWorkspace, CodeWorkspaceStatus, Diffstat, IncarnationState, OwnerId, WorkspaceId,
 };
 
-use super::checkpoint::{ChangedFile, DiffBounds, list_changed_files, produce_diff};
+use super::checkpoint::{list_changed_files, produce_diff, ChangedFile, DiffBounds};
 use super::git_runner;
 use super::runtime::CodeRuntime;
 use super::types::WorkspaceContentRevision;
@@ -757,11 +757,9 @@ mod tests {
         assert!(!blob.binary);
 
         let (files, _, stat) = list_checkout_files(&checkout).await.unwrap();
-        assert!(
-            files
-                .iter()
-                .any(|file| file.path.to_wire() == "changed.txt")
-        );
+        assert!(files
+            .iter()
+            .any(|file| file.path.to_wire() == "changed.txt"));
         assert!(stat.files >= 1);
 
         let (diff, _, _) = produce_checkout_diff(&checkout, Some("changed.txt"))
