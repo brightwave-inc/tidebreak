@@ -462,6 +462,10 @@ async fn merge_base_oid(
 
 /// Mutable origin branches return a fetchable name. Tags and commit IDs return
 /// `None` so they stay pinned, matching workspace creation.
+///
+/// Local symbolic success is not required: a branch that exists only on origin
+/// still needs a bounded fetch. A resolved `refs/heads/` name is used as-is so
+/// a local `origin/feature` branch is not rewritten to `feature`.
 async fn classify_base_ref(repo_root: &Path, base_ref: &str) -> Option<String> {
     let resolved = git_stdout(
         repo_root,
@@ -469,23 +473,35 @@ async fn classify_base_ref(repo_root: &Path, base_ref: &str) -> Option<String> {
     )
     .await
     .unwrap_or_default();
-    if resolved.is_empty() {
+    if !resolved.is_empty() {
+        if let Some(branch) = resolved.strip_prefix("refs/heads/") {
+            return (!branch.is_empty()).then(|| branch.to_owned());
+        }
+        if let Some(tracking) = resolved.strip_prefix("refs/remotes/") {
+            let Some((remote, branch)) = tracking.split_once('/') else {
+                return None;
+            };
+            if remote != "origin" || branch.is_empty() {
+                return None;
+            }
+            return Some(branch.to_owned());
+        }
         return None;
     }
-    if let Some(branch) = resolved.strip_prefix("refs/heads/") {
-        let branch = origin_branch_name(branch);
-        return (!branch.is_empty()).then(|| branch.to_owned());
+    if looks_like_commit_id(base_ref)
+        || base_ref.starts_with("refs/tags/")
+        || (base_ref.starts_with("refs/remotes/")
+            && !base_ref.starts_with("refs/remotes/origin/"))
+    {
+        return None;
     }
-    if let Some(tracking) = resolved.strip_prefix("refs/remotes/") {
-        let Some((remote, branch)) = tracking.split_once('/') else {
-            return None;
-        };
-        if remote != "origin" || branch.is_empty() {
-            return None;
-        }
-        return Some(branch.to_owned());
-    }
-    None
+    let branch = origin_branch_name(base_ref);
+    (!branch.is_empty()).then(|| branch.to_owned())
+}
+
+fn looks_like_commit_id(value: &str) -> bool {
+    let len = value.len();
+    (4..=40).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 async fn merge_base_with(
@@ -1113,6 +1129,124 @@ mod tests {
 
         let error = merge_base_oid(&host, "main", &tip).await.unwrap_err();
         assert_eq!(error.kind(), "sandbox_checkpoint_unavailable_base");
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_fetches_origin_branch_absent_from_host_refs() {
+        let dir = TempDir::new().unwrap();
+        let origin = seed_bare_origin(dir.path());
+        let host = dir.path().join("host");
+        clone_repo(&origin, &host);
+        run(
+            &host,
+            &[
+                "git",
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+
+        let advance = dir.path().join("advance");
+        clone_repo(&origin, &advance);
+        std::fs::write(advance.join("history.txt"), "later base\n").unwrap();
+        run(&advance, &["git", "add", "history.txt"]);
+        run(&advance, &["git", "commit", "-m", "later base"]);
+        run(&advance, &["git", "push", "origin", "HEAD:refs/heads/fresh-base"]);
+
+        let sandbox = dir.path().join("sandbox");
+        clone_repo(&origin, &sandbox);
+        run(&sandbox, &["git", "checkout", "-q", "fresh-base"]);
+        std::fs::write(sandbox.join("marker.txt"), "only this\n").unwrap();
+        run(&sandbox, &["git", "add", "marker.txt"]);
+        run(&sandbox, &["git", "commit", "-m", "marker"]);
+        run(
+            &sandbox,
+            &["git", "push", "origin", "HEAD:refs/heads/mg-wip/fresh-i1"],
+        );
+
+        let tip = resolve_commit(&host, "mg-wip/fresh-i1").await.unwrap();
+        assert!(git_rev_parse(&host, "fresh-base").is_none());
+        assert!(git_rev_parse(&host, "refs/heads/fresh-base").is_none());
+        assert!(git_rev_parse(&host, "refs/remotes/origin/fresh-base").is_none());
+
+        for base in ["fresh-base", "refs/heads/fresh-base"] {
+            let from_oid = merge_base_oid(&host, base, &tip).await.unwrap();
+            let paths = changed_paths(&host, &from_oid, &tip).await;
+            assert_eq!(paths, vec!["marker.txt".to_owned()], "base_ref {base}");
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_preserves_local_origin_feature_branch_name() {
+        let dir = TempDir::new().unwrap();
+        let origin = seed_bare_origin(dir.path());
+        let host = dir.path().join("host");
+        clone_repo(&origin, &host);
+
+        let feature = dir.path().join("feature");
+        clone_repo(&origin, &feature);
+        std::fs::write(feature.join("wrong.txt"), "stale feature\n").unwrap();
+        run(&feature, &["git", "add", "wrong.txt"]);
+        run(&feature, &["git", "commit", "-m", "stale feature"]);
+        run(&feature, &["git", "push", "origin", "HEAD:refs/heads/feature"]);
+
+        let named = dir.path().join("named");
+        clone_repo(&origin, &named);
+        run(&named, &["git", "checkout", "-q", "-b", "origin/feature"]);
+        std::fs::write(named.join("history.txt"), "named base\n").unwrap();
+        run(&named, &["git", "add", "history.txt"]);
+        run(&named, &["git", "commit", "-m", "named base"]);
+        run(
+            &named,
+            &["git", "push", "origin", "HEAD:refs/heads/origin/feature"],
+        );
+
+        run(
+            &host,
+            &[
+                "git",
+                "fetch",
+                "origin",
+                "+refs/heads/origin/feature:refs/heads/origin/feature",
+            ],
+        );
+        let stale_named = git_rev_parse(&host, "refs/heads/origin/feature").unwrap();
+
+        std::fs::write(named.join("history.txt"), "refreshed named\n").unwrap();
+        run(&named, &["git", "add", "history.txt"]);
+        run(&named, &["git", "commit", "-m", "refresh named"]);
+        run(
+            &named,
+            &[
+                "git",
+                "push",
+                "--force",
+                "origin",
+                "HEAD:refs/heads/origin/feature",
+            ],
+        );
+        std::fs::write(named.join("marker.txt"), "only this\n").unwrap();
+        run(&named, &["git", "add", "marker.txt"]);
+        run(&named, &["git", "commit", "-m", "marker"]);
+        run(
+            &named,
+            &["git", "push", "origin", "HEAD:refs/heads/mg-wip/named-i1"],
+        );
+
+        let tip = resolve_commit(&host, "mg-wip/named-i1").await.unwrap();
+        assert_eq!(
+            git_rev_parse(&host, "refs/heads/origin/feature").as_deref(),
+            Some(stale_named.as_str())
+        );
+
+        let from_oid = merge_base_oid(&host, "refs/heads/origin/feature", &tip)
+            .await
+            .unwrap();
+        let paths = changed_paths(&host, &from_oid, &tip).await;
+        assert_eq!(paths, vec!["marker.txt".to_owned()]);
+        assert_ne!(from_oid, stale_named);
+        assert!(git_rev_parse(&host, "refs/remotes/origin/origin/feature").is_some());
     }
 
     #[tokio::test]
