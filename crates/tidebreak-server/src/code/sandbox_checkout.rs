@@ -436,16 +436,42 @@ async fn merge_base_oid(
     let Ok(base_ref) = validate_git_ref(base_ref) else {
         return Err(unavailable_base());
     };
-    let _ = fetch_origin_ref(repo_root, base_ref).await;
-    let origin_base = format!("refs/remotes/origin/{base_ref}");
-    for candidate in [base_ref, origin_base.as_str()] {
-        if let Ok(oid) = git_stdout(repo_root, &["merge-base", candidate, tip]).await {
-            if !oid.is_empty() {
-                return Ok(oid);
-            }
+    let branch = origin_branch_name(base_ref);
+    if branch.is_empty() {
+        return Err(unavailable_base());
+    }
+    match fetch_origin_ref(repo_root, branch).await {
+        Ok(true) => {
+            // A confirmed remote base must win. Trying the local branch first
+            // lets a stale host `main` become merge-base and inflate the
+            // checkpoint diff with unrelated history.
+            merge_base_with(repo_root, &format!("refs/remotes/origin/{branch}"), tip).await
+        }
+        Ok(false) => merge_base_with(repo_root, base_ref, tip).await,
+        Err(_) => Err(unavailable_base()),
+    }
+}
+
+async fn merge_base_with(
+    repo_root: &Path,
+    candidate: &str,
+    tip: &str,
+) -> Result<String, ServerError> {
+    if let Ok(oid) = git_stdout(repo_root, &["merge-base", candidate, tip]).await {
+        if !oid.is_empty() {
+            return Ok(oid);
         }
     }
     Err(unavailable_base())
+}
+
+/// Branch name used for `origin` fetch/tracking, accepting common base_ref shapes.
+fn origin_branch_name(base_ref: &str) -> &str {
+    base_ref
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| base_ref.strip_prefix("refs/heads/"))
+        .or_else(|| base_ref.strip_prefix("origin/"))
+        .unwrap_or(base_ref)
 }
 
 fn require_local_git_dir(path: &Path) -> Result<(), ServerError> {
@@ -895,6 +921,114 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), "workspace_sandbox_unavailable");
+    }
+
+    fn seed_bare_origin(dir: &Path) -> PathBuf {
+        let seed = dir.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run(&seed, &["git", "init", "-b", "main"]);
+        run(&seed, &["git", "config", "user.email", "dev@example.com"]);
+        run(&seed, &["git", "config", "user.name", "Dev"]);
+        run(&seed, &["git", "config", "commit.gpgsign", "false"]);
+        run(&seed, &["git", "config", "core.autocrlf", "false"]);
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        run(&seed, &["git", "add", "README.md"]);
+        run(&seed, &["git", "commit", "-m", "init"]);
+        let origin = dir.join("origin.git");
+        run(
+            dir,
+            &[
+                "git",
+                "clone",
+                "--bare",
+                "--quiet",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        origin
+    }
+
+    async fn changed_paths(repo: &Path, from: &str, to: &str) -> Vec<String> {
+        list_changed_files(repo, from, to, DiffBounds::default())
+            .await
+            .unwrap()
+            .files
+            .into_iter()
+            .map(|file| file.path.to_wire())
+            .collect()
+    }
+
+    #[test]
+    fn origin_branch_name_accepts_common_base_ref_shapes() {
+        assert_eq!(origin_branch_name("main"), "main");
+        assert_eq!(origin_branch_name("origin/main"), "main");
+        assert_eq!(origin_branch_name("refs/heads/main"), "main");
+        assert_eq!(origin_branch_name("refs/remotes/origin/main"), "main");
+        assert_eq!(origin_branch_name("release/1.2"), "release/1.2");
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_uses_refreshed_origin_not_stale_local_main() {
+        let dir = TempDir::new().unwrap();
+        let origin = seed_bare_origin(dir.path());
+        let host = dir.path().join("host");
+        let sandbox = dir.path().join("sandbox");
+        clone_repo(&origin, &host);
+
+        let advance = dir.path().join("advance");
+        clone_repo(&origin, &advance);
+        for i in 0..8 {
+            let name = format!("history-{i}.txt");
+            std::fs::write(advance.join(&name), format!("{i}\n")).unwrap();
+            run(&advance, &["git", "add", &name]);
+            run(&advance, &["git", "commit", "-m", &format!("history {i}")]);
+        }
+        run(&advance, &["git", "push", "origin", "main"]);
+        clone_repo(&origin, &sandbox);
+
+        std::fs::write(sandbox.join("marker.txt"), "only this\n").unwrap();
+        run(&sandbox, &["git", "add", "marker.txt"]);
+        run(&sandbox, &["git", "commit", "-m", "marker"]);
+        run(
+            &sandbox,
+            &["git", "push", "origin", "HEAD:refs/heads/mg-wip/marker-i1"],
+        );
+
+        let tip = resolve_commit(&host, "mg-wip/marker-i1").await.unwrap();
+        let stale_local = git_rev_parse(&host, "main").unwrap();
+        let origin_main = git_rev_parse(&sandbox, "origin/main").unwrap();
+        assert_ne!(stale_local, origin_main);
+        assert_ne!(origin_main, tip);
+
+        for base in ["main", "origin/main", "refs/heads/main"] {
+            let from_oid = merge_base_oid(&host, base, &tip).await.unwrap();
+            assert_eq!(from_oid, origin_main, "base_ref {base}");
+            let paths = changed_paths(&host, &from_oid, &tip).await;
+            assert_eq!(paths, vec!["marker.txt".to_owned()], "base_ref {base}");
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_is_unavailable_when_origin_base_refresh_fails() {
+        let dir = TempDir::new().unwrap();
+        let origin = seed_bare_origin(dir.path());
+        let host = dir.path().join("host");
+        clone_repo(&origin, &host);
+        let tip = git_rev_parse(&host, "HEAD").unwrap();
+        let missing_origin = dir.path().join("unreachable.git");
+        run(
+            &host,
+            &[
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                missing_origin.to_str().unwrap(),
+            ],
+        );
+        let error = merge_base_oid(&host, "main", &tip).await.unwrap_err();
+        assert_eq!(error.kind(), "sandbox_checkpoint_unavailable_base");
     }
 
     #[tokio::test]
