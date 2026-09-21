@@ -3651,12 +3651,14 @@ export type MemorySettings = {
  */
 enabled: boolean,
 /**
- * Whether post-turn capture is enabled.
+ * Whether post-turn capture runs. Capture follows `enabled` unless the
+ * capture key was set to false explicitly, so this is false whenever
+ * memory is off.
  */
 capture_enabled: boolean,
 /**
- * Whether capture can run now. This is false when the capture switch is
- * on but no utility model resolves.
+ * Whether capture can run now. This is false when capture is on but no
+ * utility model resolves.
  */
 capture_ready: boolean, };
 

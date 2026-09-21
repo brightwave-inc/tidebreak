@@ -13,6 +13,7 @@ import { useApp } from "./AppContext";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { summedTurnTokens } from "./ContextUsage";
 import { ChatStatusChip } from "./ChatStatusChip";
+import { useChatMemoryPresence } from "./chatMemoryPresence";
 import { useChatHydration } from "./useChatHydration";
 import { useChatListStore } from "./ChatListStore";
 import { useComposerAttachments, useComposerDrafts } from "./ComposerDrafts";
@@ -158,6 +159,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const draftRef = useRef(useComposerDrafts.getState().drafts[chatId] ?? "");
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
+  const memorySummary = useChatMemoryPresence(client, chat);
+  const memorySettingsPath: string = "/settings/experimental";
   const nativeHost = hasNativeHost();
   const folders = useChatFolderAttachments(chat, nativeHost);
 
@@ -1042,6 +1045,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onOpenAgents={() => openPanel({ type: "agents" })}
               onOpenBrowser={
                 hasLocalHostAuthority() ? () => openBrowser() : undefined
+              }
+              memory={
+                memorySummary
+                  ? {
+                      summary: memorySummary,
+                      onOpen: () => void navigate({ to: memorySettingsPath }),
+                    }
+                  : undefined
               }
             />
           </div>

@@ -234,10 +234,12 @@ pub struct CompactionSettingsUpdate {
 pub struct MemorySettings {
     /// Whether memory records and digests are available.
     pub enabled: bool,
-    /// Whether post-turn capture is enabled.
+    /// Whether post-turn capture runs. Capture follows `enabled` unless the
+    /// capture key was set to false explicitly, so this is false whenever
+    /// memory is off.
     pub capture_enabled: bool,
-    /// Whether capture can run now. This is false when the capture switch is
-    /// on but no utility model resolves.
+    /// Whether capture can run now. This is false when capture is on but no
+    /// utility model resolves.
     pub capture_ready: bool,
 }
 
@@ -505,12 +507,15 @@ async fn read_memory_settings(state: &AppState) -> Result<MemorySettings, Server
         .await?
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    let capture_enabled = state
-        .store
-        .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)
-        .await?
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
+    // Unset, capture follows the memory switch; see
+    // `tidebreak_server::memory_capture::capture_enabled`.
+    let capture_enabled = enabled
+        && state
+            .store
+            .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)
+            .await?
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
     let utility_model = crate::model_roles::resolve_utility_model(
         &*state.store,
         &*state.secrets,

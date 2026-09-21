@@ -105,3 +105,29 @@ it("counts live background runs and opens the agents table", async () => {
   await userEvent.click(screen.getByText("2 of 3 running"));
   expect(onOpenAgents).toHaveBeenCalled();
 });
+
+it("shows the memory row only when the route computed one, and opens settings from it", async () => {
+  const onOpen = vi.fn();
+  render(
+    <ChatStatusChip
+      outputCount={0}
+      folders={[]}
+      runs={[]}
+      onOpenOutputs={vi.fn()}
+      onOpenFolders={vi.fn()}
+      onOpenAgents={vi.fn()}
+      onOpenPermissions={vi.fn()}
+      memory={{ summary: "2 records in context", onOpen }}
+    />,
+  );
+  expect(screen.getByLabelText("Work activity")).toHaveTextContent(
+    "2 records in context",
+  );
+  await userEvent.click(screen.getByText("Memory"));
+  expect(onOpen).toHaveBeenCalledOnce();
+});
+
+it("has no memory row when the deployment has no memory", () => {
+  renderChip();
+  expect(screen.queryByText("Memory")).not.toBeInTheDocument();
+});

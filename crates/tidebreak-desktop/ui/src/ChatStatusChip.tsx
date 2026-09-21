@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Activity as ActivityIcon,
   Bot,
+  Brain,
   ChevronDown,
   ChevronUp,
   FolderOpen,
@@ -60,6 +61,18 @@ export type ChatStatusChipProps = {
   onOpenBrowser?: () => void;
   /** How many standing approvals reach this chat, when known. */
   permissionCount?: number;
+  /**
+   * What memory is doing for this conversation, when the install has a
+   * memory backend: the one-line summary and where to manage it. Absent
+   * when memory is not part of this deployment.
+   */
+  memory?: ChatMemoryPresence;
+};
+
+/** The memory row's content, computed by the route from settings and chat. */
+export type ChatMemoryPresence = {
+  summary: string;
+  onOpen: () => void;
 };
 
 /**
@@ -83,6 +96,7 @@ export function ChatStatusChip({
   onOpenAgents,
   onOpenBrowser,
   permissionCount,
+  memory,
 }: ChatStatusChipProps) {
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -145,6 +159,7 @@ export function ChatStatusChip({
       onOpenAgents={onOpenAgents}
       onOpenBrowser={onOpenBrowser}
       browserSummary={onOpenBrowser ? "Open shared tab" : undefined}
+      memory={memory}
       onChoose={() => setOpen(false)}
     />
   );
@@ -234,6 +249,7 @@ function ActivityDetails({
   onOpenAgents,
   onOpenBrowser,
   browserSummary,
+  memory,
   onChoose,
 }: {
   outputsSummary: string;
@@ -246,6 +262,7 @@ function ActivityDetails({
   onOpenPermissions: () => void;
   onOpenAgents: () => void;
   onOpenBrowser?: () => void;
+  memory?: ChatMemoryPresence;
   onChoose: () => void;
 }) {
   const choose = (action: () => void) => {
@@ -279,6 +296,14 @@ function ActivityDetails({
         value={agentsSummary}
         onClick={() => choose(onOpenAgents)}
       />
+      {memory && (
+        <DetailRow
+          icon={<Brain className="size-4" aria-hidden="true" />}
+          label="Memory"
+          value={memory.summary}
+          onClick={() => choose(memory.onOpen)}
+        />
+      )}
       {onOpenBrowser && (
         <DetailRow
           icon={<Globe2 className="size-4" aria-hidden="true" />}
