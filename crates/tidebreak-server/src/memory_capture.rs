@@ -317,9 +317,11 @@ impl MemoryCapture {
             .map_err(capture_store_error)?;
         // A title the user forgot is not re-learned within the suppression
         // horizon (decision 0067), however confident this turn's phrasing is.
-        if stored.iter().any(|record| {
-            record.status == MemoryStatus::Rejected && titles_match(&record.title, title)
-        }) {
+        let now = chrono::Utc::now();
+        if stored
+            .iter()
+            .any(|record| recently_forgotten(record, now) && titles_match(&record.title, title))
+        {
             return Ok(Outcome::Declined);
         }
         // The same topic is one entry: a refinement rewrites the live record
@@ -356,7 +358,6 @@ impl MemoryCapture {
                 .map_err(capture_store_error)?;
             return Ok(Outcome::Updated(updated.record.id));
         }
-        let now = chrono::Utc::now();
         let record = MemoryRecord {
             id: MemoryRecordId::new(),
             scope: MemoryScope::Personal,
@@ -443,19 +444,26 @@ impl MemoryCapture {
             material.push_str(&digest.markdown);
             material.push_str("\n</stored>\n");
         }
-        let forgotten = self
+        let now = chrono::Utc::now();
+        let stored = self
             .memory
             .list(
                 owner,
                 MemoryListFilter {
                     scope: Some(MemoryScope::Personal),
-                    statuses: vec![MemoryStatus::Rejected],
+                    statuses: vec![MemoryStatus::Rejected, MemoryStatus::Archived],
                     kinds: Vec::new(),
                 },
             )
             .await
             .map_err(capture_store_error)?;
-        push_title_lines(&mut material, "forgotten", forgotten.iter());
+        push_title_lines(
+            &mut material,
+            "forgotten",
+            stored
+                .iter()
+                .filter(|record| recently_forgotten(record, now)),
+        );
         Ok(Some((material, evidence)))
     }
 }
@@ -479,6 +487,27 @@ fn push_title_lines<'a>(
         material.push('\n');
     }
     material.push_str(&format!("</{tag}>\n"));
+}
+
+/// How long a forgotten title stays off limits to capture.
+///
+/// Forgetting archives (decision 0099), so a plain archived record with no
+/// successor is what a person's Forget leaves behind, and it must not be
+/// relearned the next time the same phrasing comes up. A superseded source
+/// is a different case: its content lives on in the merge, and the merge's
+/// own title is what suppression keys on. The horizon keeps a title that
+/// stopped being true from being blocked forever.
+const FORGOTTEN_HORIZON: chrono::Duration = chrono::Duration::days(30);
+
+/// Whether a stored record is a forgotten title capture must not relearn.
+fn recently_forgotten(record: &MemoryRecord, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match record.status {
+        MemoryStatus::Rejected => true,
+        MemoryStatus::Archived => {
+            record.superseded_by.is_none() && now - record.updated_at <= FORGOTTEN_HORIZON
+        }
+        _ => false,
+    }
 }
 
 /// Whether two retrieval titles name the same pattern.

@@ -779,7 +779,8 @@ async fn capture_candidates_land_live_and_rewrite_their_topic() {
         .unwrap();
     assert_eq!(outcome, CaptureOutcome::Declined);
 
-    // A forgotten title is not re-learned.
+    // Forgetting archives the record, and the forgotten title is not
+    // re-learned however the next turn phrases it.
     db.set_status(
         &owner,
         tidebreak_core::MemoryStatusChange {
@@ -790,6 +791,34 @@ async fn capture_candidates_land_live_and_rewrite_their_topic() {
     )
     .await
     .unwrap();
+    let outcome = capture
+        .store_candidate(
+            &owner,
+            chat.id,
+            turn_id,
+            evidence.clone(),
+            candidate("When formatting reports", "Use tables rather than prose."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, CaptureOutcome::Declined);
+    assert_eq!(
+        db.list(
+            &owner,
+            MemoryListFilter {
+                scope: None,
+                statuses: vec![MemoryStatus::Active],
+                kinds: Vec::new(),
+            },
+        )
+        .await
+        .unwrap()
+        .len(),
+        0,
+        "a forgotten title stays forgotten"
+    );
+
+    // A dismissed title is not re-learned either.
     let forgotten = MemoryRecord {
         id: MemoryRecordId::new(),
         status: MemoryStatus::Rejected,
