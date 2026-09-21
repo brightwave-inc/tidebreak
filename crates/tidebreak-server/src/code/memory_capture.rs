@@ -1,6 +1,8 @@
 //! Post-turn memory capture for code sessions.
 //!
-//! Shares the recap material builder. Never blocks the turn.
+//! Shares the recap material builder. Never blocks the turn. What it
+//! captures is live at once (decision 0099); the person edits or forgets it
+//! afterwards.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -211,7 +213,9 @@ impl TurnMemoryCapturer {
             id: MemoryRecordId::new(),
             scope: MemoryScope::Personal,
             kind,
-            status: MemoryStatus::Proposed,
+            // Live at once (decision 0099): the session's memory chip and
+            // the settings page are where the person edits or forgets it.
+            status: MemoryStatus::Active,
             title,
             body,
             provenance: MemoryProvenance {

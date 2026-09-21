@@ -706,8 +706,12 @@ pub type MemoryResult<T> = std::result::Result<T, MemoryError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySweepOutcome {
-    /// The utility model proposed a merge for review.
+    /// The utility model proposed a merge for review. Retained for stored
+    /// runs written before decision 0099; new passes report `Merged`.
     Proposed,
+    /// The utility model merged overlapping records and the merge is live;
+    /// its sources are archived with a pointer to it.
+    Merged,
     /// The utility model looked at a changed scope and found nothing to merge.
     Declined,
     /// The last proposal was dismissed and the record set has not changed.
@@ -728,6 +732,7 @@ impl MemorySweepOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Proposed => "proposed",
+            Self::Merged => "merged",
             Self::Declined => "declined",
             Self::Parked => "parked",
             Self::Unchanged => "unchanged",
@@ -741,6 +746,7 @@ impl MemorySweepOutcome {
     pub fn parse(token: &str) -> MemoryResult<Self> {
         match token {
             "proposed" => Ok(Self::Proposed),
+            "merged" => Ok(Self::Merged),
             "declined" => Ok(Self::Declined),
             "parked" => Ok(Self::Parked),
             "unchanged" => Ok(Self::Unchanged),

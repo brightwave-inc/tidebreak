@@ -565,12 +565,30 @@ impl MemorySweep {
         };
 
         let record = merge_record(scope, &payload, active)?;
-        self.backend()
+        let stored = self
+            .backend()
             .put(owner, record.clone())
             .await
             .map_err(|error| {
                 AgentError::msg(format!(
                     "memory consolidation could not store a merge: {error}"
+                ))
+            })?;
+        // Live at once (decision 0099): activating the merge is the one
+        // transition that also archives its sources with a pointer back.
+        self.backend()
+            .set_status(
+                owner,
+                tidebreak_core::MemoryStatusChange {
+                    id: stored.record.id,
+                    expected_revision: stored.record.revision,
+                    status: MemoryStatus::Active,
+                },
+            )
+            .await
+            .map_err(|error| {
+                AgentError::msg(format!(
+                    "memory consolidation could not apply a merge: {error}"
                 ))
             })?;
         save_sweep_scope_state(
@@ -588,11 +606,11 @@ impl MemorySweep {
         tracing::info!(
             owner = %owner,
             record = %record.id,
-            "memory sweep proposed a merge of {} records on {}",
+            "memory sweep merged {} records on {}",
             record.links.len(),
             utility.model,
         );
-        Ok((MemorySweepOutcome::Proposed, 1))
+        Ok((MemorySweepOutcome::Merged, 1))
     }
 
     /// Whether the owner has an active turn in work or code mode.
@@ -1000,7 +1018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_proposal_cites_its_sources_and_a_dismissal_parks_the_scope() {
+    async fn a_merge_is_live_at_once_and_archives_its_sources() {
         let (_directory, db) = temp_db().await;
         let owner = OwnerId::local();
         let backend: &dyn MemoryBackend = &*db;
@@ -1015,24 +1033,24 @@ mod tests {
             .sweep_owner(&owner, Some(&utility()), at(2))
             .await
             .unwrap();
-        assert_eq!(run.outcome, MemorySweepOutcome::Proposed);
+        assert_eq!(run.outcome, MemorySweepOutcome::Merged);
         assert_eq!(run.proposed, 1);
 
-        let proposals = backend
+        let active = backend
             .list(
                 &owner,
                 MemoryListFilter {
                     scope: None,
-                    statuses: vec![MemoryStatus::Proposed],
+                    statuses: vec![MemoryStatus::Active],
                     kinds: Vec::new(),
                 },
             )
             .await
             .unwrap();
-        assert_eq!(proposals.len(), 1);
-        let proposal = &proposals[0];
-        assert_eq!(proposal.provenance.author, MemoryAuthor::Model);
-        let mut cited: Vec<MemoryRecordId> = proposal
+        assert_eq!(active.len(), 1, "the merge replaced both sources");
+        let merged = &active[0];
+        assert_eq!(merged.provenance.author, MemoryAuthor::Model);
+        let mut cited: Vec<MemoryRecordId> = merged
             .links
             .iter()
             .filter(|link| link.relation == MemoryLinkRelation::Supersedes)
@@ -1042,55 +1060,33 @@ mod tests {
         let mut sources = vec![first.id, second.id];
         sources.sort_by_key(|id| id.0);
         assert_eq!(cited, sources);
-        // The sources stay active until someone approves the merge.
+        // The sources are archived with a pointer at what replaced them, so
+        // the trail stays answerable.
         for id in [first.id, second.id] {
-            assert_eq!(
-                backend.get(&owner, id).await.unwrap().unwrap().status,
-                MemoryStatus::Active
-            );
+            let source = backend.get(&owner, id).await.unwrap().unwrap();
+            assert_eq!(source.status, MemoryStatus::Archived);
+            assert_eq!(source.superseded_by, Some(merged.id));
         }
 
-        // Dismiss it. The record set has not changed, so the scope parks and
-        // the same proposal is never regenerated.
-        backend
-            .set_status(
-                &owner,
-                MemoryStatusChange {
-                    id: proposal.id,
-                    expected_revision: proposal.revision,
-                    status: MemoryStatus::Rejected,
-                },
-            )
-            .await
-            .unwrap();
-        let parked = sweep
+        // One active record is nothing to consolidate: the next pass settles
+        // the new fingerprint without a model step.
+        let settled = sweep
             .sweep_owner(&owner, Some(&utility()), at(3))
             .await
             .unwrap();
-        assert_eq!(parked.outcome, MemorySweepOutcome::Parked);
+        assert_eq!(settled.outcome, MemorySweepOutcome::Unchanged);
         assert_eq!(provider.calls(), 1);
 
-        // Moving the record set clears the park.
-        let stored = backend.get(&owner, first.id).await.unwrap().unwrap();
+        // A new record moves the set again, and the model is asked again.
         backend
-            .update(
+            .put(
                 &owner,
-                MemoryRecordUpdate {
-                    id: stored.id,
-                    expected_revision: stored.revision,
-                    kind: stored.kind,
-                    title: stored.title.clone(),
-                    body: "Tag the release first.".to_owned(),
-                    provenance: stored.provenance.clone(),
-                    links: Vec::new(),
-                    expires_at: None,
-                    observation_count: 0,
-                },
+                record(MemoryStatus::Active, "Publish after the tag", 4),
             )
             .await
             .unwrap();
         let resumed = sweep
-            .sweep_owner(&owner, Some(&utility()), at(4))
+            .sweep_owner(&owner, Some(&utility()), at(5))
             .await
             .unwrap();
         assert_eq!(resumed.outcome, MemorySweepOutcome::Declined);
@@ -1122,76 +1118,6 @@ mod tests {
         let run = sweep.sweep_owner(&owner, None, at(2)).await.unwrap();
         assert_eq!(run.outcome, MemorySweepOutcome::NoModel);
         assert_eq!(provider.calls(), 0);
-    }
-
-    /// A pending merge survives its scope shrinking below two active
-    /// records: the trivial completion keeps the proposal reference, so a
-    /// later pass never stacks a second merge beside it.
-    #[tokio::test]
-    async fn a_shrunken_scope_keeps_its_pending_proposal_on_the_hold() {
-        let (_directory, db) = temp_db().await;
-        let owner = OwnerId::local();
-        let backend: &dyn MemoryBackend = &*db;
-        let first = record(MemoryStatus::Active, "Tag before publishing", 1);
-        let second = record(MemoryStatus::Active, "Draft notes before tagging", 1);
-        backend.put(&owner, first.clone()).await.unwrap();
-        backend.put(&owner, second.clone()).await.unwrap();
-
-        let provider = FakeUtilityProvider::new(&[&merge_answer(&[first.id, second.id])]);
-        let sweep = sweep_over(&db, &provider);
-        let run = sweep
-            .sweep_owner(&owner, Some(&utility()), at(2))
-            .await
-            .unwrap();
-        assert_eq!(run.outcome, MemorySweepOutcome::Proposed);
-
-        // The owner archives one source, shrinking the scope below two
-        // actives; the pass settles the fingerprint without a model.
-        backend
-            .set_status(
-                &owner,
-                MemoryStatusChange {
-                    id: first.id,
-                    expected_revision: 1,
-                    status: MemoryStatus::Archived,
-                },
-            )
-            .await
-            .unwrap();
-        let shrunk = sweep
-            .sweep_owner(&owner, Some(&utility()), at(3))
-            .await
-            .unwrap();
-        assert_eq!(shrunk.outcome, MemorySweepOutcome::Unchanged);
-        assert_eq!(provider.calls(), 1);
-
-        // A new record brings the scope back to two actives while the first
-        // merge still waits for review: the hold must keep holding.
-        backend
-            .put(
-                &owner,
-                record(MemoryStatus::Active, "Publish after the tag", 4),
-            )
-            .await
-            .unwrap();
-        let held = sweep
-            .sweep_owner(&owner, Some(&utility()), at(5))
-            .await
-            .unwrap();
-        assert_eq!(held.outcome, MemorySweepOutcome::Unchanged);
-        assert_eq!(provider.calls(), 1);
-        let proposals = backend
-            .list(
-                &owner,
-                MemoryListFilter {
-                    scope: None,
-                    statuses: vec![MemoryStatus::Proposed],
-                    kinds: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(proposals.len(), 1);
     }
 
     #[tokio::test]

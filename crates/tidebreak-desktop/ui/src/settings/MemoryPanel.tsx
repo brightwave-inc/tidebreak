@@ -1,30 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Brain, Eye, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Brain } from "lucide-react";
 import { toast } from "sonner";
 
 import type {
   ApiClient,
   MemoryDigest,
+  MemoryKind,
   MemorySettings,
   MemoryRecord,
-  MemoryRevision,
-  MemoryStatus,
-  MemorySweepStatus,
 } from "../api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import {
   Empty,
-  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { memoryStatusVariant } from "../memoryStatus";
 import { useMemoryPresenceStore } from "../MemoryPresenceStore";
 import {
   SettingsError,
@@ -34,44 +31,44 @@ import {
   SettingsStatus,
 } from "./primitives";
 
-type MemoryView = "review" | "noticing" | "records";
+/** Where a record shows on the page. Preferences describe the person; the rest are notes. */
+function groupOf(kind: MemoryKind): "about" | "notes" {
+  return kind === "preference" ? "about" : "notes";
+}
 
-const VIEW_OPTIONS: { id: MemoryView; label: string }[] = [
-  { id: "review", label: "Review" },
-  { id: "noticing", label: "Noticing" },
-  { id: "records", label: "All records" },
-];
+/** Past this share of the cap, the page says memory is nearly full. */
+const NEARLY_FULL = 0.8;
+
+type Draft = { id: string; title: string; body: string };
 
 /**
- * Memory settings: one switch, then everything the store holds.
+ * Memory settings: one switch and what Tidebreak knows.
  *
- * The switch is the whole setup. Capture follows it on the server, and a
- * captured record never carries authority until it is approved here or in
- * the transcript, so there is no safe reason to make a person find a second
- * switch before anything happens. The status block above the switch names
- * the one thing that is holding memory back, when something is, and the
- * Noticing view shows the patterns capture is watching before they reach
- * review, so the feature reads as alive from the first conversation.
+ * Memory is automatic (decision 0099): the model saves as it goes and the
+ * person's control is after the fact. So this page is a plain list of what
+ * is known, in two groups, each line editable and forgettable with a way
+ * back to the conversation it came from. No lifecycle states, revisions,
+ * or meters: those are how the store works, not what the person needs.
  */
 export function MemoryPanel({
   client,
   onOpenModels,
+  onOpenConversation,
 }: {
   client: ApiClient;
   /** Bring the Models settings forward, for the no-utility-model state. */
   onOpenModels?: () => void;
+  /** Open the conversation a record was learned from. */
+  onOpenConversation?: (chatId: string) => void;
 }) {
   const [settings, setSettings] = useState<MemorySettings | null>(null);
-  const [view, setView] = useState<MemoryView>("review");
-  const [records, setRecords] = useState<MemoryRecord[] | null>(null);
   const [digest, setDigest] = useState<MemoryDigest | null>(null);
-  const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [revisions, setRevisions] = useState<MemoryRevision[] | null>(null);
-  const [sweep, setSweep] = useState<MemorySweepStatus | null>(null);
+  const [records, setRecords] = useState<MemoryRecord[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Draft | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const refreshPresence = useMemoryPresenceStore((state) => state.refresh);
   const applyPresence = useMemoryPresenceStore((state) => state.apply);
 
@@ -79,48 +76,15 @@ export function MemoryPanel({
     setLoading(true);
     setError(null);
     try {
-      // Settings and the digest come through the shared snapshot the
-      // activity chip also reads, so the two never race each other and the
-      // chip shows what this page just changed.
-      const [presence, nextRecords, nextSweep] = await Promise.all([
+      const [presence, nextRecords] = await Promise.all([
         refreshPresence(client),
         client.listMemoryRecords(),
-        client.getMemorySweepStatus(),
       ]);
-      const nextSettings = { memory: presence.settings };
-      const nextDigest = presence.digest;
-      setSettings(nextSettings.memory);
-      setRecords((current) => {
-        // First load lands on the view with something to do: review when a
-        // proposal waits, noticing when only patterns are being watched,
-        // otherwise the full list.
-        if (current == null) {
-          setView(
-            nextRecords.some((record) => record.status === "proposed")
-              ? "review"
-              : nextRecords.some((record) => record.status === "tracking")
-                ? "noticing"
-                : "records",
-          );
-        }
-        return nextRecords;
-      });
-      setDigest(nextDigest);
-      setSweep(nextSweep);
-      setSelectedId((current) => {
-        const exists =
-          current != null &&
-          nextRecords.some((record) => record.id === current);
-        if (exists) return current;
-        return (
-          nextRecords.find((record) => record.status === "proposed")?.id ??
-          nextRecords.find((record) => record.status === "active")?.id ??
-          nextRecords[0]?.id ??
-          null
-        );
-      });
+      setSettings(presence.settings);
+      setDigest(presence.digest);
+      setRecords(nextRecords);
     } catch (caught) {
-      setError(friendlyErrorMessage(caught, "Could not read memory records."));
+      setError(friendlyErrorMessage(caught, "Could not read memory."));
     } finally {
       setLoading(false);
     }
@@ -130,127 +94,99 @@ export function MemoryPanel({
     void reload();
   }, [reload]);
 
-  useEffect(() => {
-    if (selectedId == null) {
-      setRevisions(null);
-      return;
-    }
-    let cancelled = false;
-    void client
-      .getMemoryRevisions(selectedId)
-      .then((nextRevisions) => {
-        if (!cancelled) setRevisions(nextRevisions);
-      })
-      .catch((caught) => {
-        if (!cancelled) {
-          setError(
-            friendlyErrorMessage(caught, "Could not read record history."),
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, selectedId]);
-
-  const filteredRecords = useMemo(() => {
-    if (records == null) return null;
-    const query = search.trim().toLowerCase();
-    if (!query) return records;
-    return records.filter(
-      (record) =>
-        record.title.toLowerCase().includes(query) ||
-        record.body.toLowerCase().includes(query),
-    );
-  }, [records, search]);
-
-  const proposals =
-    records?.filter((record) => record.status === "proposed") ?? [];
-  const noticing =
-    records?.filter((record) => record.status === "tracking") ?? [];
-  const visible =
-    view === "review"
-      ? proposals
-      : view === "noticing"
-        ? noticing
-        : (filteredRecords ?? []);
-  // The detail below the list always describes a row in the list above it.
-  const selectedRecord =
-    visible.find((record) => record.id === selectedId) ?? null;
-
-  function showView(next: MemoryView) {
-    setView(next);
-    const rows =
-      next === "review"
-        ? proposals
-        : next === "noticing"
-          ? noticing
-          : (records ?? []);
-    setSelectedId((current) =>
-      rows.some((record) => record.id === current)
-        ? current
-        : (rows[0]?.id ?? null),
-    );
-  }
-
-  async function setStatus(record: MemoryRecord, status: MemoryStatus) {
+  async function run(work: () => Promise<void>, fallback: string) {
     setWorking(true);
     setError(null);
     try {
-      const updated = await client.setMemoryRecordStatus(record.id, {
-        expected_revision: record.revision,
-        status,
-      });
-      toast.success(statusToast(status));
-      await reload();
-      setSelectedId(updated.id);
+      await work();
     } catch (caught) {
-      friendlyStatusError(caught, setError);
+      setError(friendlyErrorMessage(caught, fallback));
     } finally {
       setWorking(false);
     }
   }
 
-  async function updateSettings(update: {
-    enabled?: boolean;
-    capture_enabled?: boolean;
-  }) {
-    setWorking(true);
-    setError(null);
-    try {
-      const next = await client.putSettings({ memory: update });
+  function setEnabled(enabled: boolean) {
+    void run(async () => {
+      const next = await client.putSettings({
+        memory: { enabled, capture_enabled: enabled },
+      });
       setSettings(next.memory);
       applyPresence({ settings: next.memory });
-      toast.success(
-        update.enabled === false
-          ? "Memory is off"
-          : update.enabled === true
-            ? "Memory is on"
-            : "Capture resumed",
-      );
-    } catch (caught) {
-      setError(friendlyErrorMessage(caught, "Could not save memory settings."));
-    } finally {
-      setWorking(false);
-    }
+      toast.success(enabled ? "Memory is on" : "Memory is off");
+    }, "Could not save memory settings.");
   }
 
-  const status =
-    settings && digest
-      ? memoryStatus(settings, digest, proposals.length, noticing.length)
-      : null;
+  function forget(record: MemoryRecord) {
+    void run(async () => {
+      await client.setMemoryRecordStatus(record.id, {
+        expected_revision: record.revision,
+        status: "archived",
+      });
+      toast.success("Forgotten");
+      await reload();
+    }, "Could not forget this memory.");
+  }
+
+  function save(record: MemoryRecord, title: string, body: string) {
+    void run(async () => {
+      await client.updateMemoryRecord(record.id, {
+        expected_revision: record.revision,
+        kind: record.kind,
+        title: title.trim(),
+        body: body.trim(),
+        author: "user",
+        origin: record.provenance.origin,
+        evidence: record.provenance.evidence,
+        links: record.links,
+        expires_at: record.expires_at ?? null,
+        observation_count: record.observation_count,
+      });
+      setEditing(null);
+      toast.success("Saved");
+      await reload();
+    }, "Could not save this memory.");
+  }
+
+  async function forgetEverything(active: MemoryRecord[]) {
+    const ok = await confirm({
+      title: "Forget everything?",
+      description: `Tidebreak stops using all ${active.length} ${active.length === 1 ? "record" : "records"} in every conversation. Nothing is deleted, and new memories are still saved.`,
+      confirmLabel: "Forget everything",
+      destructive: true,
+    });
+    if (!ok) return;
+    void run(async () => {
+      for (const record of active) {
+        await client.setMemoryRecordStatus(record.id, {
+          expected_revision: record.revision,
+          status: "archived",
+        });
+      }
+      toast.success("Forgot everything");
+      await reload();
+    }, "Could not forget everything.");
+  }
+
+  const active = records?.filter((record) => record.status === "active") ?? [];
+  const about = active.filter((record) => groupOf(record.kind) === "about");
+  const notes = active.filter((record) => groupOf(record.kind) === "notes");
+  const nearlyFull =
+    digest != null &&
+    digest.byte_cap > 0 &&
+    digest.byte_len / digest.byte_cap >= NEARLY_FULL;
 
   return (
     <SettingsPanel
-      title="Experimental"
-      description="Try features that are still changing. Experimental features are off by default."
+      title="Memory"
+      description="What Tidebreak has learned about you and your work. It saves as you go and uses it in every conversation."
       busy={loading || working}
     >
       {loading && records == null ? (
         <p className="text-sm text-muted-foreground" role="status">
           Loading memory…
         </p>
-      ) : records == null || digest == null || settings == null ? (
+      ) : records == null || settings == null || digest == null ? (
         <div className="flex flex-col items-start gap-3">
           <SettingsError>{error}</SettingsError>
           <Button type="button" variant="outline" size="sm" onClick={reload}>
@@ -259,26 +195,20 @@ export function MemoryPanel({
         </div>
       ) : (
         <>
-          {status && (
+          {!settings.enabled ? (
+            <SettingsStatus
+              tone="disabled"
+              label="Memory is off"
+              description="Nothing is saved or used while it is off. Anything already learned is kept."
+            />
+          ) : !settings.capture_ready ? (
             <div className="flex flex-col items-stretch gap-2">
               <SettingsStatus
-                tone={status.tone}
-                label={status.label}
-                description={status.description}
+                tone="not-configured"
+                label="Memory saves only during conversations"
+                description="The end-of-turn review needs a small utility model, and no configured provider serves one. Add a provider, and Tidebreak also reviews each turn for anything worth keeping."
               />
-              {status.action === "resume" && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="self-start"
-                  disabled={working}
-                  onClick={() => void updateSettings({ capture_enabled: true })}
-                >
-                  Resume capture
-                </Button>
-              )}
-              {status.action === "models" && onOpenModels && (
+              {onOpenModels && (
                 <Button
                   type="button"
                   variant="outline"
@@ -290,605 +220,229 @@ export function MemoryPanel({
                 </Button>
               )}
             </div>
-          )}
-          {settings.enabled && records.length > 0 && (
-            <p className="text-sm text-muted-foreground" role="status">
-              {sweepSummary(sweep)}
-            </p>
-          )}
+          ) : nearlyFull ? (
+            <SettingsStatus
+              tone="not-configured"
+              label="Memory is nearly full"
+              description="Tidebreak merges overlapping entries on its own. Forgetting what no longer matters helps."
+            />
+          ) : null}
 
-          <SettingsSection
-            title="Memory"
-            description="Tidebreak notices facts and preferences after each conversation turn and proposes them here. Only records you approve reach a conversation."
-          >
+          <SettingsSection title="Memory">
             <SettingsField
               label="Remember across conversations"
               hint={
                 settings.enabled
-                  ? "Turning this off stops capture and injection. It keeps every record."
-                  : "Nothing is captured or injected while this is off. Existing records are kept."
+                  ? "Turning this off stops saving and using memory. It keeps what is here."
+                  : "Nothing is saved or used while this is off."
               }
             >
               <Switch
                 checked={settings.enabled}
                 disabled={working}
-                onCheckedChange={(enabled) =>
-                  void updateSettings({ enabled, capture_enabled: enabled })
-                }
+                onCheckedChange={(enabled) => setEnabled(enabled)}
               />
             </SettingsField>
           </SettingsSection>
 
-          {records.length === 0 ? (
+          {active.length === 0 ? (
             settings.enabled && (
-              <SettingsSection title="Records">
-                <Empty className="min-h-48">
+              <SettingsSection title="What Tidebreak knows">
+                <Empty className="min-h-40">
                   <EmptyHeader>
                     <EmptyMedia variant="icon" className="text-icon-violet">
                       <Brain />
                     </EmptyMedia>
-                    <EmptyTitle>Nothing captured yet</EmptyTitle>
+                    <EmptyTitle>Nothing yet</EmptyTitle>
                     <EmptyDescription>
-                      {settings.capture_ready
-                        ? "After each completed turn, Tidebreak proposes what seems worth keeping. A pattern seen once is watched here until it repeats in another conversation."
-                        : "Records appear here once capture can run."}
+                      Tell Tidebreak how you like to work, or just keep going.
+                      It saves what will matter later and shows you when it
+                      does.
                     </EmptyDescription>
                   </EmptyHeader>
                 </Empty>
               </SettingsSection>
             )
           ) : (
-            <SettingsSection title="Records">
-              <div className="flex flex-wrap items-center gap-2">
-                {VIEW_OPTIONS.map((option) => {
-                  const count =
-                    option.id === "review"
-                      ? proposals.length
-                      : option.id === "noticing"
-                        ? noticing.length
-                        : 0;
-                  return (
-                    <Button
-                      key={option.id}
-                      type="button"
-                      variant={view === option.id ? "default" : "outline"}
-                      size="sm"
-                      disabled={working}
-                      aria-pressed={view === option.id}
-                      onClick={() => showView(option.id)}
-                    >
-                      {option.label}
-                      {count > 0 && (
-                        <span className="ml-1 tabular-nums opacity-70">
-                          {count}
-                        </span>
-                      )}
-                    </Button>
-                  );
-                })}
-              </div>
-              {view === "review" ? (
-                proposals.length === 0 ? (
-                  <Empty className="min-h-48">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon" className="text-icon-violet">
-                        <Brain />
-                      </EmptyMedia>
-                      <EmptyTitle>Nothing waiting for review</EmptyTitle>
-                      <EmptyDescription>
-                        {noticing.length > 0
-                          ? `${noticing.length} ${plural(noticing.length, "pattern is", "patterns are")} being watched. Each one moves here once it repeats in another conversation.`
-                          : settings.enabled
-                            ? "Proposals appear here after a turn teaches something worth keeping."
-                            : "Turn memory on, and proposals appear here after a turn teaches something worth keeping."}
-                      </EmptyDescription>
-                    </EmptyHeader>
-                    {noticing.length > 0 && (
-                      <EmptyContent>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => showView("noticing")}
-                        >
-                          See what is being watched
-                        </Button>
-                      </EmptyContent>
-                    )}
-                  </Empty>
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {proposals.map((record) => (
-                      <MemoryRecordRow
-                        key={record.id}
-                        record={record}
-                        selected={record.id === selectedId}
-                        onSelect={() => setSelectedId(record.id)}
-                      />
-                    ))}
-                  </ul>
-                )
-              ) : view === "noticing" ? (
-                noticing.length === 0 ? (
-                  <Empty className="min-h-48">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon" className="text-icon-violet">
-                        <Eye />
-                      </EmptyMedia>
-                      <EmptyTitle>Nothing being watched</EmptyTitle>
-                      <EmptyDescription>
-                        A pattern seen once waits here until it repeats in
-                        another conversation, then moves to review.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {noticing.map((record) => (
-                      <MemoryRecordRow
-                        key={record.id}
-                        record={record}
-                        selected={record.id === selectedId}
-                        onSelect={() => setSelectedId(record.id)}
-                      />
-                    ))}
-                  </ul>
-                )
-              ) : (
-                <div className="flex flex-col gap-3">
-                  <label className="flex items-center gap-2 rounded-lg border border-input pr-2 pl-3 text-sm">
-                    <Search
-                      className="size-4 shrink-0 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                    <Input
-                      className="h-control border-0 bg-transparent pr-0 pl-0 shadow-none focus-visible:border-transparent focus-visible:ring-0"
-                      placeholder="Search records…"
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                    />
-                  </label>
-                  {filteredRecords?.length === 0 ? (
-                    <Empty className="min-h-48">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon" className="text-icon-violet">
-                          <Brain />
-                        </EmptyMedia>
-                        <EmptyTitle>
-                          {search.trim()
-                            ? "No matching records"
-                            : "No records yet"}
-                        </EmptyTitle>
-                        <EmptyDescription>
-                          {search.trim()
-                            ? "Try another word or clear the search."
-                            : "Every record capture proposes, you approve, or you write lands here."}
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
-                  ) : (
-                    <ul className="flex flex-col gap-2">
-                      {filteredRecords?.map((record) => (
-                        <MemoryRecordRow
-                          key={record.id}
-                          record={record}
-                          selected={record.id === selectedId}
-                          onSelect={() => setSelectedId(record.id)}
-                        />
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </SettingsSection>
-          )}
-
-          {selectedRecord && (
-            <MemoryDetail
-              record={selectedRecord}
-              revisions={revisions}
-              working={working}
-              onApprove={() => void setStatus(selectedRecord, "active")}
-              onReview={() => void setStatus(selectedRecord, "proposed")}
-              onDismiss={() => void setStatus(selectedRecord, "rejected")}
-              onArchive={() => void setStatus(selectedRecord, "archived")}
-            />
-          )}
-
-          {digest.record_count > 0 && (
-            <SettingsSection
-              title="Digest preview"
-              description="The exact markdown injected at a conversation boundary."
-            >
-              <div className="flex flex-col gap-3">
-                <div
-                  className="flex items-center gap-2"
-                  role="status"
-                  aria-label="Digest size"
+            <>
+              <SettingsSection
+                title="About you"
+                description="How you like to work. Tidebreak follows these in every conversation."
+              >
+                <MemoryList
+                  records={about}
+                  emptyText="Nothing about you yet."
+                  editing={editing}
+                  working={working}
+                  onEdit={setEditing}
+                  onSave={save}
+                  onForget={forget}
+                  onOpenConversation={onOpenConversation}
+                />
+              </SettingsSection>
+              <SettingsSection
+                title="Notes"
+                description="Facts, lessons, and references Tidebreak keeps for later."
+              >
+                <MemoryList
+                  records={notes}
+                  emptyText="No notes yet."
+                  editing={editing}
+                  working={working}
+                  onEdit={setEditing}
+                  onSave={save}
+                  onForget={forget}
+                  onOpenConversation={onOpenConversation}
+                />
+              </SettingsSection>
+              <SettingsSection title="Danger zone">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="self-start"
+                  disabled={working}
+                  onClick={() => void forgetEverything(active)}
                 >
-                  <div className="h-1.5 min-w-16 grow overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-primary"
-                      style={{
-                        width: `${Math.min(100, (digest.byte_len / digest.byte_cap) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {digest.byte_len}/{digest.byte_cap} bytes
-                  </span>
-                </div>
-                <pre className="max-h-64 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap">
-                  {digest.markdown}
-                </pre>
-              </div>
-            </SettingsSection>
+                  Forget everything
+                </Button>
+              </SettingsSection>
+            </>
           )}
           {error && <SettingsError>{error}</SettingsError>}
         </>
       )}
+      {confirmDialog}
     </SettingsPanel>
   );
 }
 
-/**
- * The one line at the top of the page: what memory is doing right now, and
- * when something holds it back, what that is. Each blocker names its own
- * fix, so nobody has to work out which of several conditions failed.
- */
-function memoryStatus(
-  settings: MemorySettings,
-  digest: MemoryDigest,
-  proposalCount: number,
-  noticingCount: number,
-): {
-  tone: "ready" | "not-configured" | "disabled";
-  label: string;
-  description: string;
-  /** The one control that clears a blocker, when there is one. */
-  action?: "resume" | "models";
-} {
-  if (!settings.enabled) {
-    return {
-      tone: "disabled",
-      label: "Memory is off",
-      description:
-        "Turn it on, and Tidebreak proposes records after each conversation turn. Nothing is used until you approve it.",
-    };
-  }
-  if (!settings.capture_enabled) {
-    return {
-      tone: "not-configured",
-      label: "Capture is paused",
-      description: `${activeSummary(digest.record_count)} No new records are proposed until capture resumes.`,
-      action: "resume",
-    };
-  }
-  if (!settings.capture_ready) {
-    return {
-      tone: "not-configured",
-      label: "Memory is on, but nothing can be captured yet",
-      description: `${activeSummary(digest.record_count)} Capture runs on the utility model, and no configured provider serves one. Add a provider with a small model, and capture starts on the next completed turn.`,
-      action: "models",
-    };
-  }
-  const pending =
-    proposalCount > 0
-      ? ` ${proposalCount} ${plural(proposalCount, "proposal waits", "proposals wait")} for your review.`
-      : "";
-  if (digest.record_count === 0) {
-    return {
-      tone: "ready",
-      label: "Memory is on",
-      description:
-        proposalCount > 0
-          ? `Nothing approved yet.${pending}`
-          : noticingCount > 0
-            ? `Nothing approved yet. ${noticingCount} ${plural(noticingCount, "pattern is", "patterns are")} being watched until ${noticingCount === 1 ? "it repeats" : "they repeat"} in another conversation.`
-            : "Nothing captured yet. Tidebreak reviews each completed turn and proposes what seems worth keeping.",
-    };
-  }
-  return {
-    tone: "ready",
-    label: `${digest.record_count} active ${plural(digest.record_count, "record reaches", "records reach")} every conversation`,
-    description: `Injected as dated claims; the current conversation always overrides them.${pending}`,
-  };
-}
-
-function activeSummary(count: number): string {
-  if (count === 0) return "No approved records yet.";
-  return `${count} approved ${plural(count, "record reaches", "records reach")} every conversation.`;
-}
-
-function plural(count: number, one: string, many: string): string {
-  return count === 1 ? one : many;
-}
-
-function statusToast(status: MemoryStatus): string {
-  switch (status) {
-    case "active":
-      return "Memory approved";
-    case "proposed":
-      return "Sent to review";
-    case "rejected":
-      return "Memory dismissed";
-    case "archived":
-      return "Memory archived";
-    default:
-      return "Memory updated";
-  }
-}
-
-function friendlyStatusError(
-  caught: unknown,
-  setError: (message: string) => void,
-) {
-  setError(friendlyErrorMessage(caught, "Could not change the record status."));
-}
-
-/** How often capture has seen a watched pattern, as one short line. */
-function observationSummary(record: MemoryRecord): string {
-  const seen =
-    record.observation_count <= 1
-      ? "Seen once"
-      : `Seen ${record.observation_count} times`;
-  return `${seen} · moves to review when it repeats in another conversation`;
-}
-
-function MemoryRecordRow({
-  record,
-  selected,
-  onSelect,
-}: {
-  record: MemoryRecord;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const watched = record.status === "tracking";
-  return (
-    <li>
-      <button
-        type="button"
-        className={`flex w-full items-start justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors ${
-          selected || hovered ? "border-ring bg-accent" : ""
-        }`}
-        aria-current={selected ? "true" : undefined}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onFocus={() => setHovered(true)}
-        onBlur={() => setHovered(false)}
-        onClick={onSelect}
-      >
-        <span className="min-w-0">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-medium">{record.title}</span>
-          </span>
-          <span className="mt-1 block truncate text-xs text-muted-foreground">
-            {watched ? observationSummary(record) : record.body}
-          </span>
-        </span>
-        <span className="flex shrink-0 items-center gap-2">
-          <Badge variant={memoryStatusVariant(record.status)} size="sm">
-            {statusLabel(record.status)}
-          </Badge>
-          <span className="font-mono text-xs text-muted-foreground">
-            {formatDay(record.updated_at)}
-          </span>
-        </span>
-      </button>
-    </li>
-  );
-}
-
-/** The user-facing word for a lifecycle state. */
-function statusLabel(status: MemoryStatus): string {
-  switch (status) {
-    case "tracking":
-      return "watching";
-    case "proposed":
-      return "review";
-    default:
-      return status;
-  }
-}
-
-function MemoryDetail({
-  record,
-  revisions,
+function MemoryList({
+  records,
+  emptyText,
+  editing,
   working,
-  onApprove,
-  onReview,
-  onDismiss,
-  onArchive,
+  onEdit,
+  onSave,
+  onForget,
+  onOpenConversation,
 }: {
-  record: MemoryRecord;
-  revisions: MemoryRevision[] | null;
+  records: MemoryRecord[];
+  emptyText: string;
+  editing: Draft | null;
   working: boolean;
-  onApprove: () => void;
-  onReview: () => void;
-  onDismiss: () => void;
-  onArchive: () => void;
+  onEdit: (draft: Draft | null) => void;
+  onSave: (record: MemoryRecord, title: string, body: string) => void;
+  onForget: (record: MemoryRecord) => void;
+  onOpenConversation?: (chatId: string) => void;
 }) {
+  if (records.length === 0) {
+    return <p className="text-sm text-muted-foreground">{emptyText}</p>;
+  }
   return (
-    <SettingsSection
-      title="Record detail"
-      description={`${record.kind} · ${record.provenance.author} · revision ${record.revision}`}
-    >
-      <div className="flex flex-col gap-4">
-        <div>
-          <h3 className="text-sm font-semibold">{record.title}</h3>
-          <p className="mt-2 text-sm whitespace-pre-wrap">{record.body}</p>
-        </div>
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">Status</dt>
-          <dd>
-            <Badge variant={memoryStatusVariant(record.status)} size="sm">
-              {statusLabel(record.status)}
-            </Badge>
-          </dd>
-          {record.status === "tracking" && (
-            <>
-              <dt className="text-muted-foreground">Seen</dt>
-              <dd>
-                {record.observation_count <= 1
-                  ? "once"
-                  : `${record.observation_count} times`}
-                , first on {formatDay(record.created_at)}
-              </dd>
-            </>
-          )}
-          <dt className="text-muted-foreground">Author</dt>
-          <dd>{record.provenance.author}</dd>
-          {record.provenance.evidence.length > 0 && (
-            <>
-              <dt className="text-muted-foreground">Evidence</dt>
-              <dd className="font-mono">
-                {record.provenance.evidence
-                  .map((entry) =>
-                    entry.kind === "message"
-                      ? `message ${entry.message_id}`
-                      : `code event ${entry.session_id}:${entry.seq}`,
-                  )
-                  .join(", ")}
-              </dd>
-            </>
-          )}
-          {record.links.length > 0 && (
-            <>
-              <dt className="text-muted-foreground">Links</dt>
-              <dd className="font-mono">
-                {record.links
-                  .map((link) => `${link.relation} ${link.record_id}`)
-                  .join(", ")}
-              </dd>
-            </>
-          )}
-          {record.expires_at && (
-            <>
-              <dt className="text-muted-foreground">Expires</dt>
-              <dd>{formatDay(record.expires_at)}</dd>
-            </>
-          )}
-        </dl>
-        {record.status === "proposed" && (
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={working}
-              onClick={onApprove}
-            >
-              Approve
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={working}
-              onClick={onDismiss}
-            >
-              Dismiss
-            </Button>
-          </div>
-        )}
-        {record.status === "tracking" && (
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={working}
-              onClick={onReview}
-            >
-              Review now
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={working}
-              onClick={onDismiss}
-            >
-              Dismiss
-            </Button>
-          </div>
-        )}
-        {record.status === "active" && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="self-start"
-            disabled={working}
-            onClick={onArchive}
-          >
-            Archive
-          </Button>
-        )}
-        {revisions != null && revisions.length > 0 && (
-          <div>
-            <h3 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-              History
-            </h3>
-            <ol className="mt-2 flex flex-col gap-1">
-              {revisions.map((revision) => (
-                <li
-                  key={revision.id}
-                  className="flex items-center justify-between gap-3 text-xs"
-                >
-                  <span className="truncate">{revision.snapshot.title}</span>
-                  <span className="shrink-0 font-mono text-muted-foreground">
-                    {formatDay(revision.created_at)} · revision{" "}
-                    {revision.ordinal}
+    <ul className="flex flex-col divide-y divide-border">
+      {records.map((record) => {
+        const draft = editing?.id === record.id ? editing : null;
+        const chatId = record.provenance.origin.chat_id;
+        return (
+          <li key={record.id} className="flex flex-col gap-2 py-3 first:pt-0">
+            {draft ? (
+              <div className="flex flex-col gap-2">
+                <Input
+                  aria-label="Memory title"
+                  value={draft.title}
+                  disabled={working}
+                  onChange={(event) =>
+                    onEdit({ ...draft, title: event.target.value })
+                  }
+                />
+                <Textarea
+                  aria-label="Memory body"
+                  value={draft.body}
+                  disabled={working}
+                  className="min-h-16 text-sm"
+                  onChange={(event) =>
+                    onEdit({ ...draft, body: event.target.value })
+                  }
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={
+                      working || !draft.title.trim() || !draft.body.trim()
+                    }
+                    onClick={() => onSave(record, draft.title, draft.body)}
+                  >
+                    Save
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={working}
+                    onClick={() => onEdit(null)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{record.title}</p>
+                  <p className="mt-0.5 text-sm whitespace-pre-wrap text-muted-foreground">
+                    {record.body}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <span>
+                    {record.provenance.author === "user"
+                      ? "You wrote this"
+                      : `Learned ${formatDay(record.created_at)}`}
                   </span>
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
-      </div>
-    </SettingsSection>
+                  {chatId && onOpenConversation && (
+                    <button
+                      type="button"
+                      className="underline-offset-2 hover:underline"
+                      onClick={() => onOpenConversation(chatId)}
+                    >
+                      Open conversation
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:underline"
+                    disabled={working}
+                    onClick={() =>
+                      onEdit({
+                        id: record.id,
+                        title: record.title,
+                        body: record.body,
+                      })
+                    }
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:underline"
+                    disabled={working}
+                    onClick={() => onForget(record)}
+                  >
+                    Forget
+                  </button>
+                </div>
+              </>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
 function formatDay(timestamp: string): string {
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleDateString();
-}
-
-/** One sentence describing the maintenance sweep's last completed pass. */
-function sweepSummary(status: MemorySweepStatus | null): string {
-  const run = status?.last_run;
-  if (!run) return "Maintenance has not run yet.";
-  const parts: string[] = [];
-  if (run.expired > 0) {
-    parts.push(
-      `archived ${run.expired} expired record${run.expired === 1 ? "" : "s"}`,
-    );
-  }
-  if (run.outcome === "proposed") {
-    parts.push(
-      `proposed ${run.proposed === 1 ? "a merge" : `${run.proposed} merges`} for review`,
-    );
-  } else if (run.outcome === "declined") {
-    parts.push("found nothing to merge");
-  } else if (run.outcome === "parked") {
-    parts.push("parked until records change");
-  } else if (run.outcome === "owner_busy") {
-    parts.push("waited while you were working");
-  } else if (run.outcome === "no_model") {
-    parts.push("skipped consolidation because no utility model is configured");
-  } else if (run.outcome === "rate_limited") {
-    parts.push("held consolidation for a later pass");
-  } else if (parts.length === 0) {
-    parts.push("found no changes");
-  }
-  return `Maintenance last ran ${formatTime(run.ran_at)} and ${parts.join(", ")}.`;
-}
-
-/** A local date and time, falling back to the raw string. */
-function formatTime(timestamp: string): string {
-  const parsed = new Date(timestamp);
-  if (Number.isNaN(parsed.getTime())) return timestamp;
-  return parsed.toLocaleString();
 }

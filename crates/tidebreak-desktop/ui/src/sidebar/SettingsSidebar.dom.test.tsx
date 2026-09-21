@@ -58,8 +58,11 @@ describe("SettingsSidebar", () => {
       }),
     ).toBeVisible();
     expect(
-      within(application).getByRole("button", { name: "Experimental" }),
+      within(application).getByRole("button", { name: "Memory" }),
     ).toBeVisible();
+    expect(
+      within(application).queryByRole("button", { name: "Experimental" }),
+    ).toBeNull();
     expect(
       within(capabilities).queryByRole("button", { name: "Memory" }),
     ).toBeNull();

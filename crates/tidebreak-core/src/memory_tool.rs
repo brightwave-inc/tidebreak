@@ -33,7 +33,9 @@ pub const MEMORY_TOOL_SEARCH_LIMIT: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryToolVerb {
-    Propose,
+    Add,
+    Replace,
+    Remove,
     Search,
     Read,
 }
@@ -46,20 +48,21 @@ pub enum MemoryToolVerb {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryToolArgs {
-    /// What to do: `propose` drafts one durable memory for the user to
-    /// review, `search` finds stored memories by text, `read` loads one
-    /// record by id.
+    /// What to do: `add` saves one new memory, `replace` rewrites an existing
+    /// one in full, `remove` forgets one, `search` finds stored memories by
+    /// text, `read` loads one record by id.
     pub verb: MemoryToolVerb,
-    /// For `propose`: the knowledge category — `fact`, `preference`,
-    /// `lesson`, or `reference`.
+    /// For `add`: the knowledge category — `fact`, `preference`, `lesson`,
+    /// or `reference`. For `replace`: the new category, or omitted to keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<MemoryKind>,
-    /// For `propose`: one plain line stating when this memory matters, so a
-    /// later session can decide from the title alone.
+    /// For `add` and `replace`: one plain line stating when this memory
+    /// matters, so a later session can decide from the title alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = MAX_MEMORY_TITLE_CHARS))]
     pub title: Option<String>,
-    /// For `propose`: the memory itself, as short markdown.
+    /// For `add` and `replace`: the memory itself, as short markdown. A
+    /// `replace` overwrites the whole entry with this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = MAX_MEMORY_BODY_BYTES))]
     pub body: Option<String>,
@@ -67,8 +70,8 @@ pub struct MemoryToolArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1))]
     pub query: Option<String>,
-    /// For `read`: the id of the record to load, exactly as a search hit or
-    /// an earlier result named it.
+    /// For `replace`, `remove`, and `read`: the id of the record, exactly as
+    /// the digest, a search hit, or an earlier result named it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_id: Option<String>,
 }
@@ -86,30 +89,49 @@ pub fn parse_memory_tool_arguments(
 ) -> std::result::Result<MemoryToolArgs, String> {
     let parsed: MemoryToolArgs = serde_json::from_value(arguments.clone())
         .map_err(|error| format!("memory arguments are not valid: {error}"))?;
+    let title_missing = parsed
+        .title
+        .as_deref()
+        .is_none_or(|title| title.trim().is_empty());
+    let body_missing = parsed
+        .body
+        .as_deref()
+        .is_none_or(|body| body.trim().is_empty());
     match parsed.verb {
-        MemoryToolVerb::Propose => {
+        MemoryToolVerb::Add => {
             if parsed.kind.is_none() {
                 return Err(
-                    "propose needs `kind`: one of fact, preference, lesson, or reference"
-                        .to_owned(),
+                    "add needs `kind`: one of fact, preference, lesson, or reference".to_owned(),
                 );
             }
-            let title_missing = parsed
-                .title
-                .as_deref()
-                .is_none_or(|title| title.trim().is_empty());
             if title_missing {
                 return Err(
-                    "propose needs `title`: one plain line saying when this memory matters"
+                    "add needs `title`: one plain line saying when this memory matters".to_owned(),
+                );
+            }
+            if body_missing {
+                return Err("add needs `body`: the memory itself, as short markdown".to_owned());
+            }
+        }
+        MemoryToolVerb::Replace => {
+            if parsed.record_id.is_none() {
+                return Err("replace needs `record_id`: the id of the memory to rewrite".to_owned());
+            }
+            if title_missing {
+                return Err(
+                    "replace needs `title`: the complete new title line for the memory".to_owned(),
+                );
+            }
+            if body_missing {
+                return Err(
+                    "replace needs `body`: the complete new memory; the whole entry is overwritten"
                         .to_owned(),
                 );
             }
-            if parsed
-                .body
-                .as_deref()
-                .is_none_or(|body| body.trim().is_empty())
-            {
-                return Err("propose needs `body`: the memory itself, as short markdown".to_owned());
+        }
+        MemoryToolVerb::Remove => {
+            if parsed.record_id.is_none() {
+                return Err("remove needs `record_id`: the id of the memory to forget".to_owned());
             }
         }
         MemoryToolVerb::Search => {
@@ -138,13 +160,15 @@ pub fn parse_memory_tool_arguments(
 pub fn memory_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<MemoryToolArgs>(
         MEMORY_TOOL,
-        "Work with the user's durable memory. verb=search finds stored memories by text; \
-         verb=read loads one record by id; verb=propose drafts one new memory — a stable fact, \
-         stated preference, reusable lesson, or durable reference worth keeping beyond this \
-         conversation — for the user to review. A proposal is a draft, not a saved memory: it \
-         carries no authority until the user activates it, so never describe it as remembered. \
-         Do not propose secrets, transient task state, or anything the user asked to keep out \
-         of memory.",
+        "Save durable facts to the user's memory, which persists across conversations. \
+         verb=add saves one memory; verb=replace rewrites one in full by record_id; \
+         verb=remove forgets one by record_id; verb=search finds stored memories by text; \
+         verb=read loads one by id. Save without being asked: who the user is, how they like \
+         to work, stable facts about their environment and projects, corrections they make, \
+         and lessons that will apply again. Prefer replace over a second entry on the same \
+         topic. Skip trivia, anything easy to rediscover, raw data, task progress, secrets, \
+         and anything the user asked to keep out of memory. A save is live at once; if memory \
+         is full the call fails and lists the current entries so you can consolidate.",
     )
 }
 
@@ -154,9 +178,17 @@ mod tests {
 
     #[test]
     fn each_verb_names_the_field_it_is_missing() {
-        let propose = serde_json::json!({"verb": "propose", "kind": "fact"});
-        let error = parse_memory_tool_arguments(&propose).expect_err("title is required");
+        let add = serde_json::json!({"verb": "add", "kind": "fact"});
+        let error = parse_memory_tool_arguments(&add).expect_err("title is required");
         assert!(error.contains("title"), "{error}");
+
+        let replace = serde_json::json!({"verb": "replace", "title": "x", "body": "y"});
+        let error = parse_memory_tool_arguments(&replace).expect_err("record_id is required");
+        assert!(error.contains("record_id"), "{error}");
+
+        let remove = serde_json::json!({"verb": "remove"});
+        let error = parse_memory_tool_arguments(&remove).expect_err("record_id is required");
+        assert!(error.contains("record_id"), "{error}");
 
         let search = serde_json::json!({"verb": "search"});
         let error = parse_memory_tool_arguments(&search).expect_err("query is required");
@@ -170,7 +202,7 @@ mod tests {
         assert!(parse_memory_tool_arguments(&unknown).is_err());
 
         let valid = serde_json::json!({
-            "verb": "propose",
+            "verb": "add",
             "kind": "preference",
             "title": "When formatting reports",
             "body": "Use tables, not prose."
@@ -186,7 +218,7 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["verb"]));
         assert_eq!(
             schema["properties"]["verb"]["enum"],
-            serde_json::json!(["propose", "search", "read"])
+            serde_json::json!(["add", "replace", "remove", "search", "read"])
         );
         // Optional in the flat schema, so the enum admits the explicit null
         // an omitting model may send.

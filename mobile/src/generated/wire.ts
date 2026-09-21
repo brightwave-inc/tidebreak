@@ -3679,7 +3679,7 @@ export type MemoryStatusBody = { expected_revision: number, status: MemoryStatus
  * the bounded consolidation step, which is the part that can wait, park, or
  * need a model.
  */
-export type MemorySweepOutcome = "proposed" | "declined" | "parked" | "unchanged" | "owner_busy" | "no_model" | "rate_limited";
+export type MemorySweepOutcome = "proposed" | "merged" | "declined" | "parked" | "unchanged" | "owner_busy" | "no_model" | "rate_limited";
 
 /**
  * The maintenance sweep's last completed pass for one owner.

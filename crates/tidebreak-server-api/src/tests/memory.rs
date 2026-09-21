@@ -677,13 +677,12 @@ async fn capture_follows_the_memory_switch() {
     );
 }
 
-/// The storage tier under a capture candidate: a plain candidate lands as a
-/// reviewable proposal; a hypothesis lands as `tracking` with one
-/// observation; a repeat of a tracked title in the same chat only counts,
-/// while a repeat from a distinct chat graduates it to review; and a title
-/// the user already rejected is never re-proposed.
+/// The storage tier under a capture candidate (decision 0099): a candidate
+/// lands live with its evidence; a repeat of an active title rewrites that
+/// record instead of adding a second; an identical repeat is declined; and a
+/// title the user forgot is never re-learned.
 #[tokio::test(flavor = "multi_thread")]
-async fn capture_candidates_land_under_the_review_thresholds() {
+async fn capture_candidates_land_live_and_rewrite_their_topic() {
     let recorder = SystemPromptRecorder::default();
     let (router, token, db, store, state, _dir) = memory_turn_app(Arc::new(recorder.clone())).await;
     let bearer = format!("Bearer {token}");
@@ -707,148 +706,111 @@ async fn capture_candidates_land_under_the_review_thresholds() {
     };
     let capture = test_capture(&state, db.clone());
 
-    let candidate = |title: &str, hypothesis: bool| MemoryCandidate {
+    let candidate = |title: &str, body: &str| MemoryCandidate {
         kind: MemoryKind::Preference,
         title: title.to_owned(),
-        body: "Use tables rather than prose.".to_owned(),
-        hypothesis,
+        body: body.to_owned(),
     };
 
-    // A confident candidate is a proposal — never active.
+    // A candidate is live at once, with its evidence and origin.
     let outcome = capture
         .store_candidate(
             &owner,
             chat.id,
             turn_id,
             evidence.clone(),
-            candidate("When formatting reports", false),
+            candidate("When formatting reports", "Use tables rather than prose."),
         )
         .await
         .unwrap();
-    let CaptureOutcome::Proposed(proposed_id) = outcome else {
-        panic!("expected a proposal, got {outcome:?}");
+    let CaptureOutcome::Remembered(id) = outcome else {
+        panic!("expected a live record, got {outcome:?}");
     };
-    let proposed = db.get(&owner, proposed_id).await.unwrap().unwrap();
-    assert_eq!(proposed.status, MemoryStatus::Proposed);
-    assert_eq!(proposed.provenance.author, MemoryAuthor::Model);
-    assert_eq!(proposed.provenance.origin.turn_id, Some(turn_id));
-
-    // A weak signal is tracked, not sent to review.
-    let outcome = capture
-        .store_candidate(
-            &owner,
-            chat.id,
-            turn_id,
-            evidence.clone(),
-            candidate("When naming branches", true),
-        )
-        .await
-        .unwrap();
-    let CaptureOutcome::Tracked(tracked_id) = outcome else {
-        panic!("expected a tracked hypothesis, got {outcome:?}");
-    };
-    let tracked = db.get(&owner, tracked_id).await.unwrap().unwrap();
-    assert_eq!(tracked.status, MemoryStatus::Tracking);
-    assert_eq!(tracked.observation_count, 1);
-    // Tracked hypotheses never reach the digest (decision 0067).
+    let stored = db.get(&owner, id).await.unwrap().unwrap();
+    assert_eq!(stored.status, MemoryStatus::Active);
+    assert_eq!(stored.provenance.author, MemoryAuthor::Model);
+    assert_eq!(stored.provenance.origin.turn_id, Some(turn_id));
     let digest = db
         .assemble_context(&owner, MemoryScope::Personal)
         .await
         .unwrap();
-    assert!(!digest.markdown.contains("When naming branches"));
+    assert!(digest.markdown.contains("When formatting reports"));
 
-    // A repeat in the same conversation only counts.
+    // The same topic again with new content rewrites the record.
     let outcome = capture
         .store_candidate(
             &owner,
             chat.id,
             turn_id,
             evidence.clone(),
-            candidate("When naming branches", true),
+            candidate(
+                "When formatting reports",
+                "Use tables; keep prose for caveats.",
+            ),
         )
         .await
         .unwrap();
-    assert_eq!(outcome, CaptureOutcome::Tracked(tracked_id));
-    let tracked = db.get(&owner, tracked_id).await.unwrap().unwrap();
-    assert_eq!(tracked.status, MemoryStatus::Tracking);
-    assert_eq!(tracked.observation_count, 2);
-
-    // A repeat across distinct conversations graduates it to review.
-    let other_chat = make_chat(&router, &bearer).await;
+    assert_eq!(outcome, CaptureOutcome::Updated(id));
+    let rewritten = db.get(&owner, id).await.unwrap().unwrap();
+    assert_eq!(rewritten.revision, 2);
+    assert_eq!(rewritten.body, "Use tables; keep prose for caveats.");
     assert_eq!(
-        send_message(&router, &bearer, other_chat.id, "branch names again").await,
-        StatusCode::ACCEPTED
-    );
-    wait_for_turns(&store, other_chat.id, 1).await;
-    let other_turn = store.list_turns(other_chat.id).await.unwrap()[0].id;
-    let other_evidence = MemoryEvidence::Message {
-        message_id: store
-            .list_messages(other_chat.id)
+        db.list(&owner, MemoryListFilter::default())
             .await
             .unwrap()
-            .into_iter()
-            .find(|message| message.role == tidebreak_core::Role::User)
-            .unwrap()
-            .id,
-    };
+            .len(),
+        1,
+        "a refinement never stacks a second entry"
+    );
+
+    // The same content again is nothing new.
     let outcome = capture
         .store_candidate(
             &owner,
-            other_chat.id,
-            other_turn,
-            other_evidence.clone(),
-            candidate("When naming branches", true),
+            chat.id,
+            turn_id,
+            evidence.clone(),
+            candidate(
+                "When formatting reports",
+                "Use tables; keep prose for caveats.",
+            ),
         )
         .await
         .unwrap();
-    assert_eq!(outcome, CaptureOutcome::Graduated(tracked_id));
-    let graduated = db.get(&owner, tracked_id).await.unwrap().unwrap();
-    assert_eq!(graduated.status, MemoryStatus::Proposed);
-    assert_eq!(graduated.observation_count, 3);
-    // The proposal is announced on the graduating conversation, so that is
-    // where its origin points and where the transcript attaches it.
-    assert_eq!(graduated.provenance.origin.chat_id, Some(other_chat.id));
-    assert_eq!(graduated.provenance.origin.turn_id, Some(other_turn));
-    assert!(
-        graduated.provenance.evidence.contains(&other_evidence),
-        "the graduating turn joins the evidence"
-    );
-    assert_eq!(
-        graduated.provenance.evidence.len(),
-        2,
-        "the first sighting stays"
-    );
+    assert_eq!(outcome, CaptureOutcome::Declined);
 
-    // A dismissed proposal suppresses re-capture for its retention horizon.
-    let rejected = db.get(&owner, proposed_id).await.unwrap().unwrap();
+    // A forgotten title is not re-learned.
     db.set_status(
         &owner,
         tidebreak_core::MemoryStatusChange {
-            id: proposed_id,
-            expected_revision: rejected.revision,
-            status: MemoryStatus::Rejected,
+            id,
+            expected_revision: rewritten.revision,
+            status: MemoryStatus::Archived,
         },
     )
     .await
     .unwrap();
+    let forgotten = MemoryRecord {
+        id: MemoryRecordId::new(),
+        status: MemoryStatus::Rejected,
+        ..active_titled(MemoryRecordId::new(), "When naming branches")
+    };
+    db.put(&owner, forgotten).await.unwrap();
     let outcome = capture
         .store_candidate(
             &owner,
             chat.id,
             turn_id,
             evidence,
-            candidate("when formatting reports", false),
+            candidate("When naming branches", "Short kebab case."),
         )
         .await
         .unwrap();
     assert_eq!(outcome, CaptureOutcome::Declined);
 }
 
-/// The explicit tool's three verbs against the real backend: a propose lands
-/// as an evidence-backed proposal, search and read find it, and an incognito
-/// chat refuses the verb outright.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_memory_tool_proposes_searches_and_reads() {
+async fn the_memory_tool_adds_replaces_removes_searches_and_reads() {
     let recorder = SystemPromptRecorder::default();
     let (router, token, db, store, _state, _dir) =
         memory_turn_app(Arc::new(recorder.clone())).await;
@@ -865,11 +827,11 @@ async fn the_memory_tool_proposes_searches_and_reads() {
     let scratch = tempfile::tempdir().unwrap();
     let ctx = ToolCtx::new_legacy_workspace(chat.id, None, scratch.path().to_path_buf());
 
-    let proposed = tool
+    let added = tool
         .execute(
             &ctx,
             json!({
-                "verb": "propose",
+                "verb": "add",
                 "kind": "preference",
                 "title": "When formatting reports",
                 "body": "Use tables rather than prose."
@@ -877,34 +839,18 @@ async fn the_memory_tool_proposes_searches_and_reads() {
         )
         .await
         .unwrap();
-    assert!(!proposed.is_error, "{}", proposed.content);
-    assert!(proposed.content.contains("draft"));
+    assert!(!added.is_error, "{}", added.content);
+    assert!(added.content.contains("Remembered"), "{}", added.content);
     let records = db.list(&owner, MemoryListFilter::default()).await.unwrap();
     assert_eq!(records.len(), 1);
-    let record = &records[0];
-    assert_eq!(record.status, MemoryStatus::Proposed);
+    let record = records[0].clone();
+    assert_eq!(record.status, MemoryStatus::Active);
     assert_eq!(record.provenance.author, MemoryAuthor::Model);
     assert!(!record.provenance.evidence.is_empty());
     assert_eq!(record.provenance.origin.chat_id, Some(chat.id));
     assert!(record.provenance.origin.turn_id.is_some());
 
-    // Search covers only authoritative records: the proposal is invisible
-    // until the user activates it.
-    let empty = tool
-        .execute(&ctx, json!({"verb": "search", "query": "tables"}))
-        .await
-        .unwrap();
-    assert!(empty.content.contains("No stored memory"));
-    db.set_status(
-        &owner,
-        tidebreak_core::MemoryStatusChange {
-            id: record.id,
-            expected_revision: record.revision,
-            status: MemoryStatus::Active,
-        },
-    )
-    .await
-    .unwrap();
+    // Live at once: search finds it without any approval.
     let found = tool
         .execute(&ctx, json!({"verb": "search", "query": "tables"}))
         .await
@@ -915,6 +861,24 @@ async fn the_memory_tool_proposes_searches_and_reads() {
         found.content
     );
 
+    // Replace rewrites the whole entry and keeps the id.
+    let replaced = tool
+        .execute(
+            &ctx,
+            json!({
+                "verb": "replace",
+                "record_id": record.id.to_string(),
+                "title": "When formatting reports",
+                "body": "Use tables; keep prose for caveats."
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!replaced.is_error, "{}", replaced.content);
+    let rewritten = db.get(&owner, record.id).await.unwrap().unwrap();
+    assert_eq!(rewritten.revision, 2);
+    assert_eq!(rewritten.body, "Use tables; keep prose for caveats.");
+
     let read = tool
         .execute(
             &ctx,
@@ -922,11 +886,28 @@ async fn the_memory_tool_proposes_searches_and_reads() {
         )
         .await
         .unwrap();
-    assert!(read.content.contains("Use tables rather than prose."));
+    assert!(read.content.contains("keep prose for caveats"));
+
+    // Remove forgets: the record archives rather than disappears.
+    let removed = tool
+        .execute(
+            &ctx,
+            json!({"verb": "remove", "record_id": record.id.to_string()}),
+        )
+        .await
+        .unwrap();
+    assert!(!removed.is_error, "{}", removed.content);
+    let archived = db.get(&owner, record.id).await.unwrap().unwrap();
+    assert_eq!(archived.status, MemoryStatus::Archived);
+    let empty = tool
+        .execute(&ctx, json!({"verb": "search", "query": "tables"}))
+        .await
+        .unwrap();
+    assert!(empty.content.contains("No stored memory"));
 
     // A verb missing its field is corrected, not executed.
     let corrected = tool
-        .execute(&ctx, json!({"verb": "propose", "kind": "fact"}))
+        .execute(&ctx, json!({"verb": "add", "kind": "fact"}))
         .await
         .unwrap();
     assert!(corrected.is_error);
@@ -950,7 +931,7 @@ async fn the_memory_tool_proposes_searches_and_reads() {
 }
 
 /// The transcript hands each terminal turn its model-authored records, so the
-/// proposal chip survives reload; tracked hypotheses stay manager-only.
+/// remembered row survives reload.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_transcript_carries_each_turns_memory_proposals() {
     let recorder = SystemPromptRecorder::default();
@@ -985,27 +966,10 @@ async fn the_transcript_carries_each_turns_memory_proposals() {
                 kind: MemoryKind::Preference,
                 title: "When formatting reports".to_owned(),
                 body: "Use tables rather than prose.".to_owned(),
-                hypothesis: false,
             },
         )
         .await
         .unwrap();
-    capture
-        .store_candidate(
-            &owner,
-            chat.id,
-            turn_id,
-            evidence,
-            MemoryCandidate {
-                kind: MemoryKind::Lesson,
-                title: "When naming branches".to_owned(),
-                body: "Short kebab case.".to_owned(),
-                hypothesis: true,
-            },
-        )
-        .await
-        .unwrap();
-
     let transcript = assert_ok(
         request(
             &router,
@@ -1019,7 +983,7 @@ async fn the_transcript_carries_each_turns_memory_proposals() {
     let turns = transcript["terminal_turns"].as_array().unwrap();
     assert_eq!(turns.len(), 1);
     let proposals = turns[0]["memory_proposals"].as_array().unwrap();
-    assert_eq!(proposals.len(), 1, "hypotheses stay out of the transcript");
+    assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0]["title"], json!("When formatting reports"));
-    assert_eq!(proposals[0]["status"], json!("proposed"));
+    assert_eq!(proposals[0]["status"], json!("active"));
 }
