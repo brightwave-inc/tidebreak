@@ -20,7 +20,7 @@ use tidebreak_core::{
     CodeWorkspace, CodeWorkspaceStatus, Diffstat, IncarnationState, OwnerId, WorkspaceId,
 };
 
-use super::checkpoint::{list_changed_files, produce_diff, ChangedFile, DiffBounds};
+use super::checkpoint::{ChangedFile, DiffBounds, list_changed_files, produce_diff};
 use super::git_runner;
 use super::runtime::CodeRuntime;
 use super::types::WorkspaceContentRevision;
@@ -467,41 +467,32 @@ async fn merge_base_oid(
 /// still needs a bounded fetch. A resolved `refs/heads/` name is used as-is so
 /// a local `origin/feature` branch is not rewritten to `feature`.
 async fn classify_base_ref(repo_root: &Path, base_ref: &str) -> Option<String> {
-    let resolved = git_stdout(
+    match git_stdout(
         repo_root,
         &["rev-parse", "--symbolic-full-name", "--verify", base_ref],
     )
     .await
-    .unwrap_or_default();
-    if !resolved.is_empty() {
-        if let Some(branch) = resolved.strip_prefix("refs/heads/") {
-            return (!branch.is_empty()).then(|| branch.to_owned());
+    {
+        Ok(resolved) => {
+            // A resolved commit has no symbolic name. Tags and other remotes
+            // also stay pinned; only origin branches need a refresh.
+            resolved
+                .strip_prefix("refs/heads/")
+                .or_else(|| resolved.strip_prefix("refs/remotes/origin/"))
+                .filter(|branch| !branch.is_empty())
+                .map(str::to_owned)
         }
-        if let Some(tracking) = resolved.strip_prefix("refs/remotes/") {
-            let Some((remote, branch)) = tracking.split_once('/') else {
-                return None;
-            };
-            if remote != "origin" || branch.is_empty() {
+        Err(_) => {
+            if base_ref.starts_with("refs/")
+                && !base_ref.starts_with("refs/heads/")
+                && !base_ref.starts_with("refs/remotes/origin/")
+            {
                 return None;
             }
-            return Some(branch.to_owned());
+            let branch = origin_branch_name(base_ref);
+            (!branch.is_empty()).then(|| branch.to_owned())
         }
-        return None;
     }
-    if looks_like_commit_id(base_ref)
-        || base_ref.starts_with("refs/tags/")
-        || (base_ref.starts_with("refs/remotes/")
-            && !base_ref.starts_with("refs/remotes/origin/"))
-    {
-        return None;
-    }
-    let branch = origin_branch_name(base_ref);
-    (!branch.is_empty()).then(|| branch.to_owned())
-}
-
-fn looks_like_commit_id(value: &str) -> bool {
-    let len = value.len();
-    (4..=40).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 async fn merge_base_with(
@@ -766,9 +757,11 @@ mod tests {
         assert!(!blob.binary);
 
         let (files, _, stat) = list_checkout_files(&checkout).await.unwrap();
-        assert!(files
-            .iter()
-            .any(|file| file.path.to_wire() == "changed.txt"));
+        assert!(
+            files
+                .iter()
+                .any(|file| file.path.to_wire() == "changed.txt")
+        );
         assert!(stat.files >= 1);
 
         let (diff, _, _) = produce_checkout_diff(&checkout, Some("changed.txt"))
@@ -1152,11 +1145,14 @@ mod tests {
         std::fs::write(advance.join("history.txt"), "later base\n").unwrap();
         run(&advance, &["git", "add", "history.txt"]);
         run(&advance, &["git", "commit", "-m", "later base"]);
-        run(&advance, &["git", "push", "origin", "HEAD:refs/heads/fresh-base"]);
+        run(
+            &advance,
+            &["git", "push", "origin", "HEAD:refs/heads/deadbeef"],
+        );
 
         let sandbox = dir.path().join("sandbox");
         clone_repo(&origin, &sandbox);
-        run(&sandbox, &["git", "checkout", "-q", "fresh-base"]);
+        run(&sandbox, &["git", "checkout", "-q", "deadbeef"]);
         std::fs::write(sandbox.join("marker.txt"), "only this\n").unwrap();
         run(&sandbox, &["git", "add", "marker.txt"]);
         run(&sandbox, &["git", "commit", "-m", "marker"]);
@@ -1166,11 +1162,11 @@ mod tests {
         );
 
         let tip = resolve_commit(&host, "mg-wip/fresh-i1").await.unwrap();
-        assert!(git_rev_parse(&host, "fresh-base").is_none());
-        assert!(git_rev_parse(&host, "refs/heads/fresh-base").is_none());
-        assert!(git_rev_parse(&host, "refs/remotes/origin/fresh-base").is_none());
+        assert!(git_rev_parse(&host, "deadbeef").is_none());
+        assert!(git_rev_parse(&host, "refs/heads/deadbeef").is_none());
+        assert!(git_rev_parse(&host, "refs/remotes/origin/deadbeef").is_none());
 
-        for base in ["fresh-base", "refs/heads/fresh-base"] {
+        for base in ["deadbeef", "refs/heads/deadbeef"] {
             let from_oid = merge_base_oid(&host, base, &tip).await.unwrap();
             let paths = changed_paths(&host, &from_oid, &tip).await;
             assert_eq!(paths, vec!["marker.txt".to_owned()], "base_ref {base}");
@@ -1189,7 +1185,10 @@ mod tests {
         std::fs::write(feature.join("wrong.txt"), "stale feature\n").unwrap();
         run(&feature, &["git", "add", "wrong.txt"]);
         run(&feature, &["git", "commit", "-m", "stale feature"]);
-        run(&feature, &["git", "push", "origin", "HEAD:refs/heads/feature"]);
+        run(
+            &feature,
+            &["git", "push", "origin", "HEAD:refs/heads/feature"],
+        );
 
         let named = dir.path().join("named");
         clone_repo(&origin, &named);
