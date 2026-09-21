@@ -88,20 +88,22 @@ function parseDiffTarget(id: string): PanelContent | null {
   if (parts[0] === "t" && parts[1]) {
     const turnId = parts[1];
     if (parts.length === 2) return { type: "diff", turnId };
-    if (parts[2] === "f" && parts[3]) {
+    if (parts[2] === "f" && parts.length > 3) {
       try {
         const path = decodeURIComponent(parts.slice(3).join("."));
-        return path ? { type: "diff", turnId, path } : null;
+        return path && !path.includes("\0")
+          ? { type: "diff", turnId, path }
+          : null;
       } catch {
         return null;
       }
     }
     return null;
   }
-  if (parts[0] === "f" && parts[1]) {
+  if (parts[0] === "f" && parts.length > 1) {
     try {
       const path = decodeURIComponent(parts.slice(1).join("."));
-      return path ? { type: "diff", path } : null;
+      return path && !path.includes("\0") ? { type: "diff", path } : null;
     } catch {
       return null;
     }
