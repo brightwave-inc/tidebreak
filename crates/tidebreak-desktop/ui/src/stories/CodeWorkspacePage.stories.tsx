@@ -339,6 +339,16 @@ const changedFiles = {
   stat: { files: 3, insertions: 295, deletions: 362, truncated: false },
 };
 
+const hiddenFile = ".tidebreak-canary.txt";
+const hiddenFileDiff = [
+  `diff --git a/${hiddenFile} b/${hiddenFile}`,
+  "new file mode 100644",
+  "--- /dev/null",
+  `+++ b/${hiddenFile}`,
+  "@@ -0,0 +1 @@",
+  "+CHECKPOINT-OK",
+].join("\n");
+
 const filePaths = [
   "crates/tidebreak-desktop/ui/src/code/CodeWorkspacePage.tsx",
   "crates/tidebreak-desktop/ui/src/code/WorkspaceCard.tsx",
@@ -779,7 +789,10 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       message: "Done.",
     }),
     listCodeWorkspaceTree: async () => ({
-      paths: filePaths,
+      paths:
+        scenario === "managed-slack-remote"
+          ? [hiddenFile, ...filePaths]
+          : filePaths,
       truncated: false,
       ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
         ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
@@ -787,23 +800,45 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     }),
     searchCodeWorkspace: async () => ({ matches: [], truncated: false }),
     listCodeWorkspaceFiles: async () => ({
-      ...changedFiles,
+      ...(scenario === "managed-slack-remote"
+        ? {
+            files: [
+              {
+                path: hiddenFile,
+                kind: "added" as const,
+                insertions: 1,
+                deletions: 0,
+              },
+            ],
+            stat: { files: 1, insertions: 1, deletions: 0, truncated: false },
+            truncated: false,
+          }
+        : changedFiles),
       ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
         ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
         : {}),
     }),
-    getCodeWorkspaceDiff: async () => ({
-      diff: [
-        "diff --git a/src/code/editorDrag.ts b/src/code/editorDrag.ts",
-        "new file mode 100644",
-        "--- /dev/null",
-        "+++ b/src/code/editorDrag.ts",
-        "@@ -0,0 +1,4 @@",
-        "+export const CODE_EDITOR_DRAG_TYPE =",
-        "+  'application/x-tidebreak-editor-tab';",
-      ].join("\n"),
+    getCodeWorkspaceDiff: async (
+      _workspaceId: string,
+      opts: { turn?: string; file?: string } = {},
+    ) => ({
+      diff:
+        opts.file === hiddenFile
+          ? hiddenFileDiff
+          : [
+              "diff --git a/src/code/editorDrag.ts b/src/code/editorDrag.ts",
+              "new file mode 100644",
+              "--- /dev/null",
+              "+++ b/src/code/editorDrag.ts",
+              "@@ -0,0 +1,4 @@",
+              "+export const CODE_EDITOR_DRAG_TYPE =",
+              "+  'application/x-tidebreak-editor-tab';",
+            ].join("\n"),
       truncated: false,
-      stat: changedFiles.stat,
+      stat:
+        opts.file === hiddenFile
+          ? { files: 1, insertions: 1, deletions: 0, truncated: false }
+          : changedFiles.stat,
     }),
     getCodeWorkspaceBlob: async (_workspaceId: string, path: string) => ({
       path,
@@ -1512,5 +1547,27 @@ export const ManagedSlackRemoteWorkspace: Story = {
     await expect(
       canvas.queryByRole("button", { name: "Commit" }),
     ).not.toBeInTheDocument();
+  },
+};
+
+/** A saved hidden-file diff stays open when its workspace route is restored. */
+export const ManagedSlackHiddenFileDiff: Story = {
+  args: {
+    scenario: "managed-slack-remote",
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "diff", path: hiddenFile }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByRole("tab", { name: new RegExp(hiddenFile) }),
+    ).resolves.toBeVisible();
+    await expect(
+      canvas.findByText("CHECKPOINT-OK", { exact: false }),
+    ).resolves.toBeVisible();
   },
 };
