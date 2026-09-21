@@ -436,20 +436,56 @@ async fn merge_base_oid(
     let Ok(base_ref) = validate_git_ref(base_ref) else {
         return Err(unavailable_base());
     };
-    let branch = origin_branch_name(base_ref);
-    if branch.is_empty() {
-        return Err(unavailable_base());
-    }
-    match fetch_origin_ref(repo_root, branch).await {
-        Ok(true) => {
-            // A confirmed remote base must win. Trying the local branch first
-            // lets a stale host `main` become merge-base and inflate the
-            // checkpoint diff with unrelated history.
-            merge_base_with(repo_root, &format!("refs/remotes/origin/{branch}"), tip).await
+    match classify_base_ref(repo_root, base_ref).await {
+        Some(branch) => {
+            if branch.is_empty() {
+                return Err(unavailable_base());
+            }
+            match fetch_origin_ref(repo_root, &branch).await {
+                Ok(true) => {
+                    // A confirmed remote base must win. Trying the local branch first
+                    // lets a stale host `main` become merge-base and inflate the
+                    // checkpoint diff with unrelated history.
+                    merge_base_with(repo_root, &format!("refs/remotes/origin/{branch}"), tip).await
+                }
+                Ok(false) => merge_base_with(repo_root, base_ref, tip).await,
+                Err(_) => Err(unavailable_base()),
+            }
         }
-        Ok(false) => merge_base_with(repo_root, base_ref, tip).await,
-        Err(_) => Err(unavailable_base()),
+        None => {
+            // Tags and commit IDs stay pinned. Fetching them as origin branches
+            // fails when the name is not a branch, even if the object is local.
+            merge_base_with(repo_root, base_ref, tip).await
+        }
     }
+}
+
+/// Mutable origin branches return a fetchable name. Tags and commit IDs return
+/// `None` so they stay pinned, matching workspace creation.
+async fn classify_base_ref(repo_root: &Path, base_ref: &str) -> Option<String> {
+    let resolved = git_stdout(
+        repo_root,
+        &["rev-parse", "--symbolic-full-name", "--verify", base_ref],
+    )
+    .await
+    .unwrap_or_default();
+    if resolved.is_empty() {
+        return None;
+    }
+    if let Some(branch) = resolved.strip_prefix("refs/heads/") {
+        let branch = origin_branch_name(branch);
+        return (!branch.is_empty()).then(|| branch.to_owned());
+    }
+    if let Some(tracking) = resolved.strip_prefix("refs/remotes/") {
+        let Some((remote, branch)) = tracking.split_once('/') else {
+            return None;
+        };
+        if remote != "origin" || branch.is_empty() {
+            return None;
+        }
+        return Some(branch.to_owned());
+    }
+    None
 }
 
 async fn merge_base_with(
@@ -1001,7 +1037,12 @@ mod tests {
         assert_ne!(stale_local, origin_main);
         assert_ne!(origin_main, tip);
 
-        for base in ["main", "origin/main", "refs/heads/main"] {
+        for base in [
+            "main",
+            "origin/main",
+            "refs/heads/main",
+            "refs/remotes/origin/main",
+        ] {
             let from_oid = merge_base_oid(&host, base, &tip).await.unwrap();
             assert_eq!(from_oid, origin_main, "base_ref {base}");
             let paths = changed_paths(&host, &from_oid, &tip).await;
@@ -1027,6 +1068,49 @@ mod tests {
                 missing_origin.to_str().unwrap(),
             ],
         );
+        let error = merge_base_oid(&host, "main", &tip).await.unwrap_err();
+        assert_eq!(error.kind(), "sandbox_checkpoint_unavailable_base");
+    }
+
+    #[tokio::test]
+    async fn merge_base_oid_keeps_tag_and_commit_bases_pinned_without_origin_fetch() {
+        let dir = TempDir::new().unwrap();
+        let origin = seed_bare_origin(dir.path());
+        let host = dir.path().join("host");
+        clone_repo(&origin, &host);
+        let pinned = git_rev_parse(&host, "HEAD").unwrap();
+        run(&host, &["git", "tag", "v1"]);
+        let short = pinned.chars().take(12).collect::<String>();
+
+        let advance = dir.path().join("advance");
+        clone_repo(&origin, &advance);
+        std::fs::write(advance.join("later.txt"), "later\n").unwrap();
+        run(&advance, &["git", "add", "later.txt"]);
+        run(&advance, &["git", "commit", "-m", "later"]);
+        run(&advance, &["git", "push", "origin", "main"]);
+
+        std::fs::write(host.join("marker.txt"), "only this\n").unwrap();
+        run(&host, &["git", "add", "marker.txt"]);
+        run(&host, &["git", "commit", "-m", "marker"]);
+        let tip = git_rev_parse(&host, "HEAD").unwrap();
+
+        let missing_origin = dir.path().join("unreachable.git");
+        run(
+            &host,
+            &[
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                missing_origin.to_str().unwrap(),
+            ],
+        );
+
+        for base in ["v1", "refs/tags/v1", pinned.as_str(), short.as_str()] {
+            let from_oid = merge_base_oid(&host, base, &tip).await.unwrap();
+            assert_eq!(from_oid, pinned, "base_ref {base}");
+        }
+
         let error = merge_base_oid(&host, "main", &tip).await.unwrap_err();
         assert_eq!(error.kind(), "sandbox_checkpoint_unavailable_base");
     }
