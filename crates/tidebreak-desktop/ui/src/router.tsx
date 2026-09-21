@@ -386,21 +386,21 @@ const settingsMcpRedirectRoute = createRoute({
   component: McpSettingsRedirect,
 });
 
-/** Memory now lives under Experimental. Preserve old bookmarks and proposal
- * links that still name its former standalone settings page. */
-function MemorySettingsRedirect() {
+/** Memory was the only experimental section. Preserve bookmarks that still
+ * name that page. */
+function ExperimentalSettingsRedirect() {
   const navigate = useNavigate();
   useEffect(() => {
-    const experimentalPath: string = "/settings/experimental";
-    void navigate({ to: experimentalPath, replace: true });
+    const memoryPath: string = "/settings/memory";
+    void navigate({ to: memoryPath, replace: true });
   }, [navigate]);
   return <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>;
 }
 
-const settingsMemoryRedirectRoute = createRoute({
+const settingsExperimentalRedirectRoute = createRoute({
   getParentRoute: () => settingsRoute,
-  path: "memory",
-  component: MemorySettingsRedirect,
+  path: "experimental",
+  component: ExperimentalSettingsRedirect,
 });
 
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
@@ -456,7 +456,7 @@ export const routeTree = rootRoute.addChildren([
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,
-    settingsMemoryRedirectRoute,
+    settingsExperimentalRedirectRoute,
     ...settingsSectionRoutes,
   ]),
 ]);

@@ -160,7 +160,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
   const memorySummary = useChatMemoryPresence(client, chat);
-  const memorySettingsPath: string = "/settings/experimental";
+  const memorySettingsPath: string = "/settings/memory";
   const nativeHost = hasNativeHost();
   const folders = useChatFolderAttachments(chat, nativeHost);
 

@@ -811,7 +811,15 @@ mod tests {
         .await
         .expect("the deferred resync moves the worker after the turn ends");
         assert!(moved_epoch > session.spawn_epoch);
-        assert!(runtime.require_worker(attached.id).is_ok());
+        // The new epoch persists before the respawned worker registers, so
+        // the handle can trail the epoch by a beat; wait for it the same way.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while runtime.require_worker(attached.id).is_err() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the respawned worker registers after the epoch moves");
 
         // Another engine's install never touches this worker.
         assert!(runtime

@@ -107,3 +107,4 @@
 0096  0096-slack-channels-share-the-instance-github-app-repository-access.md
 0097  0097-connections-are-plural-and-typed.md
 0098  0098-standalone-machine-attach-on-mobile.md
+0099  0099-memory-is-agent-curated-and-automatic.md

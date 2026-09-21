@@ -8,11 +8,11 @@ import type { MemoryRecord, MemorySettings } from "@/api";
 import { useMemoryPresenceStore } from "../MemoryPresenceStore";
 import { MemoryPanel } from "./MemoryPanel";
 
-const tracking: MemoryRecord = {
+const preference: MemoryRecord = {
   id: "3f19d0d5-8f46-4f57-a35a-000000000003",
   scope: { kind: "personal" },
   kind: "preference",
-  status: "tracking",
+  status: "active",
   title: "When reviewing pull requests",
   body: "Lead with the risk, then the diff.",
   provenance: {
@@ -29,10 +29,24 @@ const tracking: MemoryRecord = {
   links: [],
   expires_at: null,
   superseded_by: null,
-  observation_count: 2,
+  observation_count: 1,
   revision: 1,
   created_at: "2026-09-01T09:00:00Z",
   updated_at: "2026-09-01T09:00:00Z",
+};
+
+const fact: MemoryRecord = {
+  ...preference,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000004",
+  kind: "fact",
+  title: "When running JavaScript tooling",
+  body: "This machine uses pnpm.",
+};
+
+const on: MemorySettings = {
+  enabled: true,
+  capture_enabled: true,
+  capture_ready: true,
 };
 
 const off: MemorySettings = {
@@ -45,9 +59,8 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
   const putSettings = vi.fn(
     async (body: { memory?: Partial<MemorySettings> }) => {
       const enabled = body.memory?.enabled ?? memory.enabled;
-      const capture = enabled && (body.memory?.capture_enabled ?? true);
       return {
-        memory: { enabled, capture_enabled: capture, capture_ready: capture },
+        memory: { enabled, capture_enabled: enabled, capture_ready: enabled },
       };
     },
   );
@@ -55,6 +68,14 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
     async (id: string, body: { status: MemoryRecord["status"] }) => ({
       ...records.find((record) => record.id === id)!,
       status: body.status,
+      revision: 2,
+    }),
+  );
+  const updateMemoryRecord = vi.fn(
+    async (id: string, body: { title: string; body: string }) => ({
+      ...records.find((record) => record.id === id)!,
+      title: body.title,
+      body: body.body,
       revision: 2,
     }),
   );
@@ -68,14 +89,15 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
         markdown: "",
         byte_len: 0,
         byte_cap: 8192,
-        record_count: 0,
+        record_count: records.filter((record) => record.status === "active")
+          .length,
       }),
-      getMemorySweepStatus: async () => ({ last_run: null }),
-      getMemoryRevisions: async () => [],
       setMemoryRecordStatus,
+      updateMemoryRecord,
     } as never,
     putSettings,
     setMemoryRecordStatus,
+    updateMemoryRecord,
   };
 }
 
@@ -85,76 +107,90 @@ afterEach(() => {
 });
 
 describe("MemoryPanel", () => {
-  it("turns capture on with the one memory switch", async () => {
+  it("turns memory on with the one switch", async () => {
     const { client, putSettings } = stubClient([], off);
     render(<MemoryPanel client={client} />);
     expect(await screen.findByText("Memory is off")).toBeInTheDocument();
     const toggle = screen.getByRole("switch", {
       name: /^Remember across conversations/,
     });
-    expect(toggle).not.toBeChecked();
     await userEvent.click(toggle);
     expect(putSettings).toHaveBeenCalledWith({
       memory: { enabled: true, capture_enabled: true },
     });
     await waitFor(() => expect(toggle).toBeChecked());
-    expect(screen.getByText("Memory is on")).toBeInTheDocument();
   });
 
-  it("names the missing utility model and offers the way to Models", async () => {
+  it("groups what it knows, opens the source conversation, and forgets a line", async () => {
+    const onOpenConversation = vi.fn();
+    const { client, setMemoryRecordStatus } = stubClient(
+      [preference, fact],
+      on,
+    );
+    render(
+      <MemoryPanel client={client} onOpenConversation={onOpenConversation} />,
+    );
+    expect(await screen.findByText("About you")).toBeInTheDocument();
+    expect(screen.getByText("Notes")).toBeInTheDocument();
+    expect(
+      screen.getByText("When reviewing pull requests"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("When running JavaScript tooling"),
+    ).toBeInTheDocument();
+    // No lifecycle vocabulary reaches the page.
+    expect(screen.queryByText(/revision/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^active$/)).not.toBeInTheDocument();
+
+    const [openConversation] = screen.getAllByRole("button", {
+      name: "Open conversation",
+    });
+    await userEvent.click(openConversation);
+    expect(onOpenConversation).toHaveBeenCalledWith(
+      preference.provenance.origin.chat_id,
+    );
+
+    const [forget] = screen.getAllByRole("button", { name: "Forget" });
+    await userEvent.click(forget);
+    expect(setMemoryRecordStatus).toHaveBeenCalledWith(preference.id, {
+      expected_revision: 1,
+      status: "archived",
+    });
+  });
+
+  it("saves an edit as the person's own words", async () => {
+    const { client, updateMemoryRecord } = stubClient([preference], on);
+    render(<MemoryPanel client={client} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const body = screen.getByLabelText("Memory body");
+    await userEvent.clear(body);
+    await userEvent.type(body, "Lead with the risk.");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(updateMemoryRecord).toHaveBeenCalledWith(
+      preference.id,
+      expect.objectContaining({
+        expected_revision: 1,
+        body: "Lead with the risk.",
+        author: "user",
+      }),
+    );
+  });
+
+  it("names the missing utility model without hiding what it knows", async () => {
     const onOpenModels = vi.fn();
-    const { client } = stubClient([], {
+    const { client } = stubClient([fact], {
       enabled: true,
       capture_enabled: true,
       capture_ready: false,
     });
     render(<MemoryPanel client={client} onOpenModels={onOpenModels} />);
     expect(
-      await screen.findByText("Memory is on, but nothing can be captured yet"),
+      await screen.findByText("Memory saves only during conversations"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("When running JavaScript tooling"),
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Open Models" }));
     expect(onOpenModels).toHaveBeenCalledOnce();
-  });
-
-  it("resumes a paused capture without touching the memory switch", async () => {
-    const { client, putSettings } = stubClient([], {
-      enabled: true,
-      capture_enabled: false,
-      capture_ready: false,
-    });
-    render(<MemoryPanel client={client} />);
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Resume capture" }),
-    );
-    expect(putSettings).toHaveBeenCalledWith({
-      memory: { capture_enabled: true },
-    });
-  });
-
-  it("shows watched patterns with their sightings and sends one to review", async () => {
-    const { client, setMemoryRecordStatus } = stubClient([tracking], {
-      enabled: true,
-      capture_enabled: true,
-      capture_ready: true,
-    });
-    render(<MemoryPanel client={client} />);
-    // The status names what is being watched, and the page opens on the
-    // Noticing view because that is where the only records are.
-    expect(
-      await screen.findByText(/1 pattern is being watched/),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Noticing/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByText(/Seen 2 times/)).toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: /When reviewing pull requests/ }),
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Review now" }));
-    expect(setMemoryRecordStatus).toHaveBeenCalledWith(tracking.id, {
-      expected_revision: 1,
-      status: "proposed",
-    });
   });
 });

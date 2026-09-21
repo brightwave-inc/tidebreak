@@ -1,16 +1,18 @@
-//! The foreground agent's explicit memory verb.
+//! The foreground agent's memory verbs.
 //!
-//! Three verbs, one tool: `propose` drafts a durable record for the user to
-//! review, `search` runs the backend's lexical search, and `read` loads one
-//! record. It needs the memory backend and the store, so it lives here rather
-//! than in the core tool module — the execution context carries the
-//! conversation and the call, not a backend handle.
+//! Five verbs, one tool: `add` saves a durable record, `replace` rewrites
+//! one in full, `remove` forgets one, `search` runs the backend's lexical
+//! search, and `read` loads one record. It needs the memory backend and the
+//! store, so it lives here rather than in the core tool module — the
+//! execution context carries the conversation and the call, not a backend
+//! handle.
 //!
-//! A `propose` never lands with authority. The record is written as
-//! `proposed` with model authorship and evidence pointing at this
-//! conversation's durable transcript, so the storage layer's review lifecycle
-//! (decision 0067) is the consent gate; there is no approval card to click
-//! through here.
+//! A write is live at once (decision 0099). The record is written as
+//! `active` with model authorship and evidence pointing at this
+//! conversation's durable transcript, so "why do you think this" always has
+//! an answer, and the user's control is after the fact: the transcript row
+//! and the settings page edit or forget it, and every mutation leaves a
+//! revision.
 
 use std::sync::Arc;
 
@@ -18,12 +20,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tidebreak_core::{
     memory_tool_spec, parse_memory_tool_arguments, ApprovalClass, MemoryAuthor, MemoryBackend,
-    MemoryError, MemoryEvidence, MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId,
-    MemoryScope, MemorySearchRequest, MemoryStatus, MemoryToolVerb, Result, Role, Store, Tool,
-    ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec, MEMORY_TOOL_SEARCH_LIMIT,
+    MemoryError, MemoryEvidence, MemoryListFilter, MemoryOrigin, MemoryProvenance, MemoryRecord,
+    MemoryRecordId, MemoryScope, MemorySearchRequest, MemoryStatus, MemoryStatusChange,
+    MemoryToolVerb, OwnerId, Result, Role, Store, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
+    ToolSpec, MEMORY_TOOL_SEARCH_LIMIT,
 };
 
-/// Search, read, and propose against the owner's durable memory.
+/// Add, replace, remove, search, and read the owner's durable memory.
 pub struct MemoryTool {
     memory: Arc<dyn MemoryBackend>,
     store: Arc<dyn Store>,
@@ -61,13 +64,14 @@ impl Tool for MemoryTool {
         memory_tool_spec()
     }
 
-    /// `ReadOnly` even though `propose` writes a row, for the same reason
-    /// `update_task_plan` is: the class governs consent, and this call
-    /// reaches only the owner's own review queue — a `proposed` record
-    /// carries no authority until the user activates it, so the review
-    /// lifecycle is the gate an approval card would duplicate. The registry
-    /// still excludes the tool from the plan-mode surface by name, exactly
-    /// like the task plan: a plan turn must not commit rows.
+    /// `ReadOnly` even though the write verbs change rows, for the same
+    /// reason `update_task_plan` is: the class governs consent, and this
+    /// call reaches only the owner's own memory, which the transcript and
+    /// the settings page can undo. An approval card here would ask the user
+    /// to consent to being remembered on every turn, which is the review
+    /// queue decision 0099 removed. The registry still excludes the tool
+    /// from the plan-mode surface by name, exactly like the task plan: a
+    /// plan turn must not commit rows.
     fn approval_class(&self) -> ApprovalClass {
         ApprovalClass::ReadOnly
     }
@@ -193,13 +197,13 @@ impl Tool for MemoryTool {
                     Err(error) => Ok(memory_failure(error)),
                 }
             }
-            MemoryToolVerb::Propose => {
+            MemoryToolVerb::Add => {
                 // The storage layer refuses a model-authored record without
-                // resolvable evidence, so the proposal is pinned to the
-                // newest durable user message of this very conversation —
-                // the material the model is proposing from. Its turn is the
-                // running turn, which is what attributes the proposal to a
-                // transcript row.
+                // resolvable evidence, so the record is pinned to the newest
+                // durable user message of this very conversation — the
+                // material the model is saving from. Its turn is the running
+                // turn, which is what attributes the record to a transcript
+                // row.
                 let evidence = match self.store.list_messages(ctx.chat_id).await {
                     Ok(messages) => messages
                         .iter()
@@ -216,22 +220,22 @@ impl Tool for MemoryTool {
                     Err(error) => {
                         return Ok(ToolOutput::failed(
                             ToolErrorCategory::ToolFailed,
-                            format!("the proposal could not be recorded: {error}"),
+                            format!("the memory could not be saved: {error}"),
                         ));
                     }
                 };
                 let Some((evidence, turn_id)) = evidence else {
                     return Ok(ToolOutput::failed(
                         ToolErrorCategory::ToolFailed,
-                        "a memory proposal needs a conversation with at least one user message",
+                        "a memory needs a conversation with at least one user message",
                     ));
                 };
                 let now = chrono::Utc::now();
                 let record = MemoryRecord {
                     id: MemoryRecordId::new(),
                     scope: MemoryScope::Personal,
-                    kind: arguments.kind.expect("propose arguments carry a kind"),
-                    status: MemoryStatus::Proposed,
+                    kind: arguments.kind.expect("add arguments carry a kind"),
+                    status: MemoryStatus::Active,
                     title: arguments.title.unwrap_or_default().trim().to_owned(),
                     body: arguments.body.unwrap_or_default().trim().to_owned(),
                     provenance: MemoryProvenance {
@@ -253,13 +257,148 @@ impl Tool for MemoryTool {
                 };
                 match self.memory.put(&owner, record).await {
                     Ok(receipt) => Ok(ToolOutput::text(format!(
-                        "Proposed memory {} for the user to review. It is a draft: it carries no \
-                         authority unless the user activates it.",
+                        "Remembered (id {}). It is live for every later conversation; the user \
+                         can edit or forget it.",
                         receipt.record.id
                     ))),
+                    Err(error) => Ok(self.failure_with_entries(&owner, error).await),
+                }
+            }
+            MemoryToolVerb::Replace => {
+                let raw = arguments.record_id.unwrap_or_default();
+                let Ok(id) = raw.parse::<MemoryRecordId>() else {
+                    return Ok(ToolOutput::failed(
+                        ToolErrorCategory::InvalidArguments,
+                        "record_id is not a memory record id; use the id the digest or a search hit named",
+                    ));
+                };
+                let existing = match self.memory.get(&owner, id).await {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        return Ok(ToolOutput::failed(
+                            ToolErrorCategory::NotFound,
+                            "no memory record has that id",
+                        ))
+                    }
+                    Err(error) => return Ok(memory_failure(error)),
+                };
+                if existing.status != MemoryStatus::Active {
+                    return Ok(ToolOutput::failed(
+                        ToolErrorCategory::InvalidArguments,
+                        "that memory is not active; add a new one instead",
+                    ));
+                }
+                let update = tidebreak_core::MemoryRecordUpdate {
+                    id,
+                    expected_revision: existing.revision,
+                    kind: arguments.kind.unwrap_or(existing.kind),
+                    title: arguments.title.unwrap_or_default().trim().to_owned(),
+                    body: arguments.body.unwrap_or_default().trim().to_owned(),
+                    provenance: existing.provenance.clone(),
+                    links: existing.links.clone(),
+                    expires_at: existing.expires_at,
+                    observation_count: existing.observation_count,
+                };
+                match self.memory.update(&owner, update).await {
+                    Ok(receipt) => Ok(ToolOutput::text(format!(
+                        "Updated memory {} (revision {}).",
+                        receipt.record.id, receipt.record.revision
+                    ))),
+                    Err(error) => Ok(self.failure_with_entries(&owner, error).await),
+                }
+            }
+            MemoryToolVerb::Remove => {
+                let raw = arguments.record_id.unwrap_or_default();
+                let Ok(id) = raw.parse::<MemoryRecordId>() else {
+                    return Ok(ToolOutput::failed(
+                        ToolErrorCategory::InvalidArguments,
+                        "record_id is not a memory record id; use the id the digest or a search hit named",
+                    ));
+                };
+                let existing = match self.memory.get(&owner, id).await {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        return Ok(ToolOutput::failed(
+                            ToolErrorCategory::NotFound,
+                            "no memory record has that id",
+                        ))
+                    }
+                    Err(error) => return Ok(memory_failure(error)),
+                };
+                if existing.status == MemoryStatus::Archived {
+                    return Ok(ToolOutput::text("That memory was already forgotten."));
+                }
+                // Forgetting archives rather than deletes: the revision trail
+                // stays answerable, and the settings page can still show what
+                // was once believed.
+                match self
+                    .memory
+                    .set_status(
+                        &owner,
+                        MemoryStatusChange {
+                            id,
+                            expected_revision: existing.revision,
+                            status: MemoryStatus::Archived,
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(ToolOutput::text(format!("Forgot memory {id}."))),
                     Err(error) => Ok(memory_failure(error)),
                 }
             }
         }
     }
+}
+
+impl MemoryTool {
+    /// A refusal from the store, with the current entries attached when the
+    /// refusal is a cap: the model consolidates or removes in the same turn
+    /// and retries, instead of guessing what is taking the room.
+    async fn failure_with_entries(&self, owner: &OwnerId, error: MemoryError) -> ToolOutput {
+        let capped = matches!(
+            error,
+            MemoryError::ActiveRecordCapExceeded { .. } | MemoryError::DigestCapExceeded { .. }
+        );
+        let mut output = memory_failure(error);
+        if !capped {
+            return output;
+        }
+        let Ok(records) = self
+            .memory
+            .list(
+                owner,
+                MemoryListFilter {
+                    scope: Some(MemoryScope::Personal),
+                    statuses: vec![MemoryStatus::Active],
+                    kinds: Vec::new(),
+                },
+            )
+            .await
+        else {
+            return output;
+        };
+        let mut lines = vec![String::from("Current entries:")];
+        for record in &records {
+            lines.push(format!(
+                "- {} — {} (id {}): {}",
+                record.updated_at.format("%Y-%m-%d"),
+                record.title,
+                record.id,
+                head(&record.body)
+            ));
+        }
+        output.content = format!("{}\n{}", output.content, lines.join("\n"));
+        output
+    }
+}
+
+/// The first line of a body, bounded, for a listing the model reads.
+fn head(body: &str) -> String {
+    let line = body.lines().next().unwrap_or_default().trim();
+    let mut out: String = line.chars().take(120).collect();
+    if out.len() < line.len() {
+        out.push('…');
+    }
+    out
 }

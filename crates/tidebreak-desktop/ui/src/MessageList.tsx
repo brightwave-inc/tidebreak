@@ -64,9 +64,9 @@ import type {
 } from "./generated/wire";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
 import {
-  MemoryProposalCard,
-  type MemoryProposalClient,
-} from "./MemoryProposalCard";
+  MemoryRememberedCard,
+  type MemoryRememberedClient,
+} from "./MemoryRememberedCard";
 
 export type ChatMessage =
   | {
@@ -285,7 +285,7 @@ type MessageListProps = {
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
-  memoryClient?: MemoryProposalClient;
+  memoryClient?: MemoryRememberedClient;
 };
 
 // Defaults for the background-agent props feed the grouping memo below, so
@@ -603,7 +603,7 @@ export function groupMessageItems(
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >,
-  memoryClient?: MemoryProposalClient,
+  memoryClient?: MemoryRememberedClient,
   backgroundAgents: {
     runs: AgentRun[];
     loading: boolean;
@@ -1149,7 +1149,7 @@ function MessageBubbleImpl({
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
-  memoryClient?: MemoryProposalClient;
+  memoryClient?: MemoryRememberedClient;
   /** Present only on the transcript's newest retryable failure. */
   onRetry?: () => void;
 }) {
@@ -1312,7 +1312,7 @@ function MessageBubbleImpl({
   if (message.role === "memory_proposals") {
     if (!memoryClient) return null;
     return (
-      <MemoryProposalCard
+      <MemoryRememberedCard
         turnId={message.turnId}
         records={message.records}
         client={memoryClient}

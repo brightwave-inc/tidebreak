@@ -714,13 +714,16 @@ pub(crate) fn compose_for_surface(
     let mut memory_lines: Vec<String> = Vec::new();
     if has(tidebreak_core::MEMORY_TOOL) {
         memory_lines.push(
-            "- Use `memory` with `verb: \"search\"` or `verb: \"read\"` when earlier durable knowledge would change the answer and the digest's title lines suggest it exists.".to_owned(),
+            "- The entries below are what you already know about the user, dated. Treat this conversation as newer evidence when they disagree.".to_owned(),
         );
         memory_lines.push(
-            "- Use `memory` with `verb: \"propose\"` only for knowledge worth keeping beyond this conversation: a stable fact, a stated preference, a reusable lesson, or a durable reference. A proposal is a draft for the user to review, never an active memory; do not describe it as saved.".to_owned(),
+            "- Save durable knowledge with `memory` as it comes up, without being asked: who the user is, how they like to work, stable facts about their environment and projects, corrections they make, and lessons that will apply again. `verb: \"add\"` saves one entry; `verb: \"replace\"` rewrites an entry by its id when the topic already has one; `verb: \"remove\"` forgets an entry that is no longer true or that the user asks you to forget. A save is live at once, so say \"I'll remember that\" only after the call succeeds.".to_owned(),
         );
         memory_lines.push(
-            "- Do not propose secrets, transient task state, or anything the user asked to keep out of memory.".to_owned(),
+            "- Do not save trivia, anything easy to rediscover, raw data, task progress, secrets, or anything the user asked to keep out of memory. Memory is small on purpose: if a save fails as full, consolidate overlapping entries with `replace` and `remove`, then retry.".to_owned(),
+        );
+        memory_lines.push(
+            "- Use `verb: \"search\"` or `verb: \"read\"` when an entry's title suggests earlier knowledge would change the answer.".to_owned(),
         );
     }
     if let Some(digest) = memory_digest {
@@ -1587,8 +1590,9 @@ mod tests {
             Some(""),
         );
         assert!(with_tool.contains(MEMORY_HEADING));
-        assert!(with_tool.contains("verb: \"propose\""));
-        assert!(with_tool.contains("never an active memory"));
+        assert!(with_tool.contains("verb: \"add\""));
+        assert!(with_tool.contains("verb: \"replace\""));
+        assert!(with_tool.contains("live at once"));
         assert!(!compose(&[spec("read_file")]).contains("`memory`"));
     }
 

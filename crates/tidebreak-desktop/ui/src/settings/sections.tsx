@@ -4,7 +4,7 @@ import {
   Blocks,
   Bot,
   Cpu,
-  FlaskConical,
+  Brain,
   Gauge,
   Globe,
   GitBranch,
@@ -241,7 +241,7 @@ function GitSourceControlSection() {
   return <GitSourceControlPanel client={client} />;
 }
 
-function ExperimentalSection() {
+function MemorySection() {
   const { client } = useApp();
   const navigate = useNavigate();
   const modelsPath: string = "/settings/models";
@@ -249,6 +249,9 @@ function ExperimentalSection() {
     <MemoryPanel
       client={client}
       onOpenModels={() => void navigate({ to: modelsPath })}
+      onOpenConversation={(chatId) =>
+        void navigate({ to: "/c/$chatId", params: { chatId } })
+      }
     />
   );
 }
@@ -423,12 +426,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     Component: UpdatesSection,
   },
   {
-    path: "experimental",
-    label: "Experimental",
+    path: "memory",
+    label: "Memory",
     group: "application",
-    icon: FlaskConical,
+    icon: Brain,
     iconClass: "text-icon-violet",
-    Component: ExperimentalSection,
+    Component: MemorySection,
   },
 ];
 

@@ -33,12 +33,12 @@ describe("settings sections", () => {
     );
   });
 
-  it("always exposes coding harnesses and experimental settings", () => {
+  it("always exposes coding harnesses and memory settings", () => {
     for (const managed of [false, true]) {
       const paths = settingsSectionsFor(managed).map((section) => section.path);
       expect(paths).toContain("coding-harnesses");
-      expect(paths).toContain("experimental");
-      expect(paths).not.toContain("memory");
+      expect(paths).toContain("memory");
+      expect(paths).not.toContain("experimental");
     }
   });
 

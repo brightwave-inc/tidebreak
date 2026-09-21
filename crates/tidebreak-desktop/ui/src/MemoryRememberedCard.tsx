@@ -3,48 +3,43 @@ import { Brain } from "lucide-react";
 
 import type { ApiClient, MemoryRecord } from "./api";
 import type { TurnId } from "./generated/wire";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { memoryStatusVariant } from "./memoryStatus";
 import { ToolCardShell } from "./ToolCardShell";
 
-/** What deciding or editing a proposal needs from the connected client. */
-export type MemoryProposalClient = Pick<
+/** What editing or forgetting a remembered record needs from the client. */
+export type MemoryRememberedClient = Pick<
   ApiClient,
   "setMemoryRecordStatus" | "updateMemoryRecord"
 >;
 
-type MemoryProposalCardProps = {
+type MemoryRememberedCardProps = {
   turnId: TurnId;
   /** The turn's model-authored records, in the order the server retained. */
   records: MemoryRecord[];
-  client: MemoryProposalClient;
+  client: MemoryRememberedClient;
 };
 
 /** A record's own draft while its title and body are being edited inline. */
 type Draft = { id: string; title: string; body: string };
 
 /**
- * One turn's memory proposals, as an expandable transcript row.
+ * What one turn remembered, as an expandable transcript row.
  *
- * Deliberately not an ApprovalCard: a proposal is a record with a lifecycle,
- * not a parked consent. Nothing is blocked on the reader — the turn already
- * finished, the record sits in `proposed` until someone reviews it here or in
- * settings, and a decision is an ordinary CAS mutation that can be revisited.
- * ApprovalCard also auto-focuses and is bound to tool-call ids, neither of
- * which fits a row that merely reports what a turn produced.
- *
- * Every mutation sends `expected_revision` from the record currently held and
- * replaces it with the server's returned record, so a decision made elsewhere
- * surfaces as a conflict error instead of silently overwriting it.
+ * A remembered record is live the moment it is written (decision 0099), so
+ * this row asks for nothing. It shows what was kept and offers the two
+ * controls that matter after the fact: Edit, which rewrites the entry, and
+ * Forget, which archives it. Every mutation sends `expected_revision` from
+ * the record currently held and replaces it with the server's returned
+ * record, so a change made elsewhere surfaces as a conflict instead of
+ * silently overwriting it.
  */
-export function MemoryProposalCard({
+export function MemoryRememberedCard({
   records,
   client,
-}: MemoryProposalCardProps) {
+}: MemoryRememberedCardProps) {
   const [rows, setRows] = useState(records);
   const [working, setWorking] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -52,7 +47,7 @@ export function MemoryProposalCard({
 
   useEffect(() => setRows(records), [records]);
 
-  const pending = rows.filter((record) => record.status === "proposed").length;
+  const kept = rows.filter((record) => record.status === "active");
 
   function replaceRow(updated: MemoryRecord) {
     setRows((current) =>
@@ -84,17 +79,15 @@ export function MemoryProposalCard({
     }
   }
 
-  function decide(record: MemoryRecord, status: "active" | "rejected") {
+  function forget(record: MemoryRecord) {
     void mutate(
       record,
       () =>
         client.setMemoryRecordStatus(record.id, {
           expected_revision: record.revision,
-          status,
+          status: "archived",
         }),
-      status === "active"
-        ? "Could not approve this memory record."
-        : "Could not dismiss this memory record.",
+      "Could not forget this memory.",
     );
   }
 
@@ -114,38 +107,33 @@ export function MemoryProposalCard({
           expires_at: record.expires_at ?? null,
           observation_count: record.observation_count,
         }),
-      "Could not save this memory record.",
+      "Could not save this memory.",
     );
   }
+
+  const title =
+    kept.length === 0
+      ? "Memory forgotten"
+      : kept.length === 1
+        ? `Remembered: ${kept[0].title}`
+        : `Remembered ${kept.length} things`;
 
   return (
     <ToolCardShell
       icon={<Brain className="text-icon-violet" aria-hidden="true" />}
-      title={
-        pending > 0
-          ? `${pending} memory proposal${pending === 1 ? "" : "s"}`
-          : "Memory proposals reviewed"
-      }
-      trailing={
-        pending > 0 ? (
-          <Badge variant="warning" size="sm">
-            {pending} pending
-          </Badge>
-        ) : undefined
-      }
-      label="Memory proposals"
+      title={title}
+      label="Remembered"
     >
       <ul className="flex flex-col gap-2">
         {rows.map((record) => (
-          <MemoryProposalRow
+          <MemoryRememberedRow
             key={record.id}
             record={record}
             working={working.has(record.id)}
             error={errors[record.id]}
             draft={draft?.id === record.id ? draft : null}
             onDraftChange={setDraft}
-            onApprove={() => decide(record, "active")}
-            onDismiss={() => decide(record, "rejected")}
+            onForget={() => forget(record)}
             onSave={(next) => saveDraft(record, next)}
           />
         ))}
@@ -154,14 +142,13 @@ export function MemoryProposalCard({
   );
 }
 
-function MemoryProposalRow({
+function MemoryRememberedRow({
   record,
   working,
   error,
   draft,
   onDraftChange,
-  onApprove,
-  onDismiss,
+  onForget,
   onSave,
 }: {
   record: MemoryRecord;
@@ -169,11 +156,10 @@ function MemoryProposalRow({
   error?: string;
   draft: Draft | null;
   onDraftChange: (draft: Draft | null) => void;
-  onApprove: () => void;
-  onDismiss: () => void;
+  onForget: () => void;
   onSave: (draft: Draft) => void;
 }) {
-  const proposed = record.status === "proposed";
+  const live = record.status === "active";
   return (
     <li className="rounded-md border border-border px-3 py-2">
       {draft ? (
@@ -219,34 +205,23 @@ function MemoryProposalRow({
         <>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-sm font-medium">{record.title}</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {record.kind}
+              <p
+                className={`text-sm font-medium ${live ? "" : "text-muted-foreground line-through"}`}
+              >
+                {record.title}
+              </p>
+              <p className="mt-0.5 whitespace-pre-wrap text-xs text-muted-foreground">
+                {record.body}
               </p>
             </div>
-            {!proposed && (
-              <Badge
-                variant={memoryStatusVariant(record.status)}
-                size="sm"
-                className="shrink-0"
-              >
-                {record.status}
-              </Badge>
+            {!live && (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                Forgotten
+              </span>
             )}
           </div>
-          <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
-            {record.body}
-          </p>
-          {proposed && (
+          {live && (
             <div className="mt-2 flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={working}
-                onClick={onApprove}
-              >
-                Approve
-              </Button>
               <Button
                 type="button"
                 variant="outline"
@@ -267,9 +242,9 @@ function MemoryProposalRow({
                 variant="ghost"
                 size="sm"
                 disabled={working}
-                onClick={onDismiss}
+                onClick={onForget}
               >
-                Dismiss
+                Forget
               </Button>
             </div>
           )}
