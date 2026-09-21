@@ -243,7 +243,14 @@ function GitSourceControlSection() {
 
 function ExperimentalSection() {
   const { client } = useApp();
-  return <MemoryPanel client={client} />;
+  const navigate = useNavigate();
+  const modelsPath: string = "/settings/models";
+  return (
+    <MemoryPanel
+      client={client}
+      onOpenModels={() => void navigate({ to: modelsPath })}
+    />
+  );
 }
 
 export type SettingsSectionDef = {

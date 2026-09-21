@@ -622,10 +622,13 @@ async fn an_incognito_chat_composes_no_memory_section_and_captures_nothing() {
     assert!(!chat.memory_incognito);
 }
 
-/// Capture stays off until its stored switch is turned on, whatever else is
-/// configured — model-authored writes are opt-in (decision 0067).
+/// Capture follows the memory switch: memory off means no capture, memory on
+/// means capture with no second switch to find, and the stored capture key
+/// stays an explicit override for callers that want injection alone. A
+/// captured record still never carries authority until reviewed (decision
+/// 0067), which is what makes the single switch safe.
 #[tokio::test]
-async fn capture_is_off_by_default() {
+async fn capture_follows_the_memory_switch() {
     let recorder = SystemPromptRecorder::default();
     let (router, token, db, store, state, _dir) = memory_turn_app(Arc::new(recorder.clone())).await;
     let bearer = format!("Bearer {token}");
@@ -636,7 +639,38 @@ async fn capture_is_off_by_default() {
     );
     wait_for_turns(&store, chat.id, 1).await;
     let turn_id = store.list_turns(chat.id).await.unwrap()[0].id;
-    let capture = test_capture(&state, db);
+    let capture = test_capture(&state, db.clone());
+
+    // Memory on, capture key unset: the settings report capture on.
+    let settings = assert_ok(request(&router, &bearer, "GET", "/settings".into()).await).await;
+    assert_eq!(settings["memory"]["enabled"], true);
+    assert_eq!(settings["memory"]["capture_enabled"], true);
+
+    // The explicit override still holds capture back.
+    store
+        .set_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING, &json!(false))
+        .await
+        .unwrap();
+    let settings = assert_ok(request(&router, &bearer, "GET", "/settings".into()).await).await;
+    assert_eq!(settings["memory"]["capture_enabled"], false);
+    assert_eq!(
+        capture.derive(chat.id, turn_id).await.unwrap(),
+        CaptureOutcome::NotApplicable
+    );
+
+    // Memory off wins over everything: no capture and no capture switch.
+    store
+        .set_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING, &json!(true))
+        .await
+        .unwrap();
+    store
+        .set_setting(crate::routes::MEMORY_ENABLED_SETTING, &json!(false))
+        .await
+        .unwrap();
+    let settings = assert_ok(request(&router, &bearer, "GET", "/settings".into()).await).await;
+    assert_eq!(settings["memory"]["enabled"], false);
+    assert_eq!(settings["memory"]["capture_enabled"], false);
+    assert_eq!(settings["memory"]["capture_ready"], false);
     assert_eq!(
         capture.derive(chat.id, turn_id).await.unwrap(),
         CaptureOutcome::NotApplicable

@@ -100,7 +100,7 @@ export const storySettings: RuntimeSettings = {
     account_prefix: "alex/",
     effective_branch_prefix: "alex/",
   },
-  memory: { enabled: true, capture_enabled: false, capture_ready: false },
+  memory: { enabled: true, capture_enabled: true, capture_ready: true },
 };
 
 function model(

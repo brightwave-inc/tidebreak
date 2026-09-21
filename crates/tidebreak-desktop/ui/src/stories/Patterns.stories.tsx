@@ -239,6 +239,7 @@ $ pnpm test -- TaskPlanCard.dom.test.tsx`}
             </p>
             <ChatStatusChip
               outputCount={3}
+              memory={{ summary: "3 records in context", onOpen: fn() }}
               folders={[]}
               runs={[
                 {
