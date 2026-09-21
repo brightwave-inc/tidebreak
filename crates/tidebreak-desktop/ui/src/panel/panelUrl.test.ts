@@ -70,6 +70,38 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("files")).toBeNull();
   });
 
+  it.each([".env", ".config/settings.json", ".marker.txt", "src/.hidden.ts"])(
+    "keeps a diff tab for %s when navigation round-trips through the URL",
+    (path) => {
+      for (const turnId of [undefined, "turn-1"]) {
+        const panel = {
+          type: "diff" as const,
+          path,
+          ...(turnId ? { turnId } : {}),
+        };
+        expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
+        const layout = {
+          tabs: [panel],
+          activeIndex: 0,
+          fullscreen: false,
+        };
+        expect(layoutFromSearch(searchFromLayout(layout)).tabs).toEqual([
+          panel,
+        ]);
+      }
+    },
+  );
+
+  it.each([
+    "diff.f.",
+    "diff.t.turn-1.f.",
+    "diff.f.%00",
+    "diff.t.turn-1.f.%00",
+    "diff.f.%ZZ",
+  ])("rejects an empty or malformed diff target: %s", (segment) => {
+    expect(parsePanelSegment(segment)).toBeNull();
+  });
+
   it("round-trips opaque browser tab identities without putting URLs in the layout", () => {
     const browser = { type: "browser" as const, browserId: "browser_one-2" };
     expect(encodePanelSegment(browser)).toBe("browser.browser_one-2");
