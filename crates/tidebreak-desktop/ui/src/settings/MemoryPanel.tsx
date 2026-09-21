@@ -8,7 +8,6 @@ import type {
   MemorySettings,
   MemoryRecord,
   MemoryRevision,
-  MemoryScope,
   MemoryStatus,
   MemorySweepStatus,
 } from "../api";
@@ -26,6 +25,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { memoryStatusVariant } from "../memoryStatus";
+import { useMemoryPresenceStore } from "../MemoryPresenceStore";
 import {
   SettingsError,
   SettingsField,
@@ -72,19 +72,23 @@ export function MemoryPanel({
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const scope: MemoryScope = { kind: "personal" };
+  const refreshPresence = useMemoryPresenceStore((state) => state.refresh);
+  const applyPresence = useMemoryPresenceStore((state) => state.apply);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [nextSettings, nextRecords, nextDigest, nextSweep] =
-        await Promise.all([
-          client.getSettings(),
-          client.listMemoryRecords(),
-          client.getMemoryDigest(scope),
-          client.getMemorySweepStatus(),
-        ]);
+      // Settings and the digest come through the shared snapshot the
+      // activity chip also reads, so the two never race each other and the
+      // chip shows what this page just changed.
+      const [presence, nextRecords, nextSweep] = await Promise.all([
+        refreshPresence(client),
+        client.listMemoryRecords(),
+        client.getMemorySweepStatus(),
+      ]);
+      const nextSettings = { memory: presence.settings };
+      const nextDigest = presence.digest;
       setSettings(nextSettings.memory);
       setRecords((current) => {
         // First load lands on the view with something to do: review when a
@@ -120,7 +124,7 @@ export function MemoryPanel({
     } finally {
       setLoading(false);
     }
-  }, [client]);
+  }, [client, refreshPresence]);
 
   useEffect(() => {
     void reload();
@@ -216,6 +220,7 @@ export function MemoryPanel({
     try {
       const next = await client.putSettings({ memory: update });
       setSettings(next.memory);
+      applyPresence({ settings: next.memory });
       toast.success(
         update.enabled === false
           ? "Memory is off"

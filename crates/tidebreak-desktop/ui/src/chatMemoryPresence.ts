@@ -1,63 +1,41 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-import type { ApiClient, Chat } from "./api";
-
-/** What the memory row needs from the connected client. */
-export type ChatMemoryPresenceClient = Pick<
-  ApiClient,
-  "getSettings" | "getMemoryDigest"
->;
-
-/** The facts the row summarizes, read once per conversation. */
-type MemoryFacts = { enabled: boolean; recordCount: number };
+import type { Chat } from "./api";
+import {
+  type MemoryFacts,
+  type MemoryPresenceClient,
+  useMemoryPresenceStore,
+} from "./MemoryPresenceStore";
 
 /**
  * The one line the activity chip shows for memory.
  *
- * Read from settings and the personal digest when the conversation opens,
- * then phrased against the chat's own incognito flag, so the row answers
- * "is memory reaching this conversation?" without a second data source.
- * A failed read hides the row rather than guessing: memory is enrichment.
+ * Reads the shared memory snapshot, loading it once for the app if nothing
+ * has yet, and phrases it against the chat's own incognito flag, so the row
+ * answers "is memory reaching this conversation?" and follows any change
+ * the settings page makes. Nothing loaded means no row: memory is
+ * enrichment, and the chip never guesses.
  */
 export function useChatMemoryPresence(
-  client: ChatMemoryPresenceClient,
-  chat: Pick<Chat, "id" | "memory_incognito"> | null,
+  client: MemoryPresenceClient,
+  chat: Pick<Chat, "memory_incognito"> | null,
 ): string | null {
-  const [facts, setFacts] = useState<MemoryFacts | null>(null);
-  const chatId = chat?.id ?? null;
+  const facts = useMemoryPresenceStore((state) => state.facts);
+  const refresh = useMemoryPresenceStore((state) => state.refresh);
 
   useEffect(() => {
-    if (chatId == null) return;
-    let cancelled = false;
-    void Promise.all([
-      client.getSettings(),
-      client.getMemoryDigest({ kind: "personal" }),
-    ])
-      .then(([settings, digest]) => {
-        if (cancelled) return;
-        setFacts({
-          enabled: settings.memory.enabled,
-          recordCount: digest.record_count,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setFacts(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, chatId]);
+    if (facts == null) refresh(client).catch(() => undefined);
+  }, [client, facts, refresh]);
 
   if (facts == null || chat == null) return null;
   return memorySummary(facts, chat.memory_incognito);
 }
 
-/** Phrase the memory facts for one conversation. */
+/** Phrase the memory snapshot for one conversation. */
 export function memorySummary(facts: MemoryFacts, incognito: boolean): string {
-  if (!facts.enabled) return "Off";
+  if (!facts.settings.enabled) return "Off";
   if (incognito) return "Off for this chat";
-  if (facts.recordCount === 0) return "On · nothing approved yet";
-  return facts.recordCount === 1
-    ? "1 record in context"
-    : `${facts.recordCount} records in context`;
+  const count = facts.digest.record_count;
+  if (count === 0) return "On · nothing approved yet";
+  return count === 1 ? "1 record in context" : `${count} records in context`;
 }

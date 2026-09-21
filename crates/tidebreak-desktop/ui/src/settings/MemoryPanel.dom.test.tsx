@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MemoryRecord, MemorySettings } from "@/api";
+import { useMemoryPresenceStore } from "../MemoryPresenceStore";
 import { MemoryPanel } from "./MemoryPanel";
 
 const tracking: MemoryRecord = {
@@ -78,7 +79,10 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useMemoryPresenceStore.getState().reset();
+});
 
 describe("MemoryPanel", () => {
   it("turns capture on with the one memory switch", async () => {
