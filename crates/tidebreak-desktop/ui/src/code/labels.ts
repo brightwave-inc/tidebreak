@@ -12,6 +12,7 @@ import type {
   ProviderKind,
   ReasoningEffort,
 } from "../api/types";
+import { providerLabel } from "../ModelSelection";
 import { familyForModelId, vendorForModelId } from "../modelFamilies";
 
 /**
@@ -510,6 +511,37 @@ export function groupCodeModelOptions(
     return CODE_VENDOR_ORDER.length;
   };
   return [...byId.values()].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * Rows in `groups` whose label, id leaf, vendor, or family contains `query`.
+ *
+ * The harness source is not a match field. On a gateway connection every row
+ * shares it (`Grok CLI`, or `Grok CLI · model-gateway`), so searching the
+ * engine name kept the whole catalog. The provider prefix of a qualified id
+ * is left out for the same reason: `model-gateway/` is on every hosted row.
+ */
+export function matchingCodeModels(
+  groups: readonly Pick<CodeModelGroup, "label" | "options">[],
+  query: string,
+): CodeModelOption[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [];
+  return groups.flatMap((group) =>
+    group.options.filter((option) => {
+      const leaf = option.id.split("/").pop() ?? option.id;
+      const family = familyForModelId(leaf);
+      const vendor = codeModelVendor(option);
+      return [
+        option.label,
+        leaf,
+        group.label,
+        vendor ? providerLabel(vendor) : "",
+        family?.label ?? "",
+        family?.match ?? "",
+      ].some((value) => value.toLocaleLowerCase().includes(needle));
+    }),
+  );
 }
 
 export function prettyCodeModelLabel(id: string): string {

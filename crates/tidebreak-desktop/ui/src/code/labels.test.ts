@@ -9,6 +9,7 @@ import {
   effortLadder,
   gatewayCodeModels,
   groupCodeModelOptions,
+  matchingCodeModels,
   harnessCanStartNow,
   harnessNeedsDownload,
   harnessUnusableReason,
@@ -446,5 +447,33 @@ describe("groupCodeModelOptions", () => {
       ["deepseek", "DeepSeek"],
       ["other", "Other"],
     ]);
+  });
+});
+
+describe("matchingCodeModels", () => {
+  it("does not treat the shared gateway source or id prefix as a model match", () => {
+    const option = (id: string, label: string) => ({
+      id: `model-gateway-model-gateway/${id}`,
+      label,
+      source: "Grok CLI · model-gateway",
+    });
+    const groups = groupCodeModelOptions([
+      option("gpt-5.6-luna", "GPT 5.6 Luna"),
+      option("claude-fable-5", "Claude Fable 5"),
+      option("grok-4.7", "Grok 4.7"),
+      option("deepseek-v4-flash-0731", "Deepseek V4 Flash 0731"),
+    ]);
+
+    expect(matchingCodeModels(groups, "grok").map((row) => row.label)).toEqual([
+      "Grok 4.7",
+    ]);
+    expect(matchingCodeModels(groups, "gateway")).toEqual([]);
+    expect(matchingCodeModels(groups, "cli")).toEqual([]);
+    expect(matchingCodeModels(groups, "luna").map((row) => row.label)).toEqual([
+      "GPT 5.6 Luna",
+    ]);
+    expect(
+      matchingCodeModels(groups, "deepseek").map((row) => row.label),
+    ).toEqual(["Deepseek V4 Flash 0731"]);
   });
 });

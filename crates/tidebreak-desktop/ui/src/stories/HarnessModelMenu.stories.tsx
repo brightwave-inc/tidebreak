@@ -7,10 +7,11 @@ import type { CodeModelOption } from "@/code/labels";
  * The code composer's model picker, and the same control as a form row in the
  * New workspace dialog.
  *
- * A vendor rail on the left narrows the list; a search box on top crosses
- * every vendor at once. Which rail entry opens depends on the catalog. An
- * engine confined to one vendor has nothing to narrow, so it opens on its only
- * block. A vendor-neutral engine opens on All: its catalog spans vendors, and
+ * A vendor rail on the left narrows the list. Search narrows that selection:
+ * All crosses every vendor, and a vendor tab stays on that vendor. Which rail
+ * entry opens depends on the catalog. An engine confined to one vendor has
+ * nothing to narrow, so it opens on its only block. A vendor-neutral engine
+ * opens on All: its catalog spans vendors, and
  * opening on the current model's block showed one row next to a rail of
  * unlabelled marks, which reads as a model that cannot be changed.
  */

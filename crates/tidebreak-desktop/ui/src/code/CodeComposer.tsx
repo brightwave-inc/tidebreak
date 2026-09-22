@@ -37,7 +37,6 @@ import {
 } from "../PastedText";
 import { reasoningEffortOptions } from "../ModelMenu";
 import { familyForModelId } from "../modelFamilies";
-import { providerLabel } from "../ModelSelection";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import { ProviderIcon } from "../ProviderIcons";
 import { Button } from "@/components/ui/button";
@@ -58,6 +57,7 @@ import {
   codeModelVendor,
   effortLadder,
   groupCodeModelOptions,
+  matchingCodeModels,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
   SESSION_PERMISSION_MODE_LOCKED,
@@ -193,10 +193,10 @@ function CodeModelMark({
 /**
  * Per-session model selector for the code composer.
  *
- * Mirrors the chat picker: a vendor rail on the left, search on top, one
- * row per model. The rows are confined to what the engine can drive, so a
- * Claude Code session only ever offers Claude models while vendor-neutral
- * engines group a mixed catalog by vendor.
+ * A vendor rail narrows the list. Search narrows whatever that rail is
+ * showing: All crosses vendors, and a vendor tab stays on that vendor.
+ * Choosing a tab clears the query, so the tab's models are what you see.
+ * The rows are confined to what the engine can drive.
  */
 export function HarnessModelMenu({
   harness,
@@ -256,30 +256,20 @@ export function HarnessModelMenu({
         null);
   const showingAll = activeGroup === null && mixed;
   const searching = query.trim().length > 0;
-  const matches = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return [];
-    return groups.flatMap((group) =>
-      group.options.filter((option) => {
-        const family = familyForModelId(option.id);
-        const vendor = codeModelVendor(option);
-        return [
-          option.label,
-          option.id,
-          option.source,
-          group.label,
-          vendor ? providerLabel(vendor) : "",
-          family?.label ?? "",
-          family?.match ?? "",
-        ].some((value) => value.toLowerCase().includes(needle));
-      }),
-    );
-  }, [groups, query]);
-  const visible = searching
-    ? matches
-    : showingAll
-      ? groups.flatMap((group) => group.options)
-      : (activeGroup?.options ?? []);
+  // Search stays inside the rail selection. All is the cross-vendor view;
+  // a vendor tab must keep narrowing even while a query is typed.
+  const scopedGroups = showingAll ? groups : activeGroup ? [activeGroup] : [];
+  const visible = useMemo(
+    () =>
+      searching
+        ? matchingCodeModels(scopedGroups, query)
+        : scopedGroups.flatMap((group) => group.options),
+    [scopedGroups, searching, query],
+  );
+  function selectGroup(id: string) {
+    setActiveGroupId(id);
+    setQuery("");
+  }
   const locked = disabled || !onChange;
   useEffect(() => {
     // Opening resets the search and rail — whether the trigger or a caller's
@@ -420,7 +410,7 @@ export function HarnessModelMenu({
                     "relative flex size-9 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     showingAll ? "bg-accent" : "hover:bg-accent/60",
                   )}
-                  onClick={() => setActiveGroupId(ALL_MODELS)}
+                  onClick={() => selectGroup(ALL_MODELS)}
                 >
                   <List className="size-4" />
                   {showingAll && (
@@ -445,7 +435,7 @@ export function HarnessModelMenu({
                       "relative flex size-9 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       selected ? "bg-accent" : "hover:bg-accent/60",
                     )}
-                    onClick={() => setActiveGroupId(group.id)}
+                    onClick={() => selectGroup(group.id)}
                   >
                     <ProviderIcon
                       provider={group.iconProvider}
