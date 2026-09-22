@@ -65,7 +65,7 @@ const GROK_MODEL_EFFORTS: &[ReasoningEffort] = &[
 
 pub(super) fn effort_ladder_for_version(version: Option<&str>) -> &'static [ReasoningEffort] {
     match crate::probe::version_patch_line(version) {
-        Some(version) if version == (1, 0, 5) => EFFORT_LADDER_1_0_5,
+        Some((1, 0, 5)) => EFFORT_LADDER_1_0_5,
         Some(version) if version >= (1, 0, 6) => EFFORT_LADDER_CURRENT,
         _ => EFFORT_LADDER_1_0_4,
     }
