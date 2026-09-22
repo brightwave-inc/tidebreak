@@ -210,7 +210,11 @@ impl GrokSession {
             .reasoning_effort
             .or(self.spec.reasoning_effort)
             .and_then(|level| {
-                level.clamp_to(crate::grok::effort_ladder_for_version(Some(&self.version)))
+                crate::grok::clamp_effort(
+                    Some(&self.version),
+                    input.model.as_deref().or(self.spec.model.as_deref()),
+                    level,
+                )
             })
         {
             argv.extend(["--reasoning-effort".into(), effort.as_str().into()]);
@@ -363,7 +367,11 @@ impl GrokSession {
             .reasoning_effort
             .or(self.spec.reasoning_effort)
             .and_then(|level| {
-                level.clamp_to(crate::grok::effort_ladder_for_version(Some(&self.version)))
+                crate::grok::clamp_effort(
+                    Some(&self.version),
+                    input.model.as_deref().or(self.spec.model.as_deref()),
+                    level,
+                )
             })
         {
             self.acp_rpc(
