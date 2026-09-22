@@ -778,7 +778,7 @@ it("inspects retained sandbox files without a host worktree", async () => {
     />,
   );
   expect(await screen.findByText("sandbox.txt")).toBeInTheDocument();
-  expect(screen.getByText("Retained checkpoint")).toBeInTheDocument();
+  expect(screen.getByText("Saved checkpoint")).toBeInTheDocument();
   expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
 });
 

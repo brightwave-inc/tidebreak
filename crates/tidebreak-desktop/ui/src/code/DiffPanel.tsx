@@ -10,6 +10,7 @@ import { MiddleTruncate } from "./MiddleTruncate";
 import { OpenInEditorButton } from "./OpenInEditorButton";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
+import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 
 /** Files longer than this start collapsed behind "Show diff". */
 export const DIFF_COLLAPSE_LINE_THRESHOLD = 400;
@@ -84,21 +85,26 @@ export function DiffPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
-        <div className="min-w-0">
+      {/*
+        The caption takes the row until it would drop below its basis; then
+        the controls wrap under it instead of squeezing the path beside the
+        revision chip. `FileViewer` uses the same basis so the two headers
+        wrap at the same width.
+      */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-3 py-2">
+        <div className={HEADER_CAPTION}>
           <h2 className="text-sm font-medium">Diff</h2>
           <MiddleTruncate
             text={scopeCaption}
             className="text-muted-foreground font-mono text-xs"
           />
         </div>
-        <div className="flex items-center gap-2">
-          {/* A fixed slot, so a refresh does not nudge the diffstat sideways. */}
-          <span className="grid size-3.5 shrink-0 place-items-center">
-            {refreshing && (
-              <Spinner className="size-3.5" aria-label="Refreshing" />
-            )}
-          </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <WorkspaceRevisionChip
+            revision={payload?.revision}
+            revisionRef={payload?.revision_ref}
+            savedAt={payload?.revision_saved_at}
+          />
           {payload && <DiffstatBadge stat={payload.stat} />}
           {file && onOpenFile && (
             <button
@@ -117,6 +123,13 @@ export function DiffPanel({
           {file && onOpenInEditor && (
             <OpenInEditorButton onClick={() => onOpenInEditor(file)} />
           )}
+          {/* A fixed trailing slot, so a refresh moves nothing and an idle
+              slot never opens a gap between the chip and its neighbors. */}
+          <span className="grid size-3.5 shrink-0 place-items-center">
+            {refreshing && (
+              <Spinner className="size-3.5" aria-label="Refreshing" />
+            )}
+          </span>
         </div>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}

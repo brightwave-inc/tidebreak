@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { codeWorkspace } from "@/stories/fixtures";
+import { codeRepositories, codeWorkspace } from "@/stories/fixtures";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeArchivePage } from "./CodeArchivePage";
 
@@ -133,4 +133,87 @@ it("restores an owned local archive and removes it from the archive list", async
   expect(client.restoreCodeWorkspace).toHaveBeenCalledExactlyOnceWith("owned");
   await waitFor(() => expect(screen.queryByText("Owned archive")).toBeNull());
   expect(screen.getByText("Shared archive")).toBeVisible();
+});
+
+it("names each archive row's repository, never its raw id", () => {
+  const repoId = "0f4c2a9e-1b7d-4e55-9a3c-8d21f0c7b6aa";
+  const goneId = "7d3e9b10-55aa-4c21-8f0e-2b9d6c4e1a77";
+  useCodeCatalogStore.setState({
+    repos: [
+      {
+        ...codeRepositories[0]!,
+        id: "mine",
+        display_name: "brightwave-inc/mine",
+      },
+    ],
+    workspaces: [
+      {
+        ...codeWorkspace,
+        id: "own",
+        title: "Own archive",
+        repo_id: "mine",
+        status: "archived",
+      },
+      {
+        ...codeWorkspace,
+        id: "shared",
+        title: "Shared archive",
+        repo_id: repoId,
+        repo_display_name: "brightwave-inc/tidebreak",
+        status: "archived",
+        read_only: true,
+      },
+      {
+        ...codeWorkspace,
+        id: "gone",
+        title: "Orphaned archive",
+        repo_id: goneId,
+        repo_display_name: undefined,
+        status: "archived",
+      },
+    ],
+  });
+  render(<CodeArchivePage />);
+  const row = (title: string) =>
+    screen.getByText(title).closest('[role="listitem"]') as HTMLElement;
+  // The column and the narrow-row line both carry the name.
+  expect(
+    within(row("Own archive")).getAllByText("brightwave-inc/mine"),
+  ).toHaveLength(2);
+  expect(
+    within(row("Shared archive")).getAllByText("brightwave-inc/tidebreak"),
+  ).toHaveLength(2);
+  expect(within(row("Shared archive")).queryByText(repoId)).toBeNull();
+  for (const gone of within(row("Orphaned archive")).getAllByText(
+    "Repository 7d3e9b10",
+  )) {
+    expect(gone.closest("[title]")).toHaveAttribute(
+      "title",
+      expect.stringContaining(goneId),
+    );
+  }
+});
+
+it("finds a shared archive by its repository name", async () => {
+  useCodeCatalogStore.setState({
+    workspaces: [
+      {
+        ...codeWorkspace,
+        id: "shared",
+        title: "Shared archive",
+        repo_id: "0f4c2a9e-1b7d-4e55-9a3c-8d21f0c7b6aa",
+        repo_display_name: "brightwave-inc/tidebreak",
+        status: "archived",
+        read_only: true,
+      },
+    ],
+  });
+  render(<CodeArchivePage />);
+  await userEvent
+    .setup()
+    .type(
+      screen.getByPlaceholderText("Search workspaces and conversations…"),
+      "tidebreak",
+    );
+  expect(await screen.findByText("Shared archive")).toBeInTheDocument();
 });

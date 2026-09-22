@@ -11,6 +11,7 @@ import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 
 type InspectorScenario =
   | "sandbox"
+  | "sandbox-live"
   | "sandbox-pr"
   | "sandbox-unavailable"
   | "sandbox-empty"
@@ -181,9 +182,34 @@ function pending<T>(): Promise<T> {
   return new Promise(() => {});
 }
 
+/** The checkpoint a sandbox scenario reads from. Host scenarios have none. */
+function sandboxSource(scenario: InspectorScenario) {
+  if (scenario === "sandbox-live") {
+    return {
+      revision: "live" as const,
+      revision_ref: "mg-wip/sb-1-i2",
+      revision_saved_at: new Date(Date.now() - 42_000).toISOString(),
+    };
+  }
+  if (scenario.startsWith("sandbox")) {
+    return {
+      revision: "retained" as const,
+      revision_ref: "mg-wip/sb-1-i1",
+      revision_saved_at: "2026-09-21T18:23:00.000Z",
+    };
+  }
+  return {};
+}
+
 function inspectorClient(scenario: InspectorScenario): ApiClient {
   const fail = () =>
-    Promise.reject(new Error("The workspace reader is offline."));
+    Promise.reject(
+      new Error(
+        scenario === "sandbox-unavailable"
+          ? "The sandbox has not saved a checkpoint yet. Its first live checkpoint lands within about a minute of the turn starting. Open the transcript meanwhile."
+          : "The workspace reader is offline.",
+      ),
+    );
   const sandboxTree = {
     paths:
       scenario === "sandbox-empty" || scenario === "empty"
@@ -201,9 +227,7 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
             "docs/decisions/0052-subagents.md",
           ],
     truncated: false,
-    ...(scenario.startsWith("sandbox")
-      ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
-      : {}),
+    ...sandboxSource(scenario),
   };
   const loadTree =
     scenario === "loading"
@@ -231,23 +255,13 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
                       deletions: 0,
                       truncated: false,
                     },
-                    ...(scenario.startsWith("sandbox")
-                      ? {
-                          revision: "retained" as const,
-                          revision_ref: "mg-wip/sb-1-i1",
-                        }
-                      : {}),
+                    ...sandboxSource(scenario),
                   }
                 : scenario === "truncated"
                   ? truncatedChangedFiles
                   : {
                       ...changedFiles,
-                      ...(scenario.startsWith("sandbox")
-                        ? {
-                            revision: "retained" as const,
-                            revision_ref: "mg-wip/sb-1-i1",
-                          }
-                        : {}),
+                      ...sandboxSource(scenario),
                     },
     getCodeWorkspacePr: async () => prSnapshot,
     getCodeWorkspacePullRequests: async () => ({
@@ -393,13 +407,19 @@ function InspectorStory({
         ? {
             ...workspace,
             worktree_path: `remote:${workspace.id}`,
-            pr: scenario === "sandbox" ? undefined : storyPr,
+            pr:
+              scenario === "sandbox" || scenario === "sandbox-live"
+                ? undefined
+                : storyPr,
           }
         : { ...workspace, pr: storyPr };
   const storySnapshot = {
     ...prSnapshot,
     remote: scenario.startsWith("sandbox"),
-    pr: scenario === "sandbox" ? undefined : storyPr,
+    pr:
+      scenario === "sandbox" || scenario === "sandbox-live"
+        ? undefined
+        : storyPr,
   };
   const resource = resourceFor(
     scenario === "empty"
@@ -524,9 +544,7 @@ export const SandboxFiles: Story = {
   args: { scenario: "sandbox" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      canvas.findByText("Retained checkpoint"),
-    ).resolves.toBeVisible();
+    await expect(canvas.findByText("Saved checkpoint")).resolves.toBeVisible();
     await expect(canvas.queryByRole("searchbox")).not.toBeInTheDocument();
   },
 };
@@ -537,6 +555,29 @@ export const SandboxChanges: Story = {
 
 export const SandboxWithPullRequest: Story = {
   args: { scenario: "sandbox-pr" },
+};
+
+export const SandboxLiveFiles: Story = {
+  args: { scenario: "sandbox-live" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.findByText(/^Live · saved/)).resolves.toBeVisible();
+  },
+};
+
+export const SandboxLiveChanges: Story = {
+  args: { tab: "source", scenario: "sandbox-live" },
+};
+
+export const SandboxLiveNarrow: Story = {
+  args: { tab: "source", scenario: "sandbox-live" },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-[330px]">
+        <Story />
+      </div>
+    ),
+  ],
 };
 
 export const SandboxUnavailable: Story = {

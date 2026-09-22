@@ -213,14 +213,11 @@ function CodeArchiveBody() {
     const query = trimmedSearch.toLocaleLowerCase();
     return archiveCandidates.filter((workspace) => {
       if (!query) return true;
-      const repo = repos.find(
-        (candidate) => candidate.id === workspace.repo_id,
-      );
       const metadataMatches = [
         workspace.title,
         workspace.branch_name,
         workspace.worktree_path,
-        repo?.display_name ?? "",
+        repositoryLabel(workspace, repos).name,
       ]
         .join(" ")
         .toLocaleLowerCase()
@@ -249,6 +246,27 @@ function CodeArchiveBody() {
   const totalArchived = workspaces.filter((workspace) =>
     isPutAway(workspace),
   ).length;
+
+  // A shared workspace's repository is not in this reader's registrations,
+  // but its snapshot carries the name. Offer it in the filter too.
+  const repoOptions = useMemo(() => {
+    const options = repos.map((repo) => ({
+      id: repo.id,
+      name: repo.display_name,
+    }));
+    const listed = new Set(options.map((option) => option.id));
+    for (const workspace of listArchivedWorkspaces(workspaces)) {
+      if (listed.has(workspace.repo_id) || !workspace.repo_display_name) {
+        continue;
+      }
+      listed.add(workspace.repo_id);
+      options.push({
+        id: workspace.repo_id,
+        name: workspace.repo_display_name,
+      });
+    }
+    return options;
+  }, [repos, workspaces]);
 
   return (
     <div className="flex size-full min-h-0 flex-col bg-background">
@@ -293,9 +311,9 @@ function CodeArchiveBody() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All repositories</SelectItem>
-            {repos.map((repo) => (
+            {repoOptions.map((repo) => (
               <SelectItem key={repo.id} value={repo.id}>
-                {repo.display_name}
+                {repo.name}
               </SelectItem>
             ))}
           </SelectContent>
@@ -395,9 +413,7 @@ function CodeArchiveBody() {
               <span className="text-right">Actions</span>
             </div>
             {archived.map((workspace) => {
-              const repo = repos.find(
-                (candidate) => candidate.id === workspace.repo_id,
-              );
+              const repository = repositoryLabel(workspace, repos);
               const workspaceHistory =
                 historyMatchesByWorkspace.get(workspace.id) ?? [];
               return (
@@ -423,6 +439,13 @@ function CodeArchiveBody() {
                       <span className="mt-1 flex items-center gap-1.5 truncate font-mono text-xs text-muted-foreground">
                         <GitBranch className="size-3.5 shrink-0" />
                         {workspace.branch_name}
+                      </span>
+                      {/* Narrow rows hide the repository column; keep its name. */}
+                      <span
+                        className="mt-0.5 block truncate text-xs text-muted-foreground @[46rem]:hidden"
+                        title={repository.title}
+                      >
+                        {repository.name}
                       </span>
                     </button>
                     {workspaceHistory.length > 0 && (
@@ -456,8 +479,11 @@ function CodeArchiveBody() {
                       </div>
                     )}
                   </div>
-                  <span className="flex min-w-0 items-center truncate text-xs text-muted-foreground">
-                    {repo?.display_name ?? workspace.repo_id}
+                  <span
+                    className="flex min-w-0 items-center text-xs text-muted-foreground"
+                    title={repository.title}
+                  >
+                    <span className="truncate">{repository.name}</span>
                   </span>
                   <span className="flex items-center text-xs text-muted-foreground">
                     {relativeTime(
@@ -514,6 +540,27 @@ function CodeArchiveBody() {
       </div>
     </div>
   );
+}
+
+/**
+ * The repository name an archive row shows.
+ *
+ * The reader's own registration wins, then the name the server joined onto
+ * the snapshot (shared workspaces carry one). A short id appears only when
+ * the repository row itself is gone.
+ */
+export function repositoryLabel(
+  workspace: Pick<CodeWorkspaceSnapshot, "repo_id" | "repo_display_name">,
+  repos: readonly { id: string; display_name: string }[],
+): { name: string; title: string } {
+  const name =
+    repos.find((repo) => repo.id === workspace.repo_id)?.display_name ??
+    workspace.repo_display_name;
+  if (name) return { name, title: name };
+  return {
+    name: `Repository ${workspace.repo_id.slice(0, 8)}`,
+    title: `Repository ${workspace.repo_id}. Its name is no longer available.`,
+  };
 }
 
 function canRestoreWorkspace(workspace: CodeWorkspaceSnapshot): boolean {

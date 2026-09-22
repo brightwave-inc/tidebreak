@@ -3293,6 +3293,37 @@ function parseWorkspaceContentRevision(
   return false;
 }
 
+type WorkspaceContentSource = Pick<
+  CodeWorkspaceTree,
+  "revision" | "revision_ref" | "revision_saved_at"
+>;
+
+/** Which checkpoint a remote payload was read from, and when it was saved. */
+function parseWorkspaceContentSource(
+  value: Record<string, unknown>,
+): WorkspaceContentSource | null {
+  const revision = parseWorkspaceContentRevision(value.revision);
+  if (revision === false) return null;
+  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
+    return null;
+  }
+  if (
+    value.revision_saved_at !== undefined &&
+    !timestamp(value.revision_saved_at)
+  ) {
+    return null;
+  }
+  return {
+    ...(revision === undefined ? {} : { revision }),
+    ...(value.revision_ref === undefined
+      ? {}
+      : { revision_ref: value.revision_ref }),
+    ...(value.revision_saved_at === undefined
+      ? {}
+      : { revision_saved_at: value.revision_saved_at }),
+  };
+}
+
 export function parseCodeWorkspaceTree(
   value: unknown,
 ): CodeWorkspaceTree | null {
@@ -3303,6 +3334,7 @@ export function parseCodeWorkspaceTree(
       "truncated",
       "revision",
       "revision_ref",
+      "revision_saved_at",
     ]) ||
     !Array.isArray(value.paths) ||
     typeof value.truncated !== "boolean"
@@ -3314,18 +3346,12 @@ export function parseCodeWorkspaceTree(
     if (!nonEmptyLine(item)) return null;
     paths.push(item);
   }
-  const revision = parseWorkspaceContentRevision(value.revision);
-  if (revision === false) return null;
-  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
-    return null;
-  }
+  const source = parseWorkspaceContentSource(value);
+  if (!source) return null;
   return {
     paths,
     truncated: value.truncated,
-    ...(revision === undefined ? {} : { revision }),
-    ...(value.revision_ref === undefined
-      ? {}
-      : { revision_ref: value.revision_ref }),
+    ...source,
   };
 }
 
@@ -3424,6 +3450,7 @@ export function parseCodeWorkspaceFiles(
       "turn_id",
       "revision",
       "revision_ref",
+      "revision_saved_at",
     ]) ||
     !Array.isArray(value.files) ||
     typeof value.truncated !== "boolean"
@@ -3439,20 +3466,14 @@ export function parseCodeWorkspaceFiles(
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
   if (value.turn_id !== undefined && !wireId(value.turn_id)) return null;
-  const revision = parseWorkspaceContentRevision(value.revision);
-  if (revision === false) return null;
-  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
-    return null;
-  }
+  const source = parseWorkspaceContentSource(value);
+  if (!source) return null;
   return {
     files,
     truncated: value.truncated,
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
-    ...(revision === undefined ? {} : { revision }),
-    ...(value.revision_ref === undefined
-      ? {}
-      : { revision_ref: value.revision_ref }),
+    ...source,
   };
 }
 
@@ -3468,6 +3489,7 @@ export function parseCodeWorkspaceBlob(
       "binary",
       "revision",
       "revision_ref",
+      "revision_saved_at",
     ]) ||
     !lineText(value.path) ||
     !rawText(value.content) ||
@@ -3476,20 +3498,14 @@ export function parseCodeWorkspaceBlob(
   ) {
     return null;
   }
-  const revision = parseWorkspaceContentRevision(value.revision);
-  if (revision === false) return null;
-  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
-    return null;
-  }
+  const source = parseWorkspaceContentSource(value);
+  if (!source) return null;
   return {
     path: value.path,
     content: value.content,
     truncated: value.truncated,
     binary: value.binary,
-    ...(revision === undefined ? {} : { revision }),
-    ...(value.revision_ref === undefined
-      ? {}
-      : { revision_ref: value.revision_ref }),
+    ...source,
   };
 }
 
@@ -3506,6 +3522,7 @@ export function parseCodeWorkspaceDiff(
       "file",
       "revision",
       "revision_ref",
+      "revision_saved_at",
     ]) ||
     !rawText(value.diff) ||
     typeof value.truncated !== "boolean" ||
@@ -3516,21 +3533,15 @@ export function parseCodeWorkspaceDiff(
   }
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
-  const revision = parseWorkspaceContentRevision(value.revision);
-  if (revision === false) return null;
-  if (value.revision_ref !== undefined && !nonEmptyLine(value.revision_ref)) {
-    return null;
-  }
+  const source = parseWorkspaceContentSource(value);
+  if (!source) return null;
   return {
     diff: value.diff,
     truncated: value.truncated,
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
     ...(value.file !== undefined ? { file: value.file } : {}),
-    ...(revision === undefined ? {} : { revision }),
-    ...(value.revision_ref === undefined
-      ? {}
-      : { revision_ref: value.revision_ref }),
+    ...source,
   };
 }
 

@@ -718,6 +718,20 @@ describe("parseCodeWorkspaceTree", () => {
     expect(parseCodeWorkspaceTree(tree)).toEqual(tree);
   });
 
+  it("accepts a live checkpoint and when it was saved", () => {
+    const tree = {
+      paths: ["sandbox.txt"],
+      truncated: false,
+      revision: "live",
+      revision_ref: "mg-wip/sb-1-i1",
+      revision_saved_at: "2026-09-22T10:00:00Z",
+    };
+    expect(parseCodeWorkspaceTree(tree)).toEqual(tree);
+    expect(
+      parseCodeWorkspaceTree({ ...tree, revision_saved_at: "" }),
+    ).toBeNull();
+  });
+
   it("rejects contents-shaped payloads", () => {
     expect(
       parseCodeWorkspaceTree({
