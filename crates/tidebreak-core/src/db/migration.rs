@@ -31,6 +31,7 @@ mod external_steer_recovery;
 mod external_thread_context;
 mod grant_kind;
 mod idens;
+mod incarnation_wip_time;
 mod managed_decision;
 mod native_tool_receipt;
 mod native_turn_identity;
@@ -124,6 +125,7 @@ impl MigratorTrait for Migrator {
             Box::new(trigger_fire_context::TriggerFireContext),
             Box::new(trigger_fire_context::TriggerQueueSink),
             Box::new(parent_wait::ParentWait),
+            Box::new(incarnation_wip_time::IncarnationWipTime),
         ]
     }
 }

@@ -1946,6 +1946,11 @@ pub struct CodeSessionIncarnation {
     pub task_output: Option<String>,
     /// The last WIP checkpoint ref this incarnation pushed, for resume.
     pub last_wip_ref: Option<String>,
+    /// When [`Self::last_wip_ref`] was pushed, as the environment reported it.
+    ///
+    /// Absent on rows ingested before this was recorded. Readers show it as
+    /// how old the checkpoint a Files or diff view reads is.
+    pub last_wip_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Typed native-tool requests awaiting server results, by request id.
     ///
     /// Kept on the incarnation so a server restart re-answers in-flight

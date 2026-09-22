@@ -253,9 +253,9 @@ pub struct SandboxEvent {
     /// Event payload.
     #[serde(default)]
     pub payload: serde_json::Value,
-    /// UTC event timestamp.
+    /// UTC event timestamp. A `wip_pushed` event's timestamp is when its
+    /// checkpoint was saved.
     #[serde(default)]
-    #[allow(dead_code)]
     pub created_at: String,
 }
 

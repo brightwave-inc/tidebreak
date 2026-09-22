@@ -1696,6 +1696,7 @@ pub mod code_session_incarnation {
         pub events_cursor: i64,
         pub task_output: Option<String>,
         pub last_wip_ref: Option<String>,
+        pub last_wip_at: Option<DateTimeUtc>,
         pub tool_requests_json: Option<Json>,
         pub tool_ack_seqs_json: Option<Json>,
         pub created_at: DateTimeUtc,

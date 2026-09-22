@@ -327,6 +327,16 @@ fn terminal_state_words(state: SandboxState) -> &'static str {
     }
 }
 
+/// The environment's timestamp for an event, when it sent a parseable one.
+///
+/// A missing or malformed value is not an error: the store records its own
+/// time instead.
+fn event_time(created_at: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(created_at.trim())
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
 /// Returns whether the event was ingested now (false when the cursor had it).
 async fn apply_one(
     db: &Arc<DbStore>,
@@ -372,6 +382,10 @@ async fn apply_one(
             journal: &projection.journal,
             task_output: projection.task_output.as_deref(),
             wip_ref: projection.wip_ref.as_deref(),
+            wip_at: projection
+                .wip_ref
+                .as_ref()
+                .and_then(|_| event_time(&event.created_at)),
             terminal_events_journaled: projection.terminal_flush,
             terminal_checkpoint_failed: projection.terminal_checkpoint_failed,
         },
@@ -743,6 +757,82 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(live.attention.state, AttentionState::DoneUnreviewed);
+    }
+
+    #[tokio::test]
+    async fn periodic_checkpoints_record_when_each_was_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
+        let incarnation = seeded_incarnation(&db, &session).await;
+        let b = binding(&session, incarnation);
+        let mut first = event(
+            1,
+            "wip_pushed",
+            json!({ "ref": "mg-wip/sb-1-i1", "checkpoint": "periodic" }),
+        );
+        first.created_at = "2026-09-22T10:00:00Z".to_owned();
+        ingest_events(&db, &bus, &b, &read(SandboxState::Running, 1, vec![first]))
+            .await
+            .unwrap();
+        let stored = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.last_wip_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+        assert_eq!(
+            stored.last_wip_at,
+            Some("2026-09-22T10:00:00Z".parse().unwrap())
+        );
+
+        // A later push without a usable timestamp, and one stamped by a
+        // clock ahead of this host, both record the store's own time.
+        let before = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let mut unstamped = event(
+            2,
+            "wip_pushed",
+            json!({ "ref": "mg-wip/sb-1-i1", "checkpoint": "periodic" }),
+        );
+        unstamped.created_at = "not a time".to_owned();
+        let mut ahead = event(3, "wip_pushed", json!({ "ref": "mg-wip/sb-1-i1" }));
+        ahead.created_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        for (seq, pushed) in [(2, unstamped), (3, ahead)] {
+            ingest_events(
+                &db,
+                &bus,
+                &b,
+                &read(SandboxState::Running, seq, vec![pushed]),
+            )
+            .await
+            .unwrap();
+            let saved = latest_incarnation(&db, &session.owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_wip_at
+                .expect("saved time");
+            assert!(saved > before, "seq {seq}: {saved}");
+            assert!(saved <= chrono::Utc::now() + chrono::Duration::seconds(5));
+        }
+
+        // Events that carry no checkpoint leave the saved time alone.
+        let saved = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_wip_at;
+        let mut other = event(4, "assistant_record", json!({ "body": "hi" }));
+        other.created_at = "2020-01-01T00:00:00Z".to_owned();
+        ingest_events(&db, &bus, &b, &read(SandboxState::Running, 4, vec![other]))
+            .await
+            .unwrap();
+        assert_eq!(
+            latest_incarnation(&db, &session.owner, session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_wip_at,
+            saved
+        );
     }
 
     #[tokio::test]
