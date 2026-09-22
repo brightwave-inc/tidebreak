@@ -79,6 +79,11 @@ import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
 import { ComputerUseIndicator } from "./ComputerUseIndicator";
+import { ComputerUseSetupDialog } from "./ComputerUseSetupDialog";
+import {
+  markComputerUseSetupAsked,
+  useComputerUseSetupPrompt,
+} from "./computerUseSetupPrompt";
 import { useDesktopNavigation } from "./DesktopNavigation";
 import {
   hasMacOverlayTitlebar,
@@ -269,6 +274,12 @@ export function AppShell() {
     window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY),
   );
   const [explicitUpdateCheckOpen, setExplicitUpdateCheckOpen] = useState(false);
+  // The first-run macOS setup ask. The hook answers false for every install
+  // past the ask, and the dialog reads permissions and watches window focus
+  // for as long as it is mounted, so it is mounted only when it is asking.
+  const computerUseSetupPrompt = useComputerUseSetupPrompt();
+  const [computerUseSetupDismissed, setComputerUseSetupDismissed] =
+    useState(false);
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
@@ -1192,6 +1203,15 @@ export function AppShell() {
             onOpenChange={setShortcutsOpen}
           />
           <CommandPaletteDialog />
+          {computerUseSetupPrompt && (
+            <ComputerUseSetupDialog
+              open={!computerUseSetupDismissed}
+              onDone={() => {
+                markComputerUseSetupAsked();
+                setComputerUseSetupDismissed(true);
+              }}
+            />
+          )}
           {nativeTitlebar && !sidebarCollapsed && (
             <Titlebar
               macOverlay={macOverlayTitlebar}
