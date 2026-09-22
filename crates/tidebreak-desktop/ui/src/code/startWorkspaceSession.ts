@@ -185,7 +185,7 @@ export async function startFirstSession(input: {
         // A dropped request after the turn row exists is not a failed send.
         // The socket already has the message; saying it was not sent invites
         // a second first turn.
-        if (codeSessionAcceptedTurn(session.id)) return;
+        if (codeSessionAcceptedTurn(session.id)) return session;
         // Never drop typed words or pasted images: the workspace composer
         // holds them.
         holdPrompt(session.id);
