@@ -540,6 +540,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 turn_id: Some(turn_id()),
                 revision: None,
                 revision_ref: None,
+                revision_saved_at: None,
             },
         ),
         fixture(
@@ -556,8 +557,9 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 },
                 turn_id: None,
                 file: Some("README.md".to_owned()),
-                revision: None,
-                revision_ref: None,
+                revision: Some(crate::code::types::WorkspaceContentRevision::Live),
+                revision_ref: Some("mg-wip/sb-1-i1".to_owned()),
+                revision_saved_at: Some(at(1_756_700_120)),
             },
         ),
         fixture(

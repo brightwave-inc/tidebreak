@@ -631,7 +631,34 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
     : [current, needsYou, shipped];
 }
 
-function storyClient(scenario: WorkspaceScenario): ApiClient {
+type SandboxRevision = "live" | "retained";
+
+/** The checkpoint a remote scenario reads from. Host scenarios have none. */
+function remoteSource(
+  scenario: WorkspaceScenario,
+  sandboxRevision: SandboxRevision,
+) {
+  if (scenario !== "managed-slack-remote" && scenario !== "archived-remote") {
+    return {};
+  }
+  return sandboxRevision === "live" && scenario === "managed-slack-remote"
+    ? {
+        revision: "live" as const,
+        revision_ref: "mg-wip/sb-1-i2",
+        revision_saved_at: new Date(Date.now() - 42_000).toISOString(),
+      }
+    : {
+        revision: "retained" as const,
+        revision_ref: "mg-wip/sb-1-i1",
+        revision_saved_at: "2026-09-21T18:23:00.000Z",
+      };
+}
+
+function storyClient(
+  scenario: WorkspaceScenario,
+  sandboxRevision: SandboxRevision = "retained",
+): ApiClient {
+  const source = remoteSource(scenario, sandboxRevision);
   const currentWorkspace =
     scenario === "archived-remote"
       ? {
@@ -794,9 +821,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
           ? [hiddenFile, ...filePaths]
           : filePaths,
       truncated: false,
-      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
-        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
-        : {}),
+      ...source,
     }),
     searchCodeWorkspace: async () => ({ matches: [], truncated: false }),
     listCodeWorkspaceFiles: async () => ({
@@ -814,9 +839,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
             truncated: false,
           }
         : changedFiles),
-      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
-        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
-        : {}),
+      ...source,
     }),
     getCodeWorkspaceDiff: async (
       _workspaceId: string,
@@ -839,6 +862,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
         opts.file === hiddenFile
           ? { files: 1, insertions: 1, deletions: 0, truncated: false }
           : changedFiles.stat,
+      ...source,
     }),
     getCodeWorkspaceBlob: async (_workspaceId: string, path: string) => ({
       path,
@@ -852,9 +876,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
             ].join("\n"),
       truncated: false,
       binary: false,
-      ...(scenario === "managed-slack-remote" || scenario === "archived-remote"
-        ? { revision: "retained" as const, revision_ref: "mg-wip/sb-1-i1" }
-        : {}),
+      ...source,
     }),
     restoreCodeWorkspace: async (id: string) => ({
       ...currentWorkspace,
@@ -1099,12 +1121,15 @@ function WorkspacePageStory({
   reviewOpen,
   sidebarCollapsed = false,
   storedInspectorLayout,
+  sandboxRevision,
 }: {
   scenario: WorkspaceScenario;
   initialUrl: string;
   reviewOpen: boolean;
   sidebarCollapsed?: boolean;
   storedInspectorLayout?: Record<string, number>;
+  /** Whether a remote scenario reads a running sandbox's checkpoint. */
+  sandboxRevision?: SandboxRevision;
 }) {
   const [state] = useState(() => {
     resetStoryState(reviewOpen, sidebarCollapsed, storedInspectorLayout);
@@ -1131,7 +1156,7 @@ function WorkspacePageStory({
         target: "this_workspace",
       });
     }
-    const client = storyClient(scenario);
+    const client = storyClient(scenario, sandboxRevision);
     return { client, router: storyRouter(client, initialUrl) };
   });
 
@@ -1540,7 +1565,7 @@ export const ManagedSlackRemoteWorkspace: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const revisionLabels = await canvas.findAllByText("Retained checkpoint");
+    const revisionLabels = await canvas.findAllByText("Saved checkpoint");
     for (const label of revisionLabels) {
       await expect(label).toBeVisible();
     }
@@ -1573,4 +1598,43 @@ export const ManagedSlackHiddenFileDiff: Story = {
       canvas.findByText("CHECKPOINT-OK", { exact: false }),
     ).resolves.toBeVisible();
   },
+};
+
+/** A running sandbox's standalone diff names its live checkpoint and its age. */
+export const ManagedSlackLiveDiff: Story = {
+  args: {
+    scenario: "managed-slack-remote",
+    sandboxRevision: "live",
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "diff", path: hiddenFile }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const labels = await canvas.findAllByText(/^Live · saved/);
+    for (const label of labels) {
+      await expect(label).toBeVisible();
+    }
+    await expect(
+      canvas.queryByText("Saved checkpoint"),
+    ).not.toBeInTheDocument();
+  },
+};
+
+/** The retained diff keeps the same chip as Files, and wraps it under the path when narrow. */
+export const ManagedSlackRetainedDiffCompact: Story = {
+  args: {
+    scenario: "managed-slack-remote",
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "diff", path: hiddenFile }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: false,
+    sidebarCollapsed: true,
+  },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

@@ -282,7 +282,9 @@ export function FilesPanel({
           <WorkspaceRevisionChip
             revision={tree?.revision}
             revisionRef={tree?.revision_ref}
+            savedAt={tree?.revision_saved_at}
           />
+          {/* Trailing, so an idle slot never opens a gap beside the chip. */}
           <span className="grid size-3.5 shrink-0 place-items-center">
             {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
           </span>

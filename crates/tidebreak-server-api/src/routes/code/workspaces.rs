@@ -191,6 +191,7 @@ pub async fn list_workspace_tree(
         paths,
         truncated,
         revision: source.as_ref().map(|source| source.revision),
+        revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
@@ -289,6 +290,7 @@ pub async fn get_workspace_blob(
         truncated: blob.truncated,
         binary: blob.binary,
         revision: source.as_ref().map(|source| source.revision),
+        revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
@@ -337,6 +339,7 @@ pub async fn list_workspace_files(
         stat,
         turn_id,
         revision: source.as_ref().map(|source| source.revision),
+        revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }
@@ -356,6 +359,7 @@ pub async fn get_workspace_diff(
         turn_id,
         file,
         revision: source.as_ref().map(|source| source.revision),
+        revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
     }))
 }

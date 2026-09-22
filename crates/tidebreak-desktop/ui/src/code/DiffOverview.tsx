@@ -139,8 +139,8 @@ export function DiffOverviewContent({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <header className="flex shrink-0 items-center justify-between gap-2 px-3 pb-2 pt-3">
-        <div className="min-w-0">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2 pt-3">
+        <div className="min-w-0 flex-[1_1_7rem]">
           <div className="flex items-baseline gap-1.5">
             <h2 className="text-sm font-medium">Changes</h2>
             {payload && (
@@ -153,17 +153,20 @@ export function DiffOverviewContent({
             {scopeCaption}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <WorkspaceRevisionChip
             revision={payload?.revision}
             revisionRef={payload?.revision_ref}
+            savedAt={payload?.revision_saved_at}
           />
+          {payload && <DiffstatBadge stat={payload.stat} />}
+          {/* A fixed trailing slot, so a refresh moves nothing and an idle
+              slot never opens a gap between the chip and its neighbors. */}
           <span className="grid size-3.5 shrink-0 place-items-center">
             {refreshing && (
               <Spinner className="size-3.5" aria-label="Refreshing" />
             )}
           </span>
-          {payload && <DiffstatBadge stat={payload.stat} />}
         </div>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}

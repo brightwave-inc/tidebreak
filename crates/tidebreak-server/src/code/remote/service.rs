@@ -2277,6 +2277,7 @@ mod tests {
                         journal: &[],
                         task_output: None,
                         wip_ref: None,
+                        wip_at: None,
                         terminal_events_journaled: false,
                         terminal_checkpoint_failed: false,
                     },

@@ -21,6 +21,68 @@ const DIFF = `diff --git a/src/lib.rs b/src/lib.rs
 +new
 `;
 
+describe("DiffPanel revision", () => {
+  const LONG_PATH =
+    "crates/tidebreak-server-api/src/routes/code/workspaces/checkpoints.rs";
+
+  it("labels a standalone diff read from a running sandbox's checkpoint", async () => {
+    const savedAt = new Date(Date.now() - 42_000).toISOString();
+    const client = {
+      getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+        diff: DIFF,
+        truncated: false,
+        stat: { files: 1, insertions: 1, deletions: 1, truncated: false },
+        file: LONG_PATH,
+        revision: "live",
+        revision_ref: "mg-wip/sb-1-i1",
+        revision_saved_at: savedAt,
+      }),
+    };
+    render(<DiffPanel client={client} workspaceId="ws-1" file={LONG_PATH} />);
+    const chip = await screen.findByText("Live · saved 42s ago");
+    expect(chip).toHaveAttribute(
+      "title",
+      expect.stringContaining("mg-wip/sb-1-i1"),
+    );
+    // The path keeps its full text as a title, and its block wraps the
+    // chip below it rather than shrinking beside it.
+    const caption = screen.getByTitle(LONG_PATH);
+    expect(caption.closest("header > div")).toHaveClass("flex-[1_1_18rem]");
+    expect(chip.parentElement).toHaveClass("shrink-0");
+  });
+
+  it("labels a retained checkpoint and omits the chip for a host worktree", async () => {
+    const retained = {
+      getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+        diff: DIFF,
+        truncated: false,
+        stat: { files: 1, insertions: 1, deletions: 1, truncated: false },
+        file: "src/lib.rs",
+        revision: "retained",
+        revision_ref: "mg-wip/sb-1-i1",
+      }),
+    };
+    render(
+      <DiffPanel client={retained} workspaceId="ws-1" file="src/lib.rs" />,
+    );
+    expect(await screen.findByText("Saved checkpoint")).toBeInTheDocument();
+    cleanup();
+
+    const host = {
+      getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+        diff: DIFF,
+        truncated: false,
+        stat: { files: 1, insertions: 1, deletions: 1, truncated: false },
+        file: "src/lib.rs",
+      }),
+    };
+    render(<DiffPanel client={host} workspaceId="ws-1" file="src/lib.rs" />);
+    expect(await screen.findByText("+new")).toBeInTheDocument();
+    expect(screen.queryByText("Saved checkpoint")).toBeNull();
+    expect(screen.queryByText(/^Live/)).toBeNull();
+  });
+});
+
 describe("DiffPanel", () => {
   it("renders gutters, a grouped unified diff, and a truncation notice", async () => {
     const client = {

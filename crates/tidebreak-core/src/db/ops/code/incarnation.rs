@@ -55,6 +55,7 @@ fn incarnation_from_model(
         events_cursor: model.events_cursor,
         task_output: model.task_output,
         last_wip_ref: model.last_wip_ref,
+        last_wip_at: model.last_wip_at,
         tool_requests: model
             .tool_requests_json
             .map(|value| {
@@ -155,6 +156,7 @@ pub async fn create_incarnation_intent(
         events_cursor: Set(0),
         task_output: Set(None),
         last_wip_ref: Set(None),
+        last_wip_at: Set(None),
         tool_requests_json: Set(None),
         tool_ack_seqs_json: Set(None),
         created_at: Set(now),
@@ -325,6 +327,9 @@ pub struct IncarnationSideEffects<'a> {
     pub task_output: Option<&'a str>,
     /// The WIP checkpoint ref to retain, for resume.
     pub wip_ref: Option<&'a str>,
+    /// When the environment says `wip_ref` was pushed. Absent, or later
+    /// than the database clock, records the database's own time instead.
+    pub wip_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether this event is the supervisor's goodbye, raising the gate
     /// reincarnation waits on.
     pub terminal_events_journaled: bool,
@@ -407,10 +412,21 @@ pub async fn ingest_incarnation_event(
         );
     }
     if let Some(reference) = side_effects.wip_ref {
-        update = update.col_expr(
-            entities::code_session_incarnation::Column::LastWipRef,
-            sea_orm::sea_query::Expr::value(reference),
-        );
+        // A sandbox clock ahead of this one would otherwise read as a
+        // checkpoint saved in the future.
+        let saved_at = side_effects
+            .wip_at
+            .filter(|reported| *reported <= now)
+            .unwrap_or(now);
+        update = update
+            .col_expr(
+                entities::code_session_incarnation::Column::LastWipRef,
+                sea_orm::sea_query::Expr::value(reference),
+            )
+            .col_expr(
+                entities::code_session_incarnation::Column::LastWipAt,
+                sea_orm::sea_query::Expr::value(saved_at),
+            );
     }
     if side_effects.terminal_checkpoint_failed {
         update = update
@@ -449,7 +465,22 @@ pub async fn latest_pushed_wip_ref(
     owner: &OwnerId,
     session_id: SessionId,
 ) -> Result<Option<String>> {
-    Ok(entities::code_session_incarnation::Entity::find()
+    Ok(latest_pushed_wip_incarnation(store, owner, session_id)
+        .await?
+        .and_then(|row| row.last_wip_ref))
+}
+
+/// The newest incarnation of this session that pushed a WIP checkpoint.
+///
+/// The same walk-back as [`latest_pushed_wip_ref`], returning the whole row
+/// so a reader can tell whether the checkpoint came from a sandbox that is
+/// still running and when it was saved.
+pub async fn latest_pushed_wip_incarnation(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Option<CodeSessionIncarnation>> {
+    entities::code_session_incarnation::Entity::find()
         .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_session_incarnation::Column::SessionId.eq(session_id.0))
         .filter(entities::code_session_incarnation::Column::LastWipRef.is_not_null())
@@ -457,7 +488,8 @@ pub async fn latest_pushed_wip_ref(
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .and_then(|row| row.last_wip_ref))
+        .map(incarnation_from_model)
+        .transpose()
 }
 
 /// Forget a WIP checkpoint ref the origin no longer advertises.
@@ -477,6 +509,10 @@ pub async fn forget_session_wip_ref(
         .col_expr(
             entities::code_session_incarnation::Column::LastWipRef,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session_incarnation::Column::LastWipAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
         )
         .col_expr(
             entities::code_session_incarnation::Column::UpdatedAt,

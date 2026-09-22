@@ -9,7 +9,13 @@ type FileScenario =
   | "image-failure"
   | "unsupported"
   | "retained"
+  | "live"
+  | "loading"
   | "unavailable";
+
+/** Long enough that a narrow header has to choose between path and chip. */
+const LIVE_PATH =
+  "crates/tidebreak-server/src/code/remote/checkpoints/periodic_push.rs";
 
 const imageSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
   <rect width="1200" height="800" fill="#e8ecef"/>
@@ -35,10 +41,23 @@ function clientFor(scenario: FileScenario) {
   const image = scenario !== "unsupported";
   return {
     getCodeWorkspaceBlob: async () => {
+      if (scenario === "loading") return new Promise<never>(() => {});
       if (scenario === "unavailable") {
         throw new Error(
-          "Live sandbox files are not inspectable from this machine. Open the transcript or pull request, or wait until the sandbox checkpoints its work.",
+          "The sandbox has not saved a checkpoint yet. Its first live checkpoint lands within about a minute of the turn starting. Open the transcript meanwhile.",
         );
+      }
+      if (scenario === "live") {
+        return {
+          path: LIVE_PATH,
+          content:
+            "/// Pushed about once a minute while a turn runs.\npub const PERIODIC_SECS: u64 = 60;\n",
+          truncated: false,
+          binary: false,
+          revision: "live" as const,
+          revision_ref: "mg-wip/sb-1-i2",
+          revision_saved_at: new Date(Date.now() - 42_000).toISOString(),
+        };
       }
       if (scenario === "retained") {
         return {
@@ -48,6 +67,7 @@ function clientFor(scenario: FileScenario) {
           binary: false,
           revision: "retained" as const,
           revision_ref: "mg-wip/sb-1-i1",
+          revision_saved_at: "2026-09-21T18:23:00.000Z",
         };
       }
       return {
@@ -73,9 +93,13 @@ function FileViewerStory({ scenario }: { scenario: FileScenario }) {
   const path =
     scenario === "unsupported"
       ? "build/archive.zip"
-      : scenario === "retained" || scenario === "unavailable"
-        ? "sandbox.txt"
-        : "assets/workspace-architecture.svg";
+      : scenario === "live"
+        ? LIVE_PATH
+        : scenario === "retained" ||
+            scenario === "unavailable" ||
+            scenario === "loading"
+          ? "sandbox.txt"
+          : "assets/workspace-architecture.svg";
   return (
     <div className="flex h-[680px] min-h-0 flex-col overflow-hidden rounded-lg border bg-page-background">
       <FileViewer
@@ -99,6 +123,8 @@ const meta = {
         "image-failure",
         "unsupported",
         "retained",
+        "live",
+        "loading",
         "unavailable",
       ],
     },
@@ -130,6 +156,41 @@ export const RetainedCheckpoint: Story = {
       expect(editor?.getBoundingClientRect().height ?? 0).toBeGreaterThan(100);
     });
   },
+};
+
+export const LiveCheckpoint: Story = {
+  args: { scenario: "live" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.findByText(/^Live · saved/)).resolves.toBeVisible();
+  },
+};
+
+/** The path keeps the row; the chip and editor button wrap under it. */
+export const LiveCheckpointNarrow: Story = {
+  args: { scenario: "live" },
+  decorators: [
+    (Story) => (
+      <div className="w-[358px]">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
+export const RetainedCheckpointNarrow: Story = {
+  args: { scenario: "retained" },
+  decorators: [
+    (Story) => (
+      <div className="w-[358px]">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
+export const Loading: Story = {
+  args: { scenario: "loading" },
 };
 
 export const SandboxUnavailable: Story = {

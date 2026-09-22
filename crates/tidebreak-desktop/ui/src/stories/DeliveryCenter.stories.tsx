@@ -62,7 +62,8 @@ type DeliveryScenario =
   | "archive"
   | "archive-remote"
   | "archive-search"
-  | "archive-empty";
+  | "archive-empty"
+  | "archive-repository-names";
 
 /**
  * Open one pull request's detail sheet from the list.
@@ -162,19 +163,39 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
             },
             { ...archivedWorkspace, title: "Local workspace" },
           ]
-        : scenario === "archive"
+        : scenario === "archive-repository-names"
           ? [
               {
-                ...deliveryWorkspaces.find(
-                  (workspace) => workspace.status === "released",
-                )!,
-                id: "ws-shared-archive",
-                title: "Shared Slack investigation",
+                ...archivedWorkspace,
+                id: "ws-slack-child",
+                title: "Slack child checkpoint canary",
+                repo_id: "34d3c38b-6a66-49c6-b4f6-ee9e6ddc93a2",
+                repo_display_name: "brightwave-inc/slack-canary",
+                worktree_path: "remote:ws-slack-child",
                 read_only: true,
               },
-              ...deliveryWorkspaces,
+              {
+                ...archivedWorkspace,
+                id: "ws-orphaned",
+                title: "Workspace from a removed repository",
+                repo_id: "e23e5b07-195a-499c-b78f-473be67d5abd",
+                repo_display_name: undefined,
+              },
+              { ...archivedWorkspace, title: "Local workspace" },
             ]
-          : deliveryWorkspaces;
+          : scenario === "archive"
+            ? [
+                {
+                  ...deliveryWorkspaces.find(
+                    (workspace) => workspace.status === "released",
+                  )!,
+                  id: "ws-shared-archive",
+                  title: "Shared Slack investigation",
+                  read_only: true,
+                },
+                ...deliveryWorkspaces,
+              ]
+            : deliveryWorkspaces;
   const refreshedMergedPullRequest = {
     ...deliveryPullRequests[0]!,
     state: "merged" as const,
@@ -698,6 +719,39 @@ export const ArchiveConversationSearch: Story = {
     scenario: "archive-search",
     initialUrl: "/code/archive",
   },
+};
+
+/**
+ * Each row names its repository. A shared workspace's repository comes from
+ * its snapshot; a short id appears only when the repository row is gone.
+ */
+export const ArchiveRepositoryNames: Story = {
+  args: {
+    scenario: "archive-repository-names",
+    initialUrl: "/code/archive",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const names = await canvas.findAllByText("brightwave-inc/slack-canary");
+    await expect(names.some((name) => name.checkVisibility())).toBe(true);
+    await expect(
+      canvas.queryByText("34d3c38b-6a66-49c6-b4f6-ee9e6ddc93a2"),
+    ).toBeNull();
+    await expect(
+      canvas
+        .getAllByText("Repository e23e5b07")
+        .some((name) => name.checkVisibility()),
+    ).toBe(true);
+  },
+};
+
+/** Narrow rows drop the repository column; the filter still names it. */
+export const ArchiveRepositoryNamesCompact: Story = {
+  args: {
+    scenario: "archive-repository-names",
+    initialUrl: "/code/archive",
+  },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 export const ArchiveEmpty: Story = {

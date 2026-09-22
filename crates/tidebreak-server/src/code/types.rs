@@ -1559,6 +1559,10 @@ pub struct CodeWorkspaceTree {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_ref: Option<String>,
+    /// When the checkpoint named by `revision_ref` was pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Query for `GET /code/workspaces/{id}/search`.
@@ -1641,6 +1645,10 @@ pub struct CodeWorkspaceBlob {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_ref: Option<String>,
+    /// When the checkpoint named by `revision_ref` was pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Query for `GET /code/workspaces/{id}/diff`.
@@ -1681,6 +1689,10 @@ pub struct CodeWorkspaceFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_ref: Option<String>,
+    /// When the checkpoint named by `revision_ref` was pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
@@ -1702,6 +1714,10 @@ pub struct CodeWorkspaceDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_ref: Option<String>,
+    /// When the checkpoint named by `revision_ref` was pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One parked or decided engine approval.
