@@ -961,6 +961,7 @@ mod remote_and_admission_tests {
                     journal: &[],
                     task_output: None,
                     wip_ref: checkpoint,
+                    wip_at: None,
                     terminal_events_journaled: terminal,
                     terminal_checkpoint_failed: false,
                 },

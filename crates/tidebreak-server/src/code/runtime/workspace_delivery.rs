@@ -278,7 +278,7 @@ impl CodeRuntime {
     /// credentials and every checkout outside the lending gate — those keep
     /// `gh` exactly as it is. A gateway refusal fails the operation with its
     /// reason, exactly as a push does.
-    pub(super) async fn workspace_acts_as(
+    pub(crate) async fn workspace_acts_as(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -326,7 +326,7 @@ impl CodeRuntime {
 
     /// Resolve the connection that created this workspace before borrowing authority.
     /// An external workspace never falls back to a browser caller after revocation.
-    async fn workspace_git_lender(
+    pub(crate) async fn workspace_git_lender(
         &self,
         owner: &OwnerId,
         workspace: &CodeWorkspace,
@@ -771,7 +771,7 @@ impl CodeRuntime {
     /// The repository identity a workspace's pull request lives on: the
     /// registered origin when the reconcile sweep has confirmed one, the
     /// worktree's own remote otherwise.
-    pub(super) async fn workspace_repository_target(
+    pub(crate) async fn workspace_repository_target(
         &self,
         owner: &OwnerId,
         workspace: &CodeWorkspace,

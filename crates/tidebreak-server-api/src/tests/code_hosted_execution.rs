@@ -23,11 +23,26 @@ async fn hosted_fixture() -> (
     CodeWorkspace,
     tempfile::TempDir,
 ) {
+    hosted_fixture_lending(None).await
+}
+
+async fn hosted_fixture_lending(
+    lender: Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+) -> (
+    AppState,
+    Arc<CodeRuntime>,
+    CodeRepo,
+    CodeWorkspace,
+    tempfile::TempDir,
+) {
     let (dir, db) = temp_db_store("hosted-execution.db").await;
     let db = Arc::new(db);
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
-    let runtime = CodeRuntime::with_registry(db.clone(), dir.path().to_path_buf(), registry);
+    let mut runtime = CodeRuntime::with_registry(db.clone(), dir.path().to_path_buf(), registry);
+    if let Some(lender) = lender {
+        runtime = runtime.with_git_credentials(lender);
+    }
     let owner = OwnerId::local();
     let mut repo = CodeRepo {
         id: RepoId::new(),
@@ -183,6 +198,30 @@ async fn seed_session_checkpoint(
     sandbox_id: &str,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> SessionId {
+    let (session_id, row) = seed_running_checkpoint(
+        runtime,
+        workspace,
+        Some(wip_ref),
+        None,
+        sandbox_id,
+        created_at,
+    )
+    .await;
+    stop_incarnation(&runtime.db, &workspace.owner, row, Some("completed"))
+        .await
+        .unwrap();
+    session_id
+}
+
+/// A session whose sandbox is still running, optionally after one checkpoint.
+async fn seed_running_checkpoint(
+    runtime: &CodeRuntime,
+    workspace: &CodeWorkspace,
+    wip_ref: Option<&str>,
+    wip_at: Option<chrono::DateTime<chrono::Utc>>,
+    sandbox_id: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> (SessionId, tidebreak_core::CodeIncarnationId) {
     let session = Session {
         visibility: tidebreak_core::SessionVisibility::Private,
         id: SessionId::new(),
@@ -220,6 +259,21 @@ async fn seed_session_checkpoint(
     activate_incarnation(&runtime.db, &workspace.owner, row.id, sandbox_id)
         .await
         .unwrap();
+    if let Some(wip_ref) = wip_ref {
+        push_checkpoint(runtime, workspace, session.id, row.id, 1, wip_ref, wip_at).await;
+    }
+    (session.id, row.id)
+}
+
+async fn push_checkpoint(
+    runtime: &CodeRuntime,
+    workspace: &CodeWorkspace,
+    session_id: SessionId,
+    incarnation: tidebreak_core::CodeIncarnationId,
+    seq: i64,
+    wip_ref: &str,
+    wip_at: Option<chrono::DateTime<chrono::Utc>>,
+) {
     let notice = Event::HarnessNotice {
         level: HarnessNoticeLevel::Info,
         message: "checkpointed".into(),
@@ -227,23 +281,20 @@ async fn seed_session_checkpoint(
     ingest_incarnation_event(
         &runtime.db,
         &workspace.owner,
-        session.id,
+        session_id,
         1,
-        row.id,
-        1,
+        incarnation,
+        seq,
         IncarnationSideEffects {
             journal: std::slice::from_ref(&notice),
             wip_ref: Some(wip_ref),
+            wip_at,
             ..Default::default()
         },
     )
     .await
     .unwrap()
     .unwrap();
-    stop_incarnation(&runtime.db, &workspace.owner, row.id, Some("completed"))
-        .await
-        .unwrap();
-    session.id
 }
 
 #[tokio::test]
@@ -448,4 +499,210 @@ async fn restore_refuses_a_checkpoint_string_that_is_not_recoverable() {
             .status,
         CodeWorkspaceStatus::Archived
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_sandbox_checkpoint_reads_as_live_until_the_sandbox_stops() {
+    let (state, runtime, repo, mut workspace, _dir) = hosted_fixture().await;
+    let repo_root = std::path::PathBuf::from(&repo.root_path);
+    workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+    save_workspace(&runtime.db, &workspace).await.unwrap();
+
+    // The turn has started and the first periodic push has not landed yet.
+    let (session_id, incarnation) = seed_running_checkpoint(
+        &runtime,
+        &workspace,
+        None,
+        None,
+        "sb-live",
+        chrono::Utc::now(),
+    )
+    .await;
+    let waiting = runtime
+        .workspace_tree(&workspace.owner, workspace.id, "", None)
+        .await
+        .unwrap_err();
+    assert_eq!(waiting.kind(), "workspace_sandbox_unavailable");
+    assert!(
+        waiting.message().contains("within about a minute"),
+        "{}",
+        waiting.message()
+    );
+
+    let saved_at: chrono::DateTime<chrono::Utc> = "2026-09-22T10:00:00Z".parse().unwrap();
+    write_wip_ref(
+        &repo_root,
+        "live.txt",
+        "periodic push\n",
+        "mg-wip/sb-live-i1",
+    );
+    push_checkpoint(
+        &runtime,
+        &workspace,
+        session_id,
+        incarnation,
+        1,
+        "mg-wip/sb-live-i1",
+        Some(saved_at),
+    )
+    .await;
+
+    let token = state.token.clone();
+    let addr = serve(app(state)).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}/code/workspaces/{}", workspace.id);
+    for route in ["tree", "files", "diff?file=live.txt", "blob?path=live.txt"] {
+        let response = client
+            .get(format!("{base}/{route}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{route}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["revision"], "live", "{route}");
+        assert_eq!(body["revision_ref"], "mg-wip/sb-live-i1", "{route}");
+        assert_eq!(
+            body["revision_saved_at"]
+                .as_str()
+                .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok()),
+            Some(saved_at),
+            "{route}"
+        );
+    }
+
+    // The sandbox retires; the same checkpoint is now retained work.
+    stop_incarnation(
+        &runtime.db,
+        &workspace.owner,
+        incarnation,
+        Some("completed"),
+    )
+    .await
+    .unwrap();
+    let (_, _, source) = runtime
+        .workspace_tree(&workspace.owner, workspace.id, "", None)
+        .await
+        .unwrap();
+    let source = source.expect("retained revision");
+    assert_eq!(
+        source.revision,
+        crate::code::types::WorkspaceContentRevision::Retained
+    );
+    assert_eq!(source.saved_at, Some(saved_at));
+
+    // A later sandbox for the same session has not pushed yet. Its
+    // predecessor's checkpoint is still retained work, not live work.
+    let IncarnationAdmission::Admitted(next) =
+        create_incarnation_intent(&runtime.db, &workspace.owner, session_id, 2, 4)
+            .await
+            .unwrap()
+    else {
+        panic!("expected incarnation admission");
+    };
+    activate_incarnation(&runtime.db, &workspace.owner, next.id, "sb-live-2")
+        .await
+        .unwrap();
+    let (_, _, source) = runtime
+        .workspace_tree(&workspace.owner, workspace.id, "", None)
+        .await
+        .unwrap();
+    let source = source.expect("retained revision");
+    assert_eq!(
+        source.revision,
+        crate::code::types::WorkspaceContentRevision::Retained
+    );
+    assert_eq!(source.revision_ref.as_deref(), Some("mg-wip/sb-live-i1"));
+}
+
+/// A private origin the host cannot fetch anonymously borrows one
+/// repository credential from the workspace's lender, as the identity its
+/// sessions act as, and still refuses when that fetch fails.
+#[tokio::test]
+async fn a_private_origin_borrows_the_workspace_credential_before_refusing() {
+    use crate::obo_gateway::test_support::FakeLender;
+    use crate::obo_gateway::{GitForgeAttributionRequest, GitForgeError};
+
+    for (lender, asked) in [
+        (
+            FakeLender::offering("acme-ship[bot]"),
+            vec![GitForgeAttributionRequest::Person],
+        ),
+        (
+            FakeLender::refusing(GitForgeError::NotConnected { connect_url: None }),
+            vec![
+                GitForgeAttributionRequest::Person,
+                GitForgeAttributionRequest::Installation,
+            ],
+        ),
+    ] {
+        let lender = Arc::new(lender);
+        let (_state, runtime, repo, mut workspace, dir) =
+            hosted_fixture_lending(Some(lender.clone())).await;
+        tidebreak_core::db::code::set_repo_origin(
+            &runtime.db,
+            &repo.owner,
+            repo.id,
+            "github.com",
+            "acme",
+            "private",
+        )
+        .await
+        .unwrap();
+        let repo_root = std::path::PathBuf::from(&repo.root_path);
+        seed_retained_checkpoint(&runtime, &workspace, &repo_root).await;
+        workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+        save_workspace(&runtime.db, &workspace).await.unwrap();
+        let refused = dir.path().join("refuses-anonymous.git");
+        git(
+            &repo_root,
+            &["remote", "add", "origin", refused.to_str().unwrap()],
+        );
+
+        // Workspace creation already probed the forge identity.
+        let probed = lender.asked().len();
+        let error = runtime
+            .workspace_tree(&workspace.owner, workspace.id, "", None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "workspace_sandbox_unavailable");
+        assert_eq!(lender.asked()[probed..], asked[..]);
+        assert_eq!(
+            lender.minted(),
+            vec!["acme/private".to_owned(); asked.len()]
+        );
+    }
+}
+
+/// An origin the host can read anonymously never asks the lender.
+#[tokio::test]
+async fn a_readable_origin_does_not_borrow_a_credential() {
+    use crate::obo_gateway::test_support::FakeLender;
+
+    let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
+    let (_state, runtime, repo, mut workspace, _dir) =
+        hosted_fixture_lending(Some(lender.clone())).await;
+    tidebreak_core::db::code::set_repo_origin(
+        &runtime.db,
+        &repo.owner,
+        repo.id,
+        "github.com",
+        "acme",
+        "public",
+    )
+    .await
+    .unwrap();
+    let repo_root = std::path::PathBuf::from(&repo.root_path);
+    seed_retained_checkpoint(&runtime, &workspace, &repo_root).await;
+    workspace.worktree_path = CodeWorkspace::remote_worktree_marker(workspace.id);
+    save_workspace(&runtime.db, &workspace).await.unwrap();
+    let readable = repo_root.to_str().unwrap().to_owned();
+    git(&repo_root, &["remote", "add", "origin", &readable]);
+
+    let (paths, _, _) = runtime
+        .workspace_tree(&workspace.owner, workspace.id, "", None)
+        .await
+        .unwrap();
+    assert!(paths.iter().any(|path| path == "sandbox.txt"));
+    assert!(lender.minted().is_empty());
 }
