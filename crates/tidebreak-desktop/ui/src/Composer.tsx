@@ -1769,10 +1769,16 @@ export function ImageAttachmentList({
   items,
   onRemove,
   onRetry,
+  showUploadStatus = true,
 }: {
   items: readonly ImageAttachment[];
   onRemove: (id: string) => void;
   onRetry?: (id: string) => void;
+  /**
+   * The chat composer publishes as soon as the file is attached, so the chip
+   * says so. A surface that only holds the file leaves this off.
+   */
+  showUploadStatus?: boolean;
 }) {
   if (items.length === 0) return null;
   return (
@@ -1786,6 +1792,7 @@ export function ImageAttachmentList({
           attachment={item}
           onRemove={() => onRemove(item.id)}
           onRetry={onRetry ? () => onRetry(item.id) : undefined}
+          showUploadStatus={showUploadStatus}
         />
       ))}
     </ul>
@@ -1803,14 +1810,18 @@ function ImageAttachmentChip({
   attachment,
   onRemove,
   onRetry,
+  showUploadStatus,
 }: {
   attachment: ImageAttachment;
   onRemove: () => void;
   onRetry?: () => void;
+  showUploadStatus: boolean;
 }) {
-  const uploading =
+  const inFlight =
     attachment.status === "queued" || attachment.status === "uploading";
+  const uploading = showUploadStatus && inFlight;
   const failed = attachment.status === "failed";
+  const showStatus = showUploadStatus || !inFlight;
   return (
     <li
       className={cn(
@@ -1842,12 +1853,14 @@ function ImageAttachmentChip({
         </strong>
         {/* Only the outcome is announced. A live region on the percentage
             would read every tick of a bar that is already on screen. */}
-        <small
-          className={cn("text-2xs", failed && "text-destructive")}
-          role={failed ? "alert" : uploading ? undefined : "status"}
-        >
-          {describeImageAttachment(attachment)}
-        </small>
+        {showStatus ? (
+          <small
+            className={cn("text-2xs", failed && "text-destructive")}
+            role={failed ? "alert" : uploading ? undefined : "status"}
+          >
+            {describeImageAttachment(attachment)}
+          </small>
+        ) : null}
         {uploading && (
           <progress
             className="mt-0.5 h-[3px] w-full appearance-none rounded-full border-0 bg-border [&::-moz-progress-bar]:rounded-full [&::-moz-progress-bar]:bg-foreground [&::-webkit-progress-bar]:rounded-full [&::-webkit-progress-bar]:bg-border [&::-webkit-progress-value]:rounded-full [&::-webkit-progress-value]:bg-foreground [&::-webkit-progress-value]:transition-[width_120ms_linear]"

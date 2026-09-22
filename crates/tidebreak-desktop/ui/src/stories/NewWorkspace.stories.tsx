@@ -321,8 +321,46 @@ type Story = StoryObj<typeof meta>;
  */
 export const Default: Story = {};
 
-/** A clipboard image stays attached instead of inserting its local path. */
-export const PastedImage: Story = {};
+/** A clipboard image stays attached. Nothing is uploading yet, so the chip is the file. */
+export const PastedImage: Story = {
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    const message = await body.findByRole("textbox", { name: "First message" });
+    const preview = canvasElement.ownerDocument.createElement("canvas");
+    preview.width = 96;
+    preview.height = 64;
+    const context = preview.getContext("2d");
+    if (context) {
+      context.fillStyle = "#1c1c1f";
+      context.fillRect(0, 0, 96, 64);
+      context.fillStyle = "#d4d4d8";
+      context.fillRect(12, 16, 72, 6);
+      context.fillRect(12, 28, 48, 6);
+    }
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      preview.toBlob((next) => {
+        if (next) resolve(next);
+        else reject(new Error("preview blob missing"));
+      }, "image/png");
+    });
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([blob], "CleanShot 2026-09-22 at 10.14.02.png", {
+        type: "image/png",
+      }),
+    );
+    // A real ClipboardEvent will not carry files we invent. The textarea
+    // reads clipboardData off the event it receives.
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: transfer });
+    message.dispatchEvent(paste);
+    await expect(
+      await body.findByText("CleanShot 2026-09-22 at 10.14.02.png"),
+    ).toBeVisible();
+    await expect(body.queryByText(/^Uploading/)).toBeNull();
+    await expect(body.queryByRole("progressbar")).toBeNull();
+  },
+};
 
 /** The minimum supported window wraps settings without clipping the actions. */
 export const MinimumWindow: Story = {

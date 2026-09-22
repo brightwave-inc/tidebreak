@@ -1137,6 +1137,8 @@ export function NewWorkspaceDialog({
               <ImageAttachmentList
                 items={heldImages.map((image) => image.attachment)}
                 onRemove={removeImage}
+                // Held until create. Nothing is uploading yet.
+                showUploadStatus={false}
               />
               {imageError && (
                 <p className="text-critical text-xs" role="alert">
