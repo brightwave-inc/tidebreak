@@ -20,6 +20,8 @@ use super::external::{require_bound, ExternalGrantAuth};
 
 /// `GET /external/code/sessions/{id}/conversation-requests` — list the
 /// unexpired pending jobs for the authenticated grant's bound session.
+/// An ended or fenced session answers bad request, as completion does, so
+/// the adapter stops polling it instead of retrying a server error.
 ///
 /// The response is deliberately lean: only id, binding, operation, and the
 /// exact arguments. No result, owner, session, grant, or internal fields
@@ -36,7 +38,8 @@ pub async fn external_conversation_requests(
         id,
         grant.id,
     )
-    .await?;
+    .await
+    .map_err(map_conversation_request_error)?;
     Ok(Json(ConversationRequestsResponse {
         requests: pending
             .into_iter()

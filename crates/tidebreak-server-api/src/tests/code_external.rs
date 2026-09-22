@@ -5138,6 +5138,21 @@ async fn external_bindings_attach_idempotently_and_refuse_foreign_or_ended_targe
         ended.json::<serde_json::Value>().await.unwrap()["kind"],
         "ended"
     );
+    // Polling an ended session's requests is a refusal, not a server error:
+    // the adapter retries a 500 every ten seconds for as long as it follows.
+    let requests = client
+        .get(format!(
+            "http://{addr}/external/code/sessions/{id}/conversation-requests"
+        ))
+        .bearer_auth(&pair.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(requests.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        requests.json::<serde_json::Value>().await.unwrap()["kind"],
+        "conversation_request_invalid"
+    );
 }
 
 #[tokio::test]
