@@ -174,6 +174,7 @@ impl InternalSession {
             TurnParkWait::Approval { call_id } => ParkWait::Approval { call_id },
             TurnParkWait::ClientToolCall { call_id } => ParkWait::ClientToolCall { call_id },
             TurnParkWait::AgentRuns { run_ids } => ParkWait::AgentRuns { run_ids },
+            TurnParkWait::ChildSessions { session_ids } => ParkWait::ChildSessions { session_ids },
         };
         *self.active.lock().expect("active turn") = Some(ActiveTurn {
             turn_id: TurnId(turn.id.0),
@@ -242,6 +243,16 @@ impl InternalSession {
                 park_ref: call_id.to_string(),
                 waiting_on: ParkWait::AgentRuns {
                     run_ids: run_ids.into_iter().map(|id| id.to_string()).collect(),
+                },
+            },
+            LegDriverOutcome::WaitingForChildSessions {
+                call_id,
+                session_ids,
+                ..
+            } => TurnOutcome::Parked {
+                park_ref: call_id.to_string(),
+                waiting_on: ParkWait::ChildSessions {
+                    session_ids: session_ids.into_iter().map(|id| id.to_string()).collect(),
                 },
             },
             LegDriverOutcome::Resuming(_) => TurnOutcome::Clean,
@@ -477,6 +488,14 @@ impl InternalSession {
                 ParkWait::AgentRuns { run_ids: waiting },
                 ResumeInput::AgentRunsSettled { run_ids: settled },
             ) if waiting == settled => Ok(()),
+            (
+                ParkWait::ChildSessions {
+                    session_ids: waiting,
+                },
+                ResumeInput::ChildSessionsSettled {
+                    session_ids: settled,
+                },
+            ) if waiting == settled => Ok(()),
             (ParkWait::Approval { call_id }, _) => Err(HarnessError::ApprovalBindingMismatch(
                 format!("park {park_ref} waited on approval {call_id}"),
             )),
@@ -486,6 +505,10 @@ impl InternalSession {
             (ParkWait::AgentRuns { run_ids }, _) => Err(HarnessError::Other(format!(
                 "park {park_ref} waited on agent runs {}",
                 run_ids.join(", ")
+            ))),
+            (ParkWait::ChildSessions { session_ids }, _) => Err(HarnessError::Other(format!(
+                "park {park_ref} waited on child sessions {}",
+                session_ids.join(", ")
             ))),
         }
     }

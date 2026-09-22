@@ -13,7 +13,8 @@ choice also stays on the machine. Invalid runtime settings refuse admission
 instead of silently changing the execution location.
 See [Repository-less sessions](#repository-less-sessions) and the amendment to
 [decision 94](decisions/0094-repository-optional-conversations-on-the-internal-engine.md).
-Durable child wait/resume and the thread/web tree remain follow-up work.
+A parent that waits on children parks durably and resumes when they settle. The
+thread/web tree remains follow-up work.
 
 A person talks to Tidebreak in Slack — in the agent's own chat (Slack's
 primary and split view for AI agents) or in a channel thread. Tidebreak
@@ -847,7 +848,12 @@ The same conversation can then choose repositories with `code_repos`, start
 independent child sessions in new workspaces with `code_session_create` (each
 with a stable
 `request_key`), send follow-ups with `code_run_turn`, list children with
-`code_sessions`, and poll for results with `code_wait`. In the desktop and
+`code_sessions`, and read their results with `code_wait`. That call answers
+inline when the children settle within twenty seconds. Otherwise the parent's
+turn parks on exactly those children and resumes with their ordered results
+once every one of them finishes, ends, fails, or is fenced — across a server
+restart included, so nothing polls and a killed child never strands the
+parent. In the desktop and
 hosted web app, the parent session lists each child's status, execution
 location, and Open action. The updates rail nests children beneath their
 parent. See [Self-drive child sessions](code-mode.md#self-drive-child-sessions).
@@ -932,7 +938,7 @@ loss can remain unknown; transport idempotency cannot settle that case.
 
 Scope parked when the Slack epic (#3178) closed is recorded in
 [`deferred.md`](deferred.md), "Tidebreak in Slack: what the first delivery
-leaves out": durable child waits and the self-drive MCP mount, research runs
+leaves out": the self-drive MCP mount, research runs
 as children, tree budgets, multi-repository workspaces, the delivery loop in
 the thread, participants and sharing, files the session produces, retention
 and audit, and the laptop as the machine. The adapter-side items (App Home,

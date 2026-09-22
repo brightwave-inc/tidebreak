@@ -492,6 +492,12 @@ pub enum ParkWait {
         /// Durable agent run ids.
         run_ids: Vec<String>,
     },
+    /// A set of child sessions the parent asked to wait on; the turn resumes
+    /// when every named child settles, or when one is fenced.
+    ChildSessions {
+        /// Child session ids, in the order the parent named them.
+        session_ids: Vec<String>,
+    },
 }
 
 /// What resolved a parked turn's wait, handed to
@@ -520,6 +526,15 @@ pub enum ResumeInput {
     AgentRunsSettled {
         /// The runs that settled.
         run_ids: Vec<String>,
+    },
+    /// Every awaited child session settled, or one was fenced.
+    ///
+    /// One resume carries the whole set. The ordered results are already
+    /// durable on the `code_wait` call the turn parked, so the engine reads
+    /// them from its own state rather than from a second copy here.
+    ChildSessionsSettled {
+        /// The children that settled, in the order the parent asked.
+        session_ids: Vec<String>,
     },
 }
 

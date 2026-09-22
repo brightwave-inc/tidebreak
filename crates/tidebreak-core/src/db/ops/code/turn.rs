@@ -520,11 +520,19 @@ pub async fn store_turn_park(
         TurnStatus::WaitingForClient
             if matches!(
                 wait,
-                TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
+                TurnParkWait::Approval { .. }
+                    | TurnParkWait::ClientToolCall { .. }
+                    | TurnParkWait::ChildSessions { .. }
             ) =>
         {
-            require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
-                .await?;
+            require_client_park_receipt(
+                &transaction,
+                &turn,
+                park_ref,
+                wait,
+                TurnClientWaitStatus::Waiting,
+            )
+            .await?;
             TurnStatus::Waiting
         }
         TurnStatus::WaitingForAgentRun if matches!(wait, TurnParkWait::AgentRuns { .. }) => {
@@ -545,11 +553,19 @@ pub async fn store_turn_park(
         TurnStatus::CancellingClient
             if matches!(
                 wait,
-                TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
+                TurnParkWait::Approval { .. }
+                    | TurnParkWait::ClientToolCall { .. }
+                    | TurnParkWait::ChildSessions { .. }
             ) =>
         {
-            require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
-                .await?;
+            require_client_park_receipt(
+                &transaction,
+                &turn,
+                park_ref,
+                wait,
+                TurnClientWaitStatus::Waiting,
+            )
+            .await?;
             TurnStatus::CancellingClient
         }
         TurnStatus::Interrupted => {
@@ -673,8 +689,11 @@ where
     C: ConnectionTrait,
 {
     match wait {
-        TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. } => {
-            require_client_park_receipt(conn, turn, wait, TurnClientWaitStatus::Resumed).await
+        TurnParkWait::Approval { .. }
+        | TurnParkWait::ClientToolCall { .. }
+        | TurnParkWait::ChildSessions { .. } => {
+            require_client_park_receipt(conn, turn, park_ref, wait, TurnClientWaitStatus::Resumed)
+                .await
         }
         TurnParkWait::AgentRuns { .. } => {
             require_agent_run_park_receipt(
@@ -699,8 +718,11 @@ where
     C: ConnectionTrait,
 {
     match wait {
-        TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. } => {
-            require_client_park_receipt(conn, turn, wait, TurnClientWaitStatus::Cancelled).await
+        TurnParkWait::Approval { .. }
+        | TurnParkWait::ClientToolCall { .. }
+        | TurnParkWait::ChildSessions { .. } => {
+            require_client_park_receipt(conn, turn, park_ref, wait, TurnClientWaitStatus::Cancelled)
+                .await
         }
         TurnParkWait::AgentRuns { .. } => {
             require_agent_run_park_receipt(
@@ -718,6 +740,7 @@ where
 async fn require_client_park_receipt<C>(
     conn: &C,
     turn: &entities::turn::Model,
+    park_ref: &str,
     wait: &TurnParkWait,
     expected_status: TurnClientWaitStatus,
 ) -> Result<()>
@@ -726,6 +749,9 @@ where
 {
     let call_id = match wait {
         TurnParkWait::Approval { call_id } | TurnParkWait::ClientToolCall { call_id } => call_id,
+        // A child-session park names its children, not its call, so the park
+        // ref is the only place its durable receipt is identified.
+        TurnParkWait::ChildSessions { .. } => park_ref,
         TurnParkWait::AgentRuns { .. } => {
             return Err(AgentError::Store(format!(
                 "turn {} client park has an agent-run wait",

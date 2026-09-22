@@ -182,8 +182,8 @@ impl Tool for SessionTool {
                 json!({"session_id":{"type":"string"},"text":{"type":"string","maxLength":16000},"request_key":{"type":"string","maxLength":128}}),
                 json!(["session_id", "text", "request_key"]),
             ),
-            "code_wait" => (
-                "Read child results, waiting up to 20 seconds while they run. Results remain in requested order. If waiting is true, call again after other useful work. A child awaiting approval includes its pending cards.",
+            tidebreak_core::CODE_WAIT_TOOL => (
+                "Read child results, in the order you name them. The call answers within 20 seconds when the children settle in time. Otherwise this turn parks on those children and resumes with their results once every one of them finishes, ends, fails, or is fenced — including across a server restart, so you do not poll and you do not need other work to fill the wait. A child awaiting approval includes its pending cards.",
                 json!({"session_ids":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string"}}}),
                 json!(["session_ids"]),
             ),
@@ -260,12 +260,12 @@ impl SessionTool {
                 .await?;
                 snapshot(runtime, &auth.parent.owner, child).await
             }
-            "code_wait" => {
+            tidebreak_core::CODE_WAIT_TOOL => {
                 let ids: Vec<SessionId> = serde_json::from_value(args["session_ids"].clone())
                     .map_err(|_| {
                         ServerError::bad_request("session_ids must be an array of session IDs")
                     })?;
-                if ids.is_empty() || ids.len() > 8 {
+                if ids.is_empty() || ids.len() > tidebreak_core::MAX_CODE_WAIT_CHILDREN {
                     return Err(ServerError::bad_request(
                         "Name between one and eight child sessions.",
                     ));
@@ -275,7 +275,13 @@ impl SessionTool {
                 for id in &ids {
                     children.push(require_child(runtime, &live, *id).await?);
                 }
-                wait_for_children(runtime, &live.parent, &children, Duration::from_secs(20)).await
+                wait_for_children(
+                    runtime,
+                    &live.parent,
+                    &children,
+                    Duration::from_secs(tidebreak_core::CODE_WAIT_INLINE_BOUND_SECONDS),
+                )
+                .await
             }
             _ => {
                 let mut children = Vec::new();
@@ -789,14 +795,48 @@ async fn send(
     Ok(())
 }
 
+/// The ordered `code_wait` payload for a settled set of children, or `None`
+/// while one of them is still running.
+///
+/// This is the same shape the tool returns inline, so a parked call and an
+/// inline one hand the model one answer. A fenced or ended child counts as
+/// settled and carries its reason, which is what keeps a killed child from
+/// leaving the parent parked forever.
+pub(crate) async fn settled_child_wait_result(
+    db: &tidebreak_core::db::DbStore,
+    owner: &OwnerId,
+    session_ids: &[SessionId],
+) -> Result<Option<String>, ServerError> {
+    let mut sessions = Vec::with_capacity(session_ids.len());
+    for id in session_ids {
+        let view = snapshot_on(db, owner, *id).await?;
+        if view["running"].as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        sessions.push(view);
+    }
+    Ok(Some(
+        json!({"waiting":false,"sessions":sessions}).to_string(),
+    ))
+}
+
 async fn snapshot(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     session: Session,
 ) -> Result<Value, ServerError> {
-    let session = runtime.get_session(owner, session.id).await?;
-    let page =
-        tidebreak_core::db::code::list_events(&runtime.db, owner, session.id, 0, 200).await?;
+    snapshot_on(&runtime.db, owner, session.id).await
+}
+
+async fn snapshot_on(
+    db: &tidebreak_core::db::DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Value, ServerError> {
+    let session = tidebreak_core::db::code::get_session(db, owner, session_id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("session {session_id} not found")))?;
+    let page = tidebreak_core::db::code::list_events(db, owner, session.id, 0, 200).await?;
     let mut answer = None;
     let mut answer_may_be_missing = page.truncated;
     let mut failure: Option<Value> = None;
@@ -840,8 +880,7 @@ async fn snapshot(
         }));
     }
     let approvals =
-        tidebreak_core::db::code::list_approvals(&runtime.db, owner, None, Some(session.id))
-            .await?;
+        tidebreak_core::db::code::list_approvals(db, owner, None, Some(session.id)).await?;
     let pending = approvals
         .into_iter()
         .filter(|a| a.state.is_pending())
@@ -1051,6 +1090,106 @@ mod tests {
         tokio::spawn(async move {
             wait_for_children(&runtime, &parent, &[child], Duration::from_secs(10)).await
         })
+    }
+
+    /// The inline bound is the fast path: children that are already settled
+    /// answer the call now, and the turn never parks.
+    #[tokio::test]
+    async fn children_that_settle_inside_the_bound_answer_inline() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let mut first = wait_child(&runtime, &parent, "inline-one").await;
+        let mut second = wait_child(&runtime, &parent, "inline-two").await;
+        for child in [&mut first, &mut second] {
+            append(
+                &runtime,
+                child,
+                vec![turn_started(), answer("done"), turn_completed()],
+            )
+            .await;
+            child.lifecycle = SessionLifecycle::Idle;
+            tidebreak_core::db::code::save_session(&runtime.db, child)
+                .await
+                .unwrap();
+        }
+        let result = wait_for_children(
+            &runtime,
+            &parent,
+            &[first.clone(), second.clone()],
+            Duration::from_secs(tidebreak_core::CODE_WAIT_INLINE_BOUND_SECONDS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["waiting"], false);
+        assert!(!tidebreak_core::code_wait_result_is_waiting(
+            &result.to_string()
+        ));
+        assert_eq!(result["sessions"][0]["session_id"], json!(first.id));
+        assert_eq!(result["sessions"][1]["session_id"], json!(second.id));
+        // The same set settles the durable park with the same shape and the
+        // same order.
+        let settled = settled_child_wait_result(&runtime.db, &parent.owner, &[first.id, second.id])
+            .await
+            .unwrap()
+            .expect("settled children produce a result");
+        assert_eq!(
+            serde_json::from_str::<Value>(&settled).unwrap(),
+            json!({"waiting": false, "sessions": result["sessions"]})
+        );
+    }
+
+    /// A child that is killed or fenced settles the parent's wait carrying
+    /// its reason, instead of leaving the parent parked forever.
+    #[tokio::test]
+    async fn a_fenced_child_settles_the_parent_wait_with_its_reason() {
+        let (_dir, runtime, _host, parent) = setup().await;
+        let settled = wait_child(&runtime, &parent, "settled").await;
+        let mut fenced = wait_child(&runtime, &parent, "fenced").await;
+        assert_eq!(
+            settled_child_wait_result(&runtime.db, &parent.owner, &[settled.id, fenced.id])
+                .await
+                .unwrap(),
+            None,
+            "running children keep the park open"
+        );
+        let mut finished = settled.clone();
+        append(
+            &runtime,
+            &finished,
+            vec![turn_started(), answer("ok"), turn_completed()],
+        )
+        .await;
+        finished.lifecycle = SessionLifecycle::Idle;
+        tidebreak_core::db::code::save_session(&runtime.db, &finished)
+            .await
+            .unwrap();
+        fenced.lifecycle = SessionLifecycle::Fenced;
+        fenced.fence_reason = Some(tidebreak_core::FenceReason::SandboxLost {
+            detail: "Sandbox node disappeared".into(),
+        });
+        tidebreak_core::db::code::save_session(&runtime.db, &fenced)
+            .await
+            .unwrap();
+        let result =
+            settled_child_wait_result(&runtime.db, &parent.owner, &[settled.id, fenced.id])
+                .await
+                .unwrap()
+                .expect("a fenced child settles the wait");
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["waiting"], false);
+        assert_eq!(result["sessions"][0]["session_id"], json!(settled.id));
+        assert_eq!(result["sessions"][1]["session_id"], json!(fenced.id));
+        assert_eq!(
+            result["sessions"][1]["status"],
+            json!(SessionLifecycle::Fenced)
+        );
+        assert_eq!(
+            result["sessions"][1]["failure"]["message"],
+            "Sandbox node disappeared"
+        );
+        assert_eq!(
+            result["sessions"][1]["fence_reason"]["type"],
+            "sandbox_lost"
+        );
     }
 
     #[tokio::test]

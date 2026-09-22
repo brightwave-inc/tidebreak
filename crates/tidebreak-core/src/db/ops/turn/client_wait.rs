@@ -59,8 +59,11 @@ pub(in crate::db) fn adapter_client_park_call_id(
     let Some(wait) = adapter_park_wait(turn)? else {
         return Ok(None);
     };
+    let park_ref = turn.park_ref.as_deref().unwrap_or_default();
     let call_id = match wait {
         TurnParkWait::Approval { call_id } | TurnParkWait::ClientToolCall { call_id } => call_id,
+        // A child-session park identifies its call only by the park ref.
+        TurnParkWait::ChildSessions { .. } => park_ref.to_owned(),
         TurnParkWait::AgentRuns { .. } => return Ok(None),
     };
     call_id.parse::<CallId>().map(Some).map_err(|_| {
@@ -387,7 +390,10 @@ fn exact_call_request(
 }
 
 fn checkpoint_execution(name: &str) -> ToolCallExecution {
-    if name == crate::ASK_USER_QUESTIONS_TOOL || name == crate::EXIT_PLAN_MODE_TOOL {
+    if name == crate::ASK_USER_QUESTIONS_TOOL
+        || name == crate::EXIT_PLAN_MODE_TOOL
+        || name == crate::CODE_WAIT_TOOL
+    {
         // The foreground user, rather than a separately leased native
         // executor, supplies this call's result. Orchestration records are
         // intentionally ineligible for either generic execution path.

@@ -333,6 +333,13 @@ pub struct SessionSnapshot {
     /// none); never inferred by counting children.
     #[serde(default)]
     pub wait: Option<SessionTreeWait>,
+    /// The conversation that created this session, when one did.
+    ///
+    /// A child carries the link so a viewer can walk up the tree from the
+    /// session it opened, rather than only down from the parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_session_id: Option<tidebreak_core::SessionId>,
 }
 
 impl SessionSnapshot {
@@ -385,6 +392,9 @@ impl From<Session> for SessionSnapshot {
             acts_as: Some(acts_as),
             children: Vec::new(),
             wait: None,
+            // The parent link is a separate lookup, like provenance; the
+            // tree attachment fills it.
+            parent_session_id: None,
         }
     }
 }

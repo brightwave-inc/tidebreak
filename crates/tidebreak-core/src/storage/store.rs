@@ -3140,6 +3140,20 @@ pub trait Store: Send + Sync {
 
     /// Atomically commit exact answers, complete the same tool call, and move
     /// its blocked turn to the shared resumable state.
+    /// Settle one parked `code_wait` call with its ordered child results.
+    ///
+    /// `result` is the payload the tool returns when it answers inline, so a
+    /// parked call and an inline one hand the model the same shape.
+    async fn settle_child_session_wait(
+        &self,
+        _chat_id: SessionId,
+        _call_id: CallId,
+        _result: &str,
+        _settled_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::storage::SettleChildSessionWaitOutcome> {
+        turn_storage_unavailable()
+    }
+
     async fn answer_user_questions(
         &self,
         _request: &AnswerUserQuestionsRequest,
