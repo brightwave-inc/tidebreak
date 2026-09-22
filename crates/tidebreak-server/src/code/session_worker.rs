@@ -37,7 +37,8 @@ use tidebreak_core::{
     bound_subagents, Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, AttentionSource,
     BlobStore, BoundedError, CodeSubagentStatus, CodeSubagentSummary, CodeWorkspaceStatus, DbStore,
     Event, FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode, Session,
-    SessionId, SessionLifecycle, Store, ToolOutcome, Turn, TurnId, TurnStatus,
+    SessionId, SessionLifecycle, SettleChildSessionWaitOutcome, Store, ToolOutcome, Turn, TurnId,
+    TurnStatus,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -1401,6 +1402,11 @@ async fn persist_turn_park(
                 run_ids: run_ids.clone(),
             }
         }
+        tidebreak_harness::ParkWait::ChildSessions { session_ids } => {
+            tidebreak_core::TurnParkWait::ChildSessions {
+                session_ids: session_ids.clone(),
+            }
+        }
     };
     let status = store_turn_park(db, &session.owner, turn.id, park_ref, &wait)
         .await
@@ -1679,6 +1685,19 @@ async fn durable_park_state(
                 run_ids: run_ids.clone(),
             })
         }
+        tidebreak_core::TurnParkWait::ChildSessions { session_ids }
+            if turn.status == TurnStatus::Resuming =>
+        {
+            Some(tidebreak_harness::ResumeInput::ChildSessionsSettled {
+                session_ids: session_ids.clone(),
+            })
+        }
+        // Still parked: read the children and settle the wait when the last
+        // of them is done. The children's own rows are the durable truth, so
+        // a restarted worker settles the same park from the same evidence.
+        tidebreak_core::TurnParkWait::ChildSessions { session_ids } => {
+            settle_child_sessions_park(db, session, park_ref, session_ids).await?
+        }
         tidebreak_core::TurnParkWait::ClientToolCall { .. }
         | tidebreak_core::TurnParkWait::AgentRuns { .. } => None,
     };
@@ -1697,6 +1716,55 @@ async fn durable_park_state(
         // A legacy or damaged wait cannot resume safely. Close it through the
         // normal turn path so one bad row cannot keep the session worker live.
         Ok(DurableParkState::Closed)
+    }
+}
+
+/// Settle a parked child-session wait once every child it named is done.
+///
+/// Returns the resume input when this call (or an earlier one) completed the
+/// wait, and `None` while a child is still running. A malformed park resolves
+/// to nothing here and is closed by the caller's ordinary fallback rather
+/// than holding the worker open.
+async fn settle_child_sessions_park(
+    db: &DbStore,
+    session: &Session,
+    park_ref: &str,
+    session_ids: &[String],
+) -> Result<Option<tidebreak_harness::ResumeInput>, WorkerError> {
+    let Ok(call_id) = park_ref.parse::<tidebreak_core::CallId>() else {
+        return Ok(None);
+    };
+    let mut children = Vec::with_capacity(session_ids.len());
+    for raw in session_ids {
+        let Ok(id) = raw.parse::<SessionId>() else {
+            return Ok(None);
+        };
+        children.push(id);
+    }
+    let result = super::session_tools::settled_child_wait_result(db, &session.owner, &children)
+        .await
+        .map_err(|error| WorkerError::Failed(error.message().to_owned()))?;
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    let settled = tidebreak_core::Store::settle_child_session_wait(
+        db,
+        session.id,
+        call_id,
+        &result,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|error| WorkerError::Failed(error.to_string()))?;
+    match settled {
+        SettleChildSessionWaitOutcome::Settled { .. }
+        | SettleChildSessionWaitOutcome::Existing(_) => {
+            Ok(Some(tidebreak_harness::ResumeInput::ChildSessionsSettled {
+                session_ids: session_ids.to_vec(),
+            }))
+        }
+        SettleChildSessionWaitOutcome::ResultConflict
+        | SettleChildSessionWaitOutcome::Unavailable => Ok(None),
     }
 }
 

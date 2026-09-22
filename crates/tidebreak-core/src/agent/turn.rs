@@ -38,6 +38,7 @@ use super::events::{AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent
 use super::registry::ToolRegistry;
 use super::transcript::{parse_args, parse_tool_args, tool_result_blocks};
 use super::types::{AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest, WRAP_UP_INSTRUCTION};
+use super::ChildSessionWaitAttempt;
 use super::{
     AcceptedServerCall, Agent, AssistantCandidate, CallIsolation, ClientArgumentResolution,
     PendingCall, SandboxSpawnGate, StreamAttempt, StreamEnd, StreamItem, TurnExecution,
@@ -1500,6 +1501,50 @@ impl Agent {
                                     outputs[index] =
                                         Some(self.decline_call(call, events, reason.into()));
                                 }
+                            }
+                        }
+                        CallIsolation::ChildSessionWait => {
+                            // The checkpoint is prepared first so a call that
+                            // could never park is refused before it waits.
+                            match self.child_session_wait_checkpoint(
+                                chat,
+                                turn_id,
+                                call,
+                                generation_steer_revision,
+                            ) {
+                                Ok((request, session_ids, steer_revision)) => {
+                                    match self
+                                        .run_child_session_wait(chat, turn_id, call, events)
+                                        .await?
+                                    {
+                                        ChildSessionWaitAttempt::Settled(output) => {
+                                            outputs[index] = Some(output);
+                                        }
+                                        ChildSessionWaitAttempt::Unsettled => {
+                                            return Ok(AgentTurnOutcome::ChildSessionWait {
+                                                request,
+                                                session_ids,
+                                                remaining_vendor_web_search,
+                                                usage: total_usage,
+                                                steer_revision,
+                                                model_steps: steps_used,
+                                            })
+                                        }
+                                    }
+                                }
+                                Err(reason) => {
+                                    outputs[index] =
+                                        Some(self.decline_call(call, events, reason.into()));
+                                }
+                            }
+                            if self.cancel.is_cancelled() {
+                                return Ok(self.finish_cancelled(
+                                    events,
+                                    total_usage,
+                                    steps_used,
+                                    publish_terminal,
+                                    None,
+                                ));
                             }
                         }
                     }

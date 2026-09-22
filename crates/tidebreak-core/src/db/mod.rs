@@ -2918,6 +2918,16 @@ impl Store for DbStore {
         ops::chat_attention::chat_attention(self, owner, items).await
     }
 
+    async fn settle_child_session_wait(
+        &self,
+        chat_id: SessionId,
+        call_id: crate::CallId,
+        result: &str,
+        settled_at: chrono::DateTime<Utc>,
+    ) -> Result<crate::storage::SettleChildSessionWaitOutcome> {
+        ops::child_session_wait::settle(self, chat_id, call_id, result, settled_at).await
+    }
+
     async fn answer_user_questions(
         &self,
         request: &crate::AnswerUserQuestionsRequest,

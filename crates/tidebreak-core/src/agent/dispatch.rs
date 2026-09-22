@@ -24,6 +24,7 @@ use super::transcript::{
     exec_preview_images, parse_args, parse_tool_args, tool_result_blocks, truncate_to_bytes,
 };
 use super::types::{ForegroundAgentWaitRequest, SandboxAgentSpawnRequest, TurnWebSearch};
+use super::ChildSessionWaitAttempt;
 use super::{
     call_action_preview, provider_executed_entries, AcceptedServerCall, Agent, CallIsolation,
     ClientArgumentResolution, PendingCall, SandboxSpawnGate,
@@ -80,6 +81,12 @@ impl Agent {
             if self.tools.is_foreground_agent_wait(&call.name) {
                 return Some(CallIsolation::AgentWait);
             }
+        }
+        // The child-session wait stands alone because it can park the turn.
+        // A park writes its own durable row for this call, so no sibling may
+        // be left pending behind it for the resuming attempt to guess about.
+        if call.name == crate::CODE_WAIT_TOOL && self.tools.contains(&call.name) {
+            return Some(CallIsolation::ChildSessionWait);
         }
         None
     }
@@ -307,29 +314,48 @@ impl Agent {
         recovered: Option<ToolOutput>,
         repeat_refusal: Option<String>,
     ) -> Result<ToolOutput> {
-        let (mut output, needs_resolution) = match recovered {
-            Some(output) => (output, false),
-            None if self.cancel.is_cancelled() => (
-                ToolOutput::failed(
-                    ToolErrorCategory::UserCancelled,
-                    "turn cancelled before tool execution",
-                ),
-                true,
+        let output = match recovered {
+            // Recovered: the row is already terminal, so it is announced
+            // below and never resolved a second time.
+            Some(output) => {
+                let preview = ToolResultPreview::build(&call.name, &output);
+                events.send(AgentEvent::ToolCallCompleted {
+                    call_id: call.call_id,
+                    output: self.tool_output_for_event(&output, call.call_id),
+                    action: call_action_preview(call),
+                    result: preview,
+                });
+                return Ok(output);
+            }
+            None if self.cancel.is_cancelled() => ToolOutput::failed(
+                ToolErrorCategory::UserCancelled,
+                "turn cancelled before tool execution",
             ),
             // A repeated-call refusal answers the admitted row without
             // dispatching the tool, then resolves it below like any other
             // failure so recovery never finds it pending.
             None => match repeat_refusal {
-                Some(reason) => (ToolOutput::error(reason), true),
+                Some(reason) => ToolOutput::error(reason),
                 None => {
                     self.ensure_durable_lease_current(turn_id).await?;
-                    (self.run_tool(chat, turn_id, call, events, None).await, true)
+                    self.run_tool(chat, turn_id, call, events, None).await
                 }
             },
         };
-        if needs_resolution {
-            self.publish_tool_images(&mut output).await?;
-        }
+        self.record_server_call_result(chat.id, turn_id, call, events, output)
+            .await
+    }
+
+    /// Announce one server call's result and commit it to its admitted row.
+    pub(crate) async fn record_server_call_result(
+        &self,
+        chat_id: crate::id::SessionId,
+        turn_id: TurnId,
+        call: &PendingCall,
+        events: &EventSink<'_>,
+        mut output: ToolOutput,
+    ) -> Result<ToolOutput> {
+        self.publish_tool_images(&mut output).await?;
         let preview = ToolResultPreview::build(&call.name, &output);
         events.send(AgentEvent::ToolCallCompleted {
             call_id: call.call_id,
@@ -337,40 +363,38 @@ impl Agent {
             action: call_action_preview(call),
             result: preview.clone(),
         });
-        if needs_resolution {
-            let resolution = if output.is_error {
-                ToolCallResolution::Failed {
-                    result: output.content.clone(),
-                    error_code: output
-                        .error_category
-                        .unwrap_or(ToolErrorCategory::ToolFailed)
-                        .as_str()
-                        .into(),
-                    error_detail: None,
-                }
-            } else {
-                ToolCallResolution::Completed {
-                    result: output.content.clone(),
-                }
-            };
-            let outcome = self
-                .resolve_server_call_retry(
-                    chat.id,
-                    turn_id,
-                    call.call_id,
-                    &resolution,
-                    preview.as_ref(),
-                )
-                .await?;
-            if !matches!(
-                outcome,
-                ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
-            ) {
-                return Err(AgentError::Store(format!(
-                    "tool call {} could not be resolved: {outcome:?}",
-                    call.call_id
-                )));
+        let resolution = if output.is_error {
+            ToolCallResolution::Failed {
+                result: output.content.clone(),
+                error_code: output
+                    .error_category
+                    .unwrap_or(ToolErrorCategory::ToolFailed)
+                    .as_str()
+                    .into(),
+                error_detail: None,
             }
+        } else {
+            ToolCallResolution::Completed {
+                result: output.content.clone(),
+            }
+        };
+        let outcome = self
+            .resolve_server_call_retry(
+                chat_id,
+                turn_id,
+                call.call_id,
+                &resolution,
+                preview.as_ref(),
+            )
+            .await?;
+        if !matches!(
+            outcome,
+            ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+        ) {
+            return Err(AgentError::Store(format!(
+                "tool call {} could not be resolved: {outcome:?}",
+                call.call_id
+            )));
         }
         Ok(output)
     }
@@ -545,6 +569,81 @@ impl Agent {
             );
         };
         Ok((request, steer_revision))
+    }
+
+    /// Run one child-session wait inline, and record it when it settles.
+    ///
+    /// Nothing durable is written until the wait has an answer. That order is
+    /// what lets the same call park: a park writes this id as a deferred tool
+    /// call, and a server row accepted first would collide with it.
+    pub(crate) async fn run_child_session_wait(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        call: &PendingCall,
+        events: &EventSink<'_>,
+    ) -> Result<ChildSessionWaitAttempt> {
+        self.ensure_durable_lease_current(turn_id).await?;
+        let output = self.run_tool(chat, turn_id, call, events, None).await;
+        if !output.is_error && crate::code_wait_result_is_waiting(&output.content) {
+            return Ok(ChildSessionWaitAttempt::Unsettled);
+        }
+        // The wait answered, so it is admitted and committed like any other
+        // server call. An earlier attempt's committed answer wins over this
+        // one: re-reading settled children is free, but the recorded result
+        // is the one the model already saw.
+        let settled = match self.accept_server_call(chat.id, turn_id, call).await? {
+            Some(recovered) => {
+                self.execute_server_call(chat, turn_id, call, events, Some(recovered), None)
+                    .await?
+            }
+            None => {
+                self.record_server_call_result(chat.id, turn_id, call, events, output)
+                    .await?
+            }
+        };
+        Ok(ChildSessionWaitAttempt::Settled(settled))
+    }
+
+    /// The child-session park checkpoint for `call`, or what the model is
+    /// told when the request cannot be made.
+    pub(crate) fn child_session_wait_checkpoint(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        call: &PendingCall,
+        steer_revision: Option<i64>,
+    ) -> std::result::Result<
+        (
+            crate::model::ClientToolCallRequest,
+            Vec<crate::SessionId>,
+            i64,
+        ),
+        &'static str,
+    > {
+        let Some(arguments) = parse_tool_args(&call.args) else {
+            return Err("not run: the child-session wait arguments were not valid JSON. Ask again with one complete JSON value.");
+        };
+        let Some(session_ids) = crate::code_wait_session_ids(&arguments) else {
+            return Err("not run: name between one and eight distinct child sessions to wait on.");
+        };
+        let request = crate::model::ClientToolCallRequest {
+            id: call.call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: call.provider_id.clone(),
+            name: call.name.clone(),
+            arguments,
+        };
+        if !request.is_well_formed() {
+            return Err("not run: the child-session wait request was too large or malformed. Ask again with a valid tool identity and smaller arguments.");
+        }
+        let Some(steer_revision) = steer_revision else {
+            return Err(
+                "not run: a durable child-session wait is available only from a durably claimed turn.",
+            );
+        };
+        Ok((request, session_ids, steer_revision))
     }
 
     /// The sandbox delegation checkpoint for `call`, or what the model is told

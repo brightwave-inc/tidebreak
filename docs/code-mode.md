@@ -445,9 +445,12 @@ independent workspace sessions (decision [0094](decisions/0094-repository-option
   observes the same owner-scoped clone job rather than starting another.
 - `code_run_turn` — a follow-up to one of this conversation's children,
   with the same request-key reuse rule.
-- `code_wait` — poll a bounded list of children (at most 20 seconds,
-  results in requested order) and return their pending approvals with the
-  snapshot.
+- `code_wait` — read a bounded list of children, results in requested
+  order, with their pending approvals in the snapshot. Children that settle
+  within twenty seconds answer inline. Otherwise the parent's turn parks on
+  exactly those children and resumes with their results once every one of
+  them finishes, ends, fails, or is fenced. The park is durable, so a server
+  restart does not lose it and a killed child does not strand the parent.
 - `code_sessions` — list this conversation's direct children.
 
 In the desktop and hosted web app, open the parent session to see its

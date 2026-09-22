@@ -49,8 +49,9 @@ context row, the next retry repairs the context and reuses the child. Snapshots 
 the latest top-level answer, report truncation, and include current failure or fence
 information.
 
-`code_wait` polls for at most 20 seconds. Durable child wait/resume (#3191), the broader
-sandbox-child tool contract (#3193), tree budgets (#3194), and tree UI (#3195) remain.
+`code_wait` polls for at most 20 seconds (amended below: it now parks durably instead).
+The broader sandbox-child tool contract (#3193), tree budgets (#3194), and tree UI
+(#3195) remain.
 
 ## Alternatives considered
 
@@ -100,3 +101,24 @@ remain the follow-up work named in this record.
 Decision 96 supersedes this record's per-channel repository scope. Shared channel
 sessions discover and use the instance's live GitHub App access. A channel default
 selects a repository; it never grants access or creates another allowlist.
+
+## Amendment 2026-09-22: a child wait parks durably
+
+`code_wait` no longer ends at a poll. The call still answers inline when every
+child it named settles within twenty seconds, which keeps a quick batch on the
+fast path. When they do not, the same call becomes a durable park: the turn
+stops, the engine releases its lease, and `TurnParkWait::ChildSessions` records
+the children beside the park ref, so a server that restarts sees what the parent
+is waiting on and settles the wait from the children's own rows.
+
+The park is checkpointed the way any deferred tool call is — an orchestration
+row no leased client may claim, because the server supplies the result. One
+resume carries the whole set, in the order the parent asked. A child that ends,
+fails, or is fenced counts as settled and carries its reason, so killing a child
+resumes the parent instead of stranding it.
+
+`SessionSnapshot` now carries `parent_session_id`, so a viewer can walk up the
+tree from the session it opened.
+
+A bounded children summary on the parent's digest is still open, and stays in
+[`deferred.md`](../deferred.md).

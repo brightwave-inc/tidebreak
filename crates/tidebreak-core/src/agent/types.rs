@@ -288,6 +288,26 @@ pub enum AgentTurnOutcome {
         /// Model-call steps consumed in this agent invocation.
         model_steps: usize,
     },
+    /// The model asked to wait on child sessions that did not settle inside
+    /// the tool's inline bound.
+    ///
+    /// The worker checkpoints this exact call the way it checkpoints any
+    /// deferred tool call, then parks the turn on the named children. The
+    /// call resumes with the ordered results once every child settles.
+    ChildSessionWait {
+        /// Immutable call identity and canonical arguments to checkpoint.
+        request: crate::model::ClientToolCallRequest,
+        /// The children the call named, in the order it asked for them.
+        session_ids: Vec<crate::SessionId>,
+        /// Vendor search allowance that remains after the producing step.
+        remaining_vendor_web_search: Option<VendorWebSearch>,
+        /// Provider usage incurred in this agent invocation.
+        usage: Usage,
+        /// Durable steering epoch captured before the producing model call.
+        steer_revision: i64,
+        /// Model-call steps consumed in this agent invocation.
+        model_steps: usize,
+    },
     /// Execution failed after consuming provider work that must be retained.
     Failed {
         /// Stable terminal error payload for the durable failure event.

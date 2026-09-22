@@ -516,6 +516,17 @@ pub enum TurnParkWait {
         /// Durable agent run ids, engine-scoped.
         run_ids: Vec<String>,
     },
+    /// A set of child code sessions the parent asked to wait on; the turn
+    /// resumes when every named child settles, in the order it asked.
+    ///
+    /// The park ref is the `code_wait` call id, so the durable receipt is the
+    /// same turn-client wait every deferred tool call parks on. Only the set
+    /// of children lives here, because a restarted server reads each child's
+    /// own state rather than a copy of it.
+    ChildSessions {
+        /// Child session ids, in the order the parent named them.
+        session_ids: Vec<String>,
+    },
 }
 
 /// State of a persisted approval.

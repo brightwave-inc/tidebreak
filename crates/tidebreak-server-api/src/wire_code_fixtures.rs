@@ -197,6 +197,7 @@ fn session() -> SessionSnapshot {
         }),
         children: Vec::new(),
         wait: None,
+        parent_session_id: None,
     }
 }
 

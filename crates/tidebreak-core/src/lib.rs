@@ -55,6 +55,7 @@ pub mod blob;
 pub mod browser;
 pub mod cancel;
 pub mod chat_journal;
+pub mod child_sessions;
 pub mod chrome_computer_use;
 pub mod chrome_connection;
 pub mod citation;
@@ -178,6 +179,10 @@ pub use browser::{
     MAX_BROWSER_UPLOAD_PATH_BYTES, MAX_BROWSER_URL_CHARS,
 };
 pub use cancel::{CancelToken, Cancelled};
+pub use child_sessions::{
+    code_wait_result_is_waiting, code_wait_session_ids, CodeWaitArgs,
+    CODE_WAIT_INLINE_BOUND_SECONDS, CODE_WAIT_TOOL, MAX_CODE_WAIT_CHILDREN,
+};
 pub use citation::{
     citation_authoring_instruction, format_citation_directive, parse_assistant_citations,
     AssistantCitationInput, AssistantCitationSnapshot, CitationLocator, ParsedAssistantCitations,
@@ -409,9 +414,9 @@ pub use storage::{
     RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
     ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
-    SandboxAdmissionMode, SandboxProvision, SandboxProvisionState, SecretProvider, Store,
-    SubmitAgentRunResultOutcome, TurnEventAppend, TurnLeaseFence,
-    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    SandboxAdmissionMode, SandboxProvision, SandboxProvisionState, SecretProvider,
+    SettleChildSessionWaitOutcome, Store, SubmitAgentRunResultOutcome, TurnEventAppend,
+    TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
     open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,

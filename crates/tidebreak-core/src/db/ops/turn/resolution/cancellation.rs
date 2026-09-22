@@ -72,7 +72,8 @@ async fn request_turn_cancellation_inner(
     let adapter_client_call = super::super::adapter_client_park_call_id(&turn)?;
     let status = match adapter_wait {
         Some(crate::TurnParkWait::Approval { .. })
-        | Some(crate::TurnParkWait::ClientToolCall { .. }) => TurnRunStatus::WaitingForClient,
+        | Some(crate::TurnParkWait::ClientToolCall { .. })
+        | Some(crate::TurnParkWait::ChildSessions { .. }) => TurnRunStatus::WaitingForClient,
         Some(crate::TurnParkWait::AgentRuns { .. }) => TurnRunStatus::WaitingForAgentRun,
         None => turn_run_status_from_db(&turn.status)?,
     };
@@ -164,12 +165,16 @@ async fn request_turn_cancellation_inner(
             .await
             .map_err(store_err)?
             .expect("locked waiting client call exists");
-        let is_foreground_question = call.name == crate::ASK_USER_QUESTIONS_TOOL
+        // Neither the questions card nor the child-session wait is executed by
+        // a leased client: the server supplies both results, so both are
+        // orchestration rows rather than client ones.
+        let is_server_supplied = (call.name == crate::ASK_USER_QUESTIONS_TOOL
+            || call.name == crate::CODE_WAIT_TOOL)
             && call.execution == crate::model::ToolCallExecution::Orchestration.as_str();
         if call.chat_id != turn.session_id
             || call.turn_id != turn.id
             || (call.execution != crate::model::ToolCallExecution::Client.as_str()
-                && !is_foreground_question)
+                && !is_server_supplied)
             || call.status != crate::model::ToolCallStatus::Pending.as_str()
         {
             return Err(AgentError::Store(format!(

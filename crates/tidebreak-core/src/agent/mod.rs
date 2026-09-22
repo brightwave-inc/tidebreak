@@ -199,6 +199,18 @@ pub(crate) enum CallIsolation {
     SandboxSpawn,
     /// Leaves the loop as an ordered child-wait checkpoint.
     AgentWait,
+    /// Answers inline while the named child sessions settle quickly, and
+    /// leaves the loop as a durable park when they do not.
+    ChildSessionWait,
+}
+
+/// What one inline child-session wait produced.
+pub(crate) enum ChildSessionWaitAttempt {
+    /// Every named child settled inside the inline bound; the model reads
+    /// this result now and the turn keeps running.
+    Settled(ToolOutput),
+    /// A named child is still running. The call parks instead of answering.
+    Unsettled,
 }
 
 /// What the approval gate decided about one delegation.

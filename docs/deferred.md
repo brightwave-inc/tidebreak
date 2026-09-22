@@ -296,12 +296,12 @@ below were scoped on that epic and are parked here, not abandoned. Each
 closed issue keeps its acceptance criteria; reopen or refile one when it has
 an owner.
 
-- **Durable child waits and the rest of the lifecycle contract** (was
-  #3191). `code_wait` polls for at most 20 seconds and `ParkWait` has no
-  child-session wait, so a parent cannot park across a restart on children
-  that take an hour. The parent link on `SessionSnapshot` and a bounded
-  children summary on the parent's digest are also open. Parent deletion
-  already leaves children running (#3478).
+- **A bounded children summary on the parent's digest** (was #3191). A
+  parent now parks durably on the children it named and resumes with their
+  ordered results, and `SessionSnapshot` carries the parent link. The digest
+  still reports `parent_session` and wait counts rather than a bounded
+  summary of the children themselves. Parent deletion already leaves children
+  running (#3478).
 - **Self-drive tools as one contract** (was #3192). The internal engine's
   native tools (`code_repos`, `code_session_create`, `code_run_turn`,
   `code_wait`, `code_sessions`) and the managed-sandbox bridge (record 94)

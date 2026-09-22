@@ -14,6 +14,7 @@ mod app;
 mod approval;
 mod blob_retirement;
 mod chat;
+mod child_session_wait;
 mod client_wait;
 mod code;
 mod code_channel_scope;

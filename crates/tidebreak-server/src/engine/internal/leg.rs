@@ -104,6 +104,12 @@ pub enum LegDriverOutcome {
         call_id: CallId,
         run_ids: Vec<AgentRunId>,
     },
+    /// The turn parked on child sessions the parent named with `code_wait`.
+    WaitingForChildSessions {
+        turn_id: TurnId,
+        call_id: CallId,
+        session_ids: Vec<tidebreak_core::SessionId>,
+    },
     Resuming(TurnId),
     Cancelled(TurnId),
     Failed(TurnId),
@@ -533,6 +539,26 @@ fn client_checkpoint_is_valid(
         && request.is_well_formed()
         && tools.client_arguments_are_valid(&request.name, &request.arguments)
         && tools.execution(&request.name) == Some(tidebreak_core::ToolCallExecution::Client)
+}
+
+/// A child-session checkpoint names the registered wait tool and the exact
+/// children its stored arguments carry. Validated here for the same reason
+/// the client checkpoint is: the park outlives this process, so a malformed
+/// one must never reach the store.
+fn child_session_wait_checkpoint_is_valid(
+    tools: &ToolRegistry,
+    chat_id: tidebreak_core::SessionId,
+    turn_id: TurnId,
+    request: &tidebreak_core::ClientToolCallRequest,
+    session_ids: &[tidebreak_core::SessionId],
+) -> bool {
+    request.chat_id == chat_id
+        && request.turn_id == turn_id
+        && request.is_well_formed()
+        && request.name == tidebreak_core::CODE_WAIT_TOOL
+        && tools.contains(&request.name)
+        && tidebreak_core::code_wait_session_ids(&request.arguments)
+            .is_some_and(|ids| ids == session_ids)
 }
 
 fn sandbox_spawn_checkpoint_is_valid(
@@ -1750,6 +1776,30 @@ impl LegDriver {
                     Ok(result) => result,
                     Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
                 };
+            // A child-session wait is checkpointed exactly like any other
+            // deferred tool call. Only the park it produces differs, so the
+            // children ride alongside the request rather than through a
+            // second copy of the checkpoint path.
+            let (drive_result, child_session_wait) = match drive_result {
+                Ok(AgentTurnOutcome::ChildSessionWait {
+                    request,
+                    session_ids,
+                    remaining_vendor_web_search,
+                    usage,
+                    steer_revision,
+                    model_steps,
+                }) => (
+                    Ok(AgentTurnOutcome::ClientToolCall {
+                        request,
+                        remaining_vendor_web_search,
+                        usage,
+                        steer_revision,
+                        model_steps,
+                    }),
+                    Some(session_ids),
+                ),
+                other => (other, None),
+            };
             #[cfg(any(test, feature = "test-support"))]
             if let Some((entered, release)) = self.post_drive_pause.as_ref() {
                 entered.notify_one();
@@ -1806,6 +1856,14 @@ impl LegDriver {
             }
 
             match drive_result {
+                // Normalized into a deferred-call checkpoint above, so this
+                // shape can no longer reach the outcome match.
+                Ok(AgentTurnOutcome::ChildSessionWait { .. }) => {
+                    return Err(AgentError::msg(format!(
+                        "turn {} returned an unnormalized child-session wait",
+                        turn.id
+                    )));
+                }
                 Ok(AgentTurnOutcome::Completed {
                     output,
                     citations,
@@ -2153,12 +2211,23 @@ impl LegDriver {
                     // Parking on the last budgeted step is fine: the resuming
                     // segment arrives with zero steps and runs the wrap-up,
                     // which reads the client tool's result (#1181).
-                    if !client_checkpoint_is_valid(
-                        surface.tools.as_ref(),
-                        turn.chat_id,
-                        turn.id,
-                        &request,
-                    ) {
+                    let checkpoint_is_valid = if child_session_wait.is_some() {
+                        child_session_wait_checkpoint_is_valid(
+                            surface.tools.as_ref(),
+                            turn.chat_id,
+                            turn.id,
+                            &request,
+                            child_session_wait.as_deref().unwrap_or_default(),
+                        )
+                    } else {
+                        client_checkpoint_is_valid(
+                            surface.tools.as_ref(),
+                            turn.chat_id,
+                            turn.id,
+                            &request,
+                        )
+                    };
+                    if !checkpoint_is_valid {
                         drop(active);
                         return self
                             .record_failure(
@@ -2249,6 +2318,13 @@ impl LegDriver {
                                     self.publish(turn.chat_id, event);
                                 }
                                 checkpoint_heartbeat.abort_and_wait().await;
+                                if let Some(session_ids) = child_session_wait {
+                                    return Ok(LegDriverOutcome::WaitingForChildSessions {
+                                        turn_id: turn.id,
+                                        call_id: request.id,
+                                        session_ids,
+                                    });
+                                }
                                 if request.name == tidebreak_core::ASK_USER_QUESTIONS_TOOL
                                     || request.name == tidebreak_core::EXIT_PLAN_MODE_TOOL
                                 {
@@ -3554,6 +3630,9 @@ fn cancellation_race_accounting(
         }
         | AgentTurnOutcome::WaitForAgents {
             model_steps, usage, ..
+        }
+        | AgentTurnOutcome::ChildSessionWait {
+            model_steps, usage, ..
         } => {
             if *model_steps == 0 || *model_steps > remaining_steps {
                 return Err(AgentError::msg(format!(
@@ -3613,6 +3692,7 @@ fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str
         Ok(LegDriverOutcome::WaitingForApproval { .. }) => "waiting_for_approval",
         Ok(LegDriverOutcome::WaitingForClient { .. }) => "waiting_for_client",
         Ok(LegDriverOutcome::WaitingForAgentRun { .. }) => "waiting_for_agent_run",
+        Ok(LegDriverOutcome::WaitingForChildSessions { .. }) => "waiting_for_child_sessions",
         Ok(LegDriverOutcome::Resuming(_)) => "resuming",
         Ok(LegDriverOutcome::Cancelled(_)) => "cancelled",
         Ok(LegDriverOutcome::Failed(_)) => "failed",

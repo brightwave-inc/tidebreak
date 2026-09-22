@@ -38,6 +38,18 @@ pub async fn attach_to_snapshot(
     grant_id: Option<CodeGrantId>,
     principal: Option<&OwnerId>,
 ) {
+    snapshot.parent_session_id =
+        match tidebreak_core::db::code::session_context(db, owner, snapshot.id).await {
+            Ok(context) => context.and_then(|context| context.parent_session_id),
+            Err(error) => {
+                tracing::warn!(
+                    session = %snapshot.id,
+                    error = %error,
+                    "could not read the parent link for a snapshot"
+                );
+                None
+            }
+        };
     match compute(db, owner, snapshot.id, grant_id).await {
         Ok((children, wait)) => {
             let event = filter_tree_event(

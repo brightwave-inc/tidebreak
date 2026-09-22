@@ -1032,6 +1032,25 @@ pub enum AnswerUserQuestionsOutcome {
     Unavailable,
 }
 
+/// Result of settling one parked child-session wait.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettleChildSessionWaitOutcome {
+    /// The ordered results completed the call and made the turn resumable.
+    Settled {
+        /// The resumable turn.
+        turn: TurnRun,
+        /// The call's journaled completion, committed with the result so a
+        /// live renderer settles the card now rather than at the turn's end.
+        completion_event: Box<SequencedAgentEvent>,
+    },
+    /// An ambiguous retry recovered the same committed result.
+    Existing(TurnRun),
+    /// The call already committed a different result.
+    ResultConflict,
+    /// The wait is missing, cancelled, terminal, or scoped to another chat.
+    Unavailable,
+}
+
 /// Result of resolving one tool call under its required authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveToolCallOutcome {
