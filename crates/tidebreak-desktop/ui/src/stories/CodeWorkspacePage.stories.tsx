@@ -669,6 +669,8 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
   const sessions =
     scenario === "start" ||
     scenario === "workspace-starting" ||
+    scenario === "workspace-sending-message" ||
+    scenario === "uneff-preparing" ||
     scenario === "session-create-failure" ||
     scenario === "first-turn-failure" ||
     scenario === "loading" ||

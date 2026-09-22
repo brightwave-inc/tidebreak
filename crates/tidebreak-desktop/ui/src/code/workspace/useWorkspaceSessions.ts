@@ -29,6 +29,10 @@ import { isPutAway } from "../workspaceCards";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { useCodeUiStore } from "../CodeUiStore";
+import {
+  codeSessionAcceptedTurn,
+  waitForCodeSessionHydrated,
+} from "../CodeSessionRegistry";
 import { submitFirstCodeTurn } from "../publishCodeSessionImages";
 import { useConversationDigests } from "../CodeUpdatesStore";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -365,14 +369,21 @@ export function useWorkspaceSessions({
         // Publish into this session only after create, then send once. Using
         // blob ids reserved for another session (or never published) is what
         // yields "attachment blob … was not published to session …".
+        // Open the event socket before the post. The post does not return
+        // until the engine finishes the reply.
         await submitFirstCodeTurn({
           client: startedWithClient,
           sessionId: created.id,
           message,
           images: heldImages ?? [],
+          beforeTurn: () => waitForCodeSessionHydrated(created.id),
         });
         clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
       } catch (err) {
+        if (codeSessionAcceptedTurn(created.id)) {
+          clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
+          return;
+        }
         if (heldImages && heldImages.length > 0) {
           useCodeUiStore
             .getState()

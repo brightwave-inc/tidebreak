@@ -47,12 +47,17 @@ export async function publishCodeSessionImages(
  * Returns whether a turn was posted. Callers that already created the session
  * use this so the message is sent at most once and only with attachments the
  * new session actually holds.
+ *
+ * `beforeTurn` runs after publication and before `POST /turns`. That request
+ * does not return until the engine finishes the reply, so the caller drops
+ * the startup screen and opens the event socket here.
  */
 export async function submitFirstCodeTurn(input: {
   client: ApiClient;
   sessionId: string;
   message: string;
   images?: readonly File[];
+  beforeTurn?: () => Promise<void> | void;
 }): Promise<boolean> {
   const message = input.message.trim();
   if (!message) return false;
@@ -61,6 +66,7 @@ export async function submitFirstCodeTurn(input: {
     input.sessionId,
     input.images ?? [],
   );
+  await input.beforeTurn?.();
   if (attachments.length > 0) {
     await input.client.submitCodeTurn(
       input.sessionId,

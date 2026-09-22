@@ -17,6 +17,10 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
 } from "./labels";
+import {
+  codeSessionAcceptedTurn,
+  waitForCodeSessionHydrated,
+} from "./CodeSessionRegistry";
 import { submitFirstCodeTurn } from "./publishCodeSessionImages";
 
 /** What the first session of a workspace is created with. */
@@ -74,8 +78,10 @@ export async function resolveSessionModel(input: {
  *
  * While a first message still has images to publish, the handoff stays up so
  * the session composer cannot send a second first turn with unpublished
- * ids. Once publication finishes, the handoff drops so the socket can open
- * and stream; `POST /turns` may still run for the whole first reply.
+ * ids. Once publication finishes, the handoff drops and the event socket
+ * opens before `POST /turns`. That request does not return until the engine
+ * finishes the reply. Leaving the handoff up, or starting the request first,
+ * keeps the startup screen in front of a message that has already been sent.
  */
 export async function startFirstSession(input: {
   client: ApiClient;
@@ -170,8 +176,16 @@ export async function startFirstSession(input: {
           sessionId: session.id,
           message: prompt,
           images,
+          beforeTurn: async () => {
+            setWorkspaceStartup(workspace.id, null);
+            await waitForCodeSessionHydrated(session.id);
+          },
         });
       } catch (error) {
+        // A dropped request after the turn row exists is not a failed send.
+        // The socket already has the message; saying it was not sent invites
+        // a second first turn.
+        if (codeSessionAcceptedTurn(session.id)) return;
         // Never drop typed words or pasted images: the workspace composer
         // holds them.
         holdPrompt(session.id);

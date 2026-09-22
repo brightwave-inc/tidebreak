@@ -103,6 +103,7 @@ import { toast } from "sonner";
 import { useApp } from "@/AppContext";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeContentRevision } from "./useLiveContent";
+import { useReleaseStartupWhenTurnLands } from "./workspace/useReleaseStartupWhenTurnLands";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore, useSessionDigest } from "./CodeUpdatesStore";
 import { useBrowserTabs } from "./workspace/useBrowserTabs";
@@ -357,6 +358,12 @@ function CodeWorkspaceBody({
   );
   const workspaceStartup = useCodeUiStore(
     (state) => state.workspaceStartups[workspaceId] ?? null,
+  );
+  useReleaseStartupWhenTurnLands(
+    workspaceId,
+    session?.id ?? null,
+    client,
+    workspaceStartup !== null,
   );
 
   useEffect(() => {

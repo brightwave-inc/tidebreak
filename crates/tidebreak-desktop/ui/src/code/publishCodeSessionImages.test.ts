@@ -153,6 +153,37 @@ describe("publishCodeSessionImages / submitFirstCodeTurn", () => {
     expect(submitCodeTurn).toHaveBeenCalledWith(SESSION_A, "hello");
   });
 
+  it("runs beforeTurn after publication and before the turn post", async () => {
+    const order: string[] = [];
+    uploadImageAttachment.mockImplementation(async () => {
+      order.push("publish");
+      return {
+        attachmentId: BLOB_ID,
+        mediaType: "image/png",
+        width: 1,
+        height: 1,
+        byteLen: 4,
+      };
+    });
+    const submitCodeTurn = vi.fn(async () => {
+      order.push("submit");
+      return { kind: "turn" };
+    });
+    const client = { submitCodeTurn } as unknown as ApiClient;
+
+    await submitFirstCodeTurn({
+      client,
+      sessionId: SESSION_A,
+      message: "look at this",
+      images: [pngFile()],
+      beforeTurn: () => {
+        order.push("before");
+      },
+    });
+
+    expect(order).toEqual(["publish", "before", "submit"]);
+  });
+
   it("does not submit when the message is empty", async () => {
     const submitCodeTurn = vi.fn();
     const client = { submitCodeTurn } as unknown as ApiClient;
