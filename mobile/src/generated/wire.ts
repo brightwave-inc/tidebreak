@@ -5048,7 +5048,14 @@ children: Array<SessionTreeChild>,
  * A parent wait that is actually known. Always present (`null` when
  * none); never inferred by counting children.
  */
-wait: SessionTreeWait | null, };
+wait: SessionTreeWait | null,
+/**
+ * The conversation that created this session, when one did.
+ *
+ * A child carries the link so a viewer can walk up the tree from the
+ * session it opened, rather than only down from the parent.
+ */
+parent_session_id?: SessionId, };
 
 /**
  * One direct child on a parent session tree.
