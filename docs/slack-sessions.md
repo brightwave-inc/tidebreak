@@ -930,15 +930,21 @@ loss can remain unknown; transport idempotency cannot settle that case.
 
 ## Later
 
+Scope parked when the Slack epic (#3178) closed is recorded in
+[`deferred.md`](deferred.md), "Tidebreak in Slack: what the first delivery
+leaves out": durable child waits and the self-drive MCP mount, research runs
+as children, tree budgets, multi-repository workspaces, the delivery loop in
+the thread, participants and sharing, files the session produces, retention
+and audit, and the laptop as the machine. The adapter-side items (App Home,
+OAuth install, Slack Code channels, pull-request cards) are on the gateway's
+own deferred page.
+
+Gated on evidence rather than parked:
+
 - Automatic Slack steering, pending-admission recovery, and confirmed delivery
   rendering, gated on the reply-during-run signal.
-- Slack Code channels as a session surface: one code channel per
-  session, `AttentionState` feeding the native status.
-- Durable child wait/resume, the broader sandbox-child tools, and the thread/web tree,
-  as specified in the preceding section.
 - Collaborator steer, and an owner relay affordance ("forward this to
   the session") as its cheaper predecessor.
-- Local-desktop Slack via a relay.
 - [`0048`](decisions/0048-one-interaction-model.md) step 5.
 
 ## Out of scope

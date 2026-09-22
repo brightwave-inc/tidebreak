@@ -268,9 +268,85 @@ purpose:
   URL and a token from its roster, no gateway in the path
   ([record 98](decisions/0098-standalone-machine-attach-on-mobile.md), #3404).
   That covers a machine the phone can reach over trusted TLS. What remains
-  deferred is #3199's outbound machine link, which is what a phone would need
-  to reach a *laptop* — a machine with no stable address and no certificate
-  anyone issued.
+  deferred is the outbound machine link ("The laptop as the machine" in the
+  Slack section below), which is what a phone would need to reach a
+  *laptop* — a machine with no stable address and no certificate anyone
+  issued.
+
+## Tidebreak in Slack: what the first delivery leaves out
+
+The Slack epic (#3178) closed on September 22, 2026 with the core product
+deployed. A mention in a channel or DM starts a session, and no repository is
+required
+([record 94](decisions/0094-repository-optional-conversations-on-the-internal-engine.md)).
+The session runs where the deployment can run it
+([record 88](decisions/0088-a-slack-session-runs-where-the-deployment-can-run-it.md)).
+Channel sessions act as one shared forge identity under a workspace grant
+([records 89](decisions/0089-service-principals.md),
+[90](decisions/0090-a-session-acts-as-one-forge-identity.md),
+[92](decisions/0092-workspace-grants.md), and
+[96](decisions/0096-slack-channels-share-the-instance-github-app-repository-access.md)).
+Approvals, questions, and plans settle from Slack
+([record 91](decisions/0091-approvals-are-answerable-where-the-person-is.md)).
+Anyone on the deployment opens the session on the web and stays signed in
+across a reload. A parent creates repository children, waits on them, and the
+web and the thread show the tree. Attachments and images reach the session.
+[`slack-sessions.md`](slack-sessions.md) records what is true. The tracks
+below were scoped on that epic and are parked here, not abandoned. Each
+closed issue keeps its acceptance criteria; reopen or refile one when it has
+an owner.
+
+- **Durable child waits and the rest of the lifecycle contract** (was
+  #3191). `code_wait` polls for at most 20 seconds and `ParkWait` has no
+  child-session wait, so a parent cannot park across a restart on children
+  that take an hour. The parent link on `SessionSnapshot` and a bounded
+  children summary on the parent's digest are also open. Parent deletion
+  already leaves children running (#3478).
+- **Self-drive tools as one contract** (was #3192). The internal engine's
+  native tools (`code_repos`, `code_session_create`, `code_run_turn`,
+  `code_wait`, `code_sessions`) and the managed-sandbox bridge (record 94)
+  are in. Not in: an MCP mount with a session-scoped `tbreak_hl_` token for
+  ordinary machine harnesses, schema parity with `agent-mcp`, separate
+  workspace creation, a placement override and budget inheritance on the
+  call, and the stolen-token boundary test.
+- **Research runs as children** (was #3193). `spawn_sandbox_run` returning
+  a sandbox's `task_output` as a wait result, mixed child-session and run
+  waits, and a typed missing-runtime conflict that offers a machine child
+  instead.
+- **Tree-aware budgets** (was #3194). Operator settings for the sandbox cap
+  and spend ceilings shipped (`TIDEBREAK_RUNTIME_*`). A per-tree ceiling a
+  child inherits from, spend rollup onto the parent, a machine-wide cap on
+  harness children, and refusals that name the setting did not.
+- **Multi-repository workspaces and their delivery** (was #3196, #3197). A
+  workspace is one repository
+  ([records 32](decisions/0032-code-workspaces-worktrees-checkpoints.md) and
+  [53](decisions/0053-code-worktrees-live-in-a-user-visible-root.md)). Work
+  across two repositories today is a parent with two children, each with
+  its own pull request.
+- **The delivery loop in the thread** (was #3203, #3204, #3205; gateway
+  #1864). Pull-request facts, watch state, and turn cost on the external
+  event stream; trigger turns on Slack-bound sessions; `fix`, `merge`,
+  `rebase`, `ready`, and `close` as contribute-gated routes. The thread
+  today ends at the pull-request link.
+- **Participants and sharing on the session header** (was #3181).
+  Authorized channel sessions are visible on the web and shared-workspace
+  controls ship. The participants header, the owner's Share control for
+  viewers and contributors by principal, and the viewer and contributor
+  stories do not.
+- **Files the session produces** (was #3200). Inbound images from a thread
+  reach the session and were verified live. Files the session writes do not
+  come back to the thread as Slack files or links.
+- **Retention, deletion, and audit for Slack-originated content** (was
+  #3201). A configurable retention window with a sweep, a per-session
+  delete that also drops the adapter's rows, and an audit read listing every
+  Slack-originated action with its actor.
+- **The laptop as the machine** (was #3199, gateway #1859). An outbound
+  WebSocket from the desktop's embedded server so a DM session runs on a
+  laptop with no hosted machine and survives sleep.
+- **Live acceptance without a sandbox runtime** (was on #3185). The
+  internal-engine path has a regression test (#3445). The live channel
+  drill on a machine with no runtime needs a standalone deployment, since
+  production runtime settings are not weakened to run it.
 
 ## Memory that outlives a session
 
