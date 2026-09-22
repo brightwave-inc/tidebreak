@@ -122,6 +122,8 @@ impl GrokSession {
         // still required to be absolute so a relative private path cannot
         // slip through; the engine then runs without additional read scoping.
         crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
+        let model = turn_model.or(self.spec.model.as_deref());
+        let effort_ladder = crate::grok::effective_effort_ladder(Some(&self.version), model);
         compose_print_plan(PrintLaunch {
             binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             extra_argv: &self.spec.extra_argv,
@@ -133,9 +135,9 @@ impl GrokSession {
             new_session_id,
             prompt_file,
             mode: self.permission_mode(),
-            model: turn_model.or(self.spec.model.as_deref()),
+            model,
             effort: turn_effort.or(self.spec.reasoning_effort),
-            effort_ladder: crate::grok::effort_ladder_for_version(Some(&self.version)),
+            effort_ladder: &effort_ladder,
         })
     }
 
@@ -931,6 +933,35 @@ mod tests {
             plan.argv
         );
         assert!(!plan.argv.iter().any(|arg| arg == "xhigh"));
+    }
+
+    #[test]
+    fn current_cli_sends_xhigh_not_max_for_a_grok_model() {
+        let ladder = crate::grok::effective_effort_ladder(Some("grok 1.0.40"), Some("grok-4.7"));
+        let plan = compose_print_plan(PrintLaunch {
+            binary: std::path::Path::new("/usr/bin/grok"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            extra_env: &[],
+            relay_auth: None,
+            relay_key_env: None,
+            resume_ref: None,
+            new_session_id: None,
+            prompt_file: std::path::Path::new("/tmp/prompt.txt"),
+            mode: PermissionMode::Auto,
+            model: Some("grok-4.7"),
+            effort: Some(ReasoningEffort::Max),
+            effort_ladder: &ladder,
+        })
+        .unwrap();
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|pair| pair == ["--reasoning-effort", "xhigh"]),
+            "{:#?}",
+            plan.argv
+        );
+        assert!(!plan.argv.iter().any(|arg| arg == "max"));
     }
 
     #[tokio::test]

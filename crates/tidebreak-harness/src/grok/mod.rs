@@ -36,22 +36,89 @@ pub(crate) const EFFORT_LADDER_1_0_4: &[ReasoningEffort] = &[
     ReasoningEffort::XHigh,
 ];
 
-/// Grok 1.0.5 replaced `medium` and `xhigh` with `max`.
+/// Grok 1.0.5's CLI flag enum dropped `medium` and `xhigh` and added `max`.
+/// That pin is the only release captured with this vocabulary.
 pub(crate) const EFFORT_LADDER_1_0_5: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
 
+/// Current `grok --reasoning-effort` vocabulary. Later CLIs restored
+/// `medium` and `xhigh`. `max` remains a CLI flag for non-Grok models the
+/// engine can host (for example GLM); Grok chat models do not take it.
+pub(crate) const EFFORT_LADDER_CURRENT: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+];
+
+/// xAI's published Grok chat ladder. `max` is not a Grok model option.
+const GROK_MODEL_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
+
 pub(super) fn effort_ladder_for_version(version: Option<&str>) -> &'static [ReasoningEffort] {
     match crate::probe::version_patch_line(version) {
-        Some(version) if version >= (1, 0, 5) => EFFORT_LADDER_1_0_5,
+        Some(version) if version == (1, 0, 5) => EFFORT_LADDER_1_0_5,
+        Some(version) if version >= (1, 0, 6) => EFFORT_LADDER_CURRENT,
         _ => EFFORT_LADDER_1_0_4,
     }
 }
 
 fn effort_ladder(probe: &HarnessProbe) -> &'static [ReasoningEffort] {
     effort_ladder_for_version(probe.version.as_deref())
+}
+
+/// The levels one listed model may actually take on this CLI version.
+///
+/// Grok-family ids intersect the engine flag enum with xAI's published
+/// ladder so the picker never offers `max` for Grok 4.7. Other models keep
+/// the engine ladder, which is how GLM still reaches `max`.
+pub(crate) fn effective_effort_ladder(
+    version: Option<&str>,
+    model: Option<&str>,
+) -> Vec<ReasoningEffort> {
+    let engine = effort_ladder_for_version(version);
+    match model.and_then(published_grok_model_efforts) {
+        Some(published) => engine
+            .iter()
+            .copied()
+            .filter(|effort| published.contains(effort))
+            .collect(),
+        None => engine.to_vec(),
+    }
+}
+
+pub(crate) fn clamp_effort(
+    version: Option<&str>,
+    model: Option<&str>,
+    effort: ReasoningEffort,
+) -> Option<ReasoningEffort> {
+    effort.clamp_to(&effective_effort_ladder(version, model))
+}
+
+fn published_grok_model_efforts(model_id: &str) -> Option<&'static [ReasoningEffort]> {
+    let leaf = model_id.rsplit(['/', ':']).next().unwrap_or(model_id);
+    leaf.starts_with("grok-").then_some(GROK_MODEL_EFFORTS)
+}
+
+fn with_model_reasoning_efforts(
+    models: Vec<crate::ListedHarnessModel>,
+    version: Option<&str>,
+) -> Vec<crate::ListedHarnessModel> {
+    models
+        .into_iter()
+        .map(|mut model| {
+            model.reasoning_efforts = effective_effort_ladder(version, Some(&model.id));
+            model
+        })
+        .collect()
 }
 
 /// Grok CLI adapter. Capabilities below are for the captured version
@@ -175,11 +242,11 @@ impl HarnessAdapter for GrokAdapter {
         let Some(binary) = probe.binary_path.as_deref() else {
             return Vec::new();
         };
-        crate::with_reasoning_efforts(
+        with_model_reasoning_efforts(
             crate::prefer_gateway_models(
                 crate::list_cli_models(binary, &["models"], &probe.env).await,
             ),
-            effort_ladder(probe),
+            probe.version.as_deref(),
         )
     }
 
@@ -543,8 +610,42 @@ mod tests {
             EFFORT_LADDER_1_0_5
         );
         assert_eq!(
+            effort_ladder_for_version(Some("grok 1.0.40 (eb1a2256660d) [stable]")),
+            EFFORT_LADDER_CURRENT
+        );
+        assert_eq!(
             effort_ladder_for_version(Some("grok 1.1.0 [stable]")),
-            EFFORT_LADDER_1_0_5
+            EFFORT_LADDER_CURRENT
+        );
+    }
+
+    #[test]
+    fn grok_models_do_not_advertise_max() {
+        let current = Some("grok 1.0.40 (eb1a2256660d) [stable]");
+        for id in [
+            "grok-4.7",
+            "grok-4.6",
+            "model-gateway-model-gateway/grok-4.7",
+            "xai:grok-4.7",
+        ] {
+            let ladder = effective_effort_ladder(current, Some(id));
+            assert_eq!(
+                ladder,
+                vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                ],
+                "{id}"
+            );
+            assert!(!ladder.contains(&ReasoningEffort::Max), "{id}");
+        }
+        let glm = effective_effort_ladder(current, Some("model-gateway-model-gateway/glm-5.3"));
+        assert!(glm.contains(&ReasoningEffort::Max));
+        assert_eq!(
+            clamp_effort(current, Some("grok-4.7"), ReasoningEffort::Max),
+            Some(ReasoningEffort::XHigh)
         );
     }
 
