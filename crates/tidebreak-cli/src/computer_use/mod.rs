@@ -838,7 +838,9 @@ pub(crate) fn parse_computer(raw: Vec<String>) -> std::result::Result<ComputerCo
 
 /// Run one `tidebreak computer …` command.
 ///
-/// The result JSON on stdout never contains image bytes. When the result
+/// The result is one JSON document on stdout, stamped with its
+/// `schema_version` like every other `--json` document (see
+/// [`crate::json_output`]). It never contains image bytes. When the result
 /// carries images and `--output` names a path, the first image's PNG bytes
 /// are written there (private, replaced atomically) and the JSON names the
 /// path so the caller can read the actual pixels from disk.
@@ -896,12 +898,7 @@ pub(crate) async fn run_computer(command: ComputerCommand) -> Result<()> {
             "the result contained an image; re-run with --output <path> to save it".into(),
         );
     }
-    println!(
-        "{}",
-        serde_json::to_string(&printed)
-            .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-    );
-    Ok(())
+    crate::json_output::print_document(&printed)
 }
 
 #[cfg(test)]

@@ -97,3 +97,75 @@ fn every_json_document_carries_its_schema_version() {
     }
     assert_eq!(row["id"], chat.as_str());
 }
+
+/// `browser … --json` prints the browser tool's own result, and it carries the
+/// version beside it like every other document.
+#[test]
+fn a_browser_command_prints_a_versioned_document() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("an address").port();
+    let endpoint = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("one connection");
+        let mut reader = BufReader::new(stream.try_clone().expect("a second handle"));
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).expect("a request line");
+        loop {
+            let mut header = String::new();
+            let read = reader.read_line(&mut header).expect("a header line");
+            if read == 0 || header == "\r\n" {
+                break;
+            }
+        }
+        let body = r#"{"sessions":[]}"#;
+        let mut stream = stream;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("the answer is written");
+        request_line
+    });
+    let dir = tempfile::tempdir().expect("temp dir");
+    let capfile = dir.path().join("browser.json");
+    std::fs::write(
+        &capfile,
+        serde_json::json!({
+            "version": 1,
+            "endpoint": format!("http://127.0.0.1:{port}/code/browser"),
+            "token": "tbreak_bt_00000000-0000-0000-0000-000000000000",
+        })
+        .to_string(),
+    )
+    .expect("the capfile is written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args(["browser", "list", "--json"])
+        .env("TIDEBREAK_BROWSER_CAPFILE", &capfile)
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tidebreak browser list");
+    assert!(
+        output.status.success(),
+        "browser list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(
+        document,
+        serde_json::json!({ "sessions": [], "schema_version": 1 })
+    );
+    let request_line = endpoint.join().expect("the endpoint answered");
+    assert!(
+        request_line.starts_with("GET /code/browser/list "),
+        "{request_line}"
+    );
+}
