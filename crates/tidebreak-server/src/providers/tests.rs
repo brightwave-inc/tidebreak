@@ -1331,7 +1331,7 @@ async fn custom_models_on_a_curated_provider_reach_the_catalog_beside_its_rows()
         ProviderUpdate {
             enabled: Some(true),
             base_url: None,
-            credential: Some(ProviderCredential::api_key("sk-ant-test")),
+            credential: Some(ProviderCredential::api_key("anthropic-test-key")),
             models: Some(vec![custom.clone()]),
         },
         &*provisioned,
@@ -1339,7 +1339,7 @@ async fn custom_models_on_a_curated_provider_reach_the_catalog_beside_its_rows()
     )
     .await
     .expect("Anthropic accepts configured models");
-    assert_eq!(info.models, [custom.clone()]);
+    assert_eq!(info.models, std::slice::from_ref(&custom));
     assert_eq!(
         info.custom_reasoning_efforts,
         ProviderKind::Anthropic.custom_reasoning_efforts()
@@ -1385,7 +1385,7 @@ async fn a_configured_row_a_catalog_update_curated_gives_way_to_the_curated_row(
     secrets
         .set_secret(
             &ProviderKind::Anthropic.credential_key(),
-            &serde_json::to_string(&ProviderCredential::api_key("sk-ant-test")).unwrap(),
+            &serde_json::to_string(&ProviderCredential::api_key("anthropic-test-key")).unwrap(),
         )
         .await
         .unwrap();
