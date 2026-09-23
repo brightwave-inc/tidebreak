@@ -158,6 +158,7 @@ impl Session {
                 let config = crate::profile_config()?;
                 // stdout belongs to the command's output, so logs are file-only.
                 tidebreak_server::logging::init_logging_file_only(&config.data_dir);
+                tidebreak_server::logging::install_panic_hook(Some(&config.data_dir));
                 let server = tidebreak_server::bind_configured(config).await?;
                 let client = Client::new(server.local_addr(), server.token())?;
                 let client_executor_token = server.client_executor_token().to_owned();

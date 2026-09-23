@@ -686,6 +686,16 @@ impl TurnGuard {
         }
     }
 
+    /// Every turn executing locally right now, as `(chat, turn)`.
+    pub fn active(&self) -> Vec<(SessionId, TurnId)> {
+        self.active
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(chat_id, handles)| (*chat_id, handles.turn_id))
+            .collect()
+    }
+
     /// Wake the exact local worker after durable steering admission commits.
     ///
     /// The instruction remains in the store; this process-local signal only

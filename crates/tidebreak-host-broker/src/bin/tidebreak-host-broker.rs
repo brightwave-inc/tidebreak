@@ -28,6 +28,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // From here on a panic is written to the desktop's boot failure log, not
+    // only to a stderr nobody reads in a GUI launch.
+    tidebreak_host_broker::panic_log::install_panic_hook(&data_dir);
     let policy = match RootPolicy::for_host(args.home)
         .and_then(|policy| policy.with_private_directory(&data_dir))
     {

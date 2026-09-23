@@ -175,6 +175,7 @@ fn model_step_rate_bound_holds(last: Option<DateTime<Utc>>, now: DateTime<Utc>) 
 }
 
 /// Runs the maintenance sweep for every owner with memory records.
+#[derive(Clone)]
 pub struct MemorySweep {
     db: Arc<DbStore>,
     store: Arc<dyn Store>,

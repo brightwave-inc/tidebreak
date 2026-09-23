@@ -200,6 +200,7 @@ pub async fn run(command: Command) -> Result<()> {
     let config = crate::profile_config()?;
     // stdout carries the command's report; logs stay in the profile's log file.
     tidebreak_server::logging::init_logging_file_only(&config.data_dir);
+    tidebreak_server::logging::install_panic_hook(Some(&config.data_dir));
     let data_dir = config.data_dir.clone();
     // Prefer a normal embed: that runs the desktop schema epoch path and is
     // the only safe first-boot of an idle profile. When serve/desktop already

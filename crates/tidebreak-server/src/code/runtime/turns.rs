@@ -29,7 +29,14 @@ impl CodeRuntime {
     /// run their engine in a sandbox and survive a restart on their own, so
     /// they never appear here — the worker map only holds local sessions.
     pub async fn await_update_quiesce(&self, deadline: Duration) -> Result<(), String> {
-        let deadline_at = Instant::now() + deadline;
+        self.await_turn_boundaries(Some(deadline)).await
+    }
+
+    /// [`Self::await_update_quiesce`], with the deadline optional. A quit that
+    /// waits for a safe point passes `None` and waits as long as the turns
+    /// take; the person can still cancel it or stop the turns instead.
+    pub async fn await_turn_boundaries(&self, deadline: Option<Duration>) -> Result<(), String> {
+        let deadline_at = deadline.map(|deadline| Instant::now() + deadline);
         // Turn starts are fenced by the worktree lock, not by the database:
         // a starting turn holds its workspace's lock from before it re-reads
         // the quiesce flag until the turn ends, and the flag is already up.
@@ -47,6 +54,10 @@ impl CodeRuntime {
             .cloned()
             .collect();
         for worktree_turn in worktree_turns {
+            let Some(deadline_at) = deadline_at else {
+                drop(worktree_turn.lock().await);
+                continue;
+            };
             let remaining = deadline_at.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, worktree_turn.lock()).await {
                 Ok(guard) => drop(guard),
@@ -62,35 +73,15 @@ impl CodeRuntime {
         // Past every turn boundary; now wait for the workers to park their
         // engine children and for the stored rows to agree.
         loop {
-            let ids: Vec<SessionId> = self
-                .workers
-                .lock()
-                .expect("code workers")
-                .keys()
-                .copied()
-                .collect();
-            let mut busy = 0usize;
-            for id in ids {
-                match tidebreak_core::db::code::get_session_all_owners(&self.db, id).await {
-                    Ok(Some(session)) => {
-                        if session.lifecycle == SessionLifecycle::Running
-                            || session.child_pid.is_some()
-                        {
-                            busy += 1;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        return Err(format!(
-                            "could not read code sessions while preparing the update: {error}"
-                        ));
-                    }
-                }
-            }
+            let busy = self
+                .sessions_short_of_a_safe_point()
+                .await
+                .map_err(|error| format!("{error} while preparing the update"))?
+                .len();
             if busy == 0 {
                 return Ok(());
             }
-            if Instant::now() >= deadline_at {
+            if deadline_at.is_some_and(|deadline_at| Instant::now() >= deadline_at) {
                 return Err(if busy == 1 {
                     "A code session is still working on a turn. Try again once it finishes — \
                      the update stays ready."
@@ -104,6 +95,52 @@ impl CodeRuntime {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Every local session that is not at a safe point: mid-turn, or holding
+    /// an engine child that has not parked yet. The quiesce waits on exactly
+    /// these, and a quit that waits for a safe point counts them, so the two
+    /// cannot disagree. Remote sessions are left out: their engine runs in a
+    /// sandbox and keeps going when this process quits.
+    pub async fn sessions_short_of_a_safe_point(&self) -> Result<Vec<SessionSafePoint>, String> {
+        let ids: Vec<SessionId> = self
+            .workers
+            .lock()
+            .expect("code workers")
+            .keys()
+            .copied()
+            .collect();
+        let mut short = Vec::new();
+        for id in ids {
+            let session = match tidebreak_core::db::code::get_session_all_owners(&self.db, id).await
+            {
+                Ok(Some(session)) => session,
+                Ok(None) => continue,
+                Err(error) => return Err(format!("could not read code sessions: {error}")),
+            };
+            let Some(mid_turn) = short_of_a_safe_point(&session) else {
+                continue;
+            };
+            // A turn parked on an approval, a question, or a plan holds its
+            // engine until the person answers, so it never reaches its
+            // boundary on its own.
+            let waiting_for_answer = mid_turn
+                && !list_approvals(
+                    &self.db,
+                    &session.owner,
+                    Some(ApprovalState::Pending),
+                    Some(id),
+                )
+                .await
+                .map_err(|error| format!("could not read code approvals: {error}"))?
+                .is_empty();
+            short.push(SessionSafePoint {
+                id,
+                mid_turn,
+                waiting_for_answer,
+            });
+        }
+        Ok(short)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1131,5 +1168,68 @@ fn trigger_actor(name: &str, context: Option<tidebreak_core::TriggerTurnContext>
     match context {
         Some(context) => TurnActor::trigger_event(name, context),
         None => TurnActor::trigger(name),
+    }
+}
+
+/// Whether `session` keeps a quiesce waiting, and why: `Some(true)` mid-turn,
+/// `Some(false)` idle with an engine child that has not parked yet, `None`
+/// at a safe point.
+fn short_of_a_safe_point(session: &Session) -> Option<bool> {
+    let mid_turn = session.lifecycle == SessionLifecycle::Running;
+    (mid_turn || session.child_pid.is_some()).then_some(mid_turn)
+}
+
+#[cfg(test)]
+mod safe_point_tests {
+    use tidebreak_core::{ExecutionLocation, SessionVisibility};
+
+    use super::*;
+
+    fn session(lifecycle: SessionLifecycle, child_pid: Option<i64>) -> Session {
+        Session {
+            visibility: SessionVisibility::Private,
+            id: SessionId::new(),
+            owner: OwnerId::local(),
+            owner_kind: None,
+            workspace_id: None,
+            kind: SessionKind::Interactive,
+            harness_kind: HarnessKind::Internal,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: PermissionMode::Allow,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle,
+            fence_reason: None,
+            child_pid,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+            execution_location: ExecutionLocation::Machine,
+            acts_as: None,
+        }
+    }
+
+    /// A quiesce waits for turns and for engine children to park, and a quit
+    /// that waits for a safe point counts the same sessions it waits on. Only
+    /// a mid-turn session counts as working when the quit first asks.
+    #[test]
+    fn a_parking_engine_child_is_short_of_a_safe_point_but_not_mid_turn() {
+        assert_eq!(
+            short_of_a_safe_point(&session(SessionLifecycle::Running, Some(42))),
+            Some(true)
+        );
+        assert_eq!(
+            short_of_a_safe_point(&session(SessionLifecycle::Idle, Some(42))),
+            Some(false)
+        );
+        assert_eq!(
+            short_of_a_safe_point(&session(SessionLifecycle::Idle, None)),
+            None
+        );
     }
 }

@@ -138,6 +138,19 @@ pub enum SubmitTurnOutcome {
     AlreadyDelivered,
 }
 
+/// One local session that is not at a safe point for a quiesce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionSafePoint {
+    pub id: SessionId,
+    /// The session is mid-turn. When false, only its engine child has yet
+    /// to park.
+    pub mid_turn: bool,
+    /// Mid-turn and parked on the person: an approval, a question, or a
+    /// plan is waiting for an answer, so the turn cannot reach its boundary
+    /// on its own.
+    pub waiting_for_answer: bool,
+}
+
 /// One message an adapter delivers into a bound session
 /// (`docs/slack-sessions.md`, stage 2).
 ///

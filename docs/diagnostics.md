@@ -39,6 +39,10 @@ The routes are:
 The desktop launch token resolves to the local owner. On self-host, members
 receive `403 Forbidden`; only administrators can read or export diagnostics.
 
+One more route writes rather than reads. `POST /diagnostics/renderer-errors`
+takes an error the renderer could not handle and writes it to the human log;
+see [Renderer errors](#renderer-errors).
+
 ## Bundle contents
 
 The ZIP contains `snapshot.json`, `metrics.prom`, `manifest.json`, a short
@@ -50,9 +54,9 @@ The ZIP contains `snapshot.json`, `metrics.prom`, `manifest.json`, a short
 
 The snapshot contains build and process metadata, uptime, CPU time, maximum
 resident memory, Tokio worker and queue gauges, request histograms keyed by
-matched route, model duration and token measurements, and named operation
-histograms. The OpenMetrics file projects the same measurements for scraping or
-collector ingestion.
+matched route, model duration and token measurements, named operation
+histograms, and the health of each background worker. The OpenMetrics file
+projects the same measurements for scraping or collector ingestion.
 
 In model usage records, `input_tokens` includes uncached, cache-read, and
 cache-creation input. `uncached_input_tokens` keeps the fresh-input component
@@ -69,6 +73,99 @@ records a request that failed with a 4xx or 5xx status or took 250 ms or
 longer. Fast successful requests are mostly local polling, and a record for
 each one used to fill the file in minutes. To record a span for every request
 while you investigate, see [Logging filters](#logging-filters).
+
+## Background workers
+
+The server runs its long-lived workers under a supervisor: the chat turn
+worker, the sandbox workers, blob retirement, the approval judge, the memory
+sweep, the MCP supervisor, the gateway model sync, and the rest. When a worker
+panics or returns, the supervisor logs it and starts the worker again after a
+wait that doubles from one second up to a minute. A worker that stops while
+the server shuts down stays stopped.
+
+The snapshot's `workers` list reports each one by name:
+
+```json
+{
+  "name": "turn_worker",
+  "state": "running",
+  "restarts": 1,
+  "last_error": "the worker panicked: index out of bounds",
+  "last_stopped_at": "2026-09-23T10:02:11Z"
+}
+```
+
+`state` is `running`, `restarting` (waiting to start again), or `stopped`. The
+metrics carry the same facts as `tidebreak_worker_up` and
+`tidebreak_worker_restarts_total`, labeled by `worker`.
+
+## Panics
+
+Tidebreak records each panic with its message, location, thread, and
+backtrace. The desktop, `tidebreak serve`, and every CLI command that writes a
+profile's log also append the report to `boot-failures.log` in the profile
+data directory. Any other CLI command prints it to stderr. The host broker
+sidecar has no log of its own: it writes the report to stderr, which the
+desktop forwards into its log, and appends it to the same `boot-failures.log`.
+
+A location that keeps panicking is recorded on its 1st, 2nd, 4th, 8th, and
+later powers of two, and only the first carries a backtrace, so a worker that
+panics on every restart cannot grow the file without bound.
+
+A panic message is text the log's own emit sites did not choose, so it is
+scrubbed before it is written, by the same rules as renderer errors (see
+[Scrubbing](#scrubbing)), and cut to 1,000 characters. So is a worker's
+`last_error` in the snapshot.
+
+## Renderer errors
+
+The renderer reports three kinds of error: a render error its error boundary
+caught, an uncaught exception from the window's `error` event, and a rejected
+promise from the window's `unhandledrejection` event. Each report goes to
+`POST /diagnostics/renderer-errors`, which writes it to the human log with
+every field escaped and cut to a fixed length.
+
+The route takes the same bearer as the rest of the API and sits on the member
+plane, because every signed-in renderer reports its own errors. It writes at
+most 20 reports at once and then 10 a minute, answering `429` past that. The
+renderer adds its own limits: one report for an error that repeats within a
+minute, and at most 50 per page load.
+
+Reports never leave the machine. The renderer sends them only to the embedded
+server it runs beside, and sends nothing while the window is attached to a
+remote machine.
+
+### Scrubbing
+
+The log never carries prompts, URL query strings, credentials, or tokens. Text
+from outside the server's own emit sites, such as a renderer error or a panic
+message, is scrubbed to keep that rule:
+
+- A URL keeps its scheme, host, and path. Its query string, fragment, and any
+  user name or password become `[redacted]`.
+- The value after a credential key, such as `token=`, `password:`, or
+  `Authorization: Bearer`, becomes `[redacted]`.
+- A vendor key, a Tidebreak token, or a JSON web token becomes `[redacted]`
+  wherever it appears.
+
+The renderer applies these rules before a report leaves the window, and the
+server applies them again before it writes the line. A rejected value that is
+not an `Error` is named by its kind and its keys, such as `Object with keys
+prompt, url (not an Error)`, and never by its values, so a prompt inside it
+does not reach the log.
+
+## After an unclean exit
+
+The desktop writes a marker file at launch and removes it on a clean exit. If
+the marker is still there at the next launch, the app quit some other way: a
+crash, a force quit, or a power loss. The app then shows a notice, "Tidebreak
+quit unexpectedly", with a button that saves this export to a file you pick.
+Nothing is sent anywhere; you decide whether to share the file.
+
+An update removes the marker just before it installs. On Windows the
+installer ends the process on the spot, without the exit handler, and the
+relaunch into the new version would otherwise read as a crash. An install that
+fails writes the marker again, because the run goes on.
 
 ## Privacy and bounds
 

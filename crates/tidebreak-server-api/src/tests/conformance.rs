@@ -724,6 +724,7 @@ fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/notifications/read-all"),
         ("GET", "/grants"),
         ("GET", "/consent/statements"),
+        ("POST", "/diagnostics/renderer-errors"),
     ]
 }
 

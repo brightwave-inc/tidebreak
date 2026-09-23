@@ -91,6 +91,7 @@ mod lifecycle;
 mod listener;
 mod memory;
 mod outputs;
+mod renderer_errors;
 mod root_attachment;
 mod sandbox;
 mod sandbox_runtime;
