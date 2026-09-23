@@ -287,10 +287,19 @@ impl McpServer {
                     .get(&spec.name)
                     .is_some_and(|tool| self.exposes(tool.approval_class()))
             })
-            .map(|spec| ToolDescriptor {
-                name: spec.name,
-                description: spec.description,
-                input_schema: spec.input_schema,
+            .map(|spec| {
+                let class = self
+                    .tools
+                    .get(&spec.name)
+                    .map(|tool| tool.approval_class())
+                    .unwrap_or(ApprovalClass::Sensitive);
+                ToolDescriptor {
+                    title: Some(human_title(&spec.name)),
+                    annotations: Some(annotations_for(class)),
+                    name: spec.name,
+                    description: spec.description,
+                    input_schema: spec.input_schema,
+                }
             })
             .collect();
         // The registry is a HashMap; sort by name so the advertised list is stable
@@ -496,6 +505,38 @@ fn image_encoding_error(image: &ImageRef, reason: impl std::fmt::Display) -> Str
 
 fn request_id_is_valid(id: &Value) -> bool {
     id.is_string() || id.is_number()
+}
+
+fn annotations_for(class: ApprovalClass) -> crate::protocol::ToolAnnotations {
+    match class {
+        ApprovalClass::ReadOnly => crate::protocol::ToolAnnotations {
+            read_only_hint: true,
+            destructive_hint: false,
+        },
+        ApprovalClass::Workspace | ApprovalClass::Sensitive => crate::protocol::ToolAnnotations {
+            read_only_hint: false,
+            destructive_hint: true,
+        },
+    }
+}
+
+fn human_title(name: &str) -> String {
+    let trimmed = name
+        .strip_prefix("mcp__")
+        .map(|rest| rest.rsplit_once("__").map(|(_, tool)| tool).unwrap_or(rest))
+        .unwrap_or(name);
+    trimmed
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn validate_optional_object_params(params: Value) -> Result<(), RpcError> {
@@ -889,7 +930,46 @@ mod tests {
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "echo");
+        assert_eq!(tools[0]["title"], "Echo");
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[0]["annotations"]["destructiveHint"], false);
         assert!(tools[0]["inputSchema"]["properties"]["text"].is_object());
+    }
+
+    #[tokio::test]
+    async fn tools_list_sets_annotations_from_approval_class() {
+        let tools = ToolRegistry::new()
+            .with(Box::new(ClassifiedTool {
+                name: "read_file",
+                class: ApprovalClass::ReadOnly,
+                ran: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }))
+            .with(Box::new(ClassifiedTool {
+                name: "write_file",
+                class: ApprovalClass::Workspace,
+                ran: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }));
+        let server = server_with(tools).with_approval_gate(Arc::new(AutoApproveGate));
+        initialize_session(&server).await;
+        let listed = server
+            .handle(request(2, "tools/list", Value::Null))
+            .await
+            .unwrap()
+            .result
+            .unwrap();
+        let by_name: std::collections::BTreeMap<&str, &serde_json::Value> = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| (tool["name"].as_str().unwrap(), tool))
+            .collect();
+        assert_eq!(by_name["read_file"]["title"], "Read File");
+        assert_eq!(by_name["read_file"]["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            by_name["write_file"]["annotations"]["destructiveHint"],
+            true
+        );
+        assert_eq!(by_name["write_file"]["annotations"]["readOnlyHint"], false);
     }
 
     #[tokio::test]

@@ -136,7 +136,12 @@ impl NativeCapfile {
     fn from_env() -> Result<Self> {
         let path = std::env::var_os("TIDEBREAK_NATIVE_CAPFILE")
             .map(PathBuf::from)
-            .ok_or_else(|| AgentError::config("TIDEBREAK_NATIVE_CAPFILE is not set"))?;
+            .ok_or_else(|| {
+                AgentError::config(
+                    "TIDEBREAK_NATIVE_CAPFILE is not set; computer commands run inside a \
+                     Tidebreak session that publishes this capfile",
+                )
+            })?;
         Self::load(&path)
     }
 
@@ -766,22 +771,6 @@ fn mcp_failure(failure: ClientFailure) -> ToolOutput {
 // ---------------------------------------------------------------------------
 // Direct CLI: `tidebreak computer <tool> --json '<arguments>' [--output p]`
 // ---------------------------------------------------------------------------
-
-pub(crate) const COMPUTER_USAGE: &str = "\
-usage: tidebreak computer <tool> --json '<arguments-json>' [--output <path>]
-
-<tool> is any canonical native or Chrome computer-use tool (run
-`tidebreak computer list-tools` for the current set, e.g.
-computer_list_windows, computer_capture_screen, computer_click,
-computer_type_text, computer_key_press, computer_scroll,
-computer_hover, computer_drag, computer_wait).
-
---json     the tool's argument object, as one JSON string (use '{}' for none)
---output   write the first result image (PNG) to this private path instead of
-           discarding it; read the file afterwards to see the pixels
-
-Computer commands use the session-private capfile named by
-TIDEBREAK_NATIVE_CAPFILE. They do not take --server/--attach.";
 
 /// One parsed `tidebreak computer …` invocation.
 pub(crate) struct ComputerCommand {

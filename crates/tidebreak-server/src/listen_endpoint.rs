@@ -43,10 +43,15 @@ impl ListenEndpoint {
         let bytes = std::fs::read(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 AgentError::config(format!(
-                    "no listen endpoint at {} — is an Tidebreak server running \
-                     on this data directory? Start the desktop app or \
-                     `tidebreak serve`, or pass --server <url> with \
-                     TIDEBREAK_SERVER_TOKEN",
+                    "no listen endpoint at {} — is a Tidebreak server running \
+                     on this data directory? If the desktop app is already \
+                     running, set TIDEBREAK_DATA_DIR to its data directory \
+                     (macOS: ~/Library/Application Support/io.brightwave.tidebreak, \
+                     Linux: ~/.local/share/io.brightwave.tidebreak, \
+                     Windows: %APPDATA%\\io.brightwave.tidebreak; debug builds \
+                     use io.brightwave.tidebreak.dev) and pass --attach. Or \
+                     start the desktop app or `tidebreak serve`, or pass \
+                     --server <url> with TIDEBREAK_SERVER_TOKEN",
                     path.display()
                 ))
             } else {
@@ -173,5 +178,15 @@ mod tests {
         assert!(!json.contains("client_executor"));
         drop(guard);
         assert!(ListenEndpoint::read(dir.path()).is_err());
+    }
+
+    #[test]
+    fn missing_listen_file_names_the_desktop_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = ListenEndpoint::read(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("is a Tidebreak server running"));
+        assert!(!error.contains("is an Tidebreak"));
+        assert!(error.contains("TIDEBREAK_DATA_DIR"));
+        assert!(error.contains("io.brightwave.tidebreak"));
     }
 }

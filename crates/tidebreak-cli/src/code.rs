@@ -36,47 +36,6 @@ const EXIT_TIMEOUT: i32 = 124;
 /// SIGINT, following the shell's 128+signal convention and `-p`.
 const EXIT_INTERRUPTED: i32 = 130;
 
-/// Short usage for the `code` family. Parse errors print this instead of the
-/// whole CLI surface — a driving agent should not have to scrape 80 lines to
-/// see that `--session` was missing.
-pub const USAGE: &str = "\
-usage: tidebreak code doctor [--refresh]
-       tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
-       tidebreak code repo list
-       tidebreak code repo rm <id>
-       tidebreak code ws new --repo <id|path> [--title <title>] [--base-ref <ref>]
-       tidebreak code ws list [--repo <id|path>]
-       tidebreak code ws show <id>
-       tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow] [--model <id>] [--reasoning <level>] [--fast]
-       tidebreak code session show <id>
-       tidebreak code session mode <id> plan|ask|auto|allow
-       tidebreak code session reap <id>
-       tidebreak code share grant <session-id> <subject> [--level view|contribute]
-       tidebreak code share list <session-id>
-       tidebreak code share revoke <session-id> <subject>
-       tidebreak code share visibility <session-id> private|deployment
-       tidebreak code run (--session <id> | --ws <id>) [<message>]
-                  [--on-approval wait|fail] [--timeout <secs>]
-       tidebreak code approvals [--session <id>]
-       tidebreak code approve <approval-id>
-       tidebreak code deny <approval-id> [-m <feedback>]
-       tidebreak code interrupt --session <id>
-       tidebreak code turns --session <id>
-       tidebreak code diff --ws <id> [--turn N] [--file PATH]
-       tidebreak code files --ws <id> [--turn N]
-       tidebreak code git commit --ws <id> [-m MSG]
-       tidebreak code git push --ws <id>
-       tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
-       tidebreak code git status --ws <id>
-       tidebreak code action <name> --ws <id>
-       tidebreak code watch [--once] [--timeout <secs>]
-
-Every verb takes --json (or --output-format json). run and watch stream NDJSON
-under --json. --timeout is seconds. watch --once prints the connect snapshot
-and exits. session start without --mode uses the first mode the engine supports:
-allow, auto, ask, then plan. Pass --mode ask to require approval prompts.";
-
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 

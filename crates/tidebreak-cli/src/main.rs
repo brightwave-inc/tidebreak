@@ -112,11 +112,13 @@ mod diagnostics;
 mod event_stream;
 mod folder;
 mod folder_executor;
+mod help;
 mod image_output;
 mod outputs;
 mod print;
 mod setup;
 
+use help::{set_usage_family, usage_error, Family};
 use print::OutputFormat;
 use setup::{Command as SetupCommand, SecretSource};
 
@@ -131,115 +133,6 @@ const VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
     Some(version) => version,
     None => "0.0.0-unreleased",
 };
-
-const USAGE: &str = "\
-usage: tidebreak serve
-       tidebreak --version
-       tidebreak mcp <workspace>
-       tidebreak rehome-secrets
-       tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
-                  [--permission-mode ask|auto|allow|plan]
-                  [--model <key>]
-
-       tidebreak output list <chat> [--output-format text|json]
-       tidebreak output show <chat> <output> [--revision <id>] [--output-format text|json]
-       tidebreak output revisions <chat> <output> [--output-format text|json]
-       tidebreak output export <chat> <output> <path> [--revision <id>] [--output-format text|json]
-       tidebreak attach <chat> <file>
-
-       tidebreak provider list
-       tidebreak provider set-key <kind> [--from-env <var>]
-       tidebreak provider remove-key <kind>
-       tidebreak model list
-       tidebreak model roles
-       tidebreak model select <key|auto> [--role <role>]
-       tidebreak settings show
-       tidebreak settings web-search select <provider|off>
-       tidebreak settings web-search set-key <provider> [--from-env <var>]
-       tidebreak settings web-search remove-key <provider>
-       tidebreak settings exec select <provider|off>
-       tidebreak settings exec set-key <provider> [--from-env <var>]
-       tidebreak settings exec remove-key <provider>
-       tidebreak mcp-server list
-       tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
-                  [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
-                  [--timeout-ms <ms>] [--disabled]
-       tidebreak mcp-server remove <name>
-       tidebreak chat list
-       tidebreak chat create
-       tidebreak chat delete <chat>
-       tidebreak chat steer <chat> <turn> <text...>
-       tidebreak agent-run list <chat>
-       tidebreak agent-run show <chat> <run>
-       tidebreak agent-run cancel <chat> <run>
-
-       tidebreak diagnostics snapshot
-       tidebreak diagnostics metrics
-       tidebreak diagnostics export <path>
-
-       tidebreak browser list --json
-       tidebreak browser navigate --browser-id <id> --url <url> --json
-       tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
-       tidebreak browser wait --browser-id <id> --snapshot-id <id> --document-epoch <n> \
-              (--url-changed | --load-state <idle|loading|ready> | \
-               --text-present <text> | --text-absent <text>) \
-              [--timeout-ms <ms>] --json
-       tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
-              --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
-       tidebreak browser-mcp
-       tidebreak agent-mcp
-
-       tidebreak folder connect <path> --chat <id> [--output-format text|json]
-       tidebreak folder list [--chat <id>] [--output-format text|json]
-       tidebreak folder disconnect <path-or-root-id> --chat <id> [--output-format text|json]
-
-       tidebreak code doctor [--refresh]
-       tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
-       tidebreak code repo list
-       tidebreak code repo rm <id>
-       tidebreak code ws new --repo <id|path> [--title <title>] [--base-ref <ref>]
-       tidebreak code ws list [--repo <id|path>]
-       tidebreak code ws show <id>
-       tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow] [--model <id>] [--reasoning <level>] [--fast]
-       tidebreak code session show <id>
-       tidebreak code session reap <id>
-       tidebreak code share grant <session-id> <subject> [--level view|contribute]
-       tidebreak code share list <session-id>
-       tidebreak code share revoke <session-id> <subject>
-       tidebreak code share visibility <session-id> private|deployment
-       tidebreak code run (--session <id> | --ws <id>) [<message>]
-                  [--on-approval wait|fail] [--timeout <secs>]
-       tidebreak code approvals [--session <id>]
-       tidebreak code approve <approval-id>
-       tidebreak code deny <approval-id> [-m <feedback>]
-       tidebreak code interrupt --session <id>
-       tidebreak code turns --session <id>
-       tidebreak code diff --ws <id> [--turn N] [--file PATH]
-       tidebreak code files --ws <id> [--turn N]
-       tidebreak code git commit --ws <id> [-m MSG]
-       tidebreak code git push --ws <id>
-       tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
-       tidebreak code git status --ws <id>
-       tidebreak code action <name> --ws <id>
-       tidebreak code watch [--once] [--timeout <secs>]
-
-The setup commands, the output family, the folder commands, and the code
-family take --output-format text|json. Code commands also accept --json.
-A key is read from stdin, or from the environment variable named by
---from-env — never from an argument, which every process on the machine
-can read.
-
--p, output, attach, diagnostics, agent-mcp, the setup commands, and the code
-family also take --server <url> [--server-token-env <var>] or --attach, which
-talks to a server that is already running instead of embedding one. --attach
-reads {TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop).
-With --server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
-variable; it is never an argument either. Remote server URLs must use https;
-http is accepted only for a loopback host. The folder commands do not take
---server/--attach: they provision local host consent in this machine's own
-broker and product store, and they can run while serve or the desktop already
-owns the data directory.";
 
 #[tokio::main]
 async fn main() {
@@ -260,14 +153,20 @@ async fn main() {
 /// command from a failure of the work the command drove.
 async fn run() -> Result<i32> {
     let (args, server_flags) = take_server_flags(std::env::args_os().skip(1).collect());
+    if let Some(family) = help::help_topic(&args) {
+        help::print_help(family);
+        return Ok(0);
+    }
     let mut args = args.into_iter();
     match args.next().as_deref() {
         // Default to `serve` so a bare `tidebreak` runs the daemon.
         None => {
+            set_usage_family(Family::Daemon);
             server_flags.refuse("serve");
             serve().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("serve") => {
+            set_usage_family(Family::Daemon);
             server_flags.refuse("serve");
             if args.next().is_some() {
                 usage_error("serve does not accept arguments");
@@ -279,6 +178,7 @@ async fn run() -> Result<i32> {
             // image tag can be moved, and `serve` needs a database before it
             // reports anything. This is also the smoke test the server image
             // publish runs against a freshly built binary.
+            set_usage_family(Family::Daemon);
             server_flags.refuse("--version");
             if args.next().is_some() {
                 usage_error("--version does not accept arguments");
@@ -287,6 +187,7 @@ async fn run() -> Result<i32> {
             Ok(0)
         }
         Some(command) if command == OsStr::new("mcp") => {
+            set_usage_family(Family::Daemon);
             server_flags.refuse("mcp");
             let Some(workspace) = args.next() else {
                 usage_error("mcp requires a workspace path");
@@ -297,6 +198,7 @@ async fn run() -> Result<i32> {
             serve_mcp(workspace.into()).await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("rehome-secrets") => {
+            set_usage_family(Family::Daemon);
             server_flags.refuse("rehome-secrets");
             if args.next().is_some() {
                 usage_error("rehome-secrets does not accept arguments");
@@ -304,11 +206,13 @@ async fn run() -> Result<i32> {
             rehome_secrets().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("output") => {
+            set_usage_family(Family::Output);
             output_command(&mut args, server_flags.resolve()?)
                 .await
                 .map(|()| 0)
         }
         Some(command) if command == OsStr::new("attach") => {
+            set_usage_family(Family::Output);
             let Some(chat) = args.next() else {
                 usage_error("attach requires a chat id");
             };
@@ -326,6 +230,7 @@ async fn run() -> Result<i32> {
                 .map(|()| 0)
         }
         Some(command) if command == OsStr::new("-p") || command == OsStr::new("--print") => {
+            set_usage_family(Family::Print);
             let Some(prompt) = args.next() else {
                 usage_error("-p requires a prompt");
             };
@@ -398,6 +303,7 @@ async fn run() -> Result<i32> {
                 || command == OsStr::new("chat")
                 || command == OsStr::new("agent-run") =>
         {
+            set_usage_family(Family::Setup);
             let family = command.to_string_lossy().into_owned();
             let (command, format) = parse_setup(&family, text_args(args));
             setup::run(command, format, server_flags.resolve()?)
@@ -409,6 +315,7 @@ async fn run() -> Result<i32> {
         // server, and pointing at one would say the grant lands somewhere it
         // does not — so `--server` is refused rather than ignored.
         Some(command) if command == OsStr::new("folder") => {
+            set_usage_family(Family::Folder);
             server_flags.refuse("folder");
             match folder::parse(args) {
                 Ok(command) => folder::run(command).await.map(|()| 0),
@@ -416,6 +323,7 @@ async fn run() -> Result<i32> {
             }
         }
         Some(command) if command == OsStr::new("diagnostics") => {
+            set_usage_family(Family::Diagnostics);
             let subcommand = args.next().unwrap_or_default();
             let command = if subcommand == OsStr::new("snapshot") {
                 if args.next().is_some() {
@@ -445,6 +353,7 @@ async fn run() -> Result<i32> {
                 .map(|()| 0)
         }
         Some(command) if command == OsStr::new("browser") => {
+            set_usage_family(Family::AgentTools);
             server_flags.refuse("browser");
             let mut raw = text_args(args);
             let json_count = raw.iter().filter(|a| a.as_str() == "--json").count();
@@ -459,13 +368,11 @@ async fn run() -> Result<i32> {
             }
             match crate::browser::parse_browser(raw) {
                 Ok(command) => crate::browser::run_browser(command).await.map(|()| 0),
-                Err(message) => {
-                    eprintln!("tidebreak: {message}\n\n{}", crate::browser::BROWSER_USAGE);
-                    std::process::exit(2);
-                }
+                Err(message) => usage_error(&message),
             }
         }
         Some(command) if command == OsStr::new("browser-mcp") => {
+            set_usage_family(Family::AgentTools);
             server_flags.refuse("browser-mcp");
             if args.next().is_some() {
                 usage_error("browser-mcp accepts no arguments");
@@ -473,20 +380,16 @@ async fn run() -> Result<i32> {
             crate::browser::run_browser_mcp().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("computer") => {
+            set_usage_family(Family::AgentTools);
             server_flags.refuse("computer");
             let raw = text_args(args);
             match crate::computer_use::parse_computer(raw) {
                 Ok(command) => crate::computer_use::run_computer(command).await.map(|()| 0),
-                Err(message) => {
-                    eprintln!(
-                        "tidebreak: {message}\n\n{}",
-                        crate::computer_use::COMPUTER_USAGE
-                    );
-                    std::process::exit(2);
-                }
+                Err(message) => usage_error(&message),
             }
         }
         Some(command) if command == OsStr::new("computer-mcp") => {
+            set_usage_family(Family::AgentTools);
             server_flags.refuse("computer-mcp");
             if args.next().is_some() {
                 usage_error("computer-mcp accepts no arguments");
@@ -494,6 +397,7 @@ async fn run() -> Result<i32> {
             crate::computer_use::run_computer_mcp().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("agent-mcp") => {
+            set_usage_family(Family::AgentTools);
             if args.next().is_some() {
                 usage_error("agent-mcp accepts no arguments beyond --server/--attach");
             }
@@ -502,12 +406,10 @@ async fn run() -> Result<i32> {
                 .map(|()| 0)
         }
         Some(command) if command == OsStr::new("code") => {
+            set_usage_family(Family::Code);
             match crate::code::parse(text_args(args)) {
                 Ok(command) => crate::code::run(command, server_flags.resolve()?).await,
-                Err(message) => {
-                    eprintln!("tidebreak: {message}\n\n{}", crate::code::USAGE);
-                    std::process::exit(2);
-                }
+                Err(message) => usage_error(&message),
             }
         }
         Some(other) => {
@@ -974,11 +876,6 @@ fn parse_output_trailing_flags(
         }
     }
     (revision, format)
-}
-
-fn usage_error(message: &str) -> ! {
-    eprintln!("tidebreak: {message}\n\n{USAGE}");
-    std::process::exit(2);
 }
 
 /// Configuration for the profile this build talks to.
