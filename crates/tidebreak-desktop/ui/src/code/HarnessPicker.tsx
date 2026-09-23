@@ -70,7 +70,7 @@ export function HarnessPicker({
     <div
       className={
         variant === "composer"
-          ? "flex min-w-0 items-center gap-1"
+          ? "flex shrink-0 items-center gap-1"
           : "flex flex-col gap-1"
       }
     >

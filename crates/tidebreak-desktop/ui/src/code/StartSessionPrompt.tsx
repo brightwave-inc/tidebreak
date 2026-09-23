@@ -434,7 +434,7 @@ export function StartSessionPrompt({
       }}
     >
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-8">
-        <div className="flex w-full max-w-xl flex-col gap-6">
+        <div className="flex w-full max-w-3xl flex-col gap-6">
           <div className="flex flex-col gap-1 text-center">
             {workspaceTitle ? (
               <h2 className="text-lg font-semibold tracking-tight">

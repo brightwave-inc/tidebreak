@@ -1360,7 +1360,7 @@ function ComposerView({
         }}
       />
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <ComposerToolsMenu
             disabled={inputDisabled}
             attachFiles={
