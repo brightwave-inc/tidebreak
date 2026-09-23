@@ -16,124 +16,145 @@ pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
     }
     let mut names = HashSet::new();
     for server in servers {
-        validate_name(&server.name)?;
-        match (&server.command, &server.url, &server.gateway_endpoint) {
-            (None, None, None) => {
-                return Err(server_error(
-                    &server.name,
-                    "must configure a command, a url, or a gateway endpoint",
-                ));
-            }
-            (Some(command), None, None) => {
-                validate_process_string(&server.name, "command", command)?;
-                if command.is_empty() {
-                    return Err(server_error(&server.name, "command must not be empty"));
-                }
-                if server.bearer_token_env.is_some() {
-                    return Err(server_error(
-                        &server.name,
-                        "bearer_token_env applies only to url servers",
-                    ));
-                }
-            }
-            (None, Some(url), None) => {
-                validate_process_string(&server.name, "url", url)?;
-                tidebreak_mcp::validate_http_url_with_credentials(
-                    url,
-                    server.bearer_token_env.is_some() || server.oauth,
-                )
-                .map_err(|error| server_error(&server.name, error))?;
-                validate_no_process_fields(server)?;
-                if server.oauth && server.bearer_token_env.is_some() {
-                    return Err(server_error(
-                        &server.name,
-                        "oauth and bearer_token_env are mutually exclusive; an OAuth \
-                         server obtains its bearer through sign-in, not a static \
-                         environment variable",
-                    ));
-                }
-                if let Some(bearer_name) = &server.bearer_token_env {
-                    validate_environment_name(&server.name, bearer_name)?;
-                }
-            }
-            (None, None, Some(slug)) => {
-                validate_gateway_endpoint_slug(&server.name, slug)?;
-                validate_no_process_fields(server)?;
-                if server.bearer_token_env.is_some() {
-                    return Err(server_error(
-                        &server.name,
-                        "bearer_token_env applies only to url servers; a gateway \
-                         endpoint's bearer comes from the signed-in session",
-                    ));
-                }
-            }
-            _ => {
-                return Err(server_error(
-                    &server.name,
-                    "must configure exactly one of command, url, or gateway endpoint",
-                ));
-            }
-        }
-        if server.oauth && server.url.is_none() {
-            return Err(server_error(
-                &server.name,
-                "oauth applies only to url servers",
-            ));
-        }
-        if server.args.len() > MAX_ARGS {
-            return Err(server_error(
-                &server.name,
-                format!("must not contain more than {MAX_ARGS} arguments"),
-            ));
-        }
-        for argument in &server.args {
-            validate_process_string(&server.name, "argument", argument)?;
-        }
-        if server.env.len().saturating_add(server.env_from.len()) > MAX_ENVIRONMENT_VARIABLES {
-            return Err(server_error(
-                &server.name,
-                format!(
-                    "must not contain more than {MAX_ENVIRONMENT_VARIABLES} environment variables"
-                ),
-            ));
-        }
-        let mut environment_names = HashSet::new();
-        for key in &server.env {
-            validate_environment_name(&server.name, key)?;
-            environment_names.insert(key.as_str());
-        }
-        for (key, value) in &server.env_values {
-            if !server.env.contains(key) {
-                return Err(server_error(
-                    &server.name,
-                    format!("environment value {key:?} names no configured variable"),
-                ));
-            }
-            validate_process_string(&server.name, "environment value", value)?;
-        }
-        for key in &server.env_from {
-            validate_environment_name(&server.name, key)?;
-            if !environment_names.insert(key) {
-                return Err(server_error(
-                    &server.name,
-                    format!("environment variable {key:?} is configured more than once"),
-                ));
-            }
-        }
-        if let Some(path) = server.cwd.as_ref().and_then(|path| path.to_str()) {
-            validate_process_string(&server.name, "working directory", path)?;
-        }
-        if !(1..=MAX_REQUEST_TIMEOUT_MS).contains(&server.request_timeout_ms) {
-            return Err(server_error(
-                &server.name,
-                format!("request_timeout_ms must be between 1 and {MAX_REQUEST_TIMEOUT_MS}"),
-            ));
-        }
+        validate_server(server)?;
         if !names.insert(server.name.clone()) {
             return Err(server_error(&server.name, "server name is duplicated"));
         }
     }
     Ok(())
+}
+
+/// Every check [`validate_servers`] makes that concerns one server alone.
+///
+/// The loader runs this per saved record, so one invalid record is skipped
+/// with its reason instead of failing the whole set.
+pub(super) fn validate_server(server: &McpServerDefinition) -> Result<()> {
+    validate_name(&server.name)?;
+    match (&server.command, &server.url, &server.gateway_endpoint) {
+        (None, None, None) => {
+            return Err(server_error(
+                &server.name,
+                "must configure a command, a url, or a gateway endpoint",
+            ));
+        }
+        (Some(command), None, None) => {
+            validate_process_string(&server.name, "command", command)?;
+            if command.is_empty() {
+                return Err(server_error(&server.name, "command must not be empty"));
+            }
+            if server.bearer_token_env.is_some() {
+                return Err(server_error(
+                    &server.name,
+                    "bearer_token_env applies only to url servers",
+                ));
+            }
+        }
+        (None, Some(url), None) => {
+            validate_process_string(&server.name, "url", url)?;
+            tidebreak_mcp::validate_http_url_with_credentials(
+                url,
+                server.bearer_token_env.is_some() || server.oauth,
+            )
+            .map_err(|error| server_error(&server.name, error))?;
+            validate_no_process_fields(server)?;
+            if server.oauth && server.bearer_token_env.is_some() {
+                return Err(server_error(
+                    &server.name,
+                    "oauth and bearer_token_env are mutually exclusive; an OAuth \
+                     server obtains its bearer through sign-in, not a static \
+                     environment variable",
+                ));
+            }
+            if let Some(bearer_name) = &server.bearer_token_env {
+                validate_environment_name(&server.name, bearer_name)?;
+            }
+        }
+        (None, None, Some(slug)) => {
+            validate_gateway_endpoint_slug(&server.name, slug)?;
+            validate_no_process_fields(server)?;
+            if server.bearer_token_env.is_some() {
+                return Err(server_error(
+                    &server.name,
+                    "bearer_token_env applies only to url servers; a gateway \
+                     endpoint's bearer comes from the signed-in session",
+                ));
+            }
+        }
+        _ => {
+            return Err(server_error(
+                &server.name,
+                "must configure exactly one of command, url, or gateway endpoint",
+            ));
+        }
+    }
+    if server.oauth && server.url.is_none() {
+        return Err(server_error(
+            &server.name,
+            "oauth applies only to url servers",
+        ));
+    }
+    if server.args.len() > MAX_ARGS {
+        return Err(server_error(
+            &server.name,
+            format!("must not contain more than {MAX_ARGS} arguments"),
+        ));
+    }
+    for argument in &server.args {
+        validate_process_string(&server.name, "argument", argument)?;
+    }
+    if server.env.len().saturating_add(server.env_from.len()) > MAX_ENVIRONMENT_VARIABLES {
+        return Err(server_error(
+            &server.name,
+            format!("must not contain more than {MAX_ENVIRONMENT_VARIABLES} environment variables"),
+        ));
+    }
+    let mut environment_names = HashSet::new();
+    for key in &server.env {
+        validate_environment_name(&server.name, key)?;
+        environment_names.insert(key.as_str());
+    }
+    for (key, value) in &server.env_values {
+        if !server.env.contains(key) {
+            return Err(server_error(
+                &server.name,
+                format!("environment value {key:?} names no configured variable"),
+            ));
+        }
+        validate_process_string(&server.name, "environment value", value)?;
+    }
+    for key in &server.env_from {
+        validate_environment_name(&server.name, key)?;
+        if !environment_names.insert(key) {
+            return Err(server_error(
+                &server.name,
+                format!("environment variable {key:?} is configured more than once"),
+            ));
+        }
+    }
+    if let Some(path) = server.cwd.as_ref().and_then(|path| path.to_str()) {
+        validate_process_string(&server.name, "working directory", path)?;
+    }
+    if !(1..=MAX_REQUEST_TIMEOUT_MS).contains(&server.request_timeout_ms) {
+        return Err(server_error(
+            &server.name,
+            format!("request_timeout_ms must be between 1 and {MAX_REQUEST_TIMEOUT_MS}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Why a validation error refused one server, without the server's name in
+/// front: the Connected apps list shows the name beside it. Validation
+/// messages name fields and environment variable names, never a value.
+pub(super) fn validation_reason(name: &str, error: &AgentError) -> String {
+    let message = match error {
+        AgentError::Config(message) | AgentError::Message(message) => message.as_str(),
+        _ => return "Its saved settings are not valid.".to_string(),
+    };
+    let prefix = format!("invalid external MCP server {name:?}: ");
+    let detail = message.strip_prefix(&prefix).unwrap_or(message);
+    let detail = detail.strip_prefix("MCP client error: ").unwrap_or(detail);
+    format!("Its saved settings are not valid: {detail}.")
 }
 
 /// Remote transports (url and gateway endpoint) never spawn a child, so no

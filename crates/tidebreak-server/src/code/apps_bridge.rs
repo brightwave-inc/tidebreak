@@ -190,7 +190,9 @@ pub async fn connected_apps(
     if session.lifecycle == SessionLifecycle::Ended {
         return ServerError::conflict_kind("session_ended", "session has ended").into_response();
     }
-    let registry = state.mcp.snapshot();
+    // An engine relaunched at boot lists its tools right away; give saved
+    // servers that are still connecting a few seconds to join the list.
+    let registry = state.mcp.snapshot_after_boot().await;
     // Connected apps run under the session as the chat context: gateway
     // call bearers are minted against it, exactly as for the in-process
     // engine.

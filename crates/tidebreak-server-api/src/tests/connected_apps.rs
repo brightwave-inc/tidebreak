@@ -1065,3 +1065,116 @@ async fn loopback_http_rest_app_requires_explicit_consent() {
     assert_eq!(entry["base_url"], json!("http://127.0.0.1:23373/v0"));
     assert_eq!(entry["allow_loopback_http"], json!(true));
 }
+
+async fn send(router: &Router, bearer: &str, method: &str, uri: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A saved MCP record the runtime could not load is listed on its own, with
+/// its name and why, and Remove deletes it. Only a skipped record goes that
+/// way: an unknown id is a 404, not a delete of some other record.
+#[tokio::test]
+async fn a_skipped_mcp_record_is_listed_with_its_reason_and_can_be_removed() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let now = chrono::Utc::now();
+    let corrupt = tidebreak_core::connected_app::ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: "corrupt".to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition: json!({"name": "corrupt", "command": "/bin/tool", "transport": "stdio"}),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .store
+        .replace_connected_apps(ConnectedAppKind::McpServer, std::slice::from_ref(&corrupt))
+        .await
+        .unwrap();
+    state
+        .mcp
+        .initialize(crate::mcp_config::ConfiguredMcpServers::default())
+        .await
+        .unwrap()
+        .connect()
+        .await;
+
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(listing["apps"], json!([]));
+    let skipped = listing["skipped_mcp_servers"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["id"], json!(corrupt.id));
+    assert_eq!(skipped[0]["name"], json!("corrupt"));
+    assert!(skipped[0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("\"transport\""));
+
+    let other = ConnectedAppId::new();
+    assert_eq!(
+        send(
+            &router,
+            &bearer,
+            "DELETE",
+            &format!("/connected-apps/skipped/{other}")
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let uri = format!("/connected-apps/skipped/{}", corrupt.id);
+    assert_eq!(
+        send(&router, &bearer, "DELETE", &uri).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(state.store.list_connected_apps().await.unwrap().is_empty());
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(listing["skipped_mcp_servers"], json!([]));
+}
+
+/// The directory lists sourced servers with no tier the curated list did not
+/// grant. Adding an id the directory does not hold is a 404, and a managed
+/// profile refuses the add before anything connects.
+#[tokio::test]
+async fn the_mcp_directory_lists_servers_and_refuses_unknown_or_locked_adds() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let directory = send(&router, &bearer, "GET", "/mcp/directory").await;
+    assert_eq!(directory.status(), StatusCode::OK);
+    let directory: serde_json::Value = serde_json::from_str(&raw_body(directory).await).unwrap();
+    let servers = directory["servers"].as_array().unwrap();
+    assert!(servers.len() >= 15, "{directory}");
+    let linear = servers
+        .iter()
+        .find(|server| server["id"] == "linear")
+        .expect("Linear is in the directory");
+    assert_eq!(linear["url"], json!("https://mcp.linear.app/mcp"));
+    assert_eq!(linear["sign_in"], json!({"kind": "oauth"}));
+    assert_eq!(linear["docs_url"], json!("https://linear.app/docs/mcp"));
+    assert_eq!(linear["curated"], json!(null));
+
+    assert_eq!(
+        send(&router, &bearer, "POST", "/mcp/directory/not-listed/add")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    crate::managed_policy::provision(&*state.provisioned_policy, "https://corp.gateway").unwrap();
+    let refused = send(&router, &bearer, "POST", "/mcp/directory/linear/add").await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(refused).await).unwrap();
+    assert_eq!(body["kind"], json!("managed_profile"));
+    assert!(state.mcp.info().await.servers.is_empty());
+}

@@ -21,7 +21,7 @@ use crate::connected_apps::{
 };
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::mcp_config::McpHealth;
+use crate::mcp_config::{McpHealth, McpSkippedServer};
 use crate::mcp_curated::McpCuration;
 use crate::openapi_catalog::{
     enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
@@ -48,6 +48,10 @@ pub struct ConnectedAppsInfo {
     /// MCP entries in the runtime's configuration order, then REST entries in
     /// storage order (oldest first).
     pub apps: Vec<ConnectedAppInfo>,
+    /// Saved MCP server records Tidebreak could not load, with why. They stay
+    /// on file, unused, until removed with
+    /// `DELETE /connected-apps/skipped/{id}`.
+    pub skipped_mcp_servers: Vec<McpSkippedServer>,
 }
 
 /// One connected app, projected per kind for the Settings listing.
@@ -417,6 +421,28 @@ pub async fn delete_rest_connected_app(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /connected-apps/skipped/{id}` — delete one saved MCP server record
+/// Tidebreak could not load, with the environment values and OAuth session
+/// stored under it. Only a skipped record can go this way: a loaded server is
+/// removed by saving the MCP server list without it.
+pub async fn delete_skipped_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<ConnectedAppId>,
+) -> Result<StatusCode, ServerError> {
+    // Once the delete begins, finish it even if the client disconnects.
+    let runtime = state.mcp.clone();
+    let removal = tokio::spawn(async move { runtime.remove_skipped(id).await });
+    let removed = removal
+        .await
+        .map_err(|_| ServerError::internal("MCP record removal task failed"))??;
+    if !removed {
+        return Err(ServerError::not_found(format!(
+            "no skipped MCP server record {id}"
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /connected-apps/rest/spec-preview` body: where the OpenAPI document
 /// comes from. Externally tagged and closed: `{"url": …}` or
 /// `{"document": …}`.
@@ -654,5 +680,8 @@ async fn connected_apps_info(
             allow_loopback_http: definition.allow_loopback_http,
         });
     }
-    Ok(ConnectedAppsInfo { apps })
+    Ok(ConnectedAppsInfo {
+        apps,
+        skipped_mcp_servers: state.mcp.skipped_servers().await,
+    })
 }

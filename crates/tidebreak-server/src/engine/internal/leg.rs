@@ -1223,10 +1223,12 @@ impl LegDriver {
                 turn.id
             )));
         }
-        let tools = self
-            .mcp
-            .as_ref()
-            .map_or_else(|| self.tools.clone(), |mcp| mcp.snapshot());
+        // Right after boot, saved MCP servers may still be connecting; the
+        // snapshot waits for them briefly, never longer than a few seconds.
+        let tools = match &self.mcp {
+            Some(mcp) => mcp.snapshot_after_boot().await,
+            None => self.tools.clone(),
+        };
         // Session-scoped tools (the code session's native computer-use
         // channel) join the process-wide surface for this turn only.
         let tools = if session_tools.is_empty() {

@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures::future::join_all;
-use tidebreak_core::connected_app::{ConnectedApp, ConnectedAppKind};
+use tidebreak_core::connected_app::{validate_connected_app, ConnectedApp, ConnectedAppKind};
 use tidebreak_core::id::ConnectedAppId;
 use tidebreak_core::local_app::CREATE_APP_TOOL;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store, ToolRegistry};
@@ -24,7 +24,9 @@ use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
 use super::oauth::{self, OAuthAccess, OAuthNeed, SignInProgress, SignInRecord, SignInView};
 use super::types::*;
-use super::validation::{failure_diagnostic, failure_park, validate_servers};
+use super::validation::{
+    failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
+};
 
 /// One connection attempt's outcome, with what it taught the runtime about
 /// OAuth.
@@ -151,6 +153,48 @@ pub(super) struct RuntimeState {
     /// only ever a projection detail, never the consent key.
     ids: BTreeMap<String, ConnectedAppId>,
     pub(super) servers: HashMap<String, ManagedServer>,
+    /// Saved records the loader could not load, kept as stored so a save
+    /// writes them back unchanged instead of deleting them.
+    skipped: Vec<SkippedRecord>,
+}
+
+/// One saved record the loader skipped, and why.
+#[derive(Clone)]
+struct SkippedRecord {
+    record: ConnectedApp,
+    reason: String,
+}
+
+/// The `create_app` roster inputs one registry rebuild reads.
+struct Rosters {
+    rest: Vec<RestRosterApp>,
+    folders: Vec<crate::host_folders::ApprovedFolder>,
+    gateway: Vec<GatewayRosterApp>,
+}
+
+/// Why a record whose environment values could not move into the credential
+/// store is not loaded this time.
+const MIGRATION_FAILED: &str = "Tidebreak could not move this server's environment values into \
+                                the credential store, so it did not start the server without \
+                                them. It tries again the next time Tidebreak starts.";
+
+/// The saved servers [`McpRuntime::initialize`] published as connecting.
+///
+/// [`connect`](Self::connect) brings them up. Boot runs it in the background
+/// after the listener binds, so a slow server never keeps the port closed.
+#[must_use = "published servers stay connecting until their boot connections run"]
+pub struct McpBoot {
+    runtime: Arc<McpRuntime>,
+    /// Each server to connect, with the epoch it was published under.
+    servers: Vec<(String, u64)>,
+}
+
+impl McpBoot {
+    /// Connect every published server at once, publishing each one's tools as
+    /// soon as it is up.
+    pub async fn connect(self) {
+        self.runtime.connect_at_boot(self.servers).await;
+    }
 }
 
 /// Owns the current MCP connection set and atomically published tool registry.
@@ -192,6 +236,10 @@ pub struct McpRuntime {
     /// that is waiting on the browser.
     sign_ins: std::sync::Mutex<HashMap<ConnectedAppId, SignInRecord>>,
     next_sign_in: AtomicU64,
+    /// `false` while the saved servers published at boot are still making
+    /// their first connection. A turn waits on it, briefly; see
+    /// [`snapshot_after_boot`](Self::snapshot_after_boot).
+    boot_settled: tokio::sync::watch::Sender<bool>,
     /// Lets a test's fake authorization server live on loopback.
     #[cfg(test)]
     oauth_loopback: AtomicBool,
@@ -213,6 +261,7 @@ impl McpRuntime {
                 definitions: Vec::new(),
                 ids: BTreeMap::new(),
                 servers: HashMap::new(),
+                skipped: Vec::new(),
             }),
             mutation: Mutex::new(()),
             store,
@@ -225,6 +274,7 @@ impl McpRuntime {
             next_epoch: AtomicU64::new(1),
             sign_ins: std::sync::Mutex::new(HashMap::new()),
             next_sign_in: AtomicU64::new(1),
+            boot_settled: tokio::sync::watch::Sender::new(true),
             #[cfg(test)]
             oauth_loopback: AtomicBool::new(false),
         }
@@ -414,20 +464,31 @@ impl McpRuntime {
                 definition.env_values.clear();
                 continue;
             };
-            let mut values = self.stored_env(id).await;
-            values.append(&mut definition.env_values);
-            values.retain(|name, _| definition.env.contains(name));
-            let key = env_secret_key(id);
-            if values.is_empty() {
-                let _ = self.secrets.delete_secret(&key).await;
-                continue;
-            }
-            let encoded = serde_json::to_string(&values).map_err(|error| {
-                AgentError::config(format!("could not encode MCP environment values: {error}"))
-            })?;
-            self.secrets.set_secret(&key, &encoded).await?;
+            self.commit_env_value(definition, id).await?;
         }
         Ok(())
+    }
+
+    /// Commit one definition's environment values under record `id` and
+    /// empty its `env_values`, as [`commit_env_values`](Self::commit_env_values)
+    /// does for each definition.
+    async fn commit_env_value(
+        &self,
+        definition: &mut McpServerDefinition,
+        id: ConnectedAppId,
+    ) -> Result<()> {
+        let mut values = self.stored_env(id).await;
+        values.append(&mut definition.env_values);
+        values.retain(|name, _| definition.env.contains(name));
+        let key = env_secret_key(id);
+        if values.is_empty() {
+            let _ = self.secrets.delete_secret(&key).await;
+            return Ok(());
+        }
+        let encoded = serde_json::to_string(&values).map_err(|error| {
+            AgentError::config(format!("could not encode MCP environment values: {error}"))
+        })?;
+        self.secrets.set_secret(&key, &encoded).await
     }
 
     /// The gateway resolver MCP dispatch rides on — exposed so tests can pin
@@ -547,13 +608,20 @@ impl McpRuntime {
         torn_down
     }
 
-    /// Load persisted `mcp_server` connected-app records when present,
-    /// otherwise the legacy boot file.
+    /// Load the saved `mcp_server` records, or the legacy boot file when there
+    /// are none, and publish them.
     ///
-    /// A boot file remains fail-closed. Persisted definitions degrade in place
-    /// so the Settings UI remains available to repair a missing executable or
-    /// selected environment variable.
-    pub async fn initialize(&self, boot: ConfiguredMcpServers) -> Result<()> {
+    /// Saved records never fail boot. A record that does not decode, fails
+    /// validation, or cannot move its stored environment values into the
+    /// credential store is skipped: it stays on file, and Connected apps lists
+    /// it with the reason. Every other saved server is published as
+    /// connecting, without a network wait, and the returned [`McpBoot`]
+    /// connects them. Boot runs it after the listener binds.
+    ///
+    /// The boot file stays fail-closed: its servers connect here, and one that
+    /// fails stops boot, so a headless deployment never starts with fewer tools
+    /// than its file names.
+    pub async fn initialize(self: &Arc<Self>, boot: ConfiguredMcpServers) -> Result<McpBoot> {
         let records: Vec<ConnectedApp> = self
             .store
             .list_connected_apps()
@@ -562,48 +630,13 @@ impl McpRuntime {
             .filter(|record| record.kind == ConnectedAppKind::McpServer)
             .collect();
         if !records.is_empty() {
-            let mut ids = BTreeMap::new();
-            let mut definitions = Vec::with_capacity(records.len());
-            let mut migrated = Vec::new();
-            for record in records {
-                let mut stored = record.definition;
-                // Records written before literal values moved into the secret
-                // store carry them here in cleartext; lift them out before the
-                // definition is typed, so no value ever enters the type again.
-                let legacy = take_legacy_env_values(&mut stored);
-                let mut definition: McpServerDefinition =
-                    serde_json::from_value(stored).map_err(|error| {
-                        AgentError::config(format!(
-                            "invalid saved connected-app definition {:?}: {error}",
-                            record.name
-                        ))
-                    })?;
-                if !legacy.is_empty() {
-                    migrated.push(record.name.clone());
-                    definition.env_values = legacy;
-                }
-                // The record's name is authoritative for the namespace; the
-                // stored definition mirrors it and is repaired if they ever
-                // disagree.
-                definition.name = record.name.clone();
-                ids.insert(record.name, record.id);
-                definitions.push(definition);
-            }
-            validate_servers(&definitions)?;
-            if !migrated.is_empty() {
-                tracing::info!(
-                    servers = ?migrated,
-                    "moving stored MCP environment values into the secret store"
-                );
-                // Writes the values, empties `env_values`, and rewrites the
-                // records without them. A failure leaves the cleartext records
-                // untouched and retries next boot rather than starting servers
-                // whose credentials just went missing.
-                self.commit_env_values(&mut definitions, &ids).await?;
-                self.persist_definitions(&definitions, &ids).await?;
-            }
-            self.replace_permissive(definitions, ids).await;
-            return Ok(());
+            let (definitions, ids, skipped) = self.load_records(records).await;
+            return Ok(self.publish_starting(definitions, ids, skipped).await);
+        }
+        if boot.is_empty() {
+            return Ok(self
+                .publish_starting(Vec::new(), BTreeMap::new(), Vec::new())
+                .await);
         }
         // The boot file is a host-environment artifact: on a managed
         // profile it is exactly the channel the lockdown exists to
@@ -612,14 +645,484 @@ impl McpRuntime {
         // channel, in which case any remote (`url`) definitions it names
         // are still forced down per definition below. The warning is the
         // operator's diagnostic for the silence.
-        if !boot.is_empty() && self.manual_lockdown().await == ManualLockdown::AllManual {
+        if self.manual_lockdown().await == ManualLockdown::AllManual {
             tracing::warn!(
                 "{CONFIG_ENV} is ignored on a managed profile; \
                  mount MCP endpoints from the model gateway instead"
             );
-            return Ok(());
+            return Ok(self
+                .publish_starting(Vec::new(), BTreeMap::new(), Vec::new())
+                .await);
         }
-        self.replace_strict(boot.0, false).await.map(|_| ())
+        self.replace_strict(boot.0, false).await?;
+        Ok(McpBoot {
+            runtime: Arc::clone(self),
+            servers: Vec::new(),
+        })
+    }
+
+    /// Decode, validate, and migrate each saved record, setting aside the ones
+    /// that cannot be loaded.
+    ///
+    /// Records written before literal environment values moved into the
+    /// secret store carry them in cleartext. Their values move now, one record
+    /// at a time, and the records are rewritten without them. A record whose
+    /// values cannot move is skipped rather than started without its
+    /// credentials, and its record keeps the values for the next boot.
+    async fn load_records(
+        &self,
+        records: Vec<ConnectedApp>,
+    ) -> (
+        Vec<McpServerDefinition>,
+        BTreeMap<String, ConnectedAppId>,
+        Vec<SkippedRecord>,
+    ) {
+        let mut definitions: Vec<McpServerDefinition> = Vec::with_capacity(records.len());
+        let mut ids = BTreeMap::new();
+        let mut skipped = Vec::new();
+        let mut migrated = Vec::new();
+        for record in records {
+            let loaded = match decode_record(&record) {
+                Err(reason) => Err(reason),
+                Ok(_) if ids.contains_key(&record.name) => {
+                    Err("Another saved server already uses this name.".to_string())
+                }
+                Ok(_) if definitions.len() >= MAX_SERVERS => Err(format!(
+                    "Tidebreak loads at most {MAX_SERVERS} MCP servers, and this one is past \
+                     that limit."
+                )),
+                Ok(mut definition) if !definition.env_values.is_empty() => {
+                    match self.commit_env_value(&mut definition, record.id).await {
+                        Ok(()) => {
+                            migrated.push(record.name.clone());
+                            Ok(definition)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                server = %record.name,
+                                "could not move stored MCP environment values into the secret \
+                                 store: {error}"
+                            );
+                            Err(MIGRATION_FAILED.to_string())
+                        }
+                    }
+                }
+                Ok(definition) => Ok(definition),
+            };
+            match loaded {
+                Ok(definition) => {
+                    ids.insert(record.name.clone(), record.id);
+                    definitions.push(definition);
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        server = %record.name,
+                        "skipped a saved MCP server Tidebreak could not load: {reason}"
+                    );
+                    skipped.push(SkippedRecord { record, reason });
+                }
+            }
+        }
+        if !migrated.is_empty() {
+            tracing::info!(
+                servers = ?migrated,
+                "moved stored MCP environment values into the secret store"
+            );
+            // The values are stored now; rewrite the records without them. A
+            // failure leaves the cleartext in the records, and the next boot
+            // moves the same values again.
+            if let Err(error) = self.persist_definitions(&definitions, &ids, &skipped).await {
+                tracing::warn!(
+                    "could not rewrite MCP server records without their environment values: \
+                     {error}"
+                );
+            }
+        }
+        (definitions, ids, skipped)
+    }
+
+    /// Publish `configured` and the plugin servers beside it without
+    /// connecting anything: each server that connects reads as connecting,
+    /// the rest as off. Returns the connections to run.
+    ///
+    /// The registry published here carries the local `create_app` roster
+    /// only. The gateway's part of it is a network read, so it joins when the
+    /// boot connections have landed.
+    async fn publish_starting(
+        self: &Arc<Self>,
+        configured: Vec<McpServerDefinition>,
+        ids: BTreeMap<String, ConnectedAppId>,
+        skipped: Vec<SkippedRecord>,
+    ) -> McpBoot {
+        let plugin = self.plugin_definitions(&configured).await;
+        let definitions: Vec<McpServerDefinition> = configured.into_iter().chain(plugin).collect();
+        let lockdown = self.manual_lockdown().await;
+        let mut servers = HashMap::with_capacity(definitions.len());
+        let mut connecting = Vec::new();
+        for definition in &definitions {
+            let epoch = self.fresh_epoch();
+            let starts = connects(definition, lockdown);
+            if starts {
+                connecting.push((definition.name.clone(), epoch));
+            }
+            servers.insert(
+                definition.name.clone(),
+                ManagedServer {
+                    client: None,
+                    health: if starts {
+                        McpHealth::Initializing
+                    } else {
+                        McpHealth::Disabled
+                    },
+                    diagnostic: if starts {
+                        None
+                    } else {
+                        disabled_diagnostic(definition, lockdown)
+                    },
+                    resolved_command: None,
+                    reconnect: Reconnect::default(),
+                    epoch,
+                    reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views: HashMap::new(),
+                    oauth: None,
+                },
+            );
+        }
+        if !connecting.is_empty() {
+            self.boot_settled.send_replace(false);
+        }
+        let rosters = self.local_rosters().await;
+        self.forget_stale_sign_ins(&definitions, &ids);
+        let mut state = self.state.lock().await;
+        state.definitions = definitions;
+        state.ids = ids;
+        state.servers = servers;
+        state.skipped = skipped;
+        self.write_registry(&state, &rosters);
+        McpBoot {
+            runtime: Arc::clone(self),
+            servers: connecting,
+        }
+    }
+
+    /// Make the first connection to every server [`publish_starting`]
+    /// published, all at once, then mark boot settled and publish the
+    /// registry with the gateway's roster.
+    ///
+    /// [`publish_starting`]: Self::publish_starting
+    async fn connect_at_boot(self: &Arc<Self>, servers: Vec<(String, u64)>) {
+        if !servers.is_empty() {
+            // Before any connection presents a stored session, as a
+            // replacement does: a session issued for another URL goes.
+            let (definitions, ids) = {
+                let state = self.state.lock().await;
+                (state.definitions.clone(), state.ids.clone())
+            };
+            self.reconcile_oauth_sessions(&definitions, &ids).await;
+            let rosters = self.local_rosters().await;
+            join_all(
+                servers
+                    .iter()
+                    .map(|(name, epoch)| self.connect_booting(name, *epoch, &rosters)),
+            )
+            .await;
+        }
+        self.boot_settled.send_replace(true);
+        self.republish().await;
+    }
+
+    /// Make one published server's first connection, and publish its tools
+    /// the moment it is up.
+    ///
+    /// It holds the server's reconnect lock while it connects, so a manual
+    /// reconnect or the supervisor waits for this attempt instead of starting
+    /// a second child. A settings save that replaced the server meanwhile
+    /// wins: this result is dropped.
+    async fn connect_booting(&self, name: &str, epoch: u64, rosters: &Rosters) {
+        let (reconnect_lock, definition, app_id) = {
+            let state = self.state.lock().await;
+            let Some(server) = state
+                .servers
+                .get(name)
+                .filter(|server| server.epoch == epoch)
+            else {
+                return;
+            };
+            let Some(definition) = state
+                .definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .cloned()
+            else {
+                return;
+            };
+            (
+                server.reconnect_lock.clone(),
+                definition,
+                state.ids.get(name).copied(),
+            )
+        };
+        let _reconnect = reconnect_lock.lock().await;
+        if self
+            .state
+            .lock()
+            .await
+            .servers
+            .get(name)
+            .is_none_or(|server| server.epoch != epoch)
+        {
+            return;
+        }
+        // Read here rather than before boot: a keychain read can wait on a
+        // prompt, and that wait must not hold the port closed.
+        let env = match app_id {
+            Some(id) if !definition.env.is_empty() => self.stored_env(id).await,
+            _ => BTreeMap::new(),
+        };
+        let (result, oauth) = self.connect_server(&definition, &env, app_id).await;
+        let resolved_command = match &result {
+            Ok(_) => super::stdio::resolved_display(&definition).await,
+            Err(_) => None,
+        };
+        let mut state = self.state.lock().await;
+        if state
+            .definitions
+            .iter()
+            .find(|candidate| candidate.name == name)
+            != Some(&definition)
+        {
+            return;
+        }
+        let fresh_epoch = self.fresh_epoch();
+        let Some(server) = state
+            .servers
+            .get_mut(name)
+            .filter(|server| server.epoch == epoch)
+        else {
+            return;
+        };
+        match result {
+            Ok((client, ui_views)) => {
+                server.client = Some(client);
+                server.health = McpHealth::Healthy;
+                server.diagnostic = None;
+                server.resolved_command = resolved_command;
+                server.ui_views = ui_views;
+                server.oauth = None;
+                server.reconnect = Reconnect::default();
+            }
+            Err(error) => {
+                // As in `replace_strict`: the error chain is URL- and
+                // secret-free, and the warn serves `tidebreak serve` until the
+                // desktop installs a tracing subscriber.
+                tracing::warn!(
+                    server = %name,
+                    "MCP server did not connect at startup: {error}"
+                );
+                let diagnostic = failure_diagnostic(&definition, &error, oauth.as_ref());
+                server.client = None;
+                server.health = McpHealth::Degraded;
+                server.reconnect = Reconnect::after_failure(
+                    failure_park(&definition, &error, oauth.as_ref()),
+                    diagnostic.clone(),
+                );
+                server.diagnostic = Some(diagnostic);
+                server.ui_views = HashMap::new();
+                server.oauth = oauth;
+            }
+        }
+        // A reconnect that waited on the lock with the old epoch returns this
+        // result instead of starting another child.
+        server.epoch = fresh_epoch;
+        self.write_registry(&state, rosters);
+    }
+
+    /// The tool surface for work that starts now: a turn, or an external
+    /// engine listing its tools.
+    ///
+    /// While saved servers are still making their first connection after
+    /// boot, this waits for them, but never longer than [`BOOT_TOOLS_WAIT`].
+    /// After that it answers with the servers that are up; the rest reach
+    /// later snapshots as they connect. Once boot has settled, it answers at
+    /// once, like [`snapshot`](Self::snapshot).
+    pub async fn snapshot_after_boot(&self) -> Arc<ToolRegistry> {
+        let mut settled = self.boot_settled.subscribe();
+        let _ = tokio::time::timeout(BOOT_TOOLS_WAIT, settled.wait_for(|settled| *settled)).await;
+        self.snapshot()
+    }
+
+    /// The saved records the loader skipped, with why, in storage order.
+    pub async fn skipped_servers(&self) -> Vec<McpSkippedServer> {
+        self.state
+            .lock()
+            .await
+            .skipped
+            .iter()
+            .map(|skipped| McpSkippedServer {
+                id: skipped.record.id,
+                name: skipped.record.name.clone(),
+                reason: skipped.reason.clone(),
+            })
+            .collect()
+    }
+
+    /// Delete one skipped record, with the environment values and the OAuth
+    /// session stored under its id. Returns whether it was skipped.
+    pub async fn remove_skipped(&self, id: ConnectedAppId) -> Result<bool> {
+        let _mutation = self.mutation.lock().await;
+        let (configured, ids, remaining) = {
+            let state = self.state.lock().await;
+            if !state.skipped.iter().any(|skipped| skipped.record.id == id) {
+                return Ok(false);
+            }
+            (
+                state
+                    .definitions
+                    .iter()
+                    .filter(|definition| definition.plugin.is_none())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                state.ids.clone(),
+                state
+                    .skipped
+                    .iter()
+                    .filter(|skipped| skipped.record.id != id)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.persist_definitions(&configured, &ids, &remaining)
+            .await?;
+        // Best effort, like removing a server: nothing references the id now,
+        // so a leftover entry is unreachable.
+        let _ = self.secrets.delete_secret(&env_secret_key(id)).await;
+        let _ = McpOAuthCredentialVault::new(self.secrets.clone(), id)
+            .clear_all()
+            .await;
+        self.state
+            .lock()
+            .await
+            .skipped
+            .retain(|skipped| skipped.record.id != id);
+        Ok(true)
+    }
+
+    /// Add one remote server to the saved configuration, connecting only it.
+    ///
+    /// A settings save connects every server again, so one server that is
+    /// down fails it. An add leaves the configured servers alone. It saves the
+    /// new server even when it cannot connect yet, so its row says what it
+    /// needs: a sign-in, a token variable, or a network that answers. One
+    /// failure saves nothing: an OAuth sign-in Tidebreak cannot complete,
+    /// because that server could never connect.
+    ///
+    /// The server takes the definition's name, or the first free variant of
+    /// it. When a configured server already has the definition's URL, nothing
+    /// changes and that server's name comes back.
+    pub async fn add_server(
+        &self,
+        mut definition: McpServerDefinition,
+        lockdown: ManualLockdown,
+    ) -> Result<McpAddOutcome> {
+        let _mutation = self.mutation.lock().await;
+        let (configured, plugin, mut ids, skipped) = {
+            let state = self.state.lock().await;
+            let (configured, plugin): (Vec<_>, Vec<_>) = state
+                .definitions
+                .iter()
+                .cloned()
+                .partition(|definition| definition.plugin.is_none());
+            (configured, plugin, state.ids.clone(), state.skipped.clone())
+        };
+        if let Some(existing) = configured
+            .iter()
+            .find(|configured| same_endpoint(configured.url.as_deref(), definition.url.as_deref()))
+        {
+            let name = existing.name.clone();
+            return Ok(McpAddOutcome::Added {
+                name,
+                info: self.info().await,
+            });
+        }
+        if manual_lockdown_applies(&definition, lockdown) {
+            return Ok(McpAddOutcome::RefusedManual);
+        }
+        let taken: HashSet<String> = configured
+            .iter()
+            .chain(&plugin)
+            .map(|definition| definition.name.clone())
+            .chain(skipped.iter().map(|skipped| skipped.record.name.clone()))
+            .collect();
+        definition.name = unused_name(&definition.name, &taken);
+        let mut candidate = configured;
+        candidate.push(definition.clone());
+        validate_servers(&candidate)?;
+        let id = ConnectedAppId::new();
+        ids.insert(definition.name.clone(), id);
+        let (result, oauth) = self
+            .connect_server(&definition, &BTreeMap::new(), Some(id))
+            .await;
+        if let (Err(error), Some(need)) = (&result, &oauth) {
+            if !need.saves() {
+                return Err(AgentError::config(format!(
+                    "external MCP server {} failed to start: {}",
+                    definition.name,
+                    failure_diagnostic(&definition, error, Some(need))
+                )));
+            }
+        }
+        self.persist_definitions(&candidate, &ids, &skipped).await?;
+        let resolved_command = match &result {
+            Ok(_) => super::stdio::resolved_display(&definition).await,
+            Err(_) => None,
+        };
+        let managed = match result {
+            Ok((client, ui_views)) => ManagedServer {
+                client: Some(client),
+                health: McpHealth::Healthy,
+                diagnostic: None,
+                resolved_command,
+                reconnect: Reconnect::default(),
+                epoch: self.fresh_epoch(),
+                reconnect_lock: Arc::new(Mutex::new(())),
+                ui_views,
+                oauth: None,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    server = %definition.name,
+                    "added MCP server did not connect: {error}"
+                );
+                let diagnostic = failure_diagnostic(&definition, &error, oauth.as_ref());
+                ManagedServer {
+                    client: None,
+                    health: McpHealth::Degraded,
+                    diagnostic: Some(diagnostic.clone()),
+                    resolved_command: None,
+                    reconnect: Reconnect::after_failure(
+                        failure_park(&definition, &error, oauth.as_ref()),
+                        diagnostic,
+                    ),
+                    epoch: self.fresh_epoch(),
+                    reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views: HashMap::new(),
+                    oauth,
+                }
+            }
+        };
+        let name = definition.name.clone();
+        let rosters = self.rosters().await;
+        {
+            let mut state = self.state.lock().await;
+            state.definitions = candidate.into_iter().chain(plugin).collect();
+            state.ids = ids;
+            state.servers.insert(name.clone(), managed);
+            self.write_registry(&state, &rosters);
+        }
+        Ok(McpAddOutcome::Added {
+            name,
+            info: self.info().await,
+        })
     }
 
     /// One prefetched MCP Apps view document, when the named server is
@@ -924,7 +1427,7 @@ impl McpRuntime {
                 );
                 continue;
             }
-            let name = gateway_mount_name(slug, &taken);
+            let name = unused_name(slug, &taken);
             taken.insert(name.clone());
             configured.insert(slug.clone());
             servers.push(McpServerDefinition {
@@ -1052,6 +1555,23 @@ impl McpRuntime {
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
+        // A skipped record keeps its name on file, and a save writes it back
+        // unchanged, so a new server cannot take the name until the record is
+        // removed.
+        let skipped = self.state.lock().await.skipped.clone();
+        if persist {
+            if let Some(taken) = definitions.iter().find(|definition| {
+                skipped
+                    .iter()
+                    .any(|skipped| skipped.record.name == definition.name)
+            }) {
+                return Err(AgentError::config(format!(
+                    "a saved MCP server named {:?} could not be loaded and still holds that \
+                     name; remove it under Connected apps, then save again",
+                    taken.name
+                )));
+            }
+        }
         let ids = if persist {
             self.assign_app_ids(&definitions).await
         } else {
@@ -1195,7 +1715,8 @@ impl McpRuntime {
             // definitions are excluded: they are derived, so persisting them
             // would create a second, staler home for the same facts.
             self.remember_endpoint_unmounts(&configured).await;
-            self.persist_definitions(&configured, &ids).await?;
+            self.persist_definitions(&configured, &ids, &skipped)
+                .await?;
         }
         self.publish(definitions, ids, servers).await;
         Ok(())
@@ -1205,13 +1726,19 @@ impl McpRuntime {
     /// connected-app set. `env_values` is `skip_serializing`, so the record
     /// carries environment *names* and nothing more; the values are already in
     /// the secret store by the time this runs.
+    ///
+    /// `skipped` records are written back exactly as stored, after the
+    /// definitions, so no save deletes a record this build could not load.
+    /// One the store's own record checks now refuse cannot be carried
+    /// forward, and goes.
     async fn persist_definitions(
         &self,
         definitions: &[McpServerDefinition],
         ids: &BTreeMap<String, ConnectedAppId>,
+        skipped: &[SkippedRecord],
     ) -> Result<()> {
         let now = chrono::Utc::now();
-        let records: Vec<ConnectedApp> = definitions
+        let mut records: Vec<ConnectedApp> = definitions
             .iter()
             .map(|definition| {
                 Ok(ConnectedApp {
@@ -1224,87 +1751,32 @@ impl McpRuntime {
                 })
             })
             .collect::<Result<_>>()?;
+        for skipped in skipped {
+            match validate_connected_app(&skipped.record) {
+                Ok(()) => records.push(skipped.record.clone()),
+                Err(problem) => tracing::warn!(
+                    server = %skipped.record.name,
+                    "dropping a saved MCP server record the store no longer accepts: {problem}"
+                ),
+            }
+        }
         self.store
             .replace_connected_apps(ConnectedAppKind::McpServer, &records)
             .await
     }
 
+    /// Publish `definitions` the way boot does and wait for every connection,
+    /// so a test sees the settled state.
+    #[cfg(test)]
     pub(super) async fn replace_permissive(
-        &self,
+        self: &Arc<Self>,
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
-        self.reconcile_oauth_sessions(&definitions, &ids).await;
-        let plugin = self.plugin_definitions(&definitions).await;
-        let definitions: Vec<McpServerDefinition> = definitions.into_iter().chain(plugin).collect();
-        let envs = self.resolve_envs(&definitions, &ids).await;
-        let lockdown = self.manual_lockdown().await;
-        let mut servers = HashMap::new();
-        let connections = join_all(definitions.iter().map(|definition| {
-            let env = envs.get(&definition.name).cloned().unwrap_or_default();
-            let app_id = ids.get(&definition.name).copied();
-            async move {
-                if connects(definition, lockdown) {
-                    let (result, oauth) = self.connect_server(definition, &env, app_id).await;
-                    (result.map(Some), oauth)
-                } else {
-                    (Ok(None), None)
-                }
-            }
-        }))
-        .await;
-        for (definition, (connection, oauth)) in definitions.iter().zip(connections) {
-            let managed = match connection {
-                Ok(None) => ManagedServer {
-                    client: None,
-                    health: McpHealth::Disabled,
-                    diagnostic: disabled_diagnostic(definition, lockdown),
-                    resolved_command: None,
-                    reconnect: Reconnect::default(),
-                    epoch: self.fresh_epoch(),
-                    reconnect_lock: Arc::new(Mutex::new(())),
-                    ui_views: HashMap::new(),
-                    oauth: None,
-                },
-                Ok(Some((client, ui_views))) => ManagedServer {
-                    client: Some(client),
-                    health: McpHealth::Healthy,
-                    diagnostic: None,
-                    resolved_command: super::stdio::resolved_display(definition).await,
-                    reconnect: Reconnect::default(),
-                    epoch: self.fresh_epoch(),
-                    reconnect_lock: Arc::new(Mutex::new(())),
-                    ui_views,
-                    oauth: None,
-                },
-                Err(error) => {
-                    // As in `replace_strict`: the error chain is URL- and
-                    // secret-free, and the warn serves `tidebreak serve`
-                    // until the desktop installs a tracing subscriber.
-                    tracing::warn!(
-                        server = %definition.name,
-                        "MCP server connection failed during permissive replacement: {error}"
-                    );
-                    let diagnostic = failure_diagnostic(definition, &error, oauth.as_ref());
-                    ManagedServer {
-                        client: None,
-                        health: McpHealth::Degraded,
-                        diagnostic: Some(diagnostic.clone()),
-                        resolved_command: None,
-                        reconnect: Reconnect::after_failure(
-                            failure_park(definition, &error, oauth.as_ref()),
-                            diagnostic,
-                        ),
-                        epoch: self.fresh_epoch(),
-                        reconnect_lock: Arc::new(Mutex::new(())),
-                        ui_views: HashMap::new(),
-                        oauth,
-                    }
-                }
-            };
-            servers.insert(definition.name.clone(), managed);
-        }
-        self.publish(definitions, ids, servers).await;
+        self.publish_starting(definitions, ids, Vec::new())
+            .await
+            .connect()
+            .await;
     }
 
     /// Bring the plugin-sourced slice of the connection set in line with the
@@ -1525,6 +1997,49 @@ impl McpRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// The rosters this machine answers for itself: the stored REST apps and
+    /// the approved folders. The gateway's stays empty; see
+    /// [`rosters`](Self::rosters).
+    async fn local_rosters(&self) -> Rosters {
+        Rosters {
+            rest: self.rest_roster().await,
+            folders: self.folder_roster().await,
+            gateway: Vec::new(),
+        }
+    }
+
+    /// Every roster, the gateway's included. That one is a network read while
+    /// a gateway session exists, so callers read it before they take the
+    /// state lock.
+    async fn rosters(&self) -> Rosters {
+        let mut rosters = self.local_rosters().await;
+        rosters.gateway = self.gateway.entitled_app_catalogs().await;
+        rosters
+    }
+
+    /// Build the registry from `state` and publish it. Callers hold the state
+    /// lock, so the registry never runs ahead of the state it describes.
+    fn write_registry(&self, state: &RuntimeState, rosters: &Rosters) {
+        let registry = self.registry_with(
+            &state.servers,
+            &rosters.rest,
+            &rosters.folders,
+            &rosters.gateway,
+        );
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+    }
+
+    /// Rebuild the registry with fresh rosters. They are read before the
+    /// state lock, so a slow gateway never holds up a read of the server list.
+    async fn republish(&self) {
+        let rosters = self.rosters().await;
+        let state = self.state.lock().await;
+        self.write_registry(&state, &rosters);
     }
 
     fn registry_with(
@@ -2434,13 +2949,14 @@ async fn read_endpoint_unmounts(store: &dyn Store) -> Result<Vec<String>> {
     })
 }
 
-/// A valid, unused namespace for an auto-mounted endpoint: the slug,
-/// truncated to the name limit and de-duplicated against every configured
-/// server — the same derivation the desktop's mount toggle uses
-/// (`mountName` in `McpPanel.tsx`), so a mount gets the same name whichever
-/// side creates it. Slugs are ASCII by contract, so byte slicing is safe.
-fn gateway_mount_name(slug: &str, taken: &HashSet<String>) -> String {
-    let base = &slug[..slug.len().min(MAX_SERVER_NAME_BYTES)];
+/// A valid, unused namespace derived from `base`: `base` itself, truncated to
+/// the name limit, or its first free `_2`, `_3`, … variant. An auto-mounted
+/// gateway endpoint gets the same name the desktop's mount toggle would give
+/// it (`mountName` in `McpPanel.tsx`), whichever side creates it, and a
+/// directory server gets its directory id or a variant of it. Both inputs are
+/// ASCII by contract, so byte slicing is safe.
+fn unused_name(base: &str, taken: &HashSet<String>) -> String {
+    let base = &base[..base.len().min(MAX_SERVER_NAME_BYTES)];
     if !taken.contains(base) {
         return base.to_string();
     }
@@ -2453,6 +2969,72 @@ fn gateway_mount_name(slug: &str, taken: &HashSet<String>) -> String {
         }
     }
     unreachable!("some numeric suffix is always free")
+}
+
+/// Whether two server URLs name the same endpoint: the same scheme, host,
+/// port, and query, and the same path apart from a trailing slash.
+fn same_endpoint(left: Option<&str>, right: Option<&str>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+        return left == right;
+    };
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+        && left.query() == right.query()
+}
+
+/// Type and check one saved record, or say why it cannot load.
+///
+/// Records written before literal values moved into the secret store carry
+/// them in cleartext; they are lifted out before the definition is typed, so
+/// no value ever enters the type again, and come back in `env_values` for the
+/// loader to move. The record's name is authoritative for the namespace: the
+/// stored definition mirrors it and is repaired if they ever disagree.
+fn decode_record(record: &ConnectedApp) -> std::result::Result<McpServerDefinition, String> {
+    let mut stored = record.definition.clone();
+    let legacy = take_legacy_env_values(&mut stored);
+    let mut definition: McpServerDefinition =
+        serde_json::from_value(stored).map_err(|error| decode_reason(&error))?;
+    definition.env_values = legacy;
+    definition.name = record.name.clone();
+    validate_server(&definition).map_err(|error| validation_reason(&definition.name, &error))?;
+    Ok(definition)
+}
+
+/// Why a saved definition did not decode, as a sentence.
+///
+/// A serde message can quote a string it refused, and a definition's strings
+/// include arguments and URLs, so only a field name is ever carried over.
+fn decode_reason(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    if let Some(field) = quoted_field(&message, "unknown field `") {
+        return format!(
+            "It has a setting this version of Tidebreak does not know, \"{field}\". A newer \
+             version of Tidebreak may have saved it."
+        );
+    }
+    if let Some(field) = quoted_field(&message, "missing field `") {
+        return format!("It is missing the \"{field}\" setting.");
+    }
+    "Its saved settings are not in a form this version of Tidebreak can read.".to_string()
+}
+
+/// The field name serde quotes after `prefix` in `message`, when it is a
+/// plain identifier.
+fn quoted_field<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let start = message.find(prefix)? + prefix.len();
+    let length = message[start..].find('`')?;
+    let field = &message[start..start + length];
+    (!field.is_empty()
+        && field.len() <= 64
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then_some(field)
 }
 
 /// The diagnostic a forced-down manual server carries, so the settings list
