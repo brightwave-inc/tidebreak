@@ -344,13 +344,17 @@ async fn a_single_connection_store_opens_no_read_pool() {
 /// writer is.
 ///
 /// Run with `cargo test -p tidebreak-core --lib journal_load -- --ignored
-/// --nocapture` to see the numbers.
+/// --nocapture` to see the numbers. Set `TIDEBREAK_JOURNAL_LOAD_SESSIONS` to
+/// stream more sessions at once than the store has connections.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "load test; run on demand"]
 async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
-    const SESSIONS: usize = 5;
     const EVENTS_PER_SESSION: usize = 600;
     const READERS: usize = 4;
+    let sessions_streaming: usize = std::env::var("TIDEBREAK_JOURNAL_LOAD_SESSIONS")
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(5);
 
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("load.db").display());
@@ -365,11 +369,11 @@ async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
     let store = DbStore::connect_with_options(options).await.unwrap();
     let owner = OwnerId::local();
     let mut sessions = Vec::new();
-    for _ in 0..SESSIONS {
+    for _ in 0..sessions_streaming {
         sessions.push(seeded_session(&store, &owner).await);
     }
 
-    let streaming = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(SESSIONS));
+    let streaming = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(sessions_streaming));
     let started = std::time::Instant::now();
     let mut writers = Vec::new();
     for session_id in sessions.clone() {
@@ -431,7 +435,7 @@ async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
         let index = ((latencies.len() as f64 * fraction).ceil() as usize).saturating_sub(1);
         latencies[index.min(latencies.len() - 1)]
     };
-    let appends = SESSIONS * EVENTS_PER_SESSION;
+    let appends = sessions_streaming * EVENTS_PER_SESSION;
     println!(
         "{appends} appends in {:.2}s ({:.0}/s), slowest append {:.1}ms; \
          {} reads: p50 {:.1}ms, p99 {:.1}ms, max {:.1}ms; {} batches",
