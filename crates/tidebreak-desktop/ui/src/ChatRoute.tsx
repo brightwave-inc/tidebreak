@@ -31,7 +31,7 @@ import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import type { BranchOrigin, ChatMessage, RetryableTurn } from "./MessageList";
 import type { RetryModelGroup, TurnActions } from "./MessageActions";
-import type { Chat, TurnSideEffect } from "./api";
+import { HttpError, type Chat, type TurnSideEffect } from "./api";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { AgentsPanel } from "./AgentsPanel";
@@ -151,7 +151,7 @@ function withoutAnswer(
 /** What the reader is told when an edit started a new chat. */
 function editBranchedMessage(effects: readonly TurnSideEffect[]): string {
   return effects.length > 0
-    ? "Your edit started a new chat, because the answer it replaced changed things outside this one."
+    ? "Your edit started a new chat, because an answer it replaced changed things outside this one."
     : "Your edit started a new chat.";
 }
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
@@ -583,9 +583,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   /**
-   * Replace the latest message and answer it. When the turn it replaces
-   * changed things outside the conversation, the server starts a new chat
-   * instead; this one goes back the way it was, and the reader follows the
+   * Replace the latest message and answer it. When the turn it replaces, or
+   * an earlier answer to the same message, changed things outside the
+   * conversation, the server starts a new chat instead; this one goes back the way it was, and the reader follows the
    * edit there.
    */
   async function editTurn(turnId: string, text: string) {
@@ -711,8 +711,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           });
         }
       },
-      () => {
-        if (current) {
+      (error) => {
+        // Only the server's 404 says the original is gone. Any other failure
+        // leaves the notice out rather than claim it.
+        if (current && error instanceof HttpError && error.status === 404) {
           setOriginChat({
             id: originId,
             title: null,
