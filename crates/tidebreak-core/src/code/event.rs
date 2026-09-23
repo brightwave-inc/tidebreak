@@ -905,6 +905,17 @@ pub enum Event {
         /// Present only when a parent wait is known; never inferred.
         wait: Option<SessionTreeWait>,
     },
+    /// Activity from a turn the engine started on its own, such as the turn
+    /// Claude Code runs when a background task ends.
+    ///
+    /// It is never part of the person's turn, even when it arrives while one
+    /// waits for the engine: the transcript keeps it outside that turn, and
+    /// nothing that reads a turn's answer counts it. `event` is a message, a
+    /// tool call, a file change, or a notice.
+    BackgroundActivity {
+        /// What the engine did.
+        event: Box<Event>,
+    },
 }
 
 /// Whether to omit a defaulted `false` flag from a journal row.
@@ -1138,6 +1149,7 @@ mod tests {
             Event::CredentialRefused { .. } => 24,
             Event::ModelReported { .. } => 25,
             Event::SessionTree { .. } => 26,
+            Event::BackgroundActivity { .. } => 27,
         }
     }
 
@@ -1289,6 +1301,12 @@ mod tests {
             Event::SessionTree {
                 children: Vec::new(),
                 wait: None,
+            },
+            Event::BackgroundActivity {
+                event: Box::new(Event::AssistantMessage {
+                    text: "The background job finished.".into(),
+                    parent_call_id: None,
+                }),
             },
         ]
     }

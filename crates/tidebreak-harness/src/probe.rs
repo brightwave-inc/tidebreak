@@ -241,9 +241,24 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     }
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
-            let binary = match host.harness_version(kind) {
+            let version = host.harness_version(kind);
+            let binary = match version {
                 Some(version) => crate::managed_binary_version(data_dir, kind, version),
                 None => crate::managed_binary(data_dir, kind),
+            };
+            // A Grok install from before Tidebreak unpacked its binary is
+            // unpacked here, once. That reads the install already on disk.
+            let binary = match binary {
+                Some(binary) => Some(binary),
+                None => {
+                    crate::pin::unpack_installed_binary(
+                        data_dir,
+                        kind,
+                        version,
+                        host.managed_node_root.as_deref(),
+                    )
+                    .await
+                }
             };
             if let Some(binary) = binary {
                 let node = host
@@ -886,6 +901,9 @@ pub async fn observe_version(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_captured_env(&mut command, env);
+    // Grok checks for a newer release whenever it runs, and asking for its
+    // version must not replace it. Other engines ignore the variable.
+    command.env(crate::grok::DISABLE_AUTOUPDATER_ENV, "1");
     let child =
         spawn_process_tree(&mut command).map_err(|err| ProbeError::Shell(err.to_string()))?;
     let output = timeout(PROBE_TIMEOUT, child.wait_with_output())
@@ -1652,6 +1670,20 @@ eval "$cmd"
         write_exec(&bin, "#!/bin/sh\necho\necho '2.1.233 (Claude Code)'\n");
         let version = observe_version(&bin, &[]).await.unwrap();
         assert!(version.contains("2.1.233"));
+    }
+
+    /// Asking Grok for its version must not let it update itself first.
+    #[tokio::test]
+    async fn the_version_probe_turns_off_self_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("grok");
+        write_exec(
+            &bin,
+            "#!/bin/sh\necho \"grok 1.0.13 update=${GROK_DISABLE_AUTOUPDATER:-on}\"\n",
+        );
+        let env = vec![("GROK_DISABLE_AUTOUPDATER".into(), "0".into())];
+        let version = observe_version(&bin, &env).await.unwrap();
+        assert_eq!(version, "grok 1.0.13 update=1");
     }
 
     #[tokio::test]

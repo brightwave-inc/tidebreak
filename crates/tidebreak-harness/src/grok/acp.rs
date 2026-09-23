@@ -257,10 +257,6 @@ impl GrokSession {
         argv.extend(self.spec.extra_argv.iter().cloned());
         argv.push("stdio".into());
         plan.argv = argv;
-        plan.env
-            .retain(|(key, _)| key != "GROK_DISABLE_AUTOUPDATER");
-        plan.env
-            .push(("GROK_DISABLE_AUTOUPDATER".into(), "1".into()));
         validate_launch_plan_with(&plan, BypassPolicy::Forbidden)?;
         Ok(plan)
     }

@@ -28,6 +28,11 @@ use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionS
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Grok's switch that turns off its own update check for one process
+/// (documented in the 1.0.13 binary). Tidebreak runs one exact release, so
+/// every Grok child it starts sets it.
+pub const DISABLE_AUTOUPDATER_ENV: &str = "GROK_DISABLE_AUTOUPDATER";
+
 /// Longest line read while waiting for the ACP `initialize` answer. It lists
 /// models and commands, not history, so this is generous.
 const INITIALIZE_MAX_LINE: usize = 1_024 * 1_024;
@@ -205,7 +210,7 @@ async fn observe_model_efforts(
     for (key, value) in crate::filter_child_env(env.iter().cloned()) {
         command.env(key, value);
     }
-    command.env("GROK_DISABLE_AUTOUPDATER", "1");
+    command.env(DISABLE_AUTOUPDATER_ENV, "1");
     let mut child = crate::spawn_process_tree(&mut command).ok()?;
     let (Some(mut stdin), Some(mut stdout)) = (child.take_stdin(), child.take_stdout()) else {
         let _ = child.terminate().await;
@@ -418,6 +423,7 @@ async fn observe_login(
     for (key, value) in crate::filter_child_env(env.iter().cloned()) {
         command.env(key, value);
     }
+    command.env(DISABLE_AUTOUPDATER_ENV, "1");
     let child = crate::spawn_process_tree(&mut command).ok()?;
     let output = timeout(AUTH_TIMEOUT, child.wait_with_output())
         .await
@@ -1054,6 +1060,81 @@ mod tests {
         })
         .unwrap();
         assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));
+    }
+
+    /// On one machine the 1.0.13 pin ran 1.0.40: Grok's npm entrypoint runs
+    /// the person's `~/.grok/bin/grok`, which Grok's own updater keeps
+    /// current. The probe must run and report the release Tidebreak pinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_probe_runs_the_pinned_grok_when_the_persons_own_is_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = crate::pin::fake_grok_install(tmp.path());
+        let pin = crate::pin_for(HarnessKind::Grok).unwrap();
+        let host = HostEnv {
+            shell: tmp.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: Some(fake.data_dir.clone()),
+            managed_node_root: Some(fake.node_root.clone()),
+            harness_versions: Vec::new(),
+            declared_binaries: Vec::new(),
+            declared_env: Some(vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("HOME".into(), fake.person_home.clone().into_os_string()),
+            ]),
+        };
+
+        let probe = GrokAdapter::new().probe(&host).await;
+        assert!(probe.found, "{}", probe.stderr);
+        assert_eq!(
+            probe.version.as_deref(),
+            Some(format!("grok {} (shipped)", pin.version).as_str())
+        );
+        let binary = probe.binary_path.unwrap();
+        assert!(
+            binary.starts_with(crate::pin::install_dir(&fake.data_dir, pin)),
+            "{}",
+            binary.display()
+        );
+        assert!(
+            !probe
+                .env
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("GROK_HOME")),
+            "sign-in, settings, and sessions stay in the person's own Grok home"
+        );
+    }
+
+    /// Every launch turns Grok's update check off and leaves `GROK_HOME` to
+    /// the person, where Grok keeps sign-in, settings, and sessions.
+    #[test]
+    fn every_launch_turns_off_self_update_and_keeps_the_persons_grok_home() {
+        let plan = compose_print_plan(PrintLaunch {
+            binary: Path::new("/data/tools/harnesses/grok/1.0.13/grok-home/bin/grok-1.0.13"),
+            extra_argv: &[],
+            cwd: Path::new("/workspace"),
+            extra_env: &[(DISABLE_AUTOUPDATER_ENV.into(), "0".into())],
+            relay_auth: None,
+            relay_key_env: None,
+            resume_ref: None,
+            new_session_id: None,
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            mode: PermissionMode::Auto,
+            model: None,
+            effort: None,
+            effort_ladder: EFFORT_LADDER_1_0_4,
+        })
+        .unwrap();
+        assert_eq!(
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == DISABLE_AUTOUPDATER_ENV)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["1"]
+        );
+        assert!(plan.env.iter().all(|(name, _)| name != "GROK_HOME"));
     }
 
     #[test]

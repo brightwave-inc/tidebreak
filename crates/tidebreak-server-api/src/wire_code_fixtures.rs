@@ -1179,6 +1179,35 @@ fn event_frames() -> Vec<Fixture> {
                 },
             ),
         ),
+        (
+            "event: background_activity (a message)",
+            frame(
+                67,
+                Event::BackgroundActivity {
+                    event: Box::new(Event::AssistantMessage {
+                        text: "The background job finished.".to_owned(),
+                        parent_call_id: None,
+                    }),
+                },
+            ),
+        ),
+        (
+            "event: background_activity (a tool call)",
+            frame(
+                68,
+                Event::BackgroundActivity {
+                    event: Box::new(Event::ToolStarted {
+                        call_id: "toolu_own".to_owned(),
+                        name: "Bash".to_owned(),
+                        detail: ToolDetail::Command {
+                            cmd: "cat job.log".to_owned(),
+                            cwd: String::new(),
+                        },
+                        parent_call_id: None,
+                    }),
+                },
+            ),
+        ),
     ];
     frames
         .into_iter()

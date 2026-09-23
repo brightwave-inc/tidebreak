@@ -1450,5 +1450,39 @@
       },
       "seq": 66
     }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: background_activity (a message)",
+    "value": {
+      "event": {
+        "event": {
+          "text": "The background job finished.",
+          "type": "assistant_message"
+        },
+        "type": "background_activity"
+      },
+      "seq": 67
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: background_activity (a tool call)",
+    "value": {
+      "event": {
+        "event": {
+          "call_id": "toolu_own",
+          "detail": {
+            "cmd": "cat job.log",
+            "cwd": "",
+            "kind": "command"
+          },
+          "name": "Bash",
+          "type": "tool_started"
+        },
+        "type": "background_activity"
+      },
+      "seq": 68
+    }
   }
 ]

@@ -1,6 +1,7 @@
 import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
   CodeApprovalState,
+  CodeEvent,
   CodeSessionLifecycle,
   CodeSessionSnapshot,
   CodeTurnSnapshot,
@@ -76,6 +77,11 @@ export type CodeTranscriptItem =
       /** Lucid rewrite of the closing message. The journal text stays in `text`. */
       rewrite?: string;
       rewriteState?: "rewriting" | "rewritten" | "failed";
+      /**
+       * Written by a turn the engine started on its own, outside every turn
+       * of the person's. The person's reply never streams into it.
+       */
+      background?: true;
     }
   | {
       kind: "reasoning";
@@ -99,6 +105,8 @@ export type CodeTranscriptItem =
       startedAt: string | null;
       /** Wall time from start to completion. Null when replayed or still running. */
       durationMs: number | null;
+      /** Run by a turn the engine started on its own. */
+      background?: true;
     }
   | {
       kind: "notice";
@@ -154,6 +162,11 @@ export type CodeSessionState = {
   activeTurnId: string | null;
   /** Turn established by a journal `turn_started` frame. */
   journalTurnId: string | null;
+  /**
+   * The turn whose end the journal applied last. What the engine does on its
+   * own between turns lands after that turn and before the next one.
+   */
+  settledTurnId: string | null;
   /**
    * A submit accepted after this journal cursor still owns live activity until
    * the journal names that turn or a newer live frame supersedes it.
@@ -243,6 +256,7 @@ export function initialCodeSessionState(): CodeSessionState {
     busy: false,
     activeTurnId: null,
     journalTurnId: null,
+    settledTurnId: null,
     acceptedTurnFence: null,
     turnActivityRevision: 0,
     turnStartedAt: null,
@@ -485,6 +499,7 @@ function reconcileCodeTurnSnapshotWithPending(
     busy: false,
     activeTurnId: null,
     journalTurnId: null,
+    settledTurnId: turn.id,
     acceptedTurnFence:
       state.acceptedTurnFence?.turnId === turn.id
         ? null
@@ -868,6 +883,7 @@ export function reduceCodeSessionEvent(
     lastSeq: transient ? state.lastSeq : framed.seq,
     animateStreaming: framed.replayed !== true,
     journalTurnId: cappedReplayStart ? null : state.journalTurnId,
+    settledTurnId: cappedReplayStart ? null : state.settledTurnId,
     assistantBuffer: cappedReplayStart ? "" : state.assistantBuffer,
     reasoningBuffer: cappedReplayStart ? "" : state.reasoningBuffer,
     items:
@@ -1333,6 +1349,7 @@ export function reduceCodeSessionEvent(
           activeTurnId: resolvesActiveTurn ? null : state.activeTurnId,
           journalTurnId:
             state.journalTurnId === turnId ? null : state.journalTurnId,
+          settledTurnId: turnId,
           acceptedTurnFence: resolvesActiveTurn
             ? null
             : state.acceptedTurnFence,
@@ -1370,9 +1387,145 @@ export function reduceCodeSessionEvent(
         effects,
       };
 
+    case "background_activity":
+      return {
+        state: reduceBackgroundActivity(state, event.event, framed, deps),
+        effects,
+      };
+
     default:
       return { state, effects };
   }
+}
+
+/**
+ * Apply what the engine did on its own, such as the turn Claude Code runs
+ * when a background task ends.
+ *
+ * It belongs to no turn of the person's, even when it arrives while one
+ * waits for the engine: it never joins that turn's reply or its streaming
+ * text, and a reload places it the same way. A call it runs can change the
+ * worktree, so its end counts as a content change.
+ */
+function reduceBackgroundActivity(
+  state: CodeSessionState,
+  event: CodeEvent,
+  framed: SequencedCodeEventFrame,
+  deps: CodeSessionDeps,
+): CodeSessionState {
+  switch (event.type) {
+    case "assistant_message":
+      return {
+        ...state,
+        items: insertBackgroundItem(state, framed, {
+          kind: "assistant",
+          id: deps.nextId(),
+          turnId: null,
+          parentCallId: event.parent_call_id ?? null,
+          text: event.text,
+          streaming: false,
+          background: true,
+        }),
+      };
+    case "tool_started":
+      return {
+        ...state,
+        items: insertBackgroundItem(state, framed, {
+          kind: "tool",
+          id: deps.nextId(),
+          turnId: null,
+          callId: event.call_id,
+          parentCallId: event.parent_call_id ?? null,
+          name: event.name,
+          detail: event.detail,
+          status: "running",
+          preview: "",
+          startedAt: framed.replayed ? null : deps.now(),
+          durationMs: null,
+          background: true,
+        }),
+      };
+    case "tool_completed": {
+      const parentCallId = event.parent_call_id ?? null;
+      return {
+        ...state,
+        items: state.items.map((item) =>
+          item.kind === "tool" &&
+          item.background === true &&
+          item.callId === event.call_id &&
+          item.parentCallId === parentCallId
+            ? {
+                ...item,
+                status: event.outcome,
+                preview: event.preview,
+                detail: mergeToolDetail(item.detail, event.detail),
+                durationMs: framed.replayed
+                  ? null
+                  : durationMs(item.startedAt, deps.now()),
+              }
+            : item,
+        ),
+        contentRevision: state.contentRevision + 1,
+      };
+    }
+    case "harness_notice":
+      return {
+        ...state,
+        items: insertBackgroundItem(state, framed, {
+          kind: "notice",
+          id: deps.nextId(),
+          level: event.level,
+          message: event.message,
+        }),
+      };
+    case "file_changed":
+      return { ...state, contentRevision: state.contentRevision + 1 };
+    default:
+      return state;
+  }
+}
+
+/**
+ * Place one item of the engine's own activity where it happened: before
+ * the message of the person's turn that is waiting for the engine, or after
+ * the turn the journal last ended and before the next one.
+ */
+function insertBackgroundItem(
+  state: CodeSessionState,
+  framed: SequencedCodeEventFrame,
+  item: CodeTranscriptItem,
+): CodeTranscriptItem[] {
+  const items = state.items;
+  const openTurnId =
+    state.journalTurnId ??
+    (framed.replayed === true ? null : state.activeTurnId);
+  const insertAt = (index: number) => [
+    ...items.slice(0, index),
+    item,
+    ...items.slice(index),
+  ];
+  if (openTurnId !== null) {
+    const message = items.findIndex(
+      (candidate) =>
+        candidate.kind === "user" && candidate.turnId === openTurnId,
+    );
+    if (message !== -1) return insertAt(message);
+  }
+  if (state.settledTurnId !== null) {
+    const settled = items.findIndex(
+      (candidate) =>
+        candidate.kind === "turn_boundary" &&
+        candidate.turnId === state.settledTurnId,
+    );
+    const next =
+      settled === -1
+        ? -1
+        : items.findIndex(
+            (candidate, index) => index > settled && candidate.kind === "user",
+          );
+    if (next !== -1) return insertAt(next);
+  }
+  return [...items, item];
 }
 
 function replayFollowsAcceptedTurn(
@@ -1567,6 +1720,9 @@ function streamingItemMatches(
   parentCallId: string | null,
 ): item is Extract<CodeTranscriptItem, { kind: "assistant" | "reasoning" }> {
   if (item.kind !== kind || item.turnId !== turnId) return false;
+  // The engine's own text is never the person's reply, whatever turn a
+  // frame is attributed to.
+  if (item.kind === "assistant" && item.background === true) return false;
   return item.kind !== "assistant" || item.parentCallId === parentCallId;
 }
 

@@ -13,7 +13,7 @@ a capture.
 
 | Engine | Install pin | Checked-in coverage |
 | --- | --- | --- |
-| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls, a per-server timeout check, the task, heartbeat, commit, and pull-request lines around long, background, and git commands (`background-tasks`), and its `--help`. No complete 2.1.259 capture. |
+| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls, a per-server timeout check, the task, heartbeat, commit, and pull-request lines around long, background, and git commands (`background-tasks`), a background task that ends between turns, with the `command_lifecycle` lines a client `uuid` draws (`background-turn-*`, each beside the user lines it was sent in `<name>.stdin.json`), and its `--help`. No complete 2.1.259 capture. |
 | Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. 0.153.4 adds managed human MCP discovery, a 130-second human wait, web search and image view items, compaction, and resume and config deprecation notices. No complete 0.153.4 capture. |
 | opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. 1.18.27 adds `auth list` output only. No complete 1.18.27 protocol capture. |
 | Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume, tool-image transport, and `todo_write` plan updates with the `initialize` model ladders. The 1.0.13 captures use a scripted local provider, not a live model. |
@@ -103,7 +103,10 @@ The existing integration shapes are:
 - Claude: `--input-format stream-json --output-format stream-json --verbose
   --include-partial-messages`. The 2.1.233 prompt-tool approval captures include
   the MCP `tools/call` request and allow/deny responses. That hidden
-  `--permission-prompt-tool` flag is not listed in the captured `--help`.
+  `--permission-prompt-tool` flag is not listed in the captured `--help`. Each
+  user line carries a client `uuid`, and the `background-turn-*` captures record
+  the lines that name it. Their `<name>.stdin.json` holds the user lines, since
+  the stream records stdout only.
 - Codex: `app-server --stdio`, framed as `{"dir":"in"|"out","msg":{…}}`.
   The 0.147.0 baseline includes command approvals; 0.153.0 adds
   `mcpServer/elicitation/request` for MCP tools.

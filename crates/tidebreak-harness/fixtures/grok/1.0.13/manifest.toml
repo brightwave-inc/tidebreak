@@ -88,3 +88,29 @@ including eventId values; the prompt id fixture-request-1; the host name
 fixture-host; agentId fixture-agent; agentInstanceId fixture-agent-instance.
 No key or token appeared. Frame order and every other value are as emitted.
 """
+
+[binary_resolution]
+checked = "2026-09-23"
+binary = "The pinned @xai-official/grok@1.0.13 install under the Tidebreak data directory, run in place and never changed"
+notes = """
+The npm entrypoint (node_modules/.bin/grok) runs $GROK_HOME/bin/grok, with
+GROK_HOME defaulting to ~/.grok, and unpacks its bundled binary there as
+bin/grok-<version> only when that file is missing. Grok's own updater keeps
+~/.grok/bin/grok current, and the npm install script also writes it.
+
+On the checking machine, ~/.grok/bin/grok pointed at grok-1.0.40:
+- the entrypoint with the person's home printed `grok 1.0.40 (eb1a2256660d)
+  [stable]`;
+- the entrypoint with GROK_HOME set to a fresh directory unpacked
+  bin/grok-1.0.13 there in about a second and printed `grok 1.0.13
+  (5e9a58528b76)`;
+- that unpacked binary, run with the person's own home, printed `grok 1.0.13
+  (5e9a58528b76) [stable]`, and its `grok models` reported `You are logged in
+  with grok.com.` with the default model from the person's config.toml;
+- the same binary with the fresh GROK_HOME reported `You are not
+  authenticated.`, because Grok keeps sign-in in $GROK_HOME/auth.json.
+
+GROK_DISABLE_AUTOUPDATER=1 turns off the update check for one process. The
+binary's own documentation says a stdio agent skips its background update
+unless it runs from $GROK_HOME/bin/grok.
+"""

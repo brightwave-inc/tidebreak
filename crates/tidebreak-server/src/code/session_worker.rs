@@ -336,6 +336,10 @@ pub(crate) struct LiveSink {
     /// detector confirms a push or a create marks this workspace, so the
     /// next hot pass reads the head the turn just moved (issue 2799).
     hot_prs: super::pr_refresh::HotPullRequests,
+    /// When the engine last reported activity from a turn it started on its
+    /// own. That work keeps the child busy the way a turn does, so the idle
+    /// park counts from it too (decision 0064).
+    last_background_activity: std::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 impl LiveSink {
@@ -346,6 +350,14 @@ impl LiveSink {
 
     pub(crate) fn set_turn(&self, turn_id: TurnId) {
         *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
+    }
+
+    /// Whether the engine did anything on its own within the last `window`.
+    fn active_on_its_own_within(&self, window: Duration) -> bool {
+        self.last_background_activity
+            .lock()
+            .expect("code sink background activity")
+            .is_some_and(|at| at.elapsed() < window)
     }
 
     /// How many unrecognized events the engine has counted since the last
@@ -653,6 +665,12 @@ pub(crate) fn settle_running_subagents(
 #[async_trait]
 impl HarnessEventSink for LiveSink {
     async fn emit(&self, event: HarnessEvent) {
+        if matches!(event, HarnessEvent::BackgroundActivity { .. }) {
+            *self
+                .last_background_activity
+                .lock()
+                .expect("code sink background activity") = Some(tokio::time::Instant::now());
+        }
         if let HarnessEvent::SessionStarted {
             resume_ref: Some(resume_ref),
             ..
@@ -1115,6 +1133,12 @@ async fn run_worker(
             // arms nothing. During an update quiesce the timer is only the
             // retry for a park that failed above, so it comes back fast.
             _ = tokio::time::sleep(if quiescing { QUIESCE_PARK_RETRY } else { PARK_AFTER_IDLE }), if engine.child_pid().is_some() => {
+                // Work the engine did on its own, such as the turn Claude
+                // Code runs when a background task ends, is activity too:
+                // the idle window starts again after it.
+                if !quiescing && sink.active_on_its_own_within(PARK_AFTER_IDLE) {
+                    continue;
+                }
                 park_idle_engine(&mut session, engine.as_ref(), &sink).await;
             }
         }
@@ -1213,14 +1237,30 @@ const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(50);
 /// nothing reads the dead process as live. The next turn respawns and
 /// resumes. A park that fails keeps the child and simply retries on the next
 /// idle window.
+///
+/// An engine busy with a turn of its own between the person's turns — Claude
+/// Code runs one when a background task ends — keeps its child the same way.
+/// The row keeps its pid, so an update quiesce waits for that turn as it
+/// waits for any running turn (decision 0080).
 async fn park_idle_engine(session: &mut Session, engine: &dyn HarnessSession, sink: &LiveSink) {
-    if let Err(error) = engine.park().await {
-        warn!(
-            session = %session.id,
-            error = %error,
-            "could not park the idle engine child"
-        );
-        return;
+    match engine.park().await {
+        Ok(()) => {}
+        Err(HarnessError::EngineBusy(detail)) => {
+            tracing::debug!(
+                session = %session.id,
+                %detail,
+                "left the engine child running until its own turn ends"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                session = %session.id,
+                error = %error,
+                "could not park the idle engine child"
+            );
+            return;
+        }
     }
     tracing::debug!(session = %session.id, "parked the idle engine child");
     if session.child_pid.take().is_some() {
@@ -3863,6 +3903,7 @@ pub(crate) fn sink_for(
         rewrite,
         memory_capture,
         hot_prs,
+        last_background_activity: std::sync::Mutex::new(None),
     })
 }
 
@@ -4276,6 +4317,11 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
         },
         HarnessEvent::TurnInterrupted => Event::TurnInterrupted { usage: None },
         HarnessEvent::HarnessNotice { level, message } => Event::HarnessNotice { level, message },
+        // Work the engine did on its own belongs to no turn, whichever turn
+        // is open while it arrives.
+        HarnessEvent::BackgroundActivity { event } => Event::BackgroundActivity {
+            event: Box::new(map_event(*event, None)?),
+        },
     })
 }
 

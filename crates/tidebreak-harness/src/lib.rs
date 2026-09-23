@@ -46,9 +46,9 @@ pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };
 pub use pin::{
-    compare_versions, ensure_installed, ensure_installed_version, installed_versions,
-    latest_published_version, managed_bin_dir, managed_binary, managed_binary_version, pin_for,
-    sign_in_args, sign_in_command, HarnessPin, PINS,
+    compare_versions, ensure_installed, ensure_installed_version, installed_trees,
+    installed_versions, latest_published_version, managed_bin_dir, managed_binary,
+    managed_binary_version, pin_for, sign_in_args, sign_in_command, HarnessPin, PINS,
 };
 pub use probe::{
     capture_login_env, display_model_label, env_value, filter_child_env, filter_engine_child_env,
@@ -282,6 +282,26 @@ pub enum HarnessEvent {
         /// Bounded message.
         message: String,
     },
+    /// Activity from a turn the engine started on its own, such as the turn
+    /// Claude Code runs when a background task ends. It is never part of the
+    /// person's turn, even while one waits for the engine to take it.
+    ///
+    /// `event` is a message, a tool call, a file change, or a notice. The
+    /// engine's own turn has no start or end the session reports.
+    BackgroundActivity {
+        /// What the engine did.
+        event: Box<HarnessEvent>,
+    },
+}
+
+impl HarnessEvent {
+    /// Mark `event` as activity from a turn the engine started on its own.
+    #[must_use]
+    pub fn background(event: HarnessEvent) -> Self {
+        Self::BackgroundActivity {
+            event: Box::new(event),
+        }
+    }
 }
 
 /// Server-issued binding for one exact parked approval.
@@ -1243,6 +1263,10 @@ pub trait HarnessSession: Send + Sync {
     /// spawn latency. Idempotent: parking a session with nothing running is a
     /// no-op. The default does nothing, for engines with no between-turn
     /// child to release.
+    ///
+    /// An engine can be working between turns on a turn nobody in Tidebreak
+    /// asked for. An adapter answers [`HarnessError::EngineBusy`] then, and
+    /// keeps the child; the caller tries again later.
     async fn park(&self) -> Result<(), HarnessError> {
         Ok(())
     }
@@ -1352,6 +1376,12 @@ pub enum HarnessError {
     /// The server can no longer prove that a native approval waiter exists.
     #[error("the approval request is no longer waiting: {0}")]
     ApprovalWaiterMissing(String),
+    /// The engine is in the middle of a turn nobody in Tidebreak is waiting
+    /// on, such as the turn Claude Code runs on its own when a background
+    /// task ends. [`HarnessSession::park`] answers this rather than stop that
+    /// turn; the caller keeps the child and tries again later.
+    #[error("the engine is busy: {0}")]
+    EngineBusy(String),
     /// The waiter received the decision, but its acknowledgement was lost.
     #[error("the approval decision may have been delivered: {0}")]
     ApprovalAcknowledgementLost(String),

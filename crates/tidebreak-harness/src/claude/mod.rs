@@ -588,6 +588,77 @@ pub(crate) mod tests {
         assert!(first_result < notice);
     }
 
+    /// What the pinned release says about which turn a line belongs to,
+    /// captured on 2.1.259 with a client `uuid` on each user line.
+    ///
+    /// Each line's fate arrives as `command_lifecycle`: `queued`, `started`,
+    /// then `completed`. A turn the line started names it on its `result`. A
+    /// turn the engine starts itself, after a background task ends, names no
+    /// line. When the engine folds a queued line into its own turn, that
+    /// turn's `result` names no line either, and the line's `started` comes
+    /// before it. The session matches results to turns on exactly these facts.
+    #[test]
+    fn the_pinned_release_names_the_user_line_each_result_answers() {
+        const FIRST: &str = "11111111-1111-4111-8111-111111111111";
+        const SECOND: &str = "22222222-2222-4222-8222-222222222222";
+        let marks = |capture: &str| {
+            let path = version_dir("2.1.259").join(format!("{capture}.ndjson"));
+            let mut parser = ClaudeStreamParser::new();
+            let mut marks = Vec::new();
+            for line in std::fs::read_to_string(path).unwrap().lines() {
+                parser.push_line(line);
+                marks.push(parser.take_turn_mark());
+            }
+            assert_eq!(parser.unrecognized(), 0, "{capture}");
+            marks
+        };
+        let results = |marks: &[crate::claude::parse::TurnMark]| {
+            marks
+                .iter()
+                .filter(|mark| mark.ends_turn)
+                .map(|mark| mark.user_messages.clone())
+                .collect::<Vec<_>>()
+        };
+        let lifecycle = |marks: &[crate::claude::parse::TurnMark]| {
+            marks
+                .iter()
+                .filter_map(|mark| mark.command.clone())
+                .map(|(uuid, state)| format!("{} {state}", &uuid[..1]))
+                .collect::<Vec<_>>()
+        };
+
+        let between = marks("background-turn-between-turns");
+        assert_eq!(
+            results(&between),
+            [vec![FIRST.to_owned()], Vec::new(), vec![SECOND.to_owned()]],
+            "the middle result is the engine's own turn"
+        );
+        assert_eq!(
+            lifecycle(&between),
+            [
+                "1 queued",
+                "1 started",
+                "1 completed",
+                "2 queued",
+                "2 started",
+                "2 completed"
+            ]
+        );
+
+        let folded = marks("background-turn-folded-prompt");
+        assert_eq!(
+            results(&folded),
+            [vec![FIRST.to_owned()], Vec::new()],
+            "the turn that took the second line names none"
+        );
+        let started = folded
+            .iter()
+            .position(|mark| mark.command == Some((SECOND.to_owned(), "started".to_owned())))
+            .unwrap();
+        let last_result = folded.iter().rposition(|mark| mark.ends_turn).unwrap();
+        assert!(started < last_result);
+    }
+
     /// Captured on 2.1.259: the engine names its subagent tool `Agent`, and
     /// the span every adapter emits for a subagent is `Task`, which the rail
     /// and the transcript look for. The subagent's own calls attach to it.
@@ -852,17 +923,20 @@ pub(crate) mod tests {
         assert_eq!(input["message"]["content"][1]["source"]["data"], "REDACTED");
 
         let bytes = b"fixture image bytes";
-        let encoded = session::encode_turn_stdin(&crate::TurnInput {
-            turn_id: None,
-            text: "what is in this image".into(),
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            images: vec![crate::TurnImage {
-                media_type: "image/png".into(),
-                bytes: bytes.to_vec(),
-            }],
-        });
+        let encoded = session::encode_turn_stdin(
+            &crate::TurnInput {
+                turn_id: None,
+                text: "what is in this image".into(),
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                images: vec![crate::TurnImage {
+                    media_type: "image/png".into(),
+                    bytes: bytes.to_vec(),
+                }],
+            },
+            "fixture-turn",
+        );
         let mut encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         let source = &mut encoded["message"]["content"][1]["source"];
         assert_eq!(

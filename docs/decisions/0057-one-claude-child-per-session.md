@@ -199,3 +199,44 @@ that makes eager spawn worth taking.
   completes, rather than failing or fencing the session.
 - The existing failed-child test, unchanged: a child that exits non-zero
   without a `result` still reports its status and stderr as an incomplete turn.
+
+## Amendment (2026-09-23): the child's own turns, and whose `result` ends a turn
+
+Point 2 assumed the child writes only while a turn runs. It does not. When a
+background task ends after a turn's `result`, Claude Code 2.1.259 reports the
+end and runs a turn of its own, with its own `result` (captured). Nothing read
+stdout between turns, so the next user turn read that `result` and ended
+early.
+
+- A task reads the child's stdout for the child's whole life.
+- Each user line carries a client `uuid`. The engine reports the line's fate
+  in `command_lifecycle` lines (`queued`, `started`, `completed`) and names
+  the uuid on the `result` of a turn the line started. A `result` ends the
+  user's turn once the engine has started the line, or when it names the
+  line. A `result` before that ends a turn that was already running when the
+  line arrived. An engine that reports no lifecycle falls back to the first
+  `result` after the write, unless it names only other lines.
+- A line the engine closes as `cancelled`, `refused`, or `discarded` before it
+  starts never runs, so its turn ends there: as stopped when the person
+  stopped it, otherwise as failed with the error the engine reported while the
+  line waited.
+- Work the engine does on its own is its own event: `background_activity`
+  wraps each notice, message, and tool call, in the harness stream, the
+  journal, the wire, and the transcript. It is never part of the person's
+  turn, even when it arrives while that turn waits for the engine, and nothing
+  that reads a turn's answer counts it. It carries no streaming text and no
+  turn end; a failed turn of the engine's own becomes a warning notice. A call
+  that turn leaves open is settled when the turn or the child ends.
+- The engine's own turn keeps the child busy. The idle park (decision 0064)
+  waits for its `result`, up to 30 minutes, after which the turn is taken as
+  stuck; its output restarts the idle window. An update quiesce (decision
+  0080) waits for it as it waits for any turn. A turn on a new launch flag
+  waits for it before the respawn.
+- A stop between the person's turns ends the engine's own turn. A stop sets
+  `cancel_queued`, so a person's line waiting behind the engine's own turn is
+  cancelled with that turn instead of running after it (captured). An answer
+  that still lists the line as queued takes the process.
+
+The consequence about approvals above no longer holds in full: a background
+task can run between turns, and nothing here gives it an open turn to attach
+an approval to.

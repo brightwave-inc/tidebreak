@@ -1656,6 +1656,78 @@ async fn sink_settles_unclosed_tasks_at_each_terminal_parent_boundary() {
     }
 }
 
+/// Work the engine did on its own, such as the turn Claude Code runs when a
+/// background task ends, journals as background activity even while the
+/// person's turn is open. Nothing that reads that turn's answer or its
+/// subagents counts it, and it restarts the idle window before a park.
+#[tokio::test]
+async fn background_activity_journals_outside_the_open_turn() {
+    let (_directory, store, sink, session_id) = seeded_sink().await;
+    let open = insert_open_turn(&store, session_id).await;
+    sink.set_turn(open.id);
+    assert!(!sink.active_on_its_own_within(Duration::from_secs(60)));
+
+    sink.emit(HarnessEvent::background(HarnessEvent::AssistantMessage {
+        text: "The background job finished.".into(),
+        parent_call_id: None,
+    }))
+    .await;
+    sink.emit(HarnessEvent::background(HarnessEvent::ToolStarted {
+        call_id: "toolu_own".into(),
+        name: "Task".into(),
+        detail: ToolDetail::Other {
+            summary: "check the job".into(),
+        },
+        parent_call_id: None,
+    }))
+    .await;
+    sink.emit(HarnessEvent::AssistantMessage {
+        text: "done.".into(),
+        parent_call_id: None,
+    })
+    .await;
+
+    let events: Vec<Event> =
+        list_events(&store, &OwnerId::local(), session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|row| row.event)
+            .collect();
+    let answers: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AssistantMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, ["done."], "only the person's answer reads as one");
+    let own: Vec<&Event> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::BackgroundActivity { event } => Some(&**event),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(
+        own[..],
+        [
+            Event::AssistantMessage { text, .. },
+            Event::ToolStarted { call_id, .. },
+        ] if text == "The background job finished." && call_id == "toolu_own"
+    ));
+    let session = get_session(&store, &OwnerId::local(), session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        session.subagents.is_empty(),
+        "the engine's own subagent is not the person's"
+    );
+    assert!(sink.active_on_its_own_within(Duration::from_secs(60)));
+}
+
 #[tokio::test]
 async fn sink_persists_a_resume_ref_only_after_turn_activity_starts() {
     let (_directory, store, sink, session_id) = seeded_sink().await;

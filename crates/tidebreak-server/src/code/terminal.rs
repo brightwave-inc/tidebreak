@@ -746,14 +746,20 @@ pub fn shell_environment(
 
 /// The environment an engine's sign-in command runs with: the one that
 /// engine's sessions get, so the sign-in lands where a session looks for it.
+///
+/// Grok checks for a newer release whenever it runs. Its sessions turn that
+/// off, because Tidebreak runs one exact release, and so does its sign-in.
 pub fn sign_in_environment(
     kind: HarnessKind,
     probe_env: &[(OsString, OsString)],
 ) -> Vec<(OsString, OsString)> {
-    with_terminal_vars(tidebreak_harness::filter_engine_child_env(
-        kind,
-        probe_env.iter().cloned(),
-    ))
+    let mut env = tidebreak_harness::filter_engine_child_env(kind, probe_env.iter().cloned());
+    if kind == HarnessKind::Grok {
+        let name = tidebreak_harness::grok::DISABLE_AUTOUPDATER_ENV;
+        take_env(&mut env, name);
+        env.push((OsString::from(name), OsString::from("1")));
+    }
+    with_terminal_vars(env)
 }
 
 /// Replace the terminal identity variables with the ones xterm.js needs.
@@ -1809,6 +1815,36 @@ mod tests {
         assert_eq!(value_of(&env, "GITHUB_TOKEN"), None);
         assert_eq!(value_of(&env, "OPENAI_API_KEY"), None);
         assert_eq!(value_of(&env, "TERM"), Some(&OsString::from(EMBEDDED_TERM)));
+        assert_eq!(value_of(&env, "GROK_DISABLE_AUTOUPDATER"), None);
+    }
+
+    /// Grok's sign-in runs the pinned binary its sessions use, and must not
+    /// replace it with a newer release on the way.
+    #[test]
+    fn grok_signs_in_without_updating_itself() {
+        let env = sign_in_environment(
+            HarnessKind::Grok,
+            &os_env(&[
+                ("PATH", "/usr/bin"),
+                ("HOME", "/Users/person"),
+                ("GROK_DISABLE_AUTOUPDATER", "0"),
+            ]),
+        );
+        assert_eq!(
+            value_of(&env, "GROK_DISABLE_AUTOUPDATER"),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(name, _)| name == "GROK_DISABLE_AUTOUPDATER")
+                .count(),
+            1
+        );
+        assert_eq!(
+            value_of(&env, "HOME"),
+            Some(&OsString::from("/Users/person")),
+            "sign-in and settings stay in the person's own Grok home"
+        );
     }
 
     #[cfg(unix)]

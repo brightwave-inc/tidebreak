@@ -2465,3 +2465,161 @@ describe("session tree", () => {
     expect(cleared.state.wait).toBeNull();
   });
 });
+
+describe("background activity", () => {
+  const own = (event: CodeEvent): CodeEvent => ({
+    type: "background_activity",
+    event,
+  });
+
+  /** The transcript as kind, turn, and text, in order. */
+  function outline(state: CodeSessionState) {
+    return state.items.map((item) => {
+      switch (item.kind) {
+        case "user":
+          return `user ${item.turnId}: ${item.text}`;
+        case "assistant":
+          return `${item.background ? "own" : `reply ${item.turnId}`}: ${item.text}`;
+        case "tool":
+          return `${item.background ? "own tool" : `tool ${item.turnId}`}: ${item.callId} ${item.status}`;
+        case "notice":
+          return `notice: ${item.message}`;
+        case "turn_boundary":
+          return `end ${item.turnId}`;
+        default:
+          return item.kind;
+      }
+    });
+  }
+
+  const SECOND_TURN = {
+    ...SNAPSHOT_TURN,
+    id: "t2",
+    ordinal: 2,
+    user_input: "Say the word done.",
+  };
+
+  it("keeps the engine's answer out of the reply of a turn that waits for it", () => {
+    const clock = deps();
+    const first = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "assistant_message", text: "Started the background job." },
+        { type: "turn_completed", usage: NO_USAGE },
+        own({
+          type: "harness_notice",
+          level: "info",
+          message: "Background command completed",
+        }),
+      ],
+      applyAcceptedTurn(initialCodeSessionState(), {
+        ...SNAPSHOT_TURN,
+        status: "running",
+        ended_at: undefined,
+      }),
+      clock,
+    );
+    // The person sends while the engine runs its own turn.
+    const waiting = applyAcceptedTurn(first.state, {
+      ...SECOND_TURN,
+      status: "running",
+      ended_at: undefined,
+    });
+    const { state } = play(
+      [
+        { type: "turn_started", turn_id: "t2" },
+        own({
+          type: "assistant_message",
+          text: "The background job finished.",
+        }),
+        { type: "assistant_delta", text: "do" },
+        { type: "assistant_delta", text: "ne." },
+        { type: "assistant_message", text: "done." },
+        { type: "turn_completed", usage: NO_USAGE },
+      ],
+      waiting,
+      clock,
+    );
+
+    expect(outline(state)).toEqual([
+      "user t1: list the files",
+      "reply t1: Started the background job.",
+      "end t1",
+      "notice: Background command completed",
+      "own: The background job finished.",
+      "user t2: Say the word done.",
+      "reply t2: done.",
+      "end t2",
+    ]);
+  });
+
+  it("places the engine's own work the same way after a reload", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+      SECOND_TURN,
+    ]);
+    const events: CodeEvent[] = [
+      { type: "turn_started", turn_id: "t1" },
+      { type: "assistant_message", text: "Started the background job." },
+      { type: "turn_completed", usage: NO_USAGE },
+      own({
+        type: "harness_notice",
+        level: "info",
+        message: "Background command completed",
+      }),
+      { type: "turn_started", turn_id: "t2" },
+      own({ type: "assistant_message", text: "The background job finished." }),
+      { type: "assistant_message", text: "done." },
+      { type: "turn_completed", usage: NO_USAGE },
+    ];
+    let state = hydrated;
+    events.forEach((event, index) => {
+      state = reduceCodeSessionEvent(
+        state,
+        framed(index + 1, event, true),
+        deps(),
+      ).state;
+    });
+
+    expect(outline(state)).toEqual([
+      "user t1: list the files",
+      "reply t1: Started the background job.",
+      "end t1",
+      "notice: Background command completed",
+      "own: The background job finished.",
+      "user t2: Say the word done.",
+      "reply t2: done.",
+      "end t2",
+    ]);
+  });
+
+  it("settles a call the engine ran on its own and marks the worktree changed", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+      own({
+        type: "tool_started",
+        call_id: "toolu_own",
+        name: "Bash",
+        detail: { kind: "command", cmd: "cat job.log", cwd: "" },
+      }),
+    ]);
+    expect(outline(state).at(-1)).toBe("own tool: toolu_own running");
+    const settled = reduceCodeSessionEvent(
+      state,
+      framed(
+        state.lastSeq + 1,
+        own({
+          type: "tool_completed",
+          call_id: "toolu_own",
+          outcome: "failed",
+          preview: "Claude Code stopped before this call finished.",
+        }),
+      ),
+      deps(),
+    ).state;
+    expect(outline(settled).at(-1)).toBe("own tool: toolu_own failed");
+    expect(settled.contentRevision).toBe(state.contentRevision + 1);
+    expect(settled.busy).toBe(false);
+  });
+});
