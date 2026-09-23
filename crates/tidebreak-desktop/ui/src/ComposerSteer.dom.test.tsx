@@ -75,6 +75,56 @@ describe("Composer Cmd/Ctrl+Enter steer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("does not steer when images or files are attached", async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onQueue = vi.fn().mockResolvedValue(undefined);
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft="keep these files"
+        files={{
+          items: [
+            {
+              documentId: "doc-1",
+              displayName: "notes.pdf",
+              mediaType: "application/pdf",
+              byteLen: 10,
+            },
+          ],
+          attaching: false,
+          onRemove: vi.fn(),
+        }}
+        onDraftChange={vi.fn()}
+        onSend={onSend}
+        onSteer={onSteer}
+        onQueue={onQueue}
+        onStop={async () => undefined}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSteer).not.toHaveBeenCalled());
+    expect(onQueue).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.getByPlaceholderText("Queue a follow-up…"),
+    ).toBeInTheDocument();
+  });
+
   it("steers on Ctrl+Enter as well as Cmd+Enter", async () => {
     const onSteer = vi.fn().mockResolvedValue(undefined);
     const onQueue = vi.fn().mockResolvedValue(undefined);

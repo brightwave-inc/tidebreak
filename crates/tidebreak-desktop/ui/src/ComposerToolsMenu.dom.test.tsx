@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ComposerToolsMenu } from "./ComposerToolsMenu";
 import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 
-vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { warning: vi.fn(), error: vi.fn() } }));
 
 afterEach(() => {
   cleanup();
@@ -146,6 +146,27 @@ it("keeps the plugins row off a surface with no library to reach", async () => {
 
   await open();
   expect(screen.queryByText("Plugins")).not.toBeInTheDocument();
+});
+
+it("toasts when memory incognito fails to save", async () => {
+  const onChange = vi.fn().mockRejectedValue(new Error("patch failed"));
+  render(
+    <ComposerToolsMenu
+      disabled={false}
+      memoryIncognito={{ value: false, onChange }}
+    />,
+  );
+
+  await open();
+  await userEvent
+    .setup()
+    .click(screen.getByRole("menuitem", { name: /Memory incognito/ }));
+
+  await waitFor(() =>
+    expect(toast.error).toHaveBeenCalledWith(
+      "Could not update memory incognito. Try again.",
+    ),
+  );
 });
 
 it("opens when the first-task walkthrough is on the tools step", () => {

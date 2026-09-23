@@ -328,6 +328,7 @@ describe("Composer", () => {
     );
     expect(markup).not.toContain('aria-label="Switch send mode"');
     expect(markup).not.toContain('aria-label="Steer active response"');
+    expect(markup).toContain("Queue a follow-up (Ctrl+Enter to steer)");
   });
 
   it("keeps Stop available for an active turn until the user types", () => {
