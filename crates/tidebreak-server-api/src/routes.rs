@@ -39,6 +39,7 @@ mod root_attachment;
 mod settings;
 mod task_plan;
 mod turn_control;
+mod turn_rerun;
 mod user_questions;
 mod workspace_config;
 
@@ -68,6 +69,7 @@ pub use root_attachment::*;
 pub use settings::*;
 pub use task_plan::*;
 pub use turn_control::*;
+pub use turn_rerun::*;
 pub use user_questions::*;
 pub use workspace_config::*;
 

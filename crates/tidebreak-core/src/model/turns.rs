@@ -442,6 +442,138 @@ impl TurnClientWaitStatus {
     }
 }
 
+/// How a turn reran the conversation's latest turn.
+///
+/// Only the latest settled turn can be rerun, so a replacement always happens
+/// at the end of the conversation and the history before it never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReplacementKind {
+    /// The same message, answered again. The replaced answer stays as an
+    /// earlier version the reader can page back to.
+    Regenerate,
+    /// A changed message. The replaced turn leaves the conversation, because
+    /// the message it answered no longer exists.
+    Edit,
+}
+
+impl TurnReplacementKind {
+    /// Stable database representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Regenerate => "regenerate",
+            Self::Edit => "edit",
+        }
+    }
+
+    /// Parse the database representation.
+    #[must_use]
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "regenerate" => Some(Self::Regenerate),
+            "edit" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+}
+
+/// One turn that reran another.
+///
+/// A replaced turn leaves the model's view of the conversation. Its rows stay:
+/// a regenerated answer is still shown as an earlier version, and an edited
+/// one is still on record for its tool calls and outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnReplacement {
+    /// The turn that reran.
+    pub turn_id: TurnId,
+    /// The turn it replaced.
+    pub replaces: TurnId,
+    /// Whether the rerun kept the message or changed it.
+    pub kind: TurnReplacementKind,
+}
+
+/// The turns that left the conversation because a later turn reran them.
+///
+/// Everything that reads the conversation for the model filters on this set,
+/// so a replaced turn's messages and tool calls never reach a request again.
+#[must_use]
+pub fn replaced_turn_ids(replacements: &[TurnReplacement]) -> std::collections::HashSet<TurnId> {
+    replacements
+        .iter()
+        .map(|replacement| replacement.replaces)
+        .collect()
+}
+
+/// Where a replaced turn stands in the conversation.
+///
+/// A turn that no replacement names is part of the conversation and has no
+/// entry here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacedTurn {
+    /// An earlier answer to the message `current` answers now. Only
+    /// regenerates lead from this turn to `current`.
+    EarlierVersion {
+        /// The turn shown in its place.
+        current: TurnId,
+    },
+    /// Gone from the conversation: an edit changed the message it answered,
+    /// here or further along the chain of reruns.
+    Discarded,
+}
+
+/// What became of every replaced turn in one conversation.
+#[must_use]
+pub fn replaced_turns(
+    replacements: &[TurnReplacement],
+) -> std::collections::HashMap<TurnId, ReplacedTurn> {
+    let by_replaced: std::collections::HashMap<TurnId, (TurnId, TurnReplacementKind)> =
+        replacements
+            .iter()
+            .map(|replacement| {
+                (
+                    replacement.replaces,
+                    (replacement.turn_id, replacement.kind),
+                )
+            })
+            .collect();
+    by_replaced
+        .keys()
+        .map(|&turn| {
+            let mut current = turn;
+            let mut discarded = false;
+            // Each turn is replaced at most once, so the chain cannot branch.
+            // The step bound stops a corrupt cycle rather than looping on it.
+            for _ in 0..=by_replaced.len() {
+                let Some(&(next, kind)) = by_replaced.get(&current) else {
+                    break;
+                };
+                discarded |= kind == TurnReplacementKind::Edit;
+                current = next;
+            }
+            let placement = if discarded || by_replaced.contains_key(&current) {
+                ReplacedTurn::Discarded
+            } else {
+                ReplacedTurn::EarlierVersion { current }
+            };
+            (turn, placement)
+        })
+        .collect()
+}
+
+/// Why a replacement turn was refused before anything was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnReplacementRefusal {
+    /// The turn is not part of this conversation.
+    UnknownTurn,
+    /// The turn has not finished yet.
+    Unsettled,
+    /// A later turn exists. Only the latest turn can be rerun.
+    NotLatest,
+    /// Another turn already replaced this one.
+    AlreadyReplaced,
+}
+
 /// One message accepted while its chat had a live turn, waiting its turn.
 ///
 /// Immutable client request identity reserved before mutable turn admission.
@@ -460,6 +592,9 @@ pub struct TurnAdmissionRequest {
     pub file_attachments: Vec<crate::id::DocumentId>,
     pub invoked_skills: Vec<String>,
     pub voice_input_used: bool,
+    /// The latest turn this one reruns, and how. `None` for an ordinary
+    /// message.
+    pub replaces: Option<(TurnId, TurnReplacementKind)>,
 }
 
 impl TurnAdmissionRequest {
@@ -493,6 +628,13 @@ impl TurnAdmissionRequest {
             put_bytes(&mut digest, skill.as_bytes());
         }
         digest.update([u8::from(self.voice_input_used)]);
+        // Appended only when present, so every ordinary turn keeps the
+        // fingerprint it was accepted under.
+        if let Some((turn, kind)) = self.replaces {
+            digest.update(b"replaces\0");
+            digest.update(turn.0.as_bytes());
+            put_bytes(&mut digest, kind.as_str().as_bytes());
+        }
         digest.finalize().into()
     }
 }

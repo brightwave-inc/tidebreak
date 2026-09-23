@@ -861,6 +861,18 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_agent_run_steer),
         )
         .route("/chats/{id}/messages", post(routes::post_message))
+        .route(
+            "/chats/{chat_id}/turns/{turn_id}/regenerate",
+            post(routes::post_regenerate_turn),
+        )
+        .route(
+            "/chats/{chat_id}/turns/{turn_id}/edit",
+            post(routes::post_edit_turn),
+        )
+        .route(
+            "/chats/{chat_id}/turns/{turn_id}/branch",
+            post(routes::post_branch_turn),
+        )
         .route("/chats/{id}/cancel", post(routes::post_cancel))
         .route("/chats/{id}/steer", post(routes::post_steer))
         .route(

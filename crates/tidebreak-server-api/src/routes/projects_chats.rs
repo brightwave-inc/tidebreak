@@ -531,6 +531,9 @@ pub async fn patch_chat(
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ChatMessageSnapshot {
     pub id: MessageId,
+    /// The turn this message belongs to. A message the reader sent opens its
+    /// turn; the actions on a message name the turn.
+    pub turn_id: TurnId,
     pub role: TranscriptRole,
     pub content: String,
     pub created_at: chrono::DateTime<Utc>,
@@ -639,6 +642,12 @@ pub struct ChatTerminalTurnSnapshot {
     pub usage: crate::event_projection::RendererTurnUsage,
     pub voice_input_used: bool,
     pub finished_at: chrono::DateTime<Utc>,
+    /// What this turn did outside the conversation. Read only for the
+    /// conversation's latest turn, the one an edit can replace: an edit of a
+    /// turn with any of these starts a new conversation instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub side_effects: Option<Vec<super::turn_rerun::TurnSideEffect>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
@@ -686,6 +695,7 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             usage: snapshot.usage.into(),
             voice_input_used: snapshot.voice_input_used,
             finished_at: snapshot.finished_at,
+            side_effects: None,
         }
     }
 }
@@ -709,6 +719,31 @@ pub struct ChatTranscript {
     /// Pass as `before` to read the page just older than this one. Set exactly
     /// when `has_more` is.
     pub earlier_cursor: Option<i64>,
+    /// Earlier answers to messages that were answered again, oldest first.
+    ///
+    /// `messages`, `tool_activity`, and `terminal_turns` hold the conversation
+    /// as it stands, with each message's current answer. A regenerated
+    /// answer moves here, keyed to the turn now shown in its place. An answer
+    /// that failed or stopped before it said anything is not kept, and an
+    /// edited turn is gone from the conversation altogether.
+    pub answer_versions: Vec<ChatAnswerVersion>,
+}
+
+/// One earlier answer to a message that was answered again.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct ChatAnswerVersion {
+    /// The turn that gave this answer.
+    pub turn_id: TurnId,
+    /// The turn shown in its place now: the newest answer to the same
+    /// message.
+    pub current_turn_id: TurnId,
+    /// The answer's messages, oldest first. The message it answered is the
+    /// current turn's.
+    pub messages: Vec<ChatMessageSnapshot>,
+    /// The answer's finished tool activity.
+    pub tool_activity: Vec<tidebreak_core::ChatToolActivitySnapshot>,
+    /// How the answer ended.
+    pub terminal_turn: ChatTerminalTurnSnapshot,
 }
 
 /// Query of `GET /chats/{id}/messages`. With neither field, the whole
@@ -781,6 +816,7 @@ impl ChatMessageSnapshot {
     fn for_transcript(message: StoredMessage) -> Option<Self> {
         Some(Self {
             id: message.id,
+            turn_id: message.turn_id,
             role: TranscriptRole::for_transcript(message.role)?,
             content: message.content,
             created_at: message.created_at,
@@ -870,9 +906,20 @@ pub async fn list_chat_messages(
     for invoked in transcript.message_invoked_skills {
         invoked_skills_by_message.insert(invoked.message_id, invoked.skills);
     }
+    // A replaced turn is not part of the conversation as it stands: an
+    // earlier version moves to `answer_versions`, and an edited turn is gone.
+    let replaced = tidebreak_core::replaced_turns(&transcript.replacements);
+    let mut version_messages: std::collections::HashMap<TurnId, Vec<ChatMessageSnapshot>> =
+        std::collections::HashMap::new();
     let mut messages: Vec<ChatMessageSnapshot> = transcript
         .messages
         .into_iter()
+        .filter(|message| {
+            !matches!(
+                replaced.get(&message.turn_id),
+                Some(tidebreak_core::ReplacedTurn::Discarded)
+            )
+        })
         .filter_map(|message| {
             let mut snapshot = ChatMessageSnapshot::for_transcript(message)?;
             snapshot.citations = citations_by_message
@@ -895,6 +942,20 @@ pub async fn list_chat_messages(
             }
             Some(snapshot)
         })
+        .filter_map(|snapshot| {
+            if !replaced.contains_key(&snapshot.turn_id) {
+                return Some(snapshot);
+            }
+            // The message an earlier version answered is the current turn's
+            // message, sent again; only the answer is kept.
+            if snapshot.role != TranscriptRole::User {
+                version_messages
+                    .entry(snapshot.turn_id)
+                    .or_default()
+                    .push(snapshot);
+            }
+            None
+        })
         .collect();
     if let Some(checkpoint) = state
         .store
@@ -916,6 +977,7 @@ pub async fn list_chat_messages(
                 insert_at,
                 ChatMessageSnapshot {
                     id: MessageId::compaction_divider(checkpoint.source_message_id),
+                    turn_id: messages[insert_at - 1].turn_id,
                     role: TranscriptRole::Compaction,
                     content: String::new(),
                     created_at: checkpoint.created_at,
@@ -987,26 +1049,89 @@ pub async fn list_chat_messages(
             }
         }
     }
+    let mut terminal_turns = Vec::with_capacity(transcript.terminal_turns.len());
+    let mut version_turns = std::collections::HashMap::new();
+    for turn in transcript.terminal_turns {
+        let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
+        snapshot.file_changes = file_changes_by_turn
+            .remove(&snapshot.turn_id)
+            .unwrap_or_default();
+        snapshot.memory_proposals = memory_proposals_by_turn
+            .remove(&snapshot.turn_id)
+            .unwrap_or_default();
+        match replaced.get(&snapshot.turn_id) {
+            None => terminal_turns.push(snapshot),
+            Some(tidebreak_core::ReplacedTurn::EarlierVersion { .. }) => {
+                version_turns.insert(snapshot.turn_id, snapshot);
+            }
+            Some(tidebreak_core::ReplacedTurn::Discarded) => {}
+        }
+    }
+    let mut tool_activity = Vec::with_capacity(transcript.tool_activity.len());
+    let mut version_activity: std::collections::HashMap<TurnId, Vec<_>> =
+        std::collections::HashMap::new();
+    for activity in transcript.tool_activity {
+        match replaced.get(&activity.turn_id) {
+            None => tool_activity.push(activity),
+            Some(tidebreak_core::ReplacedTurn::EarlierVersion { .. }) => {
+                version_activity
+                    .entry(activity.turn_id)
+                    .or_default()
+                    .push(activity);
+            }
+            Some(tidebreak_core::ReplacedTurn::Discarded) => {}
+        }
+    }
+    let mut answer_versions = Vec::new();
+    for replacement in &transcript.replacements {
+        let Some(tidebreak_core::ReplacedTurn::EarlierVersion { current }) =
+            replaced.get(&replacement.replaces).copied()
+        else {
+            continue;
+        };
+        // A page holds a version's rows only when it holds the moment the
+        // version finished.
+        let Some(terminal_turn) = version_turns.remove(&replacement.replaces) else {
+            continue;
+        };
+        let messages = version_messages
+            .remove(&replacement.replaces)
+            .unwrap_or_default();
+        let said_something = matches!(terminal_turn.status, ChatTerminalTurnStatus::Completed)
+            || !terminal_turn.partial_content.trim().is_empty()
+            || messages
+                .iter()
+                .any(|message| !message.content.trim().is_empty());
+        if !said_something {
+            continue;
+        }
+        answer_versions.push(ChatAnswerVersion {
+            turn_id: replacement.replaces,
+            current_turn_id: current,
+            messages,
+            tool_activity: version_activity
+                .remove(&replacement.replaces)
+                .unwrap_or_default(),
+            terminal_turn,
+        });
+    }
+    // The newest page carries what the latest turn did outside the
+    // conversation, for an edit to say before it is sent whether it will
+    // start a new conversation.
+    if query.before.is_none() {
+        if let Some(latest) = terminal_turns.last_mut() {
+            latest.side_effects =
+                Some(super::turn_rerun::turn_side_effects(&store, id, latest.turn_id).await?);
+        }
+    }
     Ok(Json(ChatTranscript {
         messages,
-        tool_activity: transcript.tool_activity,
-        terminal_turns: transcript
-            .terminal_turns
-            .into_iter()
-            .map(|turn| {
-                let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
-                snapshot.file_changes = file_changes_by_turn
-                    .remove(&snapshot.turn_id)
-                    .unwrap_or_default();
-                snapshot.memory_proposals = memory_proposals_by_turn
-                    .remove(&snapshot.turn_id)
-                    .unwrap_or_default();
-                snapshot
-            })
-            .collect(),
+        tool_activity,
+        terminal_turns,
         last_event_seq: transcript.last_event_seq,
         has_more: earlier_cursor.is_some(),
         earlier_cursor,
+        answer_versions,
     }))
 }
 

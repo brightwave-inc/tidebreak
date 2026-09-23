@@ -54,6 +54,7 @@ fn admission_request(queued: &QueuedAgentTurn) -> TurnAdmissionRequest {
         file_attachments: queued.file_attachments.clone(),
         invoked_skills: queued.invoked_skills.clone(),
         voice_input_used: queued.voice_input_used,
+        replaces: None,
     }
 }
 
@@ -248,6 +249,7 @@ pub(in crate::db) async fn promote_turn(
             &expected.file_attachments,
             &expected.invoked_skills,
             expected.voice_input_used,
+            None,
         )
         .await?;
         let AcceptTurnOutcome::Existing(existing) = outcome else {
@@ -294,6 +296,7 @@ pub(in crate::db) async fn promote_turn(
         &expected.file_attachments,
         &expected.invoked_skills,
         expected.voice_input_used,
+        None,
         now,
     )
     .await?;

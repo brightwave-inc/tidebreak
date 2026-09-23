@@ -2178,6 +2178,57 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Accept a turn that reruns this chat's latest settled turn.
+    ///
+    /// The same atomic acceptance as
+    /// [`Self::accept_reserved_turn_with_message_context`], plus one check
+    /// under the chat lock: `replaces` must be the chat's latest turn, settled,
+    /// and not already replaced, or the call answers
+    /// [`ReservedTurnAcceptanceOutcome::ReplacementRefused`] and writes
+    /// nothing. A replaced turn leaves the model's view of the conversation;
+    /// its rows stay.
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_reserved_replacement_turn(
+        &self,
+        _lease: TurnAdmissionLease,
+        _chat_id: SessionId,
+        _replaces: TurnId,
+        _kind: crate::model::TurnReplacementKind,
+        _model: &str,
+        _content: &str,
+        _images: &[ImageRef],
+        _documents: &[DocumentId],
+        _invoked_skills: &[String],
+        _voice_input_used: bool,
+    ) -> Result<ReservedTurnAcceptanceOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Branch one of the owner's conversations into a new one that starts with
+    /// a copy of its history up to `request.point`.
+    ///
+    /// The copy commits in one transaction with the new conversation, so a
+    /// branch either exists with its whole history or not at all. See
+    /// [`BranchChat`] for what the new conversation carries.
+    async fn branch_chat_scoped(
+        &self,
+        _owner: &OwnerId,
+        _request: &crate::storage::BranchChat,
+    ) -> Result<crate::storage::BranchChatOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Every turn in this chat that reran another, oldest first.
+    ///
+    /// A turn named as `replaces` here has left the conversation the model
+    /// sees. A store without turn replacement has none.
+    async fn list_turn_replacements(
+        &self,
+        _chat_id: SessionId,
+    ) -> Result<Vec<crate::model::TurnReplacement>> {
+        Ok(Vec::new())
+    }
+
     /// Perform one durable claim action under a fresh exact lease.
     ///
     /// `lease_token` is the caller's idempotency identity: retrying it while its

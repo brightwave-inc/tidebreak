@@ -94,6 +94,8 @@ where
         updated_at: Set(Some(turn.started_at)),
         fingerprint: Set(None),
         actor: Set(turn.actor.as_ref().map(serde_json::to_value).transpose()?),
+        replaces_turn_id: Set(None),
+        replacement: Set(None),
     }
     .insert(conn)
     .await

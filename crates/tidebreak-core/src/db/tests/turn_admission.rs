@@ -80,6 +80,8 @@ async fn make_queued_turn(
         output_message_id: Set(None),
         updated_at: Set(Some(now)),
         fingerprint: Set(None),
+        replaces_turn_id: Set(None),
+        replacement: Set(None),
     }
 }
 
@@ -502,6 +504,7 @@ async fn turn_admission_reservation_is_global_exact_and_recoverable() {
         file_attachments: vec![DocumentId::new()],
         invoked_skills: vec!["presentations".into()],
         voice_input_used: true,
+        replaces: None,
     };
     let first_token = uuid::Uuid::new_v4();
     let first_lease = match store
@@ -572,6 +575,7 @@ async fn turn_admission_rejects_an_unbounded_lease() {
         file_attachments: Vec::new(),
         invoked_skills: Vec::new(),
         voice_input_used: false,
+        replaces: None,
     };
 
     let error = store
@@ -615,6 +619,7 @@ async fn reserved_queue_promotion_keeps_one_global_turn_owner() {
         file_attachments: queued.file_attachments.clone(),
         invoked_skills: queued.invoked_skills.clone(),
         voice_input_used: queued.voice_input_used,
+        replaces: None,
     };
     let lease = match store
         .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1))
@@ -788,6 +793,7 @@ async fn expired_turn_admission_lease_cannot_queue_or_release() {
         file_attachments: Vec::new(),
         invoked_skills: Vec::new(),
         voice_input_used: false,
+        replaces: None,
     };
     let lease = match store
         .begin_turn_admission(

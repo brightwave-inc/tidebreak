@@ -145,6 +145,12 @@ impl Agent {
         checkpoint_source: Option<MessageId>,
     ) -> Result<LoadedTranscript> {
         let mut messages = self.store.list_messages(chat_id).await?;
+        // A regenerated or edited turn leaves the conversation the model sees.
+        // Its rows stay for the reader: a regenerated answer is still shown as
+        // an earlier version.
+        let replaced =
+            crate::model::replaced_turn_ids(&self.store.list_turn_replacements(chat_id).await?);
+        messages.retain(|message| !replaced.contains(&message.turn_id));
         // The partial prose a cancelled turn committed (#1182) re-enters model
         // context annotated, so the model reads it as a response the user
         // stopped rather than one it chose to end mid-sentence. Applied here,
@@ -162,8 +168,11 @@ impl Agent {
                 }
             }
         }
-        let tool_calls = self.store.list_tool_calls(chat_id).await?;
-        let attachments = self.store.list_message_attachments(chat_id).await?;
+        let mut tool_calls = self.store.list_tool_calls(chat_id).await?;
+        tool_calls.retain(|call| !replaced.contains(&call.turn_id));
+        let kept: HashSet<MessageId> = messages.iter().map(|message| message.id).collect();
+        let mut attachments = self.store.list_message_attachments(chat_id).await?;
+        attachments.retain(|attachment| kept.contains(&attachment.message_id));
         let user_texts: Vec<(MessageId, String)> = messages
             .iter()
             .filter(|message| message.role == Role::User)

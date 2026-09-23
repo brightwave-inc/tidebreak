@@ -120,6 +120,8 @@ where
         pinned_at: Set(None),
         archived_at: Set(None),
         unread_since: Set(None),
+        branched_from_session_id: Set(None),
+        branched_from_turn_id: Set(None),
     }
     .insert(connection)
     .await

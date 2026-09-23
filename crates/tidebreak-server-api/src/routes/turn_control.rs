@@ -8,7 +8,8 @@ use serde::Deserialize;
 use tidebreak_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginTurnAdmissionOutcome, DocumentId,
     PromoteQueuedTurnOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
-    ReservedTurnAcceptanceOutcome, SessionId, TurnAdmissionRequest, TurnId, TurnSteer, TurnSteerId,
+    ReservedTurnAcceptanceOutcome, SessionId, TurnAdmissionRequest, TurnId, TurnReplacementKind,
+    TurnSteer, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -243,34 +244,112 @@ async fn require_image_capable_model(
     require_image_input(&policy)
 }
 
-fn turn_admission_from_message(chat_id: SessionId, body: &PostMessage) -> TurnAdmissionRequest {
-    TurnAdmissionRequest {
-        id: body.turn_id,
-        chat_id,
-        content: body.content.clone(),
-        attachments: body.attachments.clone(),
-        file_attachments: body.file_attachments.clone(),
-        invoked_skills: body.invoked_skills.clone(),
-        voice_input_used: body.voice_input_used,
+/// The caller-supplied input of one turn, whichever route submitted it.
+#[derive(Debug, Clone)]
+pub(crate) struct TurnInput {
+    /// Stable client-generated identity for acceptance and ambiguous retries.
+    pub turn_id: TurnId,
+    pub content: String,
+    pub attachments: Vec<uuid::Uuid>,
+    pub file_attachments: Vec<DocumentId>,
+    pub invoked_skills: Vec<String>,
+    pub voice_input_used: bool,
+}
+
+impl From<&PostMessage> for TurnInput {
+    fn from(body: &PostMessage) -> Self {
+        Self {
+            turn_id: body.turn_id,
+            content: body.content.clone(),
+            attachments: body.attachments.clone(),
+            file_attachments: body.file_attachments.clone(),
+            invoked_skills: body.invoked_skills.clone(),
+            voice_input_used: body.voice_input_used,
+        }
     }
 }
 
-fn queued_turn_from_message(
+/// What a submission asks for besides admitting its input.
+#[derive(Debug, Clone)]
+pub(crate) enum TurnSubmission {
+    /// An ordinary message. `queue` parks it behind a live turn instead of
+    /// refusing it.
+    Message { queue: bool },
+    /// Rerun the chat's latest settled turn, answered by `model` when set and
+    /// by the chat's model otherwise. `model` is already a validated
+    /// selection.
+    Replacement {
+        replaces: TurnId,
+        kind: TurnReplacementKind,
+        model: Option<String>,
+    },
+}
+
+impl TurnSubmission {
+    fn replaces(&self) -> Option<(TurnId, TurnReplacementKind)> {
+        match self {
+            Self::Message { .. } => None,
+            Self::Replacement { replaces, kind, .. } => Some((*replaces, *kind)),
+        }
+    }
+}
+
+fn turn_admission_request(
     chat_id: SessionId,
-    body: &PostMessage,
+    input: &TurnInput,
+    submission: &TurnSubmission,
+) -> TurnAdmissionRequest {
+    TurnAdmissionRequest {
+        id: input.turn_id,
+        chat_id,
+        content: input.content.clone(),
+        attachments: input.attachments.clone(),
+        file_attachments: input.file_attachments.clone(),
+        invoked_skills: input.invoked_skills.clone(),
+        voice_input_used: input.voice_input_used,
+        replaces: submission.replaces(),
+    }
+}
+
+fn queued_turn_from_input(
+    chat_id: SessionId,
+    input: &TurnInput,
 ) -> tidebreak_core::QueuedAgentTurn {
     let now = Utc::now();
     tidebreak_core::QueuedAgentTurn {
-        id: body.turn_id,
+        id: input.turn_id,
         chat_id,
-        content: body.content.clone(),
-        attachments: body.attachments.clone(),
-        file_attachments: body.file_attachments.clone(),
-        invoked_skills: body.invoked_skills.clone(),
-        voice_input_used: body.voice_input_used,
+        content: input.content.clone(),
+        attachments: input.attachments.clone(),
+        file_attachments: input.file_attachments.clone(),
+        invoked_skills: input.invoked_skills.clone(),
+        voice_input_used: input.voice_input_used,
         position: 0,
         created_at: now,
         updated_at: now,
+    }
+}
+
+/// The route answer for a replacement the store refused.
+pub(crate) fn replacement_refused(
+    turn: TurnId,
+    refusal: tidebreak_core::TurnReplacementRefusal,
+) -> ServerError {
+    use tidebreak_core::TurnReplacementRefusal as Refusal;
+    match refusal {
+        Refusal::UnknownTurn => ServerError::not_found(format!("turn {turn} not found")),
+        Refusal::Unsettled => ServerError::conflict_kind(
+            "turn_unsettled",
+            format!("turn {turn} has not finished; wait for it, or stop it first"),
+        ),
+        Refusal::NotLatest => ServerError::conflict_kind(
+            "turn_not_latest",
+            format!("turn {turn} is not the latest turn; only the latest turn can be rerun"),
+        ),
+        Refusal::AlreadyReplaced => ServerError::conflict_kind(
+            "turn_already_replaced",
+            format!("turn {turn} was already rerun"),
+        ),
     }
 }
 
@@ -346,18 +425,56 @@ pub async fn post_message(
     Path(id): Path<SessionId>,
     Json(body): Json<PostMessage>,
 ) -> Result<StatusCode, ServerError> {
-    if body.turn_id.0.is_nil() {
+    let input = TurnInput::from(&body);
+    Box::pin(admit_turn(
+        &state,
+        &store,
+        id,
+        &input,
+        &TurnSubmission::Message { queue: body.queue },
+    ))
+    .await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// The checks an admission runs against the chat before anything is written,
+/// for a caller that has to know they pass before it creates the chat the
+/// turn will run in.
+pub(crate) async fn preflight_turn(
+    state: &AppState,
+    chat: &tidebreak_core::Chat,
+    input: &TurnInput,
+) -> Result<(), ServerError> {
+    validate_invoked_skill_identity(&input.invoked_skills)?;
+    resolve_executable_chat_model(state, chat).await?;
+    require_invocable_skills(state, &input.invoked_skills).await?;
+    Ok(())
+}
+
+/// Durably accept one turn's input for `id`, the one admission path every
+/// route that starts a turn shares.
+///
+/// Answers `Ok` once the turn is accepted, queued, or found already accepted
+/// under the same identity. Every refusal is a typed [`ServerError`].
+pub(crate) async fn admit_turn(
+    state: &AppState,
+    store: &ScopedStore,
+    id: SessionId,
+    input: &TurnInput,
+    submission: &TurnSubmission,
+) -> Result<(), ServerError> {
+    if input.turn_id.0.is_nil() {
         return Err(ServerError::bad_request("turn_id must not be nil"));
     }
-    if body.content.trim().is_empty() || body.content.contains('\0') {
+    if input.content.trim().is_empty() || input.content.contains('\0') {
         return Err(ServerError::bad_request(
             "message content must be non-empty and contain no NUL characters",
         ));
     }
-    if body
+    if input
         .attachments
         .len()
-        .saturating_add(body.file_attachments.len())
+        .saturating_add(input.file_attachments.len())
         > tidebreak_core::MAX_MESSAGE_ATTACHMENTS
     {
         return Err(ServerError::bad_request_kind(
@@ -368,10 +485,18 @@ pub async fn post_message(
             ),
         ));
     }
-    validate_invoked_skill_identity(&body.invoked_skills)?;
-    let _admission = state.active_turns.serialize_admission(body.turn_id).await;
-    let chat = store.require_chat(id).await?;
-    let request = turn_admission_from_message(id, &body);
+    validate_invoked_skill_identity(&input.invoked_skills)?;
+    let _admission = state.active_turns.serialize_admission(input.turn_id).await;
+    let mut chat = store.require_chat(id).await?;
+    // A rerun with another model answers under that model and leaves the
+    // chat's own selection alone for the turns after it.
+    if let TurnSubmission::Replacement {
+        model: Some(model), ..
+    } = submission
+    {
+        chat.model = Some(model.clone());
+    }
+    let request = turn_admission_request(id, input, submission);
 
     'reserve: loop {
         let lease_token = uuid::Uuid::new_v4();
@@ -387,27 +512,27 @@ pub async fn post_message(
             }
             BeginTurnAdmissionOutcome::Accepted => {
                 state.turn_job_wake.notify_one();
-                return Ok(StatusCode::ACCEPTED);
+                return Ok(());
             }
             BeginTurnAdmissionOutcome::Queued => {
                 state.queued_turn_wake.notify_one();
-                return Ok(StatusCode::ACCEPTED);
+                return Ok(());
             }
             BeginTurnAdmissionOutcome::IdentityConflict => {
                 return Err(ServerError::conflict(format!(
                     "turn {} was already reserved with different input or by another chat",
-                    body.turn_id
+                    input.turn_id
                 )));
             }
         };
 
         let prepared = async {
-            let model = resolve_executable_chat_model(&state, &chat).await?;
-            require_invocable_skills(&state, &body.invoked_skills).await?;
-            let images = resolve_message_attachments(&state, id, &body.attachments).await?;
-            let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
+            let model = resolve_executable_chat_model(state, &chat).await?;
+            require_invocable_skills(state, &input.invoked_skills).await?;
+            let images = resolve_message_attachments(state, id, &input.attachments).await?;
+            let documents = resolve_file_attachments(store, id, &input.file_attachments).await?;
             if !images.is_empty() {
-                require_image_capable_model(&state, &chat, &model).await?;
+                require_image_capable_model(state, &chat, &model).await?;
             }
             Ok::<_, ServerError>((model, images, documents))
         }
@@ -420,43 +545,71 @@ pub async fn post_message(
             }
         };
 
-        match state
-            .store
-            .accept_reserved_turn_with_message_context(
-                lease,
-                id,
-                &model,
-                &body.content,
-                &images,
-                &documents,
-                &body.invoked_skills,
-                body.voice_input_used,
-            )
-            .await?
-        {
+        let accepted = match submission {
+            TurnSubmission::Message { .. } => {
+                state
+                    .store
+                    .accept_reserved_turn_with_message_context(
+                        lease,
+                        id,
+                        &model,
+                        &input.content,
+                        &images,
+                        &documents,
+                        &input.invoked_skills,
+                        input.voice_input_used,
+                    )
+                    .await?
+            }
+            TurnSubmission::Replacement { replaces, kind, .. } => {
+                state
+                    .store
+                    .accept_reserved_replacement_turn(
+                        lease,
+                        id,
+                        *replaces,
+                        *kind,
+                        &model,
+                        &input.content,
+                        &images,
+                        &documents,
+                        &input.invoked_skills,
+                        input.voice_input_used,
+                    )
+                    .await?
+            }
+        };
+        match accepted {
             ReservedTurnAcceptanceOutcome::LeaseLost => continue 'reserve,
+            ReservedTurnAcceptanceOutcome::ReplacementRefused(refusal) => {
+                let _ = state.store.release_turn_admission(lease).await;
+                let replaces = submission
+                    .replaces()
+                    .map_or(input.turn_id, |(turn, _)| turn);
+                return Err(replacement_refused(replaces, refusal));
+            }
             ReservedTurnAcceptanceOutcome::Outcome(outcome) => match *outcome {
                 AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
                     state.turn_job_wake.notify_one();
-                    return Ok(StatusCode::ACCEPTED);
+                    return Ok(());
                 }
                 AcceptTurnOutcome::IdentityConflict => {
                     let _ = state.store.release_turn_admission(lease).await;
                     return Err(ServerError::conflict(format!(
                         "turn {} was already reserved with different input",
-                        body.turn_id
+                        input.turn_id
                     )));
                 }
                 AcceptTurnOutcome::ChatBusy(active) => {
-                    if body.queue {
+                    if matches!(submission, TurnSubmission::Message { queue: true }) {
                         match state
                             .store
-                            .enqueue_reserved_turn(lease, &queued_turn_from_message(id, &body))
+                            .enqueue_reserved_turn(lease, &queued_turn_from_input(id, input))
                             .await?
                         {
                             ReservedQueuedTurnOutcome::Queued(_) => {
                                 state.queued_turn_wake.notify_one();
-                                return Ok(StatusCode::ACCEPTED);
+                                return Ok(());
                             }
                             ReservedQueuedTurnOutcome::LeaseLost => continue 'reserve,
                         }

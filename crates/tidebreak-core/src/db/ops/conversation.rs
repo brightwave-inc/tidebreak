@@ -180,7 +180,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     Ok(chat)
 }
 
-async fn load_chat_project_roots<C>(
+pub(in crate::db) async fn load_chat_project_roots<C>(
     conn: &C,
     project_id: Option<ProjectId>,
     owner: Option<&OwnerId>,
@@ -211,7 +211,11 @@ where
     Ok(project_from_models(model, roots)?.root_attachments)
 }
 
-async fn insert_chat_on<C>(conn: &C, chat: &Chat, owner: Option<&OwnerId>) -> Result<()>
+pub(in crate::db) async fn insert_chat_on<C>(
+    conn: &C,
+    chat: &Chat,
+    owner: Option<&OwnerId>,
+) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -282,6 +286,8 @@ where
         pinned_at: Set(None),
         archived_at: Set(None),
         unread_since: Set(None),
+        branched_from_session_id: Set(None),
+        branched_from_turn_id: Set(None),
     }
     .insert(conn)
     .await
@@ -720,6 +726,14 @@ fn chat_listing_from_models(
     let pinned_at = model.pinned_at;
     let archived_at = model.archived_at;
     let unread = model.unread_since.is_some();
+    let branched_from =
+        model
+            .branched_from_session_id
+            .map(|source| crate::model::ChatBranchOrigin {
+                chat_id: SessionId(source),
+                turn_id: model.branched_from_turn_id.map(TurnId),
+                branched_at: model.created_at,
+            });
     let chat = chat_from_models(model, roots)?;
     Ok(ChatListing {
         last_activity_at: last_activity_at.unwrap_or(chat.created_at),
@@ -728,6 +742,7 @@ fn chat_listing_from_models(
         running: activity.running,
         unread,
         turn_count: activity.turn_count,
+        branched_from,
         chat,
     })
 }
@@ -1663,6 +1678,7 @@ pub(in crate::db) async fn get_chat_transcript(
         .collect();
     let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages, &window).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id, &window).await?;
+    let replacements = super::turn::list_turn_replacements_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptPage {
@@ -1674,6 +1690,7 @@ pub(in crate::db) async fn get_chat_transcript(
             message_invoked_skills,
             terminal_turns,
             tool_activity,
+            replacements,
             last_event_seq,
         },
         earlier: window.earlier,
@@ -2085,6 +2102,7 @@ fn tool_activity_from_call(
     };
     ChatToolActivitySnapshot {
         call_id: call.id,
+        turn_id: call.turn_id,
         tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         result,
