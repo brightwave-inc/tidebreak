@@ -141,6 +141,19 @@ export const CodeExecutionUnavailableCompact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },
 };
 
+/** Cloud sandbox keys at 440 px, where Save key wraps under its input. */
+export const CodeExecutionProvidersNarrow: Story = {
+  args: { panel: "exec" },
+  globals: { viewport: { value: "compact", isRotated: false } },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-[440px] max-w-full">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
 export const CodingHarnessesConfigured: Story = {
   args: { panel: "harnesses" },
 };

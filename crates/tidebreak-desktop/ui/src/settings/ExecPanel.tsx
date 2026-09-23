@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
@@ -46,6 +46,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   const [savingKey, setSavingKey] = useState<ExecProviderKind | null>(null);
   const [removing, setRemoving] = useState<ExecProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,36 +95,30 @@ export function ExecPanel({ client }: { client: ApiClient }) {
     }
   }
 
-  async function persistConfig(next: {
-    provider: ExecProviderKind | "";
-    timeoutSeconds: string;
+  function applyConfig(nextConfig: ExecConfigInfo) {
+    setConfig(nextConfig);
+    setProvider(nextConfig.provider ?? "");
+    setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+  }
+
+  async function persistConfig(body: {
+    provider?: ExecProviderKind | null;
+    timeout_ms?: number;
   }) {
-    const timeout = timeoutMsFromSeconds(
-      next.timeoutSeconds,
-      MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
-      MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
-    );
-    if ("error" in timeout) {
-      setError(timeout.error);
-      return false;
-    }
+    const seq = ++writeSeq.current;
     setSaving(true);
     setError(null);
     try {
-      const nextConfig = await client.putExecConfig({
-        provider: next.provider || null,
-        timeout_ms: timeout.timeoutMs,
-      });
-      setConfig(nextConfig);
-      setProvider(nextConfig.provider ?? "");
-      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      const nextConfig = await client.putExecConfig(body);
+      if (seq !== writeSeq.current) return true;
+      applyConfig(nextConfig);
       toast.success("Saved code-execution settings");
       return true;
     } catch (err) {
-      setError(String(err));
+      if (seq === writeSeq.current) setError(String(err));
       return false;
     } finally {
-      setSaving(false);
+      if (seq === writeSeq.current) setSaving(false);
     }
   }
 
@@ -138,11 +133,20 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       }
     }
     setProvider(nextProvider);
-    await persistConfig({ provider: nextProvider, timeoutSeconds });
+    await persistConfig({ provider: nextProvider || null });
   }
 
   async function saveTimeout() {
-    await persistConfig({ provider, timeoutSeconds });
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
+      MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
+      return;
+    }
+    await persistConfig({ timeout_ms: timeout.timeoutMs });
   }
 
   async function removeCredential(target: ExecProviderKind) {

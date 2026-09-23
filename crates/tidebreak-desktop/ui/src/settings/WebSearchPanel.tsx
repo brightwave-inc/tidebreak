@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
@@ -70,6 +70,8 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   );
   const [removing, setRemoving] = useState<WebSearchProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const configRef = useRef<WebSearchConfigInfo | null>(null);
+  const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +85,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         ]);
         if (cancelled) return;
         setConfig(nextConfig);
+        configRef.current = nextConfig;
         setCredentials(nextCredentials.credentials);
         setMode(nextConfig.mode);
         setProvider(nextConfig.provider ?? "");
@@ -128,53 +131,41 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     return kind !== SEARXNG_PROVIDER;
   }
 
-  async function persistConfig(next: {
-    mode: WebSearchMode;
-    provider: WebSearchProviderKind | "";
-    timeoutSeconds: string;
-    searxngBaseUrl: string;
+  function applyConfig(nextConfig: WebSearchConfigInfo) {
+    configRef.current = nextConfig;
+    setConfig(nextConfig);
+    setMode(nextConfig.mode);
+    setProvider(nextConfig.provider ?? "");
+    setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+    setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
+  }
+
+  async function persistConfig(body: {
+    mode?: WebSearchMode;
+    provider?: WebSearchProviderKind | null;
+    timeout_ms?: number;
+    searxng_base_url?: string | null;
   }) {
-    const timeout = timeoutMsFromSeconds(
-      next.timeoutSeconds,
-      MIN_WEB_SEARCH_TIMEOUT_SECONDS,
-      MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-    );
-    if ("error" in timeout) {
-      setError(timeout.error);
-      return false;
-    }
+    const seq = ++writeSeq.current;
     setSaving(true);
     setError(null);
     try {
-      const nextConfig = await client.putWebSearchConfig({
-        mode: next.mode,
-        provider: next.provider || null,
-        timeout_ms: timeout.timeoutMs,
-        searxng_base_url: next.searxngBaseUrl.trim() || null,
-      });
-      setConfig(nextConfig);
-      setMode(nextConfig.mode);
-      setProvider(nextConfig.provider ?? "");
-      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
-      setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
+      const nextConfig = await client.putWebSearchConfig(body);
+      if (seq !== writeSeq.current) return true;
+      applyConfig(nextConfig);
       toast.success("Saved web-search settings");
       return true;
     } catch (err) {
-      setError(String(err));
+      if (seq === writeSeq.current) setError(String(err));
       return false;
     } finally {
-      setSaving(false);
+      if (seq === writeSeq.current) setSaving(false);
     }
   }
 
   async function saveMode(nextMode: WebSearchMode) {
     setMode(nextMode);
-    await persistConfig({
-      mode: nextMode,
-      provider,
-      timeoutSeconds,
-      searxngBaseUrl,
-    });
+    await persistConfig({ mode: nextMode });
   }
 
   async function saveProvider(nextProvider: WebSearchProviderKind | "") {
@@ -192,20 +183,37 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       return;
     }
     setProvider(nextProvider);
-    await persistConfig({
-      mode,
-      provider: nextProvider,
-      timeoutSeconds,
-      searxngBaseUrl,
-    });
+    await persistConfig({ provider: nextProvider || null });
   }
 
   async function saveTimeout() {
-    await persistConfig({ mode, provider, timeoutSeconds, searxngBaseUrl });
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_WEB_SEARCH_TIMEOUT_SECONDS,
+      MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
+      return;
+    }
+    await persistConfig({ timeout_ms: timeout.timeoutMs });
   }
 
   async function saveSearxngUrl() {
-    await persistConfig({ mode, provider, timeoutSeconds, searxngBaseUrl });
+    const trimmed = searxngBaseUrl.trim();
+    const confirmed = configRef.current;
+    if (!trimmed) {
+      if (confirmed?.provider === SEARXNG_PROVIDER) {
+        setSearxngBaseUrl(confirmed.searxng_base_url ?? "");
+        setError("SearXNG needs an instance URL.");
+        return;
+      }
+      if (!confirmed?.searxng_base_url) return;
+      await persistConfig({ searxng_base_url: null });
+      return;
+    }
+    if (trimmed === (confirmed?.searxng_base_url ?? "")) return;
+    await persistConfig({ searxng_base_url: trimmed });
   }
 
   async function removeCredential(target: WebSearchProviderKind) {
@@ -217,7 +225,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         client.getWebSearchConfig(),
         client.listWebSearchCredentials(),
       ]);
-      setConfig(nextConfig);
+      applyConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       toast.success(`Removed the saved ${providerLabel(target)} API key`);
     } catch (err) {
@@ -307,7 +315,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
           >
             <SettingsField
               label="SearXNG instance URL"
-              hint="For example http://localhost:8888. A loopback or private address is expected here; leave blank to take SearXNG out of service."
+              hint="For example http://localhost:8888. A loopback or private address is expected here. If SearXNG is the active provider, the URL is required."
             >
               <Input
                 type="url"
