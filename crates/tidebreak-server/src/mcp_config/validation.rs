@@ -289,7 +289,7 @@ pub(super) fn reconnect_park(
 pub(super) fn failure_diagnostic(
     definition: &McpServerDefinition,
     error: &AgentError,
-    oauth: Option<OAuthNeed>,
+    oauth: Option<&OAuthNeed>,
 ) -> String {
     match oauth {
         Some(need) => need.diagnostic(),
@@ -299,15 +299,16 @@ pub(super) fn failure_diagnostic(
 
 /// [`reconnect_park`], given what the failure taught the runtime about OAuth.
 /// A server that asks for a sign-in cannot connect until someone signs in or
-/// changes it, so the supervisor stops retrying it.
+/// changes it, so the supervisor stops retrying it. A sign-in service that
+/// did not answer is temporary and keeps the usual backoff.
 pub(super) fn failure_park(
     definition: &McpServerDefinition,
     error: &AgentError,
-    oauth: Option<OAuthNeed>,
+    oauth: Option<&OAuthNeed>,
 ) -> Option<ReconnectPark> {
     match oauth {
-        Some(_) => Some(ReconnectPark::Authorization),
-        None => reconnect_park(definition, error),
+        Some(need) if need.parks() => Some(ReconnectPark::Authorization),
+        _ => reconnect_park(definition, error),
     }
 }
 
@@ -359,6 +360,9 @@ fn classified_transport_detail(error: &AgentError) -> Option<String> {
         "Not executable:",
         "Permission denied:",
         "Relative executable path",
+        // A token refresh the sign-in service did not answer: temporary, and
+        // worded for the person by the OAuth connector.
+        "Sign-in service unavailable",
     ];
     PREFIXES
         .iter()

@@ -58,6 +58,18 @@ pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Short so a missing expiry never becomes "never expires".
 const DEFAULT_ACCESS_TTL_SECONDS: u64 = 300;
 
+/// The largest discovery, registration, or token response read. These are
+/// small JSON documents; discovery runs on every `401`, so a server must not
+/// be able to make Tidebreak read an unbounded body.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// The diagnostic for a token request the sign-in service did not answer.
+/// Temporary: the session is kept and the connection retried. The runtime's
+/// diagnostic classifier recognizes this text by its first words.
+pub const SIGN_IN_SERVICE_UNAVAILABLE: &str = "Sign-in service unavailable. Tidebreak could \
+                                               not refresh your sign-in for this server and \
+                                               will try again.";
+
 /// The most one discovery, registration, or token request may take.
 /// Discovery runs inside a failed connection and refresh inside a tool call,
 /// so a server that never answers must not hold either open.
@@ -153,7 +165,13 @@ pub struct AuthorizationServerMetadata {
 /// record is persisted here. The `token_endpoint`/`scopes` fields default so an
 /// older stored record (registration only) still deserializes; the runtime
 /// treats a record whose `token_endpoint` is absent as needing rediscovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The record is bound to the one server URL it was issued for
+/// ([`server_url`](Self::server_url)). A session is presented only to that
+/// exact URL, so editing a server's URL can never hand its token to the new
+/// address. `Debug` is hand-written to keep the secret and the registration
+/// access token out of every log.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientRegistration {
     pub client_id: String,
     #[serde(default)]
@@ -176,6 +194,40 @@ pub struct ClientRegistration {
     /// existed, which then refreshes without one, as it always did.
     #[serde(default)]
     pub resource: Option<String>,
+    /// The exact MCP server URL this session was issued for. A session whose
+    /// URL differs from the server's current one is never presented, and a
+    /// record written before this field existed has none, so it is never
+    /// presented either.
+    #[serde(default)]
+    pub server_url: Option<String>,
+    /// Host of the sign-in page, shown in Settings beside the session.
+    #[serde(default)]
+    pub sign_in_host: Option<String>,
+}
+
+impl std::fmt::Debug for ClientRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientRegistration")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "registration_access_token",
+                &self
+                    .registration_access_token
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field("registration_client_uri", &self.registration_client_uri)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("scopes", &self.scopes)
+            .field("resource", &self.resource)
+            .field("server_url", &self.server_url)
+            .field("sign_in_host", &self.sign_in_host)
+            .finish()
+    }
 }
 
 /// The authorization endpoints resolved for one server, parsed and admitted,
@@ -190,10 +242,12 @@ pub struct DiscoveredAuthorization {
     /// one, otherwise the protected resource's `scopes_supported`, otherwise
     /// none. This is the MCP specification's scope-selection order.
     pub scopes: Vec<String>,
-    /// The RFC 8707 resource indicator for this server: the protected
-    /// resource's own identifier when it shares the server URL's origin,
-    /// otherwise the server URL.
+    /// The RFC 8707 resource indicator for this server: the identifier its
+    /// protected-resource metadata declares, which [`resource_matches`] has
+    /// already tied to this server's URL, or the server URL itself.
     pub resource: String,
+    /// Host of the authorization endpoint: where Connect sends the person.
+    pub sign_in_host: String,
 }
 
 /// What discovery learned about signing in to one MCP server.
@@ -203,6 +257,10 @@ pub enum Discovery {
     Supported(Box<DiscoveredAuthorization>),
     /// The server asks for OAuth sign-in in a way Tidebreak cannot complete.
     Unsupported(OAuthUnsupported),
+    /// The server asks for OAuth sign-in, but its metadata or its sign-in
+    /// service did not answer: a timeout, a network failure, a `5xx`, or a
+    /// name that did not resolve. Temporary; ask again later.
+    Unavailable,
 }
 
 /// Why Tidebreak cannot complete a server's OAuth sign-in.
@@ -216,6 +274,15 @@ pub enum OAuthUnsupported {
     /// The authorization server, or an endpoint it names, is not a public
     /// `https` address.
     RefusedEndpoint,
+    /// The protected-resource metadata describes a different server
+    /// (RFC 9728 §3.3).
+    ResourceMismatch,
+    /// The authorization-server metadata names a different issuer than the
+    /// one it was fetched for (RFC 8414 §3.3).
+    IssuerMismatch,
+    /// The authorization server lists PKCE methods, and S256 is not one of
+    /// them.
+    NoS256,
 }
 
 impl OAuthUnsupported {
@@ -231,6 +298,17 @@ impl OAuthUnsupported {
                 "Tidebreak could not read the settings of its sign-in service."
             }
             Self::RefusedEndpoint => "Its sign-in service is not at a public https address.",
+            Self::ResourceMismatch => {
+                "Its sign-in settings describe a different server, so Tidebreak does not use \
+                 them."
+            }
+            Self::IssuerMismatch => {
+                "Its sign-in service's settings name a different service, so Tidebreak does \
+                 not use them."
+            }
+            Self::NoS256 => {
+                "Its sign-in service does not offer the PKCE method Tidebreak requires (S256)."
+            }
         }
     }
 }
@@ -377,6 +455,32 @@ impl McpOAuthCredentialVault {
 
     pub async fn clear_registration(&self) -> Result<()> {
         self.secrets.delete_secret(&self.client_key).await
+    }
+
+    /// The stored registration and tokens, but only when they were issued
+    /// for exactly `server_url`. A session bound to another URL, or to none
+    /// (a record from before sessions were bound), reads as no session.
+    pub async fn load_for(
+        &self,
+        server_url: &str,
+    ) -> Result<Option<(ClientRegistration, McpOAuthCredentials)>> {
+        let Some(registration) = self
+            .load_registration()
+            .await?
+            .filter(|registration| registration.server_url.as_deref() == Some(server_url))
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .load()
+            .await?
+            .map(|credentials| (registration, credentials)))
+    }
+
+    /// Remove the tokens and the registration.
+    pub async fn clear_all(&self) -> Result<()> {
+        self.clear().await?;
+        self.clear_registration().await
     }
 }
 
@@ -541,6 +645,15 @@ fn unquote(value: &str) -> String {
     out
 }
 
+/// Why an OAuth endpoint was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// Not `https`, or an address on the denied-network list: never allowed.
+    Refused,
+    /// The name did not resolve. Temporary: it may resolve on a later try.
+    Unresolved,
+}
+
 /// Admit an OAuth discovery, registration, or token endpoint before any request
 /// is sent to it.
 ///
@@ -553,31 +666,83 @@ fn unquote(value: &str) -> String {
 /// there is **no loopback exception**: an OAuth token must never leave for a
 /// loopback address discovered from server-controlled metadata.
 ///
+/// The production client also resolves every name through
+/// [`AdmittedResolver`], which applies the same check at connect time, so a
+/// name that resolves differently after this check still cannot reach a
+/// denied address.
+///
 /// [`admit_plugin_endpoint`]: crate::mcp_config
 pub async fn admit_oauth_endpoint(url: &url::Url) -> Result<()> {
-    use crate::web_search::admit_fetch_address;
+    check_endpoint(url).await.map_err(|refusal| match refusal {
+        Refusal::Refused => AgentError::config("MCP OAuth endpoint is not an allowed destination"),
+        Refusal::Unresolved => AgentError::config("MCP OAuth endpoint host could not be resolved"),
+    })
+}
 
-    let refused = || AgentError::config("MCP OAuth endpoint is not an allowed destination");
+async fn check_endpoint(url: &url::Url) -> std::result::Result<(), Refusal> {
     if url.scheme() != "https" {
         // Token-bearing traffic must be TLS; a loopback dev server is not a
         // valid OAuth authorization server for a remote resource.
-        return Err(refused());
+        return Err(Refusal::Refused);
     }
-    let host = url.host_str().ok_or_else(refused)?;
-    let port = url.port_or_known_default().ok_or_else(refused)?;
-    let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| AgentError::config("MCP OAuth endpoint host could not be resolved"))?
-        .collect();
+    let host = url.host_str().ok_or(Refusal::Refused)?;
+    let port = url.port_or_known_default().ok_or(Refusal::Refused)?;
+    let addresses = admitted_addresses(host, port).await?;
     if addresses.is_empty() {
-        return Err(AgentError::config(
-            "MCP OAuth endpoint host resolved to no addresses",
-        ));
-    }
-    for address in addresses {
-        admit_fetch_address(address.ip()).map_err(|_| refused())?;
+        return Err(Refusal::Unresolved);
     }
     Ok(())
+}
+
+/// Resolve `host` and return its addresses, refusing the whole answer when
+/// any address is on the denied-network list.
+async fn admitted_addresses(
+    host: &str,
+    port: u16,
+) -> std::result::Result<Vec<std::net::SocketAddr>, Refusal> {
+    use crate::web_search::admit_fetch_address;
+
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| Refusal::Unresolved)?
+        .collect();
+    if addresses
+        .iter()
+        .any(|address| admit_fetch_address(address.ip()).is_err())
+    {
+        return Err(Refusal::Refused);
+    }
+    Ok(addresses)
+}
+
+/// The DNS resolver of the production OAuth client: it resolves each name and
+/// hands the connector only addresses that clear the denied-network list, so
+/// the address a request connects to is the one that was checked.
+struct AdmittedResolver;
+
+impl reqwest::dns::Resolve for AdmittedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addresses = admitted_addresses(&host, 0).await.map_err(|refusal| {
+                Box::new(std::io::Error::other(match refusal {
+                    Refusal::Refused => "the OAuth endpoint is not an allowed destination",
+                    Refusal::Unresolved => "the OAuth endpoint host did not resolve",
+                })) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+            if addresses.is_empty() {
+                return Err(Box::new(std::io::Error::other(
+                    "the OAuth endpoint host resolved to no addresses",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +758,44 @@ pub struct CodeExchange<'a> {
     pub verifier: &'a str,
     /// RFC 8707 resource indicator, the same one the authorize request sent.
     pub resource: Option<&'a str>,
+}
+
+/// What one discovery document request came back with.
+enum Fetched<T> {
+    Found(T),
+    /// A definite answer that there is no usable document: a `4xx`, a body
+    /// that is not the JSON expected, or one larger than Tidebreak reads.
+    Missing,
+    /// No answer to go on: a timeout, a network failure, a `5xx`, `408`, or
+    /// `429`. Temporary.
+    Unavailable,
+}
+
+/// Whether an HTTP status means "try again later" rather than "no".
+fn is_temporary(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Read a response body, refusing one larger than [`MAX_RESPONSE_BYTES`]
+/// instead of reading it to the end. `None` for a body that is too large or
+/// that failed mid-read.
+async fn read_capped(mut response: reqwest::Response) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 /// The network client for the OAuth flows. Holds a redirect-refusing reqwest
@@ -612,6 +815,7 @@ impl McpOAuthClient {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
+            .dns_resolver(AdmittedResolver)
             .build()
             .map_err(|error| {
                 AgentError::config(format!(
@@ -645,8 +849,8 @@ impl McpOAuthClient {
         })
     }
 
-    /// [`admit_oauth_endpoint`], plus the test-only loopback allowance.
-    async fn admit(&self, url: &url::Url) -> Result<()> {
+    /// [`check_endpoint`], plus the test-only loopback allowance.
+    async fn admit(&self, url: &url::Url) -> std::result::Result<(), Refusal> {
         #[cfg(test)]
         if self.admit_loopback
             && url.scheme() == "http"
@@ -654,12 +858,14 @@ impl McpOAuthClient {
         {
             return Ok(());
         }
-        admit_oauth_endpoint(url).await
+        check_endpoint(url).await
     }
 
-    async fn parse_and_admit(&self, value: &str) -> Result<url::Url> {
-        let url = parse_oauth_url(value)?;
-        self.admit(&url).await?;
+    /// Parse and admit one URL a server's metadata named.
+    async fn endpoint(&self, value: &str) -> std::result::Result<url::Url, AuthorizationProblem> {
+        let url = parse_oauth_url(value)
+            .map_err(|_| AuthorizationProblem::Unsupported(OAuthUnsupported::UnreadableMetadata))?;
+        self.admit(&url).await.map_err(AuthorizationProblem::from)?;
         Ok(url)
     }
 
@@ -668,42 +874,59 @@ impl McpOAuthClient {
     ///
     /// The protected-resource metadata (RFC 9728) comes from the URL a `401`
     /// challenge names, then from the well-known paths under the server's
-    /// origin. It names authorization servers; the first one's metadata comes
-    /// from its RFC 8414 or OpenID Connect discovery document. Every URL,
-    /// including the ones the server names, clears [`admit_oauth_endpoint`]
-    /// before it is fetched.
+    /// origin. It must describe this server (RFC 9728 §3.3). It names
+    /// authorization servers; the first one's metadata comes from its RFC 8414
+    /// or OpenID Connect discovery document, and must name the same issuer
+    /// (RFC 8414 §3.3). Every URL, including the ones the server names, clears
+    /// [`admit_oauth_endpoint`] before it is fetched.
     ///
     /// Returns `None` when the server publishes no protected-resource metadata
     /// that names an authorization server: then it is not asking for an OAuth
-    /// sign-in Tidebreak can recognize.
+    /// sign-in Tidebreak can recognize. A server whose metadata did not answer
+    /// is `None` too, unless its challenge named metadata, which makes it
+    /// [`Discovery::Unavailable`].
     pub async fn discover(
         &self,
         resource: &url::Url,
         challenge: Option<&str>,
     ) -> Option<Discovery> {
         let hint = challenge.and_then(resource_metadata_from_challenge);
+        let mut unavailable = false;
         let mut resource_metadata = None;
         for candidate in protected_resource_metadata_urls(resource, hint.as_deref()) {
-            if self.admit(&candidate).await.is_err() {
-                continue;
+            match self.admit(&candidate).await {
+                Ok(()) => {}
+                Err(Refusal::Refused) => continue,
+                Err(Refusal::Unresolved) => {
+                    unavailable = true;
+                    continue;
+                }
             }
-            if let Some(metadata) = self
-                .get_json::<ProtectedResourceMetadata>(&candidate)
-                .await
-                .filter(|metadata| !metadata.authorization_servers.is_empty())
-            {
-                resource_metadata = Some(metadata);
-                break;
+            match self.get_json::<ProtectedResourceMetadata>(&candidate).await {
+                Fetched::Found(metadata) if !metadata.authorization_servers.is_empty() => {
+                    resource_metadata = Some(metadata);
+                    break;
+                }
+                Fetched::Found(_) | Fetched::Missing => {}
+                Fetched::Unavailable => unavailable = true,
             }
         }
-        let resource_metadata = resource_metadata?;
+        let Some(resource_metadata) = resource_metadata else {
+            return (unavailable && hint.is_some()).then_some(Discovery::Unavailable);
+        };
+        if let Some(declared) = resource_metadata.resource.as_deref() {
+            if !resource_matches(resource, declared) {
+                return Some(Discovery::Unsupported(OAuthUnsupported::ResourceMismatch));
+            }
+        }
         Some(
             match self
                 .discover_authorization(resource, &resource_metadata, challenge)
                 .await
             {
                 Ok(discovered) => Discovery::Supported(Box::new(discovered)),
-                Err(unsupported) => Discovery::Unsupported(unsupported),
+                Err(AuthorizationProblem::Unsupported(reason)) => Discovery::Unsupported(reason),
+                Err(AuthorizationProblem::Unavailable) => Discovery::Unavailable,
             },
         )
     }
@@ -713,51 +936,77 @@ impl McpOAuthClient {
         resource: &url::Url,
         resource_metadata: &ProtectedResourceMetadata,
         challenge: Option<&str>,
-    ) -> std::result::Result<DiscoveredAuthorization, OAuthUnsupported> {
-        let issuer = resource_metadata
-            .authorization_servers
-            .first()
-            .ok_or(OAuthUnsupported::UnreadableMetadata)?;
-        let issuer = parse_oauth_url(issuer).map_err(|_| OAuthUnsupported::UnreadableMetadata)?;
-        self.admit(&issuer)
-            .await
-            .map_err(|_| OAuthUnsupported::RefusedEndpoint)?;
+    ) -> std::result::Result<DiscoveredAuthorization, AuthorizationProblem> {
+        let issuer = resource_metadata.authorization_servers.first().ok_or(
+            AuthorizationProblem::Unsupported(OAuthUnsupported::UnreadableMetadata),
+        )?;
+        let issuer = self.endpoint(issuer).await?;
+        let mut unavailable = false;
+        let mut mismatched = false;
         let mut metadata = None;
         for candidate in authorization_server_metadata_urls(&issuer) {
-            if let Some(found) = self
+            match self
                 .get_json::<AuthorizationServerMetadata>(&candidate)
                 .await
             {
-                metadata = Some(found);
-                break;
+                Fetched::Found(found) if issuer_matches(&issuer, &found.issuer) => {
+                    metadata = Some(found);
+                    break;
+                }
+                // RFC 8414 §3.3: metadata naming another issuer must not be
+                // used. Keep looking; another location may be right.
+                Fetched::Found(_) => mismatched = true,
+                Fetched::Missing => {}
+                Fetched::Unavailable => unavailable = true,
             }
         }
-        let metadata = metadata.ok_or(OAuthUnsupported::UnreadableMetadata)?;
-        let authorization_endpoint = self
-            .parse_and_admit(&metadata.authorization_endpoint)
-            .await
-            .map_err(|_| OAuthUnsupported::RefusedEndpoint)?;
-        let token_endpoint = self
-            .parse_and_admit(&metadata.token_endpoint)
-            .await
-            .map_err(|_| OAuthUnsupported::RefusedEndpoint)?;
-        let registration_endpoint = metadata
-            .registration_endpoint
-            .as_deref()
-            .ok_or(OAuthUnsupported::NoClientRegistration)?;
-        let registration_endpoint = self
-            .parse_and_admit(registration_endpoint)
-            .await
-            .map_err(|_| OAuthUnsupported::RefusedEndpoint)?;
+        let metadata = match metadata {
+            Some(metadata) => metadata,
+            None if unavailable => return Err(AuthorizationProblem::Unavailable),
+            None if mismatched => {
+                return Err(AuthorizationProblem::Unsupported(
+                    OAuthUnsupported::IssuerMismatch,
+                ))
+            }
+            None => {
+                return Err(AuthorizationProblem::Unsupported(
+                    OAuthUnsupported::UnreadableMetadata,
+                ))
+            }
+        };
+        // Tidebreak signs in with PKCE S256 only. A server that lists its
+        // methods must list that one; one that lists none is asked anyway.
+        if !metadata.code_challenge_methods_supported.is_empty()
+            && !metadata
+                .code_challenge_methods_supported
+                .iter()
+                .any(|method| method == "S256")
+        {
+            return Err(AuthorizationProblem::Unsupported(OAuthUnsupported::NoS256));
+        }
+        let authorization_endpoint = self.endpoint(&metadata.authorization_endpoint).await?;
+        let token_endpoint = self.endpoint(&metadata.token_endpoint).await?;
+        let registration_endpoint =
+            metadata
+                .registration_endpoint
+                .as_deref()
+                .ok_or(AuthorizationProblem::Unsupported(
+                    OAuthUnsupported::NoClientRegistration,
+                ))?;
+        let registration_endpoint = self.endpoint(registration_endpoint).await?;
         // Revocation is optional: an endpoint Tidebreak cannot use is left out
         // rather than failing the sign-in.
         let revocation_endpoint = match metadata.revocation_endpoint.as_deref() {
-            Some(value) => self.parse_and_admit(value).await.ok(),
+            Some(value) => self.endpoint(value).await.ok(),
             None => None,
         };
         let scopes = challenge
             .and_then(scope_from_challenge)
             .unwrap_or_else(|| resource_metadata.scopes_supported.clone());
+        let sign_in_host = authorization_endpoint
+            .host_str()
+            .unwrap_or_default()
+            .to_string();
         Ok(DiscoveredAuthorization {
             authorization_endpoint,
             token_endpoint,
@@ -765,6 +1014,7 @@ impl McpOAuthClient {
             revocation_endpoint,
             scopes,
             resource: resource_indicator(resource, resource_metadata.resource.as_deref()),
+            sign_in_host,
         })
     }
 
@@ -794,13 +1044,14 @@ impl McpOAuthClient {
             .await
             .map_err(|_| SignInFailure::Failed)?;
         let status = response.status();
-        if status.is_client_error() {
+        if status.is_client_error() && !is_temporary(status) {
             return Err(SignInFailure::RegistrationRefused);
         }
         if !status.is_success() {
             return Err(SignInFailure::Failed);
         }
-        response.json().await.map_err(|_| SignInFailure::Failed)
+        let body = read_capped(response).await.ok_or(SignInFailure::Failed)?;
+        serde_json::from_slice(&body).map_err(|_| SignInFailure::Failed)
     }
 
     /// Exchange an authorization code for tokens (RFC 6749 §4.1.3 + PKCE
@@ -810,7 +1061,7 @@ impl McpOAuthClient {
         token_endpoint: &url::Url,
         exchange: CodeExchange<'_>,
     ) -> Result<McpOAuthCredentials> {
-        self.admit(token_endpoint).await?;
+        self.admit_token_endpoint(token_endpoint).await?;
         let mut form = vec![
             ("grant_type", "authorization_code"),
             ("code", exchange.code),
@@ -831,6 +1082,11 @@ impl McpOAuthClient {
     /// Refresh an access token (RFC 6749 §6). A rotated refresh token in the
     /// response replaces the stored one; its absence keeps the old one. The
     /// endpoint is admitted before the request.
+    ///
+    /// Fails with [`AgentError::SignInRequired`] only when the token endpoint
+    /// refuses the refresh token. Any other failure is temporary
+    /// ([`SIGN_IN_SERVICE_UNAVAILABLE`]): the session stays and the caller
+    /// tries again later.
     pub async fn refresh(
         &self,
         token_endpoint: &url::Url,
@@ -839,7 +1095,7 @@ impl McpOAuthClient {
         refresh_token: &str,
         resource: Option<&str>,
     ) -> Result<McpOAuthCredentials> {
-        self.admit(token_endpoint).await?;
+        self.admit_token_endpoint(token_endpoint).await?;
         let mut form = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -855,46 +1111,85 @@ impl McpOAuthClient {
         credentials_from_token(token, Some(refresh_token))
     }
 
-    /// One discovery document, or `None` when it cannot be fetched or read.
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &url::Url) -> Option<T> {
-        let response = self
+    /// Admit a token endpoint. A refusal is permanent; a name that did not
+    /// resolve is temporary, like a token service that did not answer.
+    async fn admit_token_endpoint(&self, token_endpoint: &url::Url) -> Result<()> {
+        self.admit(token_endpoint)
+            .await
+            .map_err(|refusal| match refusal {
+                Refusal::Refused => {
+                    AgentError::config("MCP OAuth endpoint is not an allowed destination")
+                }
+                Refusal::Unresolved => AgentError::config(SIGN_IN_SERVICE_UNAVAILABLE),
+            })
+    }
+
+    /// One discovery document.
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &url::Url) -> Fetched<T> {
+        let Ok(response) = self
             .http
             .get(url.clone())
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
-            .ok()?;
-        if !response.status().is_success() {
-            return None;
+        else {
+            return Fetched::Unavailable;
+        };
+        let status = response.status();
+        if is_temporary(status) {
+            return Fetched::Unavailable;
         }
-        response.json().await.ok()
+        if !status.is_success() {
+            return Fetched::Missing;
+        }
+        match read_capped(response).await {
+            Some(body) => serde_json::from_slice(&body).map_or(Fetched::Missing, Fetched::Found),
+            None => Fetched::Missing,
+        }
     }
 
+    /// Post to the token endpoint. A refused grant (`400`, `401`, and the
+    /// other permanent `4xx`) is [`AgentError::SignInRequired`]; anything
+    /// else that is not a readable token is [`SIGN_IN_SERVICE_UNAVAILABLE`].
     async fn post_token(
         &self,
         token_endpoint: &url::Url,
         form: &[(&str, &str)],
     ) -> Result<TokenResponse> {
+        let unavailable = || AgentError::config(SIGN_IN_SERVICE_UNAVAILABLE);
         let response = self
             .http
             .post(token_endpoint.clone())
             .form(form)
             .send()
             .await
-            .map_err(|_| AgentError::config("MCP OAuth token request failed"))?;
+            .map_err(|_| unavailable())?;
         let status = response.status();
-        if !status.is_success() {
-            if status.is_client_error() {
-                return Err(AgentError::SignInRequired(
-                    "the MCP OAuth session is no longer valid".to_string(),
-                ));
-            }
-            return Err(AgentError::config("MCP OAuth token request failed"));
+        if status.is_client_error() && !is_temporary(status) {
+            return Err(AgentError::SignInRequired(
+                "the MCP OAuth session is no longer valid".to_string(),
+            ));
         }
-        response
-            .json()
-            .await
-            .map_err(|_| AgentError::config("MCP OAuth token response is unreadable"))
+        if !status.is_success() {
+            return Err(unavailable());
+        }
+        let body = read_capped(response).await.ok_or_else(unavailable)?;
+        serde_json::from_slice(&body).map_err(|_| unavailable())
+    }
+}
+
+/// Why the authorization server half of discovery stopped.
+enum AuthorizationProblem {
+    Unsupported(OAuthUnsupported),
+    Unavailable,
+}
+
+impl From<Refusal> for AuthorizationProblem {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Refused => Self::Unsupported(OAuthUnsupported::RefusedEndpoint),
+            Refusal::Unresolved => Self::Unavailable,
+        }
     }
 }
 
@@ -960,14 +1255,49 @@ fn authorization_server_metadata_urls(issuer: &url::Url) -> Vec<url::Url> {
     ]
 }
 
+/// A URL's path with one trailing slash, for prefix comparisons at a segment
+/// boundary.
+fn slashed_path(url: &url::Url) -> String {
+    let path = url.path();
+    if path.ends_with('/') {
+        path.to_string()
+    } else {
+        format!("{path}/")
+    }
+}
+
+/// Whether protected-resource metadata that declares `declared` describes the
+/// server at `server` (RFC 9728 §3.3). It must share the server's origin, and
+/// its path must be the server's path or a parent of it — the same rule the
+/// MCP reference client applies, which accepts `https://mcp.example.com/` for
+/// a server at `https://mcp.example.com/mcp`.
+fn resource_matches(server: &url::Url, declared: &str) -> bool {
+    let Ok(declared) = url::Url::parse(declared) else {
+        return false;
+    };
+    declared.origin() == server.origin()
+        && slashed_path(server).starts_with(&slashed_path(&declared))
+}
+
+/// Whether authorization-server metadata that names `declared` as its issuer
+/// is the metadata for `issuer`, the identifier it was fetched for (RFC 8414
+/// §3.3). The two must be the same URL; a trailing slash is not a difference.
+fn issuer_matches(issuer: &url::Url, declared: &str) -> bool {
+    let Ok(declared) = url::Url::parse(declared) else {
+        return false;
+    };
+    declared.origin() == issuer.origin()
+        && declared.path().trim_end_matches('/') == issuer.path().trim_end_matches('/')
+        && declared.query() == issuer.query()
+}
+
 /// The RFC 8707 resource indicator to send for the server at `resource`: the
-/// identifier its protected-resource metadata declares when that shares the
-/// server's origin, otherwise the server URL without a fragment.
+/// identifier its protected-resource metadata declares, which
+/// [`resource_matches`] has tied to this server, or the server URL without a
+/// fragment when the metadata declares none.
 fn resource_indicator(resource: &url::Url, declared: Option<&str>) -> String {
     if let Some(declared) = declared.and_then(|value| url::Url::parse(value).ok()) {
-        if declared.origin() == resource.origin() {
-            return declared.to_string();
-        }
+        return declared.to_string();
     }
     let mut resource = resource.clone();
     resource.set_fragment(None);
@@ -1477,16 +1807,126 @@ mod tests {
             resource_indicator(&resource, Some("https://mcp.vercel.com/")),
             "https://mcp.vercel.com/"
         );
-        // Metadata naming another origin is not trusted for the indicator.
-        assert_eq!(
-            resource_indicator(&resource, Some("https://elsewhere.example/")),
-            "https://mcp.vercel.com/"
-        );
         let with_fragment = url::Url::parse("https://mcp.example.test/mcp#top").unwrap();
         assert_eq!(
             resource_indicator(&with_fragment, None),
             "https://mcp.example.test/mcp"
         );
+    }
+
+    /// RFC 9728 §3.3: metadata that describes another server is not used.
+    /// The server's own URL or a parent path on its origin matches, as the
+    /// MCP reference client accepts.
+    #[test]
+    fn protected_resource_metadata_must_describe_this_server() {
+        let server = url::Url::parse("https://mcp.example.test/v1/mcp").unwrap();
+        for declared in [
+            "https://mcp.example.test/v1/mcp",
+            "https://mcp.example.test/v1/mcp/",
+            "https://mcp.example.test/v1",
+            "https://mcp.example.test/",
+            "https://mcp.example.test",
+        ] {
+            assert!(resource_matches(&server, declared), "{declared}");
+        }
+        for declared in [
+            "https://elsewhere.example/v1/mcp",
+            "http://mcp.example.test/v1/mcp",
+            "https://mcp.example.test:8443/v1/mcp",
+            "https://mcp.example.test/v1/mcp/tools",
+            "https://mcp.example.test/v1/mc",
+            "https://mcp.example.test/v2",
+            "not a url",
+        ] {
+            assert!(!resource_matches(&server, declared), "{declared}");
+        }
+        let vercel = url::Url::parse("https://mcp.vercel.com").unwrap();
+        assert!(resource_matches(&vercel, "https://mcp.vercel.com/"));
+    }
+
+    /// RFC 8414 §3.3: metadata naming another issuer is not used. A trailing
+    /// slash is not a difference.
+    #[test]
+    fn authorization_server_metadata_must_name_its_issuer() {
+        let root = url::Url::parse("https://vercel.com").unwrap();
+        assert!(issuer_matches(&root, "https://vercel.com"));
+        assert!(issuer_matches(&root, "https://vercel.com/"));
+        assert!(!issuer_matches(&root, "https://evil.example"));
+        assert!(!issuer_matches(&root, "https://vercel.com/tenant"));
+        let tenant = url::Url::parse("https://auth.example.test/tenant1").unwrap();
+        assert!(issuer_matches(
+            &tenant,
+            "https://auth.example.test/tenant1/"
+        ));
+        assert!(!issuer_matches(
+            &tenant,
+            "https://auth.example.test/tenant2"
+        ));
+        assert!(!issuer_matches(&tenant, "https://auth.example.test"));
+    }
+
+    /// Discovery runs on every `401`, so a body larger than Tidebreak reads
+    /// is refused rather than read to the end, whether or not the server
+    /// declares its length.
+    #[tokio::test]
+    async fn response_bodies_are_capped() {
+        use axum::body::Body;
+
+        async fn serve(body: Body) -> String {
+            let body = std::sync::Arc::new(std::sync::Mutex::new(Some(body)));
+            let app = Router::new().route(
+                "/meta",
+                get(move || {
+                    let body = body.clone();
+                    async move { body.lock().unwrap().take().unwrap_or_else(Body::empty) }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            format!("http://{address}/meta")
+        }
+
+        let client = McpOAuthClient::admitting_loopback_for_tests().unwrap();
+        let large = vec![b' '; MAX_RESPONSE_BYTES + 1];
+        let declared = url::Url::parse(&serve(Body::from(large.clone())).await).unwrap();
+        assert!(matches!(
+            client.get_json::<serde_json::Value>(&declared).await,
+            Fetched::Missing
+        ));
+        let chunks = futures::stream::iter(
+            large
+                .chunks(8 * 1024)
+                .map(|chunk| Ok::<_, std::io::Error>(chunk.to_vec()))
+                .collect::<Vec<_>>(),
+        );
+        let streamed = url::Url::parse(&serve(Body::from_stream(chunks)).await).unwrap();
+        assert!(matches!(
+            client.get_json::<serde_json::Value>(&streamed).await,
+            Fetched::Missing
+        ));
+        let small = url::Url::parse(&serve(Body::from(r#"{"ok":true}"#)).await).unwrap();
+        assert!(matches!(
+            client.get_json::<serde_json::Value>(&small).await,
+            Fetched::Found(_)
+        ));
+    }
+
+    /// The production client resolves names through the admitting resolver,
+    /// so a name that resolves to a denied address is refused at connect
+    /// time too, not only when it was first checked.
+    #[tokio::test]
+    async fn the_resolver_refuses_names_that_resolve_to_denied_addresses() {
+        use reqwest::dns::Resolve;
+
+        let refused = AdmittedResolver
+            .resolve("localhost".parse().unwrap())
+            .await
+            .err()
+            .expect("localhost resolves to loopback, which is denied");
+        assert!(refused.to_string().contains("not an allowed destination"));
     }
 
     /// The production client admits no loopback endpoint, so metadata a

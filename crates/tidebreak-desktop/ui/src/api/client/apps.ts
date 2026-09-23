@@ -139,6 +139,17 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       });
     }
 
+    /**
+     * Stop one server's sign-in that still waits on the browser. A stored
+     * session is left alone.
+     */
+    cancelMcpServerConnect(name: string): Promise<McpOAuthStatus> {
+      return this.json(
+        `/mcp/servers/${encodeURIComponent(name)}/connect/cancel`,
+        { method: "POST", headers: this.headers() },
+      );
+    }
+
     /** Clear one server's stored OAuth session. */
     disconnectMcpServer(name: string): Promise<McpOAuthStatus> {
       return this.json(`/mcp/servers/${encodeURIComponent(name)}/disconnect`, {

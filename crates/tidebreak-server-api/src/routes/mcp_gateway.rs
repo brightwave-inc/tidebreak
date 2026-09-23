@@ -497,6 +497,23 @@ pub async fn post_mcp_server_connect(
     ))
 }
 
+/// `POST /mcp/servers/{name}/connect/cancel` — stop a sign-in that still
+/// waits on the browser. A stored session is left alone. Returns the server's
+/// OAuth status without the sign-in.
+pub async fn post_mcp_server_connect_cancel(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpOAuthStatus>, ServerError> {
+    let runtime = state.mcp.clone();
+    let mutation = tokio::spawn(async move { runtime.oauth_cancel(&name).await });
+    Ok(Json(
+        mutation
+            .await
+            .map_err(|_| ServerError::internal("MCP OAuth cancel task failed"))?
+            .map_err(mcp_request_error)?,
+    ))
+}
+
 /// `POST /mcp/servers/{name}/disconnect` — clear a server's stored OAuth
 /// session and drop its live connection. Returns the resulting OAuth status.
 pub async fn post_mcp_server_disconnect(

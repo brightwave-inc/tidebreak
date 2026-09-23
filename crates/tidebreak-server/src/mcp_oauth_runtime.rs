@@ -60,6 +60,12 @@ pub struct McpOAuthStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    /// Host of the sign-in page Connect opens, such as `vercel.com`, so the
+    /// person sees where they are sent before they go. Only a host, never a
+    /// URL. Absent when it is not known yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sign_in_host: Option<String>,
 }
 
 impl McpOAuthStatus {
@@ -69,7 +75,15 @@ impl McpOAuthStatus {
             state,
             pending_authorization_url: None,
             error: None,
+            sign_in_host: None,
         }
+    }
+
+    /// This status, naming the host of the sign-in page.
+    #[must_use]
+    pub fn with_sign_in_host(mut self, host: Option<String>) -> Self {
+        self.sign_in_host = host.filter(|host| !host.is_empty());
+        self
     }
 
     #[must_use]
@@ -88,6 +102,7 @@ impl McpOAuthStatus {
             state: McpOAuthState::Authorizing,
             pending_authorization_url: Some(authorization_url),
             error: None,
+            sign_in_host: None,
         }
     }
 
@@ -97,6 +112,7 @@ impl McpOAuthStatus {
             state,
             pending_authorization_url: None,
             error: Some(reason.into()),
+            sign_in_host: None,
         }
     }
 }

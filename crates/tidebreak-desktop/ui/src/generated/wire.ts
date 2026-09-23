@@ -3354,7 +3354,13 @@ pending_authorization_url?: string,
  * `Unsupported`, and a `NotConnected` whose last sign-in failed. Never
  * echoes a URL, token, or upstream body.
  */
-error?: string, };
+error?: string,
+/**
+ * Host of the sign-in page Connect opens, such as `vercel.com`, so the
+ * person sees where they are sent before they go. Only a host, never a
+ * URL. Absent when it is not known yet.
+ */
+sign_in_host?: string, };
 
 /**
  * One external MCP server definition: a local stdio process (`command`), a

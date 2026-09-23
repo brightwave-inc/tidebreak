@@ -1900,40 +1900,78 @@ enum FakeConsent {
     Deny,
 }
 
+/// What a fake server declares. The defaults are a well-behaved server.
+#[derive(Clone)]
+struct FakeOAuthOptions {
+    registration: bool,
+    consent: FakeConsent,
+    /// The protected resource's `resource`; `None` declares the MCP URL.
+    resource: Option<String>,
+    /// The authorization server's `issuer`; `None` declares the fake's own.
+    issuer: Option<String>,
+    pkce_methods: Vec<&'static str>,
+}
+
+impl Default for FakeOAuthOptions {
+    fn default() -> Self {
+        Self {
+            registration: true,
+            consent: FakeConsent::Approve,
+            resource: None,
+            issuer: None,
+            pkce_methods: vec!["S256"],
+        }
+    }
+}
+
 /// A remote MCP server that requires an OAuth sign-in, shaped the way the MCP
 /// authorization specification describes and Vercel's server behaves: the
 /// MCP endpoint answers an unauthenticated request with a `401` whose
 /// challenge names protected-resource metadata, which names an authorization
 /// server offering dynamic client registration, PKCE, and resource
-/// indicators. Everything lives on one loopback origin.
+/// indicators. Everything lives on one loopback origin, and every fake issues
+/// its own access token, so a test can tell whose token reached whom.
 struct FakeOAuthServer {
     origin: String,
-    registration: bool,
-    consent: FakeConsent,
+    options: FakeOAuthOptions,
+    access_token: String,
     /// Registered client ids and their one redirect URI.
     clients: std::sync::Mutex<BTreeMap<String, String>>,
     /// Issued codes, with the PKCE challenge, redirect, and resource they
     /// were issued for.
     codes: std::sync::Mutex<BTreeMap<String, (String, String, String)>>,
+    /// The bearer on every request to the MCP endpoint, empty for none.
+    mcp_bearers: std::sync::Mutex<Vec<String>>,
     /// Bearers the MCP endpoint saw on tool calls.
     tool_call_bearers: std::sync::Mutex<Vec<String>>,
+    /// The resource indicator on each refresh the token endpoint granted.
+    refresh_resources: std::sync::Mutex<Vec<String>>,
+    /// When not zero, the status the token endpoint answers a refresh with.
+    refresh_status: std::sync::atomic::AtomicU16,
+    /// When not zero, the status the authorization-server metadata answers.
+    metadata_status: std::sync::atomic::AtomicU16,
+    /// How long an authorized `initialize` takes, in milliseconds.
+    initialize_delay_ms: std::sync::atomic::AtomicU64,
 }
 
-const FAKE_ACCESS_TOKEN: &str = "fake-access-token-3521";
-
 impl FakeOAuthServer {
-    async fn serve(registration: bool, consent: FakeConsent) -> Arc<Self> {
+    async fn serve(options: FakeOAuthOptions) -> Arc<Self> {
         use axum::routing::{get, post};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
         let server = Arc::new(Self {
-            origin,
-            registration,
-            consent,
+            origin: format!("http://{address}"),
+            options,
+            access_token: format!("fake-access-{}", address.port()),
             clients: Default::default(),
             codes: Default::default(),
+            mcp_bearers: Default::default(),
             tool_call_bearers: Default::default(),
+            refresh_resources: Default::default(),
+            refresh_status: Default::default(),
+            metadata_status: Default::default(),
+            initialize_delay_ms: Default::default(),
         });
         let app = axum::Router::new()
             .route("/mcp", post(Self::mcp))
@@ -1955,8 +1993,16 @@ impl FakeOAuthServer {
         server
     }
 
+    async fn approving() -> Arc<Self> {
+        Self::serve(FakeOAuthOptions::default()).await
+    }
+
     fn mcp_url(&self) -> String {
         format!("{}/mcp", self.origin)
+    }
+
+    fn mcp_bearers(&self) -> Vec<String> {
+        self.mcp_bearers.lock().unwrap().clone()
     }
 
     async fn mcp(
@@ -1970,7 +2016,12 @@ impl FakeOAuthServer {
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
-        if bearer != Some(FAKE_ACCESS_TOKEN) {
+        server
+            .mcp_bearers
+            .lock()
+            .unwrap()
+            .push(bearer.unwrap_or_default().to_string());
+        if bearer != Some(server.access_token.as_str()) {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 [(
@@ -1990,11 +2041,17 @@ impl FakeOAuthServer {
             return axum::http::StatusCode::ACCEPTED.into_response();
         };
         let result = match request["method"].as_str().unwrap_or_default() {
-            "initialize" => serde_json::json!({
-                "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "oauth-fixture", "version": "1"}
-            }),
+            "initialize" => {
+                let delay = server
+                    .initialize_delay_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                serde_json::json!({
+                    "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "oauth-fixture", "version": "1"}
+                })
+            }
             "tools/list" => serde_json::json!({
                 "tools": [{
                     "name": "list_projects",
@@ -2026,7 +2083,7 @@ impl FakeOAuthServer {
         axum::extract::State(server): axum::extract::State<Arc<Self>>,
     ) -> axum::Json<serde_json::Value> {
         axum::Json(serde_json::json!({
-            "resource": format!("{}/mcp", server.origin),
+            "resource": server.options.resource.clone().unwrap_or_else(|| server.mcp_url()),
             "authorization_servers": [server.origin],
             "scopes_supported": ["projects:read"]
         }))
@@ -2034,18 +2091,28 @@ impl FakeOAuthServer {
 
     async fn authorization_server(
         axum::extract::State(server): axum::extract::State<Arc<Self>>,
-    ) -> axum::Json<serde_json::Value> {
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let status = server
+            .metadata_status
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if status != 0 {
+            return axum::http::StatusCode::from_u16(status)
+                .unwrap()
+                .into_response();
+        }
         let mut metadata = serde_json::json!({
-            "issuer": server.origin,
+            "issuer": server.options.issuer.clone().unwrap_or_else(|| server.origin.clone()),
             "authorization_endpoint": format!("{}/authorize", server.origin),
             "token_endpoint": format!("{}/token", server.origin),
-            "code_challenge_methods_supported": ["S256"]
+            "code_challenge_methods_supported": server.options.pkce_methods
         });
-        if server.registration {
+        if server.options.registration {
             metadata["registration_endpoint"] =
                 serde_json::json!(format!("{}/register", server.origin));
         }
-        axum::Json(metadata)
+        axum::Json(metadata).into_response()
     }
 
     async fn register(
@@ -2076,7 +2143,7 @@ impl FakeOAuthServer {
         assert_eq!(query["code_challenge_method"], "S256");
         assert_eq!(query["scope"], "projects:read");
         let state = &query["state"];
-        let location = match server.consent {
+        let location = match server.options.consent {
             FakeConsent::Deny => format!("{redirect}?error=access_denied&state={state}"),
             FakeConsent::Approve => {
                 let code = format!("code-{}", uuid::Uuid::new_v4());
@@ -2102,6 +2169,30 @@ impl FakeOAuthServer {
         use base64::Engine as _;
         use sha2::Digest as _;
 
+        let tokens = axum::Json(serde_json::json!({
+            "access_token": server.access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "fake-refresh-token-3521",
+            "scope": "projects:read"
+        }));
+        if form["grant_type"] == "refresh_token" {
+            let status = server
+                .refresh_status
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if status != 0 {
+                return axum::http::StatusCode::from_u16(status)
+                    .unwrap()
+                    .into_response();
+            }
+            assert_eq!(form["refresh_token"], "fake-refresh-token-3521");
+            server
+                .refresh_resources
+                .lock()
+                .unwrap()
+                .push(form.get("resource").cloned().unwrap_or_default());
+            return tokens.into_response();
+        }
         assert_eq!(form["grant_type"], "authorization_code");
         let Some((challenge, redirect, resource)) =
             server.codes.lock().unwrap().remove(&form["code"])
@@ -2121,14 +2212,7 @@ impl FakeOAuthServer {
             server.mcp_url(),
             "the resource indicator names the server"
         );
-        axum::Json(serde_json::json!({
-            "access_token": FAKE_ACCESS_TOKEN,
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "refresh_token": "fake-refresh-token-3521",
-            "scope": "projects:read"
-        }))
-        .into_response()
+        tokens.into_response()
     }
 }
 
@@ -2168,12 +2252,26 @@ async fn info_when(runtime: &McpRuntime, done: impl Fn(&McpServerInfo) -> bool) 
             "the sign-in did not settle: {:?}",
             info.servers[0]
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
 fn oauth_state(server: &McpServerInfo) -> Option<crate::mcp_oauth_runtime::McpOAuthState> {
     server.oauth_status.as_ref().map(|status| status.state)
+}
+
+/// Save `name` at `fake`'s URL, sign in through the browser, and wait until
+/// its tools load.
+async fn sign_in_to(runtime: &Arc<McpRuntime>, name: &str, fake: &FakeOAuthServer) {
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition(name, &fake.mcp_url())],
+        })
+        .await
+        .expect("a server that asks for a sign-in still saves");
+    let status = runtime.oauth_connect(name).await.unwrap();
+    complete_browser_sign_in(&status.pending_authorization_url.unwrap()).await;
+    info_when(runtime, |server| server.health == McpHealth::Healthy).await;
 }
 
 /// Issue #3521: an imported remote server, saved without the OAuth flag,
@@ -2185,7 +2283,7 @@ fn oauth_state(server: &McpServerInfo) -> Option<crate::mcp_oauth_runtime::McpOA
 async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
     use crate::mcp_oauth_runtime::McpOAuthState;
 
-    let fake = FakeOAuthServer::serve(true, FakeConsent::Approve).await;
+    let fake = FakeOAuthServer::approving().await;
     let (runtime, store, _directory) = oauth_test_runtime().await;
     // Exactly what the import builds for `{"url": "..."}`: the flag is off.
     let definition = http_definition("vercel", &fake.mcp_url());
@@ -2200,6 +2298,14 @@ async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
     let server = &info.servers[0];
     assert_eq!(server.health, McpHealth::Degraded);
     assert_eq!(oauth_state(server), Some(McpOAuthState::NotConnected));
+    // The row names where Connect goes before the person selects it.
+    assert_eq!(
+        server
+            .oauth_status
+            .as_ref()
+            .and_then(|status| status.sign_in_host.as_deref()),
+        Some("127.0.0.1")
+    );
     let diagnostic = server.diagnostic.as_deref().unwrap();
     assert!(diagnostic.contains("needs you to sign in"), "{diagnostic}");
     assert!(!diagnostic.contains("401"), "{diagnostic}");
@@ -2240,7 +2346,8 @@ async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
     assert_eq!(parked(&runtime, "vercel").await, None);
 
     // Stored the way the OAuth path stores sessions: in the credential store
-    // under the record id, never in the definition or the projection.
+    // under the record id, bound to this server's URL, never in the
+    // definition or the projection.
     let record = saved_records(&store).await.remove(0);
     let secrets = runtime.secrets();
     let token = secrets
@@ -2248,16 +2355,22 @@ async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
         .await
         .unwrap()
         .expect("the session is stored");
-    assert!(token.contains(FAKE_ACCESS_TOKEN));
-    assert!(secrets
+    assert!(token.contains(&fake.access_token));
+    let registration = secrets
         .get_secret(&crate::connectors::oauth_client_secret_key(record.id))
         .await
         .unwrap()
-        .is_some());
-    assert!(!record.definition.to_string().contains(FAKE_ACCESS_TOKEN));
+        .expect("the registration is stored");
+    let registration: crate::connectors::ClientRegistration =
+        serde_json::from_str(&registration).unwrap();
+    assert_eq!(
+        registration.server_url.as_deref(),
+        Some(fake.mcp_url().as_str())
+    );
+    assert!(!record.definition.to_string().contains(&fake.access_token));
     assert!(!serde_json::to_string(&info)
         .unwrap()
-        .contains(FAKE_ACCESS_TOKEN));
+        .contains(&fake.access_token));
     assert!(
         !saved_definitions(&store).await[0].oauth,
         "nothing rewrote the saved flag"
@@ -2280,8 +2393,8 @@ async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
         .unwrap();
     assert_eq!(output.content, "two projects");
     assert_eq!(
-        *fake.tool_call_bearers.lock().unwrap(),
-        [FAKE_ACCESS_TOKEN.to_string()]
+        fake.tool_call_bearers.lock().unwrap().as_slice(),
+        std::slice::from_ref(&fake.access_token)
     );
 
     // Disconnect clears the session, and the server asks for a sign-in again.
@@ -2304,13 +2417,385 @@ async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
         .is_none());
 }
 
+/// Between the browser's return and the reconnect, the server must read as
+/// signed in and connecting: never as a rejected or missing sign-in, which
+/// would stop the panel's polling on a Reconnect button that starts a second
+/// sign-in.
+#[tokio::test]
+async fn a_finished_sign_in_goes_straight_from_waiting_to_connected() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    // A slow authorized `initialize` holds the reconnect open long enough to
+    // be seen.
+    fake.initialize_delay_ms
+        .store(600, std::sync::atomic::Ordering::SeqCst);
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("vercel", &fake.mcp_url())],
+        })
+        .await
+        .unwrap();
+    let status = runtime.oauth_connect("vercel").await.unwrap();
+    complete_browser_sign_in(&status.pending_authorization_url.unwrap()).await;
+
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let info = runtime.info().await;
+        let server = &info.servers[0];
+        seen.push((oauth_state(server), server.health));
+        if server.health == McpHealth::Healthy {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{seen:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        seen.iter().all(|(state, _)| matches!(
+            state,
+            Some(McpOAuthState::Authorizing | McpOAuthState::Connected)
+        )),
+        "{seen:?}"
+    );
+    assert!(
+        seen.contains(&(Some(McpOAuthState::Connected), McpHealth::Reconnecting)),
+        "{seen:?}"
+    );
+}
+
+/// Finding: after a URL edit, server A's session went to server B. The
+/// record keeps its id when the name stays, so the session must be bound to
+/// the URL and cleared when the URL changes.
+#[tokio::test]
+async fn editing_a_servers_url_never_sends_its_session_to_the_new_address() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let a = FakeOAuthServer::approving().await;
+    let b = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    sign_in_to(&runtime, "docs", &a).await;
+    let id = saved_records(&store).await[0].id;
+
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("docs", &b.mcp_url())],
+        })
+        .await
+        .expect("the edited server asks for its own sign-in and saves");
+    assert_eq!(saved_records(&store).await[0].id, id, "the id is kept");
+    assert!(
+        !b.mcp_bearers().contains(&a.access_token),
+        "{:?}",
+        b.mcp_bearers()
+    );
+    assert!(b.mcp_bearers().iter().all(String::is_empty));
+    let secrets = runtime.secrets();
+    for key in [
+        crate::connectors::oauth_token_secret_key(id),
+        crate::connectors::oauth_client_secret_key(id),
+    ] {
+        assert!(secrets.get_secret(&key).await.unwrap().is_none(), "{key}");
+    }
+    let info = runtime.info().await;
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+
+    // A later reconnect and a tool call find nothing to send either.
+    let _ = runtime.reconnect("docs").await;
+    assert!(b.mcp_bearers().iter().all(String::is_empty));
+}
+
+/// Finding: removing a server left its session behind for a later server of
+/// the same name. Removal clears it, and the re-added server starts over.
+#[tokio::test]
+async fn a_removed_server_takes_its_session_with_it() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let a = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    sign_in_to(&runtime, "docs", &a).await;
+    let first = saved_records(&store).await[0].id;
+
+    runtime
+        .replace(McpServersConfig {
+            servers: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let secrets = runtime.secrets();
+    for key in [
+        crate::connectors::oauth_token_secret_key(first),
+        crate::connectors::oauth_client_secret_key(first),
+    ] {
+        assert!(secrets.get_secret(&key).await.unwrap().is_none(), "{key}");
+    }
+
+    let before = a.mcp_bearers().len();
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("docs", &a.mcp_url())],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+    assert!(a.mcp_bearers()[before..].iter().all(String::is_empty));
+}
+
+/// A stored session is presented only to the exact URL it was issued for.
+/// One bound elsewhere, or written before sessions were bound, is never
+/// sent, even when nothing has cleared it yet.
+#[tokio::test]
+async fn a_session_bound_to_another_url_is_never_presented() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let a = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("docs", &a.mcp_url())],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), id);
+    for server_url in [Some("https://elsewhere.example/mcp".to_string()), None] {
+        vault
+            .save_registration(&crate::connectors::ClientRegistration {
+                client_id: "fake-client".to_string(),
+                client_secret: None,
+                registration_access_token: None,
+                registration_client_uri: None,
+                token_endpoint: Some(format!("{}/token", a.origin)),
+                scopes: Vec::new(),
+                resource: None,
+                server_url,
+                sign_in_host: None,
+            })
+            .await
+            .unwrap();
+        vault
+            .save(&crate::connectors::McpOAuthCredentials {
+                // A's real token: it would be accepted if it were sent.
+                access_token: a.access_token.clone(),
+                refresh_token: None,
+                expires_at_unix: u64::MAX / 2,
+                scope: None,
+            })
+            .await
+            .unwrap();
+        let before = a.mcp_bearers().len();
+        assert!(runtime.reconnect("docs").await.is_err());
+        assert!(a.mcp_bearers()[before..].iter().all(String::is_empty));
+        assert_eq!(
+            oauth_state(&runtime.info().await.servers[0]),
+            Some(McpOAuthState::NotConnected)
+        );
+    }
+}
+
+/// Finding: a token service outage parked a signed-in server as needing a
+/// sign-in. A refresh the service does not answer keeps the session, keeps
+/// the usual retry, and says it is temporary.
+#[tokio::test]
+async fn a_token_service_outage_keeps_the_session_and_retries() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    sign_in_to(&runtime, "vercel", &fake).await;
+    let id = saved_records(&store).await[0].id;
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), id);
+    // Age the access token so the next connection must refresh it.
+    let mut credentials = vault.load().await.unwrap().unwrap();
+    credentials.expires_at_unix = 1;
+    vault.save(&credentials).await.unwrap();
+    fake.refresh_status
+        .store(503, std::sync::atomic::Ordering::SeqCst);
+
+    let before = fake.mcp_bearers().len();
+    let error = runtime
+        .reconnect("vercel")
+        .await
+        .expect_err("the refresh failed")
+        .to_string();
+    assert!(error.contains("Sign-in service unavailable"), "{error}");
+    // It did not connect without the token and read the `401` as a sign-in.
+    assert_eq!(fake.mcp_bearers().len(), before);
+    assert_eq!(parked(&runtime, "vercel").await, None);
+    let info = runtime.info().await;
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::Connected)
+    );
+    assert!(info.servers[0]
+        .diagnostic
+        .as_deref()
+        .unwrap()
+        .starts_with("Sign-in service unavailable"));
+    assert!(vault.load().await.unwrap().unwrap().refresh_token.is_some());
+
+    // The service answers again, and the next retry refreshes and connects.
+    fake.refresh_status
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    runtime.reconnect("vercel").await.unwrap();
+    assert_eq!(runtime.info().await.servers[0].health, McpHealth::Healthy);
+    assert_eq!(*fake.refresh_resources.lock().unwrap(), [fake.mcp_url()]);
+}
+
+/// Finding: a sign-in service outage read as "Sign-in not supported" and
+/// stopped the retries. It is temporary: the server saves, says the service
+/// did not answer, keeps retrying, and asks for a sign-in once it answers.
+#[tokio::test]
+async fn a_sign_in_service_outage_is_temporary_not_unsupported() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    fake.metadata_status
+        .store(503, std::sync::atomic::Ordering::SeqCst);
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("vercel", &fake.mcp_url())],
+        })
+        .await
+        .expect("a server that asks for a sign-in saves while its service is down");
+    let status = info.servers[0].oauth_status.clone().unwrap();
+    assert_eq!(status.state, McpOAuthState::NotConnected);
+    assert!(
+        status.error.as_deref().unwrap().contains("did not answer"),
+        "{status:?}"
+    );
+    assert_eq!(parked(&runtime, "vercel").await, None);
+
+    fake.metadata_status
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let _ = runtime.reconnect("vercel").await;
+    let status = runtime.info().await.servers[0]
+        .oauth_status
+        .clone()
+        .unwrap();
+    assert_eq!(status.state, McpOAuthState::NotConnected);
+    assert_eq!(status.error, None);
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Authorization)
+    );
+}
+
+/// Metadata that describes another server, names another issuer, or rules
+/// out S256 is not used, and the save says which.
+#[tokio::test]
+async fn sign_in_metadata_that_fails_the_specification_checks_is_refused() {
+    let cases = [
+        (
+            FakeOAuthOptions {
+                resource: Some("https://elsewhere.example/mcp".to_string()),
+                ..FakeOAuthOptions::default()
+            },
+            crate::connectors::OAuthUnsupported::ResourceMismatch,
+        ),
+        (
+            FakeOAuthOptions {
+                issuer: Some("https://issuer.elsewhere.example".to_string()),
+                ..FakeOAuthOptions::default()
+            },
+            crate::connectors::OAuthUnsupported::IssuerMismatch,
+        ),
+        (
+            FakeOAuthOptions {
+                pkce_methods: vec!["plain"],
+                ..FakeOAuthOptions::default()
+            },
+            crate::connectors::OAuthUnsupported::NoS256,
+        ),
+    ];
+    for (options, reason) in cases {
+        let fake = FakeOAuthServer::serve(options).await;
+        let (runtime, _store, _directory) = oauth_test_runtime().await;
+        let error = runtime
+            .replace(McpServersConfig {
+                servers: vec![http_definition("vercel", &fake.mcp_url())],
+            })
+            .await
+            .expect_err("a sign-in Tidebreak does not trust fails the save")
+            .to_string();
+        assert!(error.contains(reason.reason()), "{reason:?}: {error}");
+        assert!(fake.clients.lock().unwrap().is_empty(), "{reason:?}");
+    }
+}
+
+/// Cancel stops a sign-in that waits on the browser: its page no longer
+/// lands, nothing is stored, and the server asks for a sign-in again.
+#[tokio::test]
+async fn cancel_stops_a_waiting_sign_in() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("vercel", &fake.mcp_url())],
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .oauth_connect("vercel")
+        .await
+        .unwrap()
+        .pending_authorization_url
+        .unwrap();
+    let status = runtime.oauth_cancel("vercel").await.unwrap();
+    assert_eq!(status.state, McpOAuthState::NotConnected);
+    assert_eq!(status.error, None);
+
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .unwrap();
+    let callback = browser.get(&page).send().await.unwrap().headers()["location"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while browser.get(&callback).send().await.is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the canceled sign-in still listens"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let id = saved_records(&store).await[0].id;
+    assert!(runtime
+        .secrets()
+        .get_secret(&crate::connectors::oauth_token_secret_key(id))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        oauth_state(&runtime.info().await.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+}
+
 /// Declining on the authorization page lands in a visible, retryable state
 /// that says what happened, not in a silent failure.
 #[tokio::test]
 async fn a_declined_sign_in_says_so_and_offers_another_try() {
     use crate::mcp_oauth_runtime::McpOAuthState;
 
-    let fake = FakeOAuthServer::serve(true, FakeConsent::Deny).await;
+    let fake = FakeOAuthServer::serve(FakeOAuthOptions {
+        consent: FakeConsent::Deny,
+        ..FakeOAuthOptions::default()
+    })
+    .await;
     let (runtime, _store, _directory) = oauth_test_runtime().await;
     runtime
         .replace(McpServersConfig {
@@ -2344,7 +2829,11 @@ async fn a_declined_sign_in_says_so_and_offers_another_try() {
 async fn a_server_without_client_registration_says_sign_in_is_unsupported() {
     use crate::mcp_oauth_runtime::McpOAuthState;
 
-    let fake = FakeOAuthServer::serve(false, FakeConsent::Approve).await;
+    let fake = FakeOAuthServer::serve(FakeOAuthOptions {
+        registration: false,
+        ..FakeOAuthOptions::default()
+    })
+    .await;
     let (runtime, _store, _directory) = oauth_test_runtime().await;
     let error = runtime
         .replace(McpServersConfig {
@@ -2385,7 +2874,7 @@ async fn a_server_without_client_registration_says_sign_in_is_unsupported() {
 /// the token is wrong, so there is no sign-in to offer.
 #[tokio::test]
 async fn a_static_bearer_server_never_offers_a_sign_in() {
-    let fake = FakeOAuthServer::serve(true, FakeConsent::Approve).await;
+    let fake = FakeOAuthServer::approving().await;
     let (runtime, _store, _directory) = oauth_test_runtime().await;
     let mut definition = http_definition("vercel", &fake.mcp_url());
     // PATH always exists and is never the fake's token.

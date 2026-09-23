@@ -18,11 +18,14 @@ import {
   type McpServersInfo,
 } from "../api";
 import { McpPanel } from "./McpPanel";
+import { setAttachedRemotely } from "@/host";
 
-const { openInBrowser } = vi.hoisted(() => ({
+const { openInBrowser, toast } = vi.hoisted(() => ({
   openInBrowser: vi.fn(async (_url: string) => {}),
+  toast: { success: vi.fn(), message: vi.fn(), error: vi.fn() },
 }));
 vi.mock("@/openInBrowser", () => ({ openInBrowser }));
+vi.mock("sonner", () => ({ toast }));
 
 const healthy: McpServersInfo = {
   servers: [
@@ -114,6 +117,7 @@ function api(
     putMcpServers: vi.fn().mockResolvedValue(result),
     reconnectMcpServer: vi.fn().mockResolvedValue(result),
     connectMcpServer: vi.fn().mockResolvedValue(result),
+    cancelMcpServerConnect: vi.fn().mockResolvedValue(result),
     disconnectMcpServer: vi.fn().mockResolvedValue(result),
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
@@ -132,6 +136,7 @@ function mountRow(slug: string): HTMLElement {
 }
 
 afterEach(() => {
+  setAttachedRemotely(false);
   cleanup();
   vi.clearAllMocks();
   vi.useRealTimers();
@@ -966,25 +971,38 @@ describe("McpPanel OAuth sign-in", () => {
     expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
   });
 
-  it("opens the sign-in page on this computer and shows the server once it connects", async () => {
+  it("opens the sign-in page on this computer and follows it until the server connects", async () => {
     const page = "https://vercel.com/oauth/authorize?client_id=tidebreak-1";
     const waiting = signInServer({
-      oauth_status: { state: "authorizing", pending_authorization_url: page },
+      oauth_status: {
+        state: "authorizing",
+        pending_authorization_url: page,
+        sign_in_host: "vercel.com",
+      },
+    });
+    // The browser came back: the session is stored and the server is
+    // reconnecting to load its tools.
+    const reconnecting = signInServer({
+      health: "reconnecting",
+      diagnostic: null,
+      oauth_status: { state: "connected", sign_in_host: "vercel.com" },
     });
     const connected = signInServer({
       health: "healthy",
       tool_count: 4,
       diagnostic: null,
-      oauth_status: { state: "connected" },
+      oauth_status: { state: "connected", sign_in_host: "vercel.com" },
     });
     const listMcpServers = vi
       .fn()
       .mockResolvedValueOnce({ servers: [signInServer()] })
       .mockResolvedValueOnce({ servers: [waiting] })
+      .mockResolvedValueOnce({ servers: [reconnecting] })
       .mockResolvedValue({ servers: [connected] });
     const connectMcpServer = vi.fn().mockResolvedValue({
       state: "authorizing",
       pending_authorization_url: page,
+      sign_in_host: "vercel.com",
     });
     const client = api(
       { servers: [signInServer()] },
@@ -998,6 +1016,9 @@ describe("McpPanel OAuth sign-in", () => {
     expect(connectMcpServer).toHaveBeenCalledWith("vercel");
     await waitFor(() => expect(openInBrowser).toHaveBeenCalledWith(page));
     expect(await screen.findByText("Waiting for sign-in")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Finish signing in on vercel.com/),
+    ).toBeInTheDocument();
 
     // A closed tab is not a dead end.
     await user.click(
@@ -1006,7 +1027,19 @@ describe("McpPanel OAuth sign-in", () => {
     expect(openInBrowser).toHaveBeenCalledTimes(2);
     expect(openInBrowser).toHaveBeenLastCalledWith(page);
 
-    // The panel keeps reading while the browser has the page.
+    // Back from the browser, the server reconnects. It reads as signed in
+    // and connecting, and offers no second sign-in.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect(await screen.findByText("Connecting")).toBeInTheDocument();
+    expect(screen.getByText("Signed in with vercel.com")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reconnect$|Connect$/ }),
+    ).not.toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+
+    // The panel keeps reading through the reconnect, and says when it lands.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_100);
     });
@@ -1014,10 +1047,92 @@ describe("McpPanel OAuth sign-in", () => {
     expect(
       screen.getByText("4 tools available to new turns."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Signed in")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
     ).toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith("Connected vercel");
+  });
+
+  it("names the sign-in service before Connect", async () => {
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            signInServer({
+              oauth_status: {
+                state: "not_connected",
+                sign_in_host: "vercel.com",
+              },
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Connect" }),
+    ).toBeEnabled();
+    expect(screen.getByText("Opens vercel.com")).toBeInTheDocument();
+  });
+
+  it("cancels a sign-in that waits on the browser", async () => {
+    const page = "https://vercel.com/oauth/authorize?client_id=tidebreak-1";
+    const cancelMcpServerConnect = vi
+      .fn()
+      .mockResolvedValue({ state: "not_connected" });
+    const listMcpServers = vi
+      .fn()
+      .mockResolvedValueOnce({
+        servers: [
+          signInServer({
+            oauth_status: {
+              state: "authorizing",
+              pending_authorization_url: page,
+            },
+          }),
+        ],
+      })
+      .mockResolvedValue({ servers: [signInServer()] });
+    const client = api(
+      { servers: [signInServer()] },
+      { listMcpServers, cancelMcpServerConnect },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(cancelMcpServerConnect).toHaveBeenCalledWith("vercel");
+    expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Reopen sign-in page" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says a sign-in finishes on the other machine when attached to one", async () => {
+    setAttachedRemotely(true);
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            signInServer({
+              oauth_status: {
+                state: "not_connected",
+                error:
+                  "The sign-in timed out before you finished it. Select Connect to try again.",
+              },
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+    expect(
+      screen.getByText(/has to finish in a browser on that machine/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Select Connect to try again/),
+    ).not.toBeInTheDocument();
   });
 
   it("says why a sign-in stopped and offers the next step", async () => {

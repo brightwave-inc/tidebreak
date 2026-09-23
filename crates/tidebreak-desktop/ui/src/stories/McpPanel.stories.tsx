@@ -47,6 +47,7 @@ function stubClient(servers: McpServerInfo[]): ApiClient {
     // The story's page stays put: the stub answers as the server would, and
     // the listing keeps showing the state the story is about.
     connectMcpServer: async () => mcpOauthAuthorizing,
+    cancelMcpServerConnect: async () => mcpOauthNotConnected,
     disconnectMcpServer: async () => mcpOauthNotConnected,
     getGatewayStatus: async () => signedOut,
     getGatewayApps: async () => ({ supported: true, apps: [] }),

@@ -666,6 +666,10 @@ fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("DELETE", "/code-execution/credentials/e2b"),
         ("PUT", "/mcp/servers"),
         ("POST", "/mcp/servers/example/reconnect"),
+        // A sign-in stores a session every member's turns present.
+        ("POST", "/mcp/servers/example/connect"),
+        ("POST", "/mcp/servers/example/connect/cancel"),
+        ("POST", "/mcp/servers/example/disconnect"),
         ("POST", "/plugins/install"),
         ("PUT", "/plugins/enabled"),
         ("PUT", "/connected-apps/rest/example"),
