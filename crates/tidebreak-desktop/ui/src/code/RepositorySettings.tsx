@@ -10,8 +10,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { SettingsField, SettingsSection } from "@/settings/primitives";
+import { RepositoryTrustSettings } from "./RepositoryTrustSettings";
 
-type RepoSettingsClient = Pick<ApiClient, "getCodeRepo" | "patchCodeRepo">;
+type RepoSettingsClient = Pick<
+  ApiClient,
+  "getCodeRepo" | "patchCodeRepo" | "getCodeRepoTrust" | "setCodeRepoTrust"
+>;
 
 /**
  * How many quick actions a repository takes. Mirrors the server's cap in
@@ -213,205 +217,208 @@ export function RepositorySettings({
   };
 
   return (
-    <SettingsSection
-      title={repoLabel}
-      description="Scripts run in the worktree. A failing setup script leaves the checkout in place and marks the workspace Setup failed."
-    >
-      <div className="flex items-start justify-end">
-        {(loading || busy) && <Spinner className="size-3.5" />}
-      </div>
-      {error && (
-        <div className="notice-surface notice-critical flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
-          <span className="flex min-w-0 items-start gap-2">
-            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-            <span className="min-w-0">{error}</span>
-          </span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="shrink-0 self-end min-[480px]:self-auto"
-            disabled={loading}
-            onClick={() => void load()}
-          >
-            Try again
-          </Button>
+    <>
+      <SettingsSection
+        title={repoLabel}
+        description="Scripts run in the worktree. A failing setup script leaves the checkout in place and marks the workspace Setup failed."
+      >
+        <div className="flex items-start justify-end">
+          {(loading || busy) && <Spinner className="size-3.5" />}
         </div>
-      )}
-      {!loading && draft && (
-        <>
-          <SettingsField label="Base ref">
-            <Input
-              className="font-mono"
-              value={draft.default_base_ref}
-              placeholder="main"
-              onChange={(event) =>
-                setDraft({ ...draft, default_base_ref: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
-          </SettingsField>
-          <SettingsField label="Branch prefix">
-            <Input
-              className="font-mono"
-              value={draft.branch_prefix}
-              placeholder="tidebreak/"
-              onChange={(event) =>
-                setDraft({ ...draft, branch_prefix: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
-          </SettingsField>
-          <SettingsField
-            label="Setup script"
-            hint="Runs after a worktree is created or restored. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME. A failure leaves the workspace in Setup failed. Fix the script, then pick Retry setup; the checkout is kept."
-          >
-            <Textarea
-              className="min-h-16 font-mono"
-              rows={3}
-              aria-label="Setup script"
-              value={draft.setup_script}
-              placeholder="pnpm install"
-              onChange={(event) =>
-                setDraft({ ...draft, setup_script: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
-          </SettingsField>
-          <SettingsField
-            label="Archive script"
-            hint="Runs before the worktree is removed. A failure stops the archive. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME."
-          >
-            <Textarea
-              className="min-h-16 font-mono"
-              rows={3}
-              aria-label="Archive script"
-              value={draft.archive_script}
-              placeholder="./scripts/back-up.sh"
-              onChange={(event) =>
-                setDraft({ ...draft, archive_script: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
-          </SettingsField>
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="settings-field-label">Quick actions</span>
-              <Button
-                type="button"
-                size="xs"
-                variant="outline"
-                disabled={draft.quick_actions.length >= MAX_QUICK_ACTIONS}
-                onClick={() =>
-                  editActions(
-                    (actions) => [
-                      ...actions,
-                      { name: "", command: "", auto_run_on_create: false },
-                    ],
-                    false,
-                  )
+        {error && (
+          <div className="notice-surface notice-critical flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
+            <span className="flex min-w-0 items-start gap-2">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0">{error}</span>
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              className="shrink-0 self-end min-[480px]:self-auto"
+              disabled={loading}
+              onClick={() => void load()}
+            >
+              Try again
+            </Button>
+          </div>
+        )}
+        {!loading && draft && (
+          <>
+            <SettingsField label="Base ref">
+              <Input
+                className="font-mono"
+                value={draft.default_base_ref}
+                placeholder="main"
+                onChange={(event) =>
+                  setDraft({ ...draft, default_base_ref: event.target.value })
                 }
-              >
-                <Plus />
-                Add
-              </Button>
-            </div>
-            {draft.quick_actions.length >= MAX_QUICK_ACTIONS && (
-              <p className="settings-field-hint">
-                A repository takes at most {MAX_QUICK_ACTIONS} quick actions.
-              </p>
-            )}
-            {draft.quick_actions.length === 0 ? (
-              <p className="settings-field-hint">
-                No quick actions yet. Add one to run a named command in any
-                workspace of this repo.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {draft.quick_actions.map((action, index) => (
-                  <div
-                    // Names are still being typed here, so the row's position
-                    // is the only stable identity it has.
-                    // eslint-disable-next-line react/no-array-index-key
-                    key={index}
-                    className="flex min-w-0 flex-wrap items-center gap-2"
-                  >
-                    <Input
-                      className="min-w-24 flex-1 basis-28"
-                      value={action.name}
-                      placeholder="Test"
-                      aria-label={`Quick action ${index + 1} name`}
-                      onChange={(event) =>
-                        editActions(
-                          (actions) =>
-                            actions.map((item, at) =>
-                              at === index
-                                ? { ...item, name: event.target.value }
-                                : item,
-                            ),
-                          false,
-                        )
-                      }
-                      onBlur={() => draft && void commit(draft)}
-                    />
-                    <Input
-                      className="min-w-0 flex-[2] basis-40 font-mono"
-                      value={action.command}
-                      placeholder="cargo test"
-                      aria-label={`Quick action ${index + 1} command`}
-                      onChange={(event) =>
-                        editActions(
-                          (actions) =>
-                            actions.map((item, at) =>
-                              at === index
-                                ? { ...item, command: event.target.value }
-                                : item,
-                            ),
-                          false,
-                        )
-                      }
-                      onBlur={() => draft && void commit(draft)}
-                    />
-                    <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-                      <Switch
-                        checked={action.auto_run_on_create}
-                        aria-label={`Run quick action ${index + 1} on create`}
-                        onCheckedChange={(checked) =>
+                onBlur={() => void commit(draft)}
+              />
+            </SettingsField>
+            <SettingsField label="Branch prefix">
+              <Input
+                className="font-mono"
+                value={draft.branch_prefix}
+                placeholder="tidebreak/"
+                onChange={(event) =>
+                  setDraft({ ...draft, branch_prefix: event.target.value })
+                }
+                onBlur={() => void commit(draft)}
+              />
+            </SettingsField>
+            <SettingsField
+              label="Setup script"
+              hint="Runs after a worktree is created or restored. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME. A failure leaves the workspace in Setup failed. Fix the script, then pick Retry setup; the checkout is kept."
+            >
+              <Textarea
+                className="min-h-16 font-mono"
+                rows={3}
+                aria-label="Setup script"
+                value={draft.setup_script}
+                placeholder="pnpm install"
+                onChange={(event) =>
+                  setDraft({ ...draft, setup_script: event.target.value })
+                }
+                onBlur={() => void commit(draft)}
+              />
+            </SettingsField>
+            <SettingsField
+              label="Archive script"
+              hint="Runs before the worktree is removed. A failure stops the archive. Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME."
+            >
+              <Textarea
+                className="min-h-16 font-mono"
+                rows={3}
+                aria-label="Archive script"
+                value={draft.archive_script}
+                placeholder="./scripts/back-up.sh"
+                onChange={(event) =>
+                  setDraft({ ...draft, archive_script: event.target.value })
+                }
+                onBlur={() => void commit(draft)}
+              />
+            </SettingsField>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="settings-field-label">Quick actions</span>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={draft.quick_actions.length >= MAX_QUICK_ACTIONS}
+                  onClick={() =>
+                    editActions(
+                      (actions) => [
+                        ...actions,
+                        { name: "", command: "", auto_run_on_create: false },
+                      ],
+                      false,
+                    )
+                  }
+                >
+                  <Plus />
+                  Add
+                </Button>
+              </div>
+              {draft.quick_actions.length >= MAX_QUICK_ACTIONS && (
+                <p className="settings-field-hint">
+                  A repository takes at most {MAX_QUICK_ACTIONS} quick actions.
+                </p>
+              )}
+              {draft.quick_actions.length === 0 ? (
+                <p className="settings-field-hint">
+                  No quick actions yet. Add one to run a named command in any
+                  workspace of this repo.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {draft.quick_actions.map((action, index) => (
+                    <div
+                      // Names are still being typed here, so the row's position
+                      // is the only stable identity it has.
+                      // eslint-disable-next-line react/no-array-index-key
+                      key={index}
+                      className="flex min-w-0 flex-wrap items-center gap-2"
+                    >
+                      <Input
+                        className="min-w-24 flex-1 basis-28"
+                        value={action.name}
+                        placeholder="Test"
+                        aria-label={`Quick action ${index + 1} name`}
+                        onChange={(event) =>
                           editActions(
                             (actions) =>
                               actions.map((item, at) =>
                                 at === index
-                                  ? { ...item, auto_run_on_create: checked }
+                                  ? { ...item, name: event.target.value }
                                   : item,
                               ),
+                            false,
+                          )
+                        }
+                        onBlur={() => draft && void commit(draft)}
+                      />
+                      <Input
+                        className="min-w-0 flex-[2] basis-40 font-mono"
+                        value={action.command}
+                        placeholder="cargo test"
+                        aria-label={`Quick action ${index + 1} command`}
+                        onChange={(event) =>
+                          editActions(
+                            (actions) =>
+                              actions.map((item, at) =>
+                                at === index
+                                  ? { ...item, command: event.target.value }
+                                  : item,
+                              ),
+                            false,
+                          )
+                        }
+                        onBlur={() => draft && void commit(draft)}
+                      />
+                      <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                        <Switch
+                          checked={action.auto_run_on_create}
+                          aria-label={`Run quick action ${index + 1} on create`}
+                          onCheckedChange={(checked) =>
+                            editActions(
+                              (actions) =>
+                                actions.map((item, at) =>
+                                  at === index
+                                    ? { ...item, auto_run_on_create: checked }
+                                    : item,
+                                ),
+                              true,
+                            )
+                          }
+                        />
+                        On create
+                      </label>
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost-destructive"
+                        aria-label={`Remove quick action ${index + 1}`}
+                        onClick={() =>
+                          editActions(
+                            (actions) =>
+                              actions.filter((_item, at) => at !== index),
                             true,
                           )
                         }
-                      />
-                      On create
-                    </label>
-                    <Button
-                      type="button"
-                      size="icon-xs"
-                      variant="ghost-destructive"
-                      aria-label={`Remove quick action ${index + 1}`}
-                      onClick={() =>
-                        editActions(
-                          (actions) =>
-                            actions.filter((_item, at) => at !== index),
-                          true,
-                        )
-                      }
-                    >
-                      <X />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </SettingsSection>
+                      >
+                        <X />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </SettingsSection>
+      <RepositoryTrustSettings client={client} repoId={repoId} />
+    </>
   );
 }

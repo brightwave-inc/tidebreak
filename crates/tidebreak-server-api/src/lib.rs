@@ -1002,6 +1002,10 @@ pub fn app(state: AppState) -> Router {
                 .patch(routes::code::patch_repo)
                 .delete(routes::code::delete_repo),
         )
+        .route(
+            "/code/repos/{id}/trust",
+            get(routes::code::get_repo_trust).put(routes::code::put_repo_trust),
+        )
         .route("/code/harnesses", get(routes::code::list_harnesses))
         .route("/code/analytics", get(routes::code::analytics))
         .route("/code/usage", get(routes::code::subscription_usage))
@@ -1072,6 +1076,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/workspaces/{id}/retry-setup",
             post(routes::code::retry_workspace_setup),
+        )
+        .route(
+            "/code/workspaces/{id}/trust",
+            get(routes::code::get_workspace_trust),
         )
         .route(
             "/code/workspaces/{id}/files",
@@ -1247,6 +1255,16 @@ pub fn app(state: AppState) -> Router {
     let view_frames = Router::new()
         .route("/mcp/view-frames/{token}", get(routes::get_mcp_view_frame))
         .route("/apps/view-frames/{token}", get(routes::get_app_view_frame))
+        .with_state(frame_state.clone());
+
+    // The engine-facing MCP servers. A session-scoped bearer the engine child
+    // holds authenticates each request, so they stay outside
+    // `require_token`. That bearer is the only one these routes know, and a
+    // self-host image binds every interface, so the peer address is the
+    // second gate, as it is for the inference relay: the child dials the
+    // loopback base it was handed, and a leaked bearer from anywhere else is
+    // refused before it reaches an approval or a connected app.
+    let engine_mcp = Router::new()
         .route(
             "/code/mcp/approval-prompt",
             post(routes::code::approval_prompt),
@@ -1255,10 +1273,12 @@ pub fn app(state: AppState) -> Router {
             "/code/mcp/connected-apps",
             post(routes::code::connected_apps),
         )
+        .route_layer(axum::middleware::from_fn(auth::require_loopback_peer))
         .with_state(frame_state);
 
     let root = Router::new()
         .merge(view_frames)
+        .merge(engine_mcp)
         .merge(auth_discovery)
         .merge(machine_client_executor_api)
         .merge(api);

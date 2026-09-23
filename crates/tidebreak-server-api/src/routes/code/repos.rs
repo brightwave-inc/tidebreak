@@ -10,7 +10,8 @@ use crate::extract::{Json, Path, Query};
 
 use super::types::{
     CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories,
-    CodeRepoSnapshot, CodeRepoSources, CreateRepoBody, PatchRepoBody, RemoveRepoQuery,
+    CodeRepoSnapshot, CodeRepoSources, CodeRepoTrustSnapshot, CreateRepoBody, PatchRepoBody,
+    RemoveRepoQuery, SetCodeRepoTrustBody,
 };
 use tidebreak_core::{QuickAction, RepoId};
 
@@ -220,4 +221,34 @@ pub async fn get_clone_job(
     Path(job): Path<Uuid>,
 ) -> Result<Json<CodeCloneJobSnapshot>, ServerError> {
     Ok(Json(code.get_clone_job(job)?))
+}
+
+/// `GET /code/repos/{id}/trust` — whether engines load the repository's own
+/// config, and the engine config its main checkout carries.
+pub async fn get_repo_trust(
+    code: ScopedCode,
+    Path(id): Path<RepoId>,
+) -> Result<Json<CodeRepoTrustSnapshot>, ServerError> {
+    Ok(Json(code.repo_trust(id).await?))
+}
+
+/// `PUT /code/repos/{id}/trust` — trust the repository, or continue without
+/// its config. Live sessions of the repository move onto the decision: an
+/// idle one restarts its engine now, a working one after its turn ends.
+pub async fn put_repo_trust(
+    code: ScopedCode,
+    Path(id): Path<RepoId>,
+    Json(body): Json<SetCodeRepoTrustBody>,
+) -> Result<Json<CodeRepoTrustSnapshot>, ServerError> {
+    Ok(Json(code.set_repo_trust(id, body.trusted).await?))
+}
+
+/// `GET /code/workspaces/{id}/trust` — the trust decision for the
+/// workspace's repository and the engine config its worktree carries: what
+/// a session started there would load once the repository is trusted.
+pub async fn get_workspace_trust(
+    code: ScopedCode,
+    Path(id): Path<tidebreak_core::WorkspaceId>,
+) -> Result<Json<CodeRepoTrustSnapshot>, ServerError> {
+    Ok(Json(code.workspace_trust(id).await?))
 }

@@ -210,6 +210,16 @@ for line in sys.stdin:
 
 #[cfg(unix)]
 fn session(dir: &Path, mode: PermissionMode, duplicate: bool) -> (Arc<GrokSession>, Arc<Sink>) {
+    session_with(dir, mode, duplicate, crate::ProjectConfig::Load)
+}
+
+#[cfg(unix)]
+fn session_with(
+    dir: &Path,
+    mode: PermissionMode,
+    duplicate: bool,
+    project_config: crate::ProjectConfig,
+) -> (Arc<GrokSession>, Arc<Sink>) {
     use std::os::unix::fs::PermissionsExt;
     let binary = dir.join("grok");
     std::fs::write(&binary, SERVER).unwrap();
@@ -256,6 +266,7 @@ fn session(dir: &Path, mode: PermissionMode, duplicate: bool) -> (Arc<GrokSessio
         native: None,
         tool_bridge: None,
         apps: None,
+        project_config,
     };
     (Arc::new(GrokSession::new(spec, "1.0.13".into())), sink)
 }
@@ -455,6 +466,46 @@ async fn acp_applies_turn_model_and_effort_before_prompting() {
     assert!(index("session/set_model") < index("session/prompt"));
     assert!(index("session/set_mode") < index("session/prompt"));
     assert_eq!(calls[index("session/set_mode")]["params"]["modeId"], "high");
+}
+
+/// Grok gates a repository's config behind its own folder trust, but runs a
+/// trusted folder's `.envrc` in bash. A repository the user has not trusted
+/// in Tidebreak turns that off twice: in the child's environment and in the
+/// session request. A trusted one launches as it did.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_untrusted_repository_keeps_grok_from_running_its_envrc() {
+    for project_config in [crate::ProjectConfig::Skip, crate::ProjectConfig::Load] {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, _) = session_with(dir.path(), PermissionMode::Allow, false, project_config);
+        let plan = session.compose_acp_plan(&turn()).unwrap();
+        let envrc_timeout = plan
+            .env
+            .iter()
+            .find(|(name, _)| name == "GROK_ENVRC_TIMEOUT_SECS")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(session.run_turn(turn()).await.unwrap(), TurnOutcome::Clean);
+        let calls: Vec<Value> = std::fs::read_to_string(dir.path().join("record"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let new_session = calls
+            .iter()
+            .find(|call| call["method"] == "session/new")
+            .unwrap();
+        let skip_envrc = &new_session["params"]["_meta"]["x.ai/skip_envrc"];
+        match project_config {
+            crate::ProjectConfig::Skip => {
+                assert_eq!(envrc_timeout, Some("0"));
+                assert_eq!(skip_envrc, &json!(true));
+            }
+            crate::ProjectConfig::Load => {
+                assert_eq!(envrc_timeout, None);
+                assert!(skip_envrc.is_null());
+            }
+        }
+    }
 }
 
 #[cfg(unix)]

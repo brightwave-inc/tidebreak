@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ApprovalChannelSpec, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
 /// MCP server name used in `--mcp-config` and the tool prefix.
 pub const APPROVAL_MCP_SERVER: &str = "tb-approvals";
@@ -105,17 +105,6 @@ pub fn event_from_prompt_request(request: &PermissionPromptRequest) -> HarnessEv
         raw: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
         kind: None,
     }
-}
-
-/// Launch argv fragments captured on 2.1.233. Always `Some` for this version.
-#[must_use]
-pub fn launch_args_for_approval_channel(channel: &ApprovalChannelSpec) -> Option<Vec<String>> {
-    Some(vec![
-        "--mcp-config".into(),
-        channel.mcp_config_json(APPROVAL_MCP_SERVER),
-        "--permission-prompt-tool".into(),
-        PERMISSION_PROMPT_TOOL.into(),
-    ])
 }
 
 #[cfg(test)]

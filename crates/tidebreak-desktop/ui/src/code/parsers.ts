@@ -119,11 +119,19 @@ import type {
   CodeCheckLogError,
   CodeCheckLogsSnapshot,
   CodeForkTranscript,
+  CodeProjectConfigEffect,
+  CodeProjectConfigEffectKind,
+  CodeProjectConfigFile,
+  CodeRepoTrust,
+  CodeRepoTrustSnapshot,
 } from "../api/types";
 import { parseToolActionPreview } from "../api/parsers";
 import type {
   Event as WireCodeEvent,
   CodeRepoSnapshot as WireCodeRepoSnapshot,
+  CodeRepoTrustSnapshot as WireCodeRepoTrustSnapshot,
+  CodeProjectConfigEffect as WireCodeProjectConfigEffect,
+  CodeProjectConfigFile as WireCodeProjectConfigFile,
   SessionSnapshot as WireCodeSessionSnapshot,
   SessionExternalOrigin as CodeSessionExternalOrigin,
   TurnSnapshot as WireCodeTurnSnapshot,
@@ -2065,6 +2073,112 @@ export function parseCodeRepo(value: unknown): CodeRepoSnapshot | null {
     quick_actions,
     created_at: value.created_at,
   };
+}
+
+const REPO_TRUSTS = new Set<CodeRepoTrust>([
+  "undecided",
+  "trusted",
+  "untrusted",
+]);
+
+const PROJECT_CONFIG_EFFECT_KINDS = new Set<CodeProjectConfigEffectKind>([
+  "hooks",
+  "mcp_servers",
+  "plugins",
+  "packages",
+  "environment_variables",
+  "permission_rules",
+  "helper_commands",
+  "custom_tools",
+  "workflows",
+  "scheduled_tasks",
+  "agents",
+  "commands",
+  "skills",
+  "instructions",
+  "settings",
+]);
+
+/**
+ * The most config files one checkout lists. The server reads a fixed set of
+ * paths, well under this, so a longer list is not a server answer.
+ */
+const MAX_PROJECT_CONFIG_FILES = 128;
+
+function parseProjectConfigEffect(
+  value: unknown,
+): CodeProjectConfigEffect | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeProjectConfigEffect>(value, ["kind", "count"]) ||
+    !isMember(value.kind, PROJECT_CONFIG_EFFECT_KINDS) ||
+    !isNonNegativeInteger(value.count)
+  ) {
+    return null;
+  }
+  return { kind: value.kind, count: value.count };
+}
+
+function parseProjectConfigFile(value: unknown): CodeProjectConfigFile | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeProjectConfigFile>(value, [
+      "path",
+      "engines",
+      "effects",
+    ]) ||
+    !nonEmptyLine(value.path) ||
+    !Array.isArray(value.engines) ||
+    !Array.isArray(value.effects) ||
+    value.effects.length > PROJECT_CONFIG_EFFECT_KINDS.size
+  ) {
+    return null;
+  }
+  const engines: HarnessKind[] = [];
+  for (const engine of value.engines) {
+    if (!isMember(engine, HARNESS_KINDS) || engines.includes(engine)) {
+      return null;
+    }
+    engines.push(engine);
+  }
+  const effects: CodeProjectConfigEffect[] = [];
+  for (const entry of value.effects) {
+    const effect = parseProjectConfigEffect(entry);
+    if (!effect) return null;
+    effects.push(effect);
+  }
+  return { path: value.path, engines, effects };
+}
+
+/**
+ * `GET /code/repos/{id}/trust`, its `PUT`, and
+ * `GET /code/workspaces/{id}/trust`: whether engines load the repository's
+ * own config, and the engine config the scanned checkout carries.
+ */
+export function parseCodeRepoTrust(
+  value: unknown,
+): CodeRepoTrustSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeRepoTrustSnapshot>(value, [
+      "repo_id",
+      "trust",
+      "files",
+    ]) ||
+    !wireId(value.repo_id) ||
+    !isMember(value.trust, REPO_TRUSTS) ||
+    !Array.isArray(value.files) ||
+    value.files.length > MAX_PROJECT_CONFIG_FILES
+  ) {
+    return null;
+  }
+  const files: CodeProjectConfigFile[] = [];
+  for (const entry of value.files) {
+    const file = parseProjectConfigFile(entry);
+    if (!file) return null;
+    files.push(file);
+  }
+  return { repo_id: value.repo_id, trust: value.trust, files };
 }
 
 function parseQuickAction(value: unknown): WireQuickAction | null {

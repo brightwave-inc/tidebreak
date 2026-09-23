@@ -1,20 +1,24 @@
-//! Browser MCP stdio server injection for Claude Code 2.1.233.
+//! MCP server wiring for Claude Code: the approval, browser, native,
+//! connected-apps, and human-tool servers in one `--mcp-config` document.
 //!
-//! Claude Code accepts MCP server declarations through `--mcp-config <json>`,
-//! the same flag the approval channel already uses. A stdio MCP server is:
+//! Claude Code reads MCP server declarations from `--mcp-config`, which takes
+//! inline JSON or a file path. A stdio MCP server is:
 //!
 //! ```json
 //! {"type":"stdio","command":"/abs/path/to/tidebreak","args":["browser-mcp"]}
 //! ```
 //!
-//! The child process inherits `TIDEBREAK_BROWSER_CAPFILE` from the engine
-//! child's environment (injected by [`BrowserChannelSpec::inject_env_tokio`]
-//! via [`crate::browser_channel::apply_child_env_tokio`]), so the config
-//! carries no secrets — only the command and arguments.
-//!
-//! When both the approval and browser channels are present, the two
-//! `mcpServers` entries are merged into a single `--mcp-config` flag so
-//! the engine sees one config object.
+//! The browser and native children inherit their capability-file paths from
+//! the engine child's environment (injected by
+//! [`BrowserChannelSpec::inject_env_tokio`] via
+//! [`crate::browser_channel::apply_child_env_tokio`]), so their entries carry
+//! only the command and arguments. The approval and connected-apps entries are
+//! HTTP servers with a bearer token, and any local account can read another
+//! process's arguments. So the merged document never goes on argv: the session
+//! writes it to a file only its user can read, and argv names that file
+//! ([`McpLaunchConfig::flags`]).
+
+use std::path::Path;
 
 use crate::{BrowserChannelSpec, NativeChannelSpec};
 
@@ -65,9 +69,11 @@ fn stdio_mcp_config_entry(
 /// server entry. Returns `None` when no channel is present.
 ///
 /// When only the approval channel is present, the output is identical to
-/// [`crate::ApprovalChannelSpec::mcp_config_json`] so existing behavior is
-/// unchanged. Otherwise every present channel's entry appears in one
-/// `mcpServers` object under one `--mcp-config` flag.
+/// [`crate::ApprovalChannelSpec::mcp_config_json`]. Otherwise every present
+/// channel's entry appears in one `mcpServers` object.
+///
+/// The approval and connected-apps entries carry bearer tokens. Write the
+/// result to a private file; never put it on argv.
 pub fn merged_mcp_config_json(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
@@ -78,7 +84,6 @@ pub fn merged_mcp_config_json(
         return Ok(None);
     }
     if let (Some(channel), None, None, None) = (approval, browser, native, apps) {
-        // Existing behavior: approval-only config.
         return Ok(Some(
             channel.mcp_config_json(crate::claude::approvals::APPROVAL_MCP_SERVER),
         ));
@@ -124,32 +129,64 @@ pub fn merged_mcp_config_json(
     ))
 }
 
-/// Launch argv fragments for the approval, browser, and native MCP config.
+/// Claude Code's MCP wiring for one launch: the `--mcp-config` document and
+/// whether the approval prompt tool rides with it.
 ///
-/// Returns `None` when no channel is present (no `--mcp-config` flag).
-/// When only the approval channel is present, the output matches the
-/// existing [`crate::claude::approvals::launch_args_for_approval_channel`]
-/// exactly. The `--permission-prompt-tool` flag is added only when the
-/// approval channel is present.
-pub fn launch_args_for_mcp_channels(
-    approval: Option<&crate::ApprovalChannelSpec>,
-    browser: Option<&BrowserChannelSpec>,
-    native: Option<&NativeChannelSpec>,
-    apps: Option<&crate::AppsChannelSpec>,
-) -> Result<Option<Vec<String>>, crate::HarnessError> {
-    launch_args_for_mcp_channels_and_tools(approval, browser, native, apps, None)
+/// The document carries bearer tokens, so it goes into a file only the
+/// session's user can read, and argv names that file ([`Self::flags`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpLaunchConfig {
+    document: String,
+    permission_prompt_tool: bool,
 }
 
-/// Register durable human helpers alongside the existing channels.
-pub fn launch_args_for_mcp_channels_and_tools(
+impl std::fmt::Debug for McpLaunchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpLaunchConfig")
+            .field("document", &"<redacted>")
+            .field("permission_prompt_tool", &self.permission_prompt_tool)
+            .finish()
+    }
+}
+
+impl McpLaunchConfig {
+    /// The `--mcp-config` JSON document. It carries bearer tokens: write it to
+    /// a private file, never to argv or a log.
+    #[must_use]
+    pub fn document(&self) -> &str {
+        &self.document
+    }
+
+    /// The argv fragment that loads the document from `path`, plus
+    /// `--permission-prompt-tool` when the approval channel is present.
+    pub fn flags(&self, path: &Path) -> Result<Vec<String>, crate::HarnessError> {
+        let path = path.to_str().ok_or_else(|| {
+            crate::HarnessError::Other("the Claude MCP config path must be valid UTF-8".into())
+        })?;
+        let mut flags = vec!["--mcp-config".into(), path.to_owned()];
+        if self.permission_prompt_tool {
+            flags.push("--permission-prompt-tool".into());
+            flags.push(crate::claude::approvals::PERMISSION_PROMPT_TOOL.into());
+        }
+        Ok(flags)
+    }
+}
+
+/// The MCP wiring for the approval, browser, native, connected-apps, and
+/// human-tool channels.
+///
+/// Returns `None` when no channel is present, so the launch carries no
+/// `--mcp-config` flag. `--permission-prompt-tool` rides along only when the
+/// approval channel is present.
+pub fn mcp_launch_config(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
     native: Option<&NativeChannelSpec>,
     apps: Option<&crate::AppsChannelSpec>,
     tools: Option<&crate::ToolBridgeSpec>,
-) -> Result<Option<Vec<String>>, crate::HarnessError> {
+) -> Result<Option<McpLaunchConfig>, crate::HarnessError> {
     let config = merged_mcp_config_json(approval, browser, native, apps)?;
-    let config = if let Some(tools) = tools {
+    let document = if let Some(tools) = tools {
         let mut value: serde_json::Value = config
             .as_deref()
             .map(serde_json::from_str)
@@ -165,12 +202,10 @@ pub fn launch_args_for_mcp_channels_and_tools(
     } else {
         return Ok(None);
     };
-    let mut flags = vec!["--mcp-config".into(), config];
-    if approval.is_some() {
-        flags.push("--permission-prompt-tool".into());
-        flags.push(crate::claude::approvals::PERMISSION_PROMPT_TOOL.into());
-    }
-    Ok(Some(flags))
+    Ok(Some(McpLaunchConfig {
+        document,
+        permission_prompt_tool: approval.is_some(),
+    }))
 }
 
 #[cfg(test)]
@@ -209,32 +244,82 @@ mod tests {
         )
     }
 
-    #[test]
-    fn neither_channel_produces_no_flags() {
-        assert!(launch_args_for_mcp_channels(None, None, None, None)
-            .unwrap()
-            .is_none());
+    /// Where these tests pretend the session wrote the document.
+    const CONFIG_PATH: &str = "/private/tidebreak-claude-test/mcp-config.json";
+
+    /// The flags a launch composes for these channels, and the document the
+    /// file they name would hold.
+    fn launch(
+        approval: Option<&ApprovalChannelSpec>,
+        browser: Option<&BrowserChannelSpec>,
+        native: Option<&NativeChannelSpec>,
+        apps: Option<&crate::AppsChannelSpec>,
+    ) -> Result<Option<(Vec<String>, serde_json::Value)>, crate::HarnessError> {
+        Ok(
+            mcp_launch_config(approval, browser, native, apps, None)?.map(|config| {
+                let flags = config.flags(Path::new(CONFIG_PATH)).unwrap();
+                assert_eq!(
+                    flags[..2],
+                    ["--mcp-config", CONFIG_PATH],
+                    "argv names the file, never the document"
+                );
+                (flags, serde_json::from_str(config.document()).unwrap())
+            }),
+        )
     }
 
     #[test]
-    fn approval_only_matches_existing_behavior() {
+    fn neither_channel_produces_no_flags() {
+        assert!(launch(None, None, None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn approval_only_keeps_the_approval_document_and_its_prompt_tool() {
         let channel = approval_channel();
-        let flags = launch_args_for_mcp_channels(Some(&channel), None, None, None)
+        let config = mcp_launch_config(Some(&channel), None, None, None, None)
             .unwrap()
             .unwrap();
-        let existing =
-            crate::claude::approvals::launch_args_for_approval_channel(&channel).unwrap();
-        assert_eq!(flags, existing);
+        assert_eq!(
+            config.document(),
+            channel.mcp_config_json(crate::claude::approvals::APPROVAL_MCP_SERVER)
+        );
+        assert_eq!(
+            config.flags(Path::new(CONFIG_PATH)).unwrap(),
+            [
+                "--mcp-config",
+                CONFIG_PATH,
+                "--permission-prompt-tool",
+                crate::claude::approvals::PERMISSION_PROMPT_TOOL,
+            ]
+        );
+    }
+
+    /// Any local account can read another process's arguments, so the
+    /// bearer tokens live only in the document the file holds.
+    #[test]
+    fn bearer_tokens_stay_in_the_document_and_off_the_flags() {
+        let apps = crate::AppsChannelSpec {
+            mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
+            token: "apps-token".into(),
+        };
+        let config = mcp_launch_config(Some(&approval_channel()), None, None, Some(&apps), None)
+            .unwrap()
+            .unwrap();
+        let flags = config.flags(Path::new(CONFIG_PATH)).unwrap();
+        for token in ["test-token", "apps-token"] {
+            assert!(config.document().contains(token));
+            assert!(
+                !flags.iter().any(|flag| flag.contains(token)),
+                "{token} reached argv: {flags:?}"
+            );
+        }
+        assert!(!format!("{config:?}").contains("test-token"));
     }
 
     #[test]
     fn browser_only_emits_stdio_config_without_prompt_tool() {
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(None, Some(&browser), None, None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(flags[0], "--mcp-config");
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        let (flags, config) = launch(None, Some(&browser), None, None).unwrap().unwrap();
         assert_eq!(config["mcpServers"]["tb-browser"]["type"], "stdio");
         assert_eq!(
             config["mcpServers"]["tb-browser"]["command"],
@@ -251,12 +336,11 @@ mod tests {
     fn both_channels_merge_into_one_config() {
         let approval = approval_channel();
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser), None, None)
+        let (flags, config) = launch(Some(&approval), Some(&browser), None, None)
             .unwrap()
             .unwrap();
         // Exactly one --mcp-config flag.
         assert_eq!(flags.iter().filter(|f| **f == "--mcp-config").count(), 1);
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert!(config["mcpServers"].get("tb-approvals").is_some());
         assert!(config["mcpServers"].get("tb-browser").is_some());
         // Approval is HTTP with bearer.
@@ -270,12 +354,11 @@ mod tests {
     #[test]
     fn browser_config_carries_no_secrets() {
         let browser = browser_channel();
-        for flags in [
-            launch_args_for_mcp_channels(None, Some(&browser), None, None),
-            launch_args_for_mcp_channels(Some(&approval_channel()), Some(&browser), None, None),
+        for launched in [
+            launch(None, Some(&browser), None, None),
+            launch(Some(&approval_channel()), Some(&browser), None, None),
         ] {
-            let flags = flags.unwrap().unwrap();
-            let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+            let (_, config) = launched.unwrap().unwrap();
             let config_str = config.to_string();
             // No capfile path or env key in the config text.
             assert!(!config_str.contains("/tmp/tidebreak-browser-cap.json"));
@@ -300,10 +383,7 @@ mod tests {
             PathBuf::from("/tmp/with spaces/cap.json"),
             PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
         );
-        let flags = launch_args_for_mcp_channels(None, Some(&browser), None, None)
-            .unwrap()
-            .unwrap();
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        let (_, config) = launch(None, Some(&browser), None, None).unwrap().unwrap();
         let command = config["mcpServers"]["tb-browser"]["command"]
             .as_str()
             .unwrap();
@@ -330,11 +410,7 @@ mod tests {
     #[test]
     fn native_only_emits_stdio_config_without_prompt_tool() {
         let native = native_channel();
-        let flags = launch_args_for_mcp_channels(None, None, Some(&native), None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(flags[0], "--mcp-config");
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        let (flags, config) = launch(None, None, Some(&native), None).unwrap().unwrap();
         assert_eq!(config["mcpServers"]["tb-native"]["type"], "stdio");
         assert_eq!(
             config["mcpServers"]["tb-native"]["command"],
@@ -350,12 +426,10 @@ mod tests {
         let approval = approval_channel();
         let browser = browser_channel();
         let native = native_channel();
-        let flags =
-            launch_args_for_mcp_channels(Some(&approval), Some(&browser), Some(&native), None)
-                .unwrap()
-                .unwrap();
+        let (flags, config) = launch(Some(&approval), Some(&browser), Some(&native), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(flags.iter().filter(|f| **f == "--mcp-config").count(), 1);
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert!(config["mcpServers"].get("tb-approvals").is_some());
         assert!(config["mcpServers"].get("tb-browser").is_some());
         assert!(config["mcpServers"].get("tb-native").is_some());
@@ -365,13 +439,10 @@ mod tests {
     #[test]
     fn native_config_carries_no_secrets() {
         let native = native_channel();
-        let flags = launch_args_for_mcp_channels(None, None, Some(&native), None)
-            .unwrap()
-            .unwrap();
-        let config_str = flags[1].clone();
+        let (_, config) = launch(None, None, Some(&native), None).unwrap().unwrap();
+        let config_str = config.to_string();
         assert!(!config_str.contains("/tmp/tidebreak-native-cap.json"));
         assert!(!config_str.contains("TIDEBREAK_NATIVE_CAPFILE"));
-        let config: serde_json::Value = serde_json::from_str(&config_str).unwrap();
         let entry = &config["mcpServers"]["tb-native"];
         assert!(entry.get("headers").is_none());
         assert!(entry.get("env").is_none());
@@ -387,7 +458,7 @@ mod tests {
             PathBuf::from("/tmp/tidebreak-browser-cap.json"),
             PathBuf::from(OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec())),
         );
-        let error = launch_args_for_mcp_channels(None, Some(&browser), None, None)
+        let error = launch(None, Some(&browser), None, None)
             .expect_err("non-UTF-8 bridge paths must fail closed");
 
         assert!(error.to_string().contains("must be valid UTF-8"));
@@ -399,15 +470,13 @@ mod tests {
             mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
             token: "apps-token".into(),
         };
-        let flags = launch_args_for_mcp_channels(None, None, None, Some(&apps))
+        let (flags, config) = launch(None, None, None, Some(&apps))
             .unwrap()
             .expect("an apps channel alone still mounts a server");
-        assert_eq!(flags[0], "--mcp-config");
         assert!(
             !flags.contains(&"--permission-prompt-tool".to_string()),
             "no approval channel, no permission-prompt flag"
         );
-        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         let entry = &config["mcpServers"]["tb-apps"];
         assert_eq!(entry["type"], "http");
         assert_eq!(
@@ -416,11 +485,9 @@ mod tests {
         );
         assert_eq!(entry["headers"]["Authorization"], "Bearer apps-token");
 
-        let with_approval =
-            launch_args_for_mcp_channels(Some(&approval_channel()), None, None, Some(&apps))
-                .unwrap()
-                .unwrap();
-        let config: serde_json::Value = serde_json::from_str(&with_approval[1]).unwrap();
+        let (_, config) = launch(Some(&approval_channel()), None, None, Some(&apps))
+            .unwrap()
+            .unwrap();
         assert!(config["mcpServers"].get("tb-approvals").is_some());
         assert!(config["mcpServers"].get("tb-apps").is_some());
     }

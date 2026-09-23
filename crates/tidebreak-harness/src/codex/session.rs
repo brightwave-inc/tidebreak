@@ -874,6 +874,49 @@ pub(crate) fn compose_app_server_plan(
     Ok(plan)
 }
 
+/// Codex's switch for a repository the user has not trusted: the worktree
+/// marked untrusted in this process's config.
+///
+/// Codex loads `.codex/config.toml`, `.codex/hooks.json`, and `.codex/rules/`
+/// only for a trusted project, and a linked worktree inherits whatever trust
+/// its main checkout has in `~/.codex/config.toml`. An entry for the worktree
+/// itself wins over that inheritance, so this marks it untrusted, which also
+/// leaves out the `AGENTS.md` files. `-c` merges into the user's `projects`
+/// table rather than replacing it. Checked against 0.153.4.
+pub(crate) fn project_config_overrides(
+    project_config: crate::ProjectConfig,
+    worktree: &std::path::Path,
+) -> Result<Vec<String>, HarnessError> {
+    if project_config == crate::ProjectConfig::Load {
+        return Ok(Vec::new());
+    }
+    // Codex keys trust by path; name the worktree both as given and as the
+    // filesystem resolves it, so a symlinked parent cannot dodge the entry.
+    let mut paths = vec![worktree.to_path_buf()];
+    if let Ok(canonical) = std::fs::canonicalize(worktree) {
+        if canonical != worktree {
+            paths.push(canonical);
+        }
+    }
+    let entries = paths
+        .iter()
+        .map(|path| {
+            let path = path.to_str().ok_or_else(|| {
+                HarnessError::Other(format!(
+                    "the worktree path is not valid UTF-8: {}",
+                    path.display()
+                ))
+            })?;
+            let key = serde_json::to_string(path).expect("a string always serializes as JSON");
+            Ok(format!("{key}={{trust_level=\"untrusted\"}}"))
+        })
+        .collect::<Result<Vec<_>, HarnessError>>()?;
+    Ok(vec![
+        "-c".into(),
+        format!("projects={{{}}}", entries.join(",")),
+    ])
+}
+
 /// JSON-escape a bridge path for a Codex `-c mcp_servers.…` override,
 /// refusing non-UTF-8 paths rather than silently replacing characters.
 fn escaped_bridge_path(
@@ -951,6 +994,10 @@ impl CodexSession {
             extra_argv.push("-c".into());
             extra_argv.push(bridge.codex_config_override()?);
         }
+        extra_argv.extend(project_config_overrides(
+            self.spec.project_config,
+            &self.spec.worktree,
+        )?);
         let plan = compose_app_server_plan(
             self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             &extra_argv,

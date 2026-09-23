@@ -20,6 +20,39 @@
     }
   },
   {
+    "kind": "repo_trust",
+    "name": "repo trust",
+    "value": {
+      "files": [
+        {
+          "effects": [
+            {
+              "count": 2,
+              "kind": "hooks"
+            },
+            {
+              "count": 1,
+              "kind": "environment_variables"
+            }
+          ],
+          "engines": [
+            "claude_code"
+          ],
+          "path": ".claude/settings.json"
+        },
+        {
+          "effects": [],
+          "engines": [
+            "opencode"
+          ],
+          "path": ".opencode/plugin/"
+        }
+      ],
+      "repo_id": "00000000-0000-0000-0000-000000000001",
+      "trust": "undecided"
+    }
+  },
+  {
     "kind": "workspace",
     "name": "workspace",
     "value": {

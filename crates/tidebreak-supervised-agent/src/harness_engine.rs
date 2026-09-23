@@ -338,6 +338,10 @@ impl HarnessEngine {
                 native: None,
                 tool_bridge: self.spec.tool_bridge.clone(),
                 apps: self.spec.apps.clone(),
+                // The repository's own engine config runs inside this
+                // sandbox, not on a person's machine, so the sandbox keeps
+                // loading it. Repository trust governs machine sessions.
+                project_config: tidebreak_harness::ProjectConfig::Load,
             })
             .await
             .map_err(|error| EngineError {

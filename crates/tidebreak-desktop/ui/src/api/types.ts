@@ -173,6 +173,11 @@ import {
   type ApprovalState as WireCodeApprovalState,
   type Event as WireCodeEvent,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
+  type CodeRepoTrust as WireCodeRepoTrust,
+  type CodeRepoTrustSnapshot as WireCodeRepoTrustSnapshot,
+  type CodeProjectConfigEffect as WireCodeProjectConfigEffect,
+  type CodeProjectConfigEffectKind as WireCodeProjectConfigEffectKind,
+  type CodeProjectConfigFile as WireCodeProjectConfigFile,
   type QuickAction as WireQuickAction,
   type SessionId as WireCodeSessionId,
   type SessionKind as WireCodeSessionKind,
@@ -1213,6 +1218,16 @@ export type CodeRepoSnapshot = WireCodeRepoSnapshot;
 /** A named command a workspace of that repository can run. */
 export type QuickAction = WireQuickAction;
 export type RepoId = WireRepoId;
+/** Whether engines load the config a repository carries for them. */
+export type CodeRepoTrust = WireCodeRepoTrust;
+/** A repository's trust decision and the engine config a checkout carries. */
+export type CodeRepoTrustSnapshot = WireCodeRepoTrustSnapshot;
+/** One engine config file or directory a checkout carries. */
+export type CodeProjectConfigFile = WireCodeProjectConfigFile;
+/** One effect a config file has, counted. */
+export type CodeProjectConfigEffect = WireCodeProjectConfigEffect;
+/** What loading one engine config file would do. */
+export type CodeProjectConfigEffectKind = WireCodeProjectConfigEffectKind;
 
 /** Local code activity and cost estimates. */
 export type CodeAnalyticsSnapshot = WireCodeAnalyticsSnapshot;

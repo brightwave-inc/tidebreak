@@ -42,6 +42,7 @@ import {
   parseHarnessModelList,
   parseCodeCheckLogsSnapshot,
   parseCodeRepo,
+  parseCodeRepoTrust,
   parseCodeSessionDigest,
   parseCodeWorkspace,
   parseHarnessDoctorReport,
@@ -2194,6 +2195,7 @@ const CODE_FRAMES: { name: string; kind: string; value: unknown }[] =
 
 const CODE_FRAME_PARSERS: Record<string, (value: unknown) => unknown> = {
   repo: parseCodeRepo,
+  repo_trust: parseCodeRepoTrust,
   workspace: parseCodeWorkspace,
   session: parseCodeSession,
   turn: parseCodeTurn,
@@ -2419,6 +2421,41 @@ describe("parseCodeSession inference resolutions", () => {
       expect(
         parseCodeSession({ ...SESSION, inference_resolutions }),
       ).toBeNull();
+    }
+  });
+});
+
+describe("repository trust", () => {
+  const trust = CODE_FRAMES.find(({ kind }) => kind === "repo_trust")?.value;
+
+  it("reads the server's own snapshot", () => {
+    expect(parseCodeRepoTrust(trust)).toEqual(trust);
+  });
+
+  it("rejects a decision, an effect, or an engine it does not know", () => {
+    if (!isRecord(trust) || !Array.isArray(trust.files)) {
+      throw new Error("Missing repo trust fixture");
+    }
+    const [file] = trust.files;
+    for (const broken of [
+      { ...trust, trust: "maybe" },
+      {
+        ...trust,
+        files: [{ ...file, engines: ["claude_code", "claude_code"] }],
+      },
+      { ...trust, files: [{ ...file, engines: ["vim"] }] },
+      {
+        ...trust,
+        files: [{ ...file, effects: [{ kind: "rockets", count: 1 }] }],
+      },
+      {
+        ...trust,
+        files: [{ ...file, effects: [{ kind: "hooks", count: -1 }] }],
+      },
+      { ...trust, files: [{ ...file, path: "" }] },
+      { ...trust, extra: true },
+    ]) {
+      expect(parseCodeRepoTrust(broken)).toBeNull();
     }
   });
 });

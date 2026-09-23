@@ -169,6 +169,100 @@ impl From<CodeRepo> for CodeRepoSnapshot {
     }
 }
 
+/// Whether engines load the configuration a repository carries for them:
+/// hooks, MCP servers, plugins, environment, and other engine settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeRepoTrust {
+    /// Nobody has decided yet. Engines skip the repository's own config.
+    Undecided,
+    /// You trust the repository. Engines load its own config.
+    Trusted,
+    /// You chose to continue without the repository's own config.
+    Untrusted,
+}
+
+/// What loading one engine config file would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeProjectConfigEffectKind {
+    /// Commands the engine runs on its own events, such as a session start.
+    Hooks,
+    /// MCP servers the engine starts or connects to.
+    McpServers,
+    /// Plugins, or the marketplaces they install from.
+    Plugins,
+    /// Packages the engine installs, with their install scripts.
+    Packages,
+    /// Environment variables the engine and its tools run with.
+    EnvironmentVariables,
+    /// Rules that allow or deny tools without asking.
+    PermissionRules,
+    /// Commands the engine runs for credentials, a status line, or other
+    /// helpers.
+    HelperCommands,
+    /// Tools written in code that the engine loads.
+    CustomTools,
+    /// Workflow scripts the engine runs.
+    Workflows,
+    /// Prompts the engine runs on a schedule.
+    ScheduledTasks,
+    /// Agent definitions.
+    Agents,
+    /// Slash commands.
+    Commands,
+    /// Skills.
+    Skills,
+    /// Instructions the engine reads before it starts, such as `CLAUDE.md`.
+    Instructions,
+    /// Other settings, such as the model or the sandbox.
+    Settings,
+}
+
+/// One effect a config file has, counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeProjectConfigEffect {
+    pub kind: CodeProjectConfigEffectKind,
+    pub count: u32,
+}
+
+/// One engine config file or directory a checkout carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeProjectConfigFile {
+    /// Path from the checkout root with `/` separators. A directory ends in
+    /// `/`.
+    pub path: String,
+    /// The engines that load it.
+    pub engines: Vec<HarnessKind>,
+    /// What loading it would do. Empty when the contents could not be read,
+    /// which still counts as config the engine would load.
+    pub effects: Vec<CodeProjectConfigEffect>,
+}
+
+/// A repository's trust decision and the engine config a checkout of it
+/// carries: `GET /code/repos/{id}/trust` scans the repository's main
+/// checkout, and `GET /code/workspaces/{id}/trust` scans that workspace's
+/// worktree, which is what its sessions would load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeRepoTrustSnapshot {
+    pub repo_id: RepoId,
+    pub trust: CodeRepoTrust,
+    /// Engine config the scanned checkout carries, in a stable order. Empty
+    /// when it carries none.
+    pub files: Vec<CodeProjectConfigFile>,
+}
+
+/// `PUT /code/repos/{id}/trust`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetCodeRepoTrustBody {
+    /// `true` trusts the repository; `false` continues without its config.
+    pub trusted: bool,
+}
+
 /// One isolated workspace (worktree + branch) on a repo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]

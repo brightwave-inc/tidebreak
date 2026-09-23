@@ -124,7 +124,7 @@ impl GrokSession {
         crate::require_absolute_read_roots(&self.spec.allowed_read_roots)?;
         let model = turn_model.or(self.spec.model.as_deref());
         let effort_ladder = crate::grok::effective_effort_ladder(Some(&self.version), model);
-        compose_print_plan(PrintLaunch {
+        let mut plan = compose_print_plan(PrintLaunch {
             binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             extra_argv: &self.spec.extra_argv,
             cwd: &self.spec.worktree,
@@ -138,7 +138,11 @@ impl GrokSession {
             model,
             effort: turn_effort.or(self.spec.reasoning_effort),
             effort_ladder: &effort_ladder,
-        })
+        })?;
+        for (key, value) in project_config_env(self.spec.project_config) {
+            crate::override_env(&mut plan.env, key, value);
+        }
+        Ok(plan)
     }
 
     /// The engine session id the next child runs under, minted on first use.
@@ -221,6 +225,23 @@ impl GrokSession {
         let path = file.path.clone();
         *slot = Some(file);
         Ok(Some(path))
+    }
+}
+
+/// Grok's switches for a repository the user has not trusted.
+///
+/// Grok keeps its own folder trust: it loads a repository's `.grok/` config,
+/// `.mcp.json`, hooks, and `.envrc` only for a folder trusted in
+/// `~/.grok/trusted_folders.toml`, and Tidebreak never grants that trust over
+/// ACP. A linked worktree inherits the trust its main checkout has there, so
+/// `GROK_ENVRC_TIMEOUT_SECS=0` also keeps a trusted folder's `.envrc`, which
+/// Grok runs in bash, from running. Checked against 1.0.13.
+pub(crate) fn project_config_env(
+    project_config: crate::ProjectConfig,
+) -> &'static [(&'static str, &'static str)] {
+    match project_config {
+        crate::ProjectConfig::Skip => &[("GROK_ENVRC_TIMEOUT_SECS", "0")],
+        crate::ProjectConfig::Load => &[],
     }
 }
 
@@ -895,6 +916,7 @@ mod tests {
                 native: None,
                 tool_bridge: None,
                 apps: None,
+                project_config: crate::ProjectConfig::Load,
             },
             "1.0.5".into(),
         );
@@ -1581,6 +1603,7 @@ exit 0
                     native: None,
                     tool_bridge: None,
                     apps: None,
+                    project_config: crate::ProjectConfig::Load,
                 },
                 "1.0.5".into(),
             )

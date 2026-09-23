@@ -15,6 +15,7 @@
 //! - [`settings`]: permission mode, effort, and model capability checks.
 //! - [`workers`]: per-session worker spawn and shutdown.
 //! - [`sweeps`]: triggers and the background sweeps.
+//! - [`trust`]: repository trust and the engine config a checkout carries.
 //! - [`approvals`]: approval records and decisions.
 
 use std::collections::{HashMap, HashSet};
@@ -100,6 +101,7 @@ mod repos;
 mod sessions;
 mod settings;
 mod sweeps;
+mod trust;
 mod turns;
 mod workers;
 mod workspace_delivery;
@@ -279,6 +281,10 @@ pub struct CodeRuntime {
     /// Sessions whose worker must move to the selected engine binary once
     /// their turn in flight ends. See `resync_workers_to_selected_binaries`.
     deferred_resyncs: Mutex<HashSet<SessionId>>,
+    /// Sessions whose worker must restart under their repository's changed
+    /// trust decision once their turn in flight ends. See
+    /// `resync_workers_to_repo_trust`.
+    deferred_trust_resyncs: Mutex<HashSet<SessionId>>,
     /// Flips true while the process quiesces for a restart-to-update. Every
     /// session worker subscribes: the flag holds queue drains, refuses new
     /// turn starts at the worktree boundary, and parks idle engine children
@@ -558,6 +564,7 @@ impl CodeRuntime {
             recovery_sweep: Mutex::new(None),
             recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),
+            deferred_trust_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             workspace_creations: Mutex::new(HashMap::new()),
@@ -737,6 +744,7 @@ impl CodeRuntime {
             recovery_sweep: Mutex::new(None),
             recovery_started: AtomicBool::new(false),
             deferred_resyncs: Mutex::new(HashSet::new()),
+            deferred_trust_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             workspace_creations: Mutex::new(HashMap::new()),

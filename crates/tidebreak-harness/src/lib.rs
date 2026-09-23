@@ -31,6 +31,7 @@ pub mod launch;
 pub mod opencode;
 pub mod pin;
 pub mod probe;
+pub mod project_config;
 mod text;
 pub mod wiring;
 
@@ -660,6 +661,9 @@ impl std::fmt::Debug for ApprovalChannelSpec {
 
 impl ApprovalChannelSpec {
     /// `--mcp-config` JSON captured for Claude Code 2.1.233 HTTP MCP.
+    ///
+    /// The document carries the bearer token, so it goes into a private
+    /// file, never onto argv ([`crate::claude::browser::McpLaunchConfig`]).
     #[must_use]
     pub fn mcp_config_json(&self, server_name: &str) -> String {
         serde_json::json!({
@@ -995,8 +999,42 @@ pub struct SessionSpec {
     /// Connected-apps channel wiring: the loopback MCP bridge over every
     /// server Tidebreak has mounted. `None` advertises no connected apps.
     pub apps: Option<AppsChannelSpec>,
+    /// Whether the engine loads the configuration the repository carries for
+    /// it. [`ProjectConfig::Skip`] until the user trusts the repository.
+    pub project_config: ProjectConfig,
 }
 
+/// Whether an engine loads the configuration a repository carries for it.
+///
+/// A repository can ship engine settings that run commands or change what the
+/// engine does: hooks, MCP servers, plugins, environment variables. A headless
+/// engine loads them without asking, as the user, outside Tidebreak's
+/// approvals and sandbox. So a session in a repository the user has not
+/// trusted launches with that loading turned off, and each adapter maps
+/// [`Self::Skip`] onto its engine's own switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectConfig {
+    /// Leave the repository's engine config unread. The default: nothing a
+    /// repository carries loads until the user trusts it.
+    #[default]
+    Skip,
+    /// The user trusts the repository: launch as the engine would on its own.
+    Load,
+}
+
+/// Set `key` to `value` in a launch plan's environment, replacing any value
+/// the settings overlay supplied, so the adapter's own switch is the one the
+/// child sees.
+pub(crate) fn override_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    env.retain(|(name, _)| {
+        if cfg!(windows) {
+            !name.eq_ignore_ascii_case(key)
+        } else {
+            name != key
+        }
+    });
+    env.push((key.to_owned(), value.to_owned()));
+}
 /// Refuse a relative extra-read root.
 ///
 /// Every adapter calls this before launch so a private path cannot slip

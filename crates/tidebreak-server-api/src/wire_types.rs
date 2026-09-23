@@ -467,6 +467,10 @@ mod tests {
             &cfg, &mut out,
         );
         generate::collect_from::<crate::routes::code::CodeRepoSnapshot>(&cfg, &mut out);
+        // Repository trust: the decision and the engine config a checkout
+        // carries, and the body that records a decision.
+        generate::collect_from::<crate::routes::code::CodeRepoTrustSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SetCodeRepoTrustBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::WorkspaceTitleProposal>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);

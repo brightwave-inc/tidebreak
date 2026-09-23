@@ -39,6 +39,7 @@ pub mod recap;
 pub mod reconcile;
 pub mod recovery;
 pub mod remote;
+pub mod repo_trust;
 pub mod rewrite;
 pub mod runtime;
 pub mod sandbox_checkout;

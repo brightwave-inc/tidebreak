@@ -389,6 +389,15 @@ impl CodeRuntime {
             _ => (Vec::new(), Vec::new(), None, probe.env.clone()),
         };
 
+        // A repository's own engine config runs as the user when the engine
+        // starts, so it loads only in a repository the user trusts. A session
+        // with no workspace runs in Tidebreak's own directory: no repository
+        // is involved, so it launches as the engine would on its own.
+        let project_config = match &workspace {
+            Some(workspace) => self.workspace_project_config(workspace).await,
+            None => tidebreak_harness::ProjectConfig::Load,
+        };
+
         let spec = SessionSpec {
             owner: session.owner.clone(),
             session_id: session.id,
@@ -414,6 +423,7 @@ impl CodeRuntime {
             native,
             tool_bridge: None,
             apps,
+            project_config,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
@@ -477,6 +487,7 @@ impl CodeRuntime {
             self.update_quiesce.subscribe(),
         );
         handle.binary = binary;
+        handle.project_config = project_config;
         self.workers
             .lock()
             .expect("code workers")
@@ -659,6 +670,7 @@ impl CodeRuntime {
             .map(|handle| WorkerHandle {
                 spawn_epoch: handle.spawn_epoch,
                 binary: handle.binary.clone(),
+                project_config: handle.project_config,
                 commands: handle.commands.clone(),
                 queue: handle.queue.clone(),
                 sink: handle.sink.clone(),

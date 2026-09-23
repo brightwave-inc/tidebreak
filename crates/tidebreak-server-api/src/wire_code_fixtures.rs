@@ -11,12 +11,13 @@
 //! same switch that rewrites `wire.ts`.
 
 use crate::wire::{
-    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
-    CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
-    HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
-    SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot,
-    UpdateNotice,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange,
+    CodeProjectConfigEffect, CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot,
+    CodeRepoSnapshot, CodeRepoTrust, CodeRepoTrustSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff,
+    CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
+    HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot,
+    SequencedEventFrame, SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState,
+    TurnSnapshot, UpdateNotice,
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
@@ -378,6 +379,35 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                     auto_run_on_create: false,
                 }],
                 created_at: at(1_756_600_000),
+            },
+        ),
+        fixture(
+            "repo trust",
+            "repo_trust",
+            &CodeRepoTrustSnapshot {
+                repo_id: repo_id(),
+                trust: CodeRepoTrust::Undecided,
+                files: vec![
+                    CodeProjectConfigFile {
+                        path: ".claude/settings.json".to_owned(),
+                        engines: vec![HarnessKind::ClaudeCode],
+                        effects: vec![
+                            CodeProjectConfigEffect {
+                                kind: CodeProjectConfigEffectKind::Hooks,
+                                count: 2,
+                            },
+                            CodeProjectConfigEffect {
+                                kind: CodeProjectConfigEffectKind::EnvironmentVariables,
+                                count: 1,
+                            },
+                        ],
+                    },
+                    CodeProjectConfigFile {
+                        path: ".opencode/plugin/".to_owned(),
+                        engines: vec![HarnessKind::Opencode],
+                        effects: Vec::new(),
+                    },
+                ],
             },
         ),
         fixture(
@@ -1239,6 +1269,7 @@ fn every_code_frame_fixture_round_trips() {
     for entry in &code_frame_fixtures() {
         match entry.kind {
             "repo" => round_trip::<CodeRepoSnapshot>(entry),
+            "repo_trust" => round_trip::<CodeRepoTrustSnapshot>(entry),
             "workspace" => round_trip::<CodeWorkspaceSnapshot>(entry),
             "session" => round_trip::<SessionSnapshot>(entry),
             "turn" => round_trip::<TurnSnapshot>(entry),
@@ -1283,6 +1314,7 @@ fn code_values_reject_unknown_keys() {
         object.insert("extra".to_owned(), serde_json::Value::Bool(true));
         let rejected = match entry.kind {
             "repo" => serde_json::from_value::<CodeRepoSnapshot>(value).is_err(),
+            "repo_trust" => serde_json::from_value::<CodeRepoTrustSnapshot>(value).is_err(),
             "workspace" => serde_json::from_value::<CodeWorkspaceSnapshot>(value).is_err(),
             "session" => serde_json::from_value::<SessionSnapshot>(value).is_err(),
             "turn" => serde_json::from_value::<TurnSnapshot>(value).is_err(),
