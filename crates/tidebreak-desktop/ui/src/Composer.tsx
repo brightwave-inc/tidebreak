@@ -4,6 +4,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
+  memo,
   useEffect,
   useId,
   useLayoutEffect,
@@ -415,7 +416,14 @@ export type ComposerProps = {
   footerNote?: ReactNode;
 };
 
-export function Composer({
+/**
+ * Memoized on its props: the chat pane re-renders for turn and request state
+ * the composer does not draw, and a composer re-render redoes its layout
+ * measurements. Surfaces keep the props stable for the memo to hold.
+ */
+export const Composer = memo(ComposerView);
+
+function ComposerView({
   activeTurnId,
   busy,
   cancelError,

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ToolActionPreview, ToolResultPreview } from "./api";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -41,9 +41,63 @@ type ToolActivityGroupProps = {
   groupIndex: number;
   /** Whether this active phase arrived live rather than from socket replay. */
   animate?: boolean;
+  /**
+   * What the rail and anchors draw on, from {@link toolActivitySignature}.
+   * When present, the group re-renders only when it, its cards, or its
+   * position change: the transcript hands every phase fresh arrays on every
+   * streamed token, and without a signature every rail re-rendered each time.
+   */
+  signature?: string;
   /** Cards for the calls that have something to show, rendered below. */
   children?: ReactNode;
 };
+
+const objectIds = new WeakMap<object, number>();
+let lastObjectId = 0;
+
+/**
+ * A number for each distinct preview or result object, so a signature notices
+ * when one is replaced without reading what is inside it.
+ */
+function identityOf(value: unknown): number {
+  if (value === null || typeof value !== "object") return 0;
+  let id = objectIds.get(value);
+  if (id === undefined) {
+    lastObjectId += 1;
+    id = lastObjectId;
+    objectIds.set(value, id);
+  }
+  return id;
+}
+
+/**
+ * What a phase's rail draws on: each row's identity, status, and the preview
+ * and result objects it carries.
+ *
+ * Total, like the rest of this file: an activity that throws while being read
+ * gives its place in the signature a marker instead of taking the phase down.
+ */
+export function toolActivitySignature(
+  activities: readonly (ToolActivity | null)[],
+): string {
+  return activities
+    .map((activity) => {
+      if (activity === null) return "unreadable";
+      try {
+        return [
+          activity.id ?? "",
+          activity.name,
+          activity.status,
+          activity.resultUnreadable === true ? "unreadable" : "",
+          identityOf(activity.preview),
+          identityOf(activity.result),
+        ].join(":");
+      } catch {
+        return "unreadable";
+      }
+    })
+    .join("|");
+}
 
 /**
  * One phase of the agent's work.
@@ -57,7 +111,36 @@ type ToolActivityGroupProps = {
  * outside the collapsed region: a card whose controls can be hidden is a card
  * that can be missed.
  */
-export function ToolActivityGroup({
+export const ToolActivityGroup = memo(
+  ToolActivityGroupView,
+  (previous, next) =>
+    previous.signature !== undefined && next.signature !== undefined
+      ? previous.signature === next.signature &&
+        previous.groupIndex === next.groupIndex &&
+        previous.animate === next.animate &&
+        previous.children === next.children
+      : shallowEqualProps(previous, next),
+);
+
+function shallowEqualProps(
+  previous: ToolActivityGroupProps,
+  next: ToolActivityGroupProps,
+): boolean {
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  for (const key of keys) {
+    if (
+      !Object.is(
+        previous[key as keyof ToolActivityGroupProps],
+        next[key as keyof ToolActivityGroupProps],
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function ToolActivityGroupView({
   activities,
   labelActivities,
   anchorIds = [],
@@ -68,6 +151,9 @@ export function ToolActivityGroup({
   // Total by construction: an activity that throws while being read costs its
   // own row, leaving the rail and the cards below it standing.
   const safeActivities = normalizeActivities(activities);
+  const safeLabelActivities = normalizeActivities(
+    labelActivities ?? activities,
+  );
 
   // The rail reads model-shaped data through several defensive parsers; the
   // cards below it are the part a reader may have to act on. Containing the
@@ -79,11 +165,12 @@ export function ToolActivityGroup({
         resetKey={railSignature(safeActivities)}
         fallback={<ToolActivityUnavailable />}
       >
-        <ToolActivityRail
+        <MemoizedToolActivityRail
           activities={safeActivities}
-          labelActivities={normalizeActivities(labelActivities ?? activities)}
+          labelActivities={safeLabelActivities}
           groupIndex={groupIndex}
           animate={animate}
+          signature={`${toolActivitySignature(safeActivities)}#${toolActivitySignature(safeLabelActivities)}`}
         />
       </ErrorBoundary>
     );
@@ -123,6 +210,19 @@ export function ToolActivityGroup({
 }
 
 /**
+ * The rail, memoized on its signature: the group above it re-renders whenever
+ * its cards do, and the phase line should not re-run its presentation or its
+ * typewriter for that.
+ */
+const MemoizedToolActivityRail = memo(
+  ToolActivityRail,
+  (previous, next) =>
+    previous.signature === next.signature &&
+    previous.groupIndex === next.groupIndex &&
+    previous.animate === next.animate,
+);
+
+/**
  * The collapsed phase line and, once opened, the rail of rows beneath it.
  */
 function ToolActivityRail({
@@ -135,6 +235,8 @@ function ToolActivityRail({
   labelActivities: (ToolActivity | null)[];
   groupIndex: number;
   animate: boolean;
+  /** What the rows draw on. The memo compares this, not the arrays. */
+  signature: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = `tool-activity-group-${groupIndex}`;

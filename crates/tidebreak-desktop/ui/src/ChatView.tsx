@@ -1,9 +1,12 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import type { ApiClient, Chat } from "./api";
@@ -11,6 +14,12 @@ import type { ContextUsageReading } from "./ContextUsageIndicator";
 import { followScrollBehavior } from "./ChatScroll";
 import { useTranscriptFollow } from "./useTranscriptFollow";
 import { useChatSessionStore } from "./ChatSessionStore";
+import {
+  isOutlineMessage,
+  isToolMessage,
+  isUserMessage,
+  stableSubset,
+} from "./chatSessionSelectors";
 import {
   useComposerAttachments,
   useComposerDraft,
@@ -22,6 +31,8 @@ import {
   type ComposerFolders,
   type ComposerImages,
   type ComposerPastedTexts,
+  type ComposerProps,
+  type ComposerSlash,
   type ComposerVoice,
 } from "./Composer";
 import type { SlashCommandName } from "./ComposerCommands";
@@ -32,14 +43,17 @@ import type {
   ComposerNetwork,
   ComposerReasoning,
 } from "./ComposerToolsMenu";
-import { MessageList, type RetryableTurn } from "./MessageList";
+import {
+  MessageList,
+  type RetryableTurn,
+  type StreamActivitySource,
+} from "./MessageList";
 import type { StarterPromptOptions } from "./WelcomeState";
 import { revealPendingCall } from "./TranscriptFocus";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
-import { useStreamStalled } from "./useStreamStalled";
 import { QueueTray, useChatQueueApi } from "./QueueTray";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
@@ -56,6 +70,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown } from "lucide-react";
 import { toast } from "sonner";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { useStableCallback } from "@/lib/useStableCallback";
 import {
   TranscriptNavigation,
   transcriptNavigationEntries,
@@ -145,17 +160,16 @@ export function ChatView({
   onOpenOutput,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
-  // Subscribed here rather than in the route above: a keystroke should
-  // re-render the chat pane alone, never the panels beside it — a document
-  // viewer that re-renders per keystroke is one unstable dependency away from
-  // reloading its engine mid-typing.
-  const draft = useComposerDraft(chat.id);
   const composerPlugins = useComposerPlugins(client);
   const composerAttachments = useComposerAttachments(chat.id);
   const invokedSkills = composerAttachments.skills;
   const pastedTexts = composerAttachments.pastedTexts;
+  // What steering sends. The composer keeps it current as the reader types:
+  // the pane itself does not subscribe to the draft, so a keystroke
+  // re-renders the composer alone — never the transcript, and never the
+  // panels beside it, where a document viewer that re-renders per keystroke
+  // is one unstable dependency away from reloading its engine mid-typing.
   const steerDraftRef = useRef("");
-  steerDraftRef.current = messageWithPastedText(draft, pastedTexts);
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
@@ -183,21 +197,35 @@ export function ChatView({
     voiceInputUsed,
     invokedSkills,
   );
-  const messages = useChatSessionStore((session) => session.messages);
+  // The hooks above hand back fresh closures on every render. The composer
+  // and the transcript are memoized, so they get stable ones instead.
+  const steer = useStableCallback(turnControls.steer);
+  const stopTurn = useStableCallback(turnControls.cancel);
+  const clearSteerFeedback = useStableCallback(turnControls.clearSteerFeedback);
+  const decideApproval = useStableCallback(approvals.decide);
+  const decideFolderAccess = useStableCallback(folderAccess.decide);
+  const cancelFolderAccess = useStableCallback(folderAccess.cancel);
+  const decideOutputWriteback = useStableCallback(outputWritebacks.decide);
+  const cancelOutputWriteback = useStableCallback(outputWritebacks.cancel);
+  // The pane subscribes to the turn's edges, not to its stream: the
+  // transcript below reads the messages itself, so a streamed token renders
+  // the transcript and nothing here.
   const busy = useChatSessionStore((session) => session.busy);
-  const animateStreaming = useChatSessionStore(
-    (session) => session.animateStreaming,
-  );
-  const compacting = useChatSessionStore((session) => session.compacting);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
   const chatQueue = useChatQueueApi(client, chat.id);
-  // Every applied stream event advances the seq cursor, so it doubles as the
-  // liveness signal for the stall-aware working indicator.
-  const lastSeq = useChatSessionStore((session) => session.lastSeq);
-  const streamStalled = useStreamStalled(busy, lastSeq);
+  // The questions asked and the tool calls made, as arrays that stay the same
+  // object while a token streams into an answer.
+  const selectOutline = useMemo(() => stableSubset(isOutlineMessage), []);
+  const outline = useChatSessionStore((session) =>
+    selectOutline(session.messages),
+  );
+  const selectUserMessages = useMemo(() => stableSubset(isUserMessage), []);
+  const userMessages = selectUserMessages(outline);
+  const selectToolCalls = useMemo(() => stableSubset(isToolMessage), []);
+  const toolCalls = selectToolCalls(outline);
   const backgroundAgentSpawnKeys = useMemo(
-    () => spawnKeysOf(messages),
-    [messages],
+    () => spawnKeysOf(toolCalls),
+    [toolCalls],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
   const taskPlan = useTaskPlan(client, chat.id);
@@ -213,46 +241,42 @@ export function ChatView({
   const composerFiles = useMemo(
     () => ({
       ...files,
-      recent: recentChatFiles(
-        messages.flatMap((message) =>
-          message.role === "user" ? [message] : [],
-        ),
-        files.items,
-      ),
+      recent: recentChatFiles(userMessages, files.items),
     }),
-    [files, messages],
+    [files, userMessages],
   );
-  const composerPastedTexts: ComposerPastedTexts = {
-    items: pastedTexts,
-    onPaste: (text) => {
-      turnControls.clearSteerFeedback();
-      const current =
-        useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
-      useComposerDrafts
-        .getState()
-        .setPastedTexts(chat.id, [
-          ...current,
-          { id: crypto.randomUUID(), text },
-        ]);
-    },
-    onRemove: (id) => {
-      turnControls.clearSteerFeedback();
-      const current =
-        useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
-      useComposerDrafts.getState().setPastedTexts(
-        chat.id,
-        current.filter((item) => item.id !== id),
-      );
-    },
-  };
+  const composerPastedTexts: ComposerPastedTexts = useMemo(
+    () => ({
+      items: pastedTexts,
+      onPaste: (text) => {
+        clearSteerFeedback();
+        const current =
+          useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
+        useComposerDrafts
+          .getState()
+          .setPastedTexts(chat.id, [
+            ...current,
+            { id: crypto.randomUUID(), text },
+          ]);
+      },
+      onRemove: (id) => {
+        clearSteerFeedback();
+        const current =
+          useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
+        useComposerDrafts.getState().setPastedTexts(
+          chat.id,
+          current.filter((item) => item.id !== id),
+        );
+      },
+    }),
+    [chat.id, clearSteerFeedback, pastedTexts],
+  );
   const composerHistory = useMemo(
     () =>
-      messages
-        .flatMap((message) =>
-          message.role === "user" && message.text.trim() ? [message.text] : [],
-        )
+      userMessages
+        .flatMap((message) => (message.text.trim() ? [message.text] : []))
         .reverse(),
-    [messages],
+    [userMessages],
   );
 
   // Built-in `/` commands run here rather than being sent, so each one owns
@@ -309,6 +333,47 @@ export function ChatView({
     },
     [runCompaction],
   );
+  const composerSlash: ComposerSlash = useMemo(
+    () => ({
+      options: composerPlugins.slashOptions,
+      invoked: invokedSkills,
+      onInvoke: (names) =>
+        useComposerDrafts
+          .getState()
+          .setSkills(chat.id, [...invokedSkills, ...names]),
+      onRemove: (name) =>
+        useComposerDrafts.getState().setSkills(
+          chat.id,
+          invokedSkills.filter((skill) => skill !== name),
+        ),
+      loadPromptBody: composerPlugins.loadPromptBody,
+      onCommand: runSlashCommand,
+    }),
+    [
+      chat.id,
+      composerPlugins.loadPromptBody,
+      composerPlugins.slashOptions,
+      invokedSkills,
+      runSlashCommand,
+    ],
+  );
+  const pluginItems = composerPlugins.plugins?.items;
+  const selectPlugin = useStableCallback(
+    (plugin: NonNullable<ComposerProps["plugins"]>["items"][number]) =>
+      composerPlugins.plugins?.onSelect(plugin),
+  );
+  const plugins: ComposerProps["plugins"] = useMemo(
+    () =>
+      pluginItems ? { items: pluginItems, onSelect: selectPlugin } : undefined,
+    [pluginItems, selectPlugin],
+  );
+  // Typing retires the verdict on the last piece of guidance. Accepted
+  // guidance clears the draft through the raw callback instead, so "Guidance
+  // sent" survives the clearing it caused.
+  const changeDraft = useStableCallback((value: string) => {
+    clearSteerFeedback();
+    onDraftChange(value);
+  });
 
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
@@ -317,22 +382,12 @@ export function ChatView({
   };
   const focusCallId = search.focus;
   const anchoredMessageId = search.at;
-  const navigationSignature = messages
-    .flatMap((message) => {
-      if (message.role === "user") return [message.id, message.text];
-      if (message.role === "tool") {
-        return [message.id, message.name, message.status];
-      }
-      return [];
-    })
-    .join("\0");
+  // The outline holds exactly the rows the rail presents, and keeps its
+  // identity while an answer streams, so the rail's observers stay mounted
+  // until a question or a tool call actually changes.
   const navigationEntries = useMemo(
-    () => transcriptNavigationEntries(messages),
-    // Assistant streaming replaces the messages array every token, but does
-    // not change the table of contents. Keep the rail's observers mounted until
-    // one of the user/tool fields it actually presents changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navigationSignature],
+    () => transcriptNavigationEntries(outline),
+    [outline],
   );
 
   /** The composer's slot, which a pending question or plan card takes over. */
@@ -471,7 +526,8 @@ export function ChatView({
     beginProgrammaticScroll,
     disarmFollow,
     endProgrammaticScroll,
-    messages,
+    // The anchors are questions and tool calls; retry when those arrive.
+    outline,
     scrollElement,
     transcriptVisible,
   ]);
@@ -560,8 +616,7 @@ export function ChatView({
             </EmptyContent>
           </Empty>
         ) : (
-          <MessageList
-            messages={messages}
+          <ChatTranscript
             chatId={chat.id}
             folderAccessRequests={folderAccess.requests}
             outputWritebackRequests={outputWritebacks.requests}
@@ -586,21 +641,15 @@ export function ChatView({
             onOpenBackgroundAgent={onOpenAgentPanel}
             onOpenOutput={onOpenOutput}
             backgroundAgentClient={client}
-            busy={busy}
-            animateStreaming={animateStreaming}
-            compacting={compacting}
-            streamStalled={streamStalled}
             scrollRef={attachScrollRef}
             contentRef={attachContentRef}
             pinLastTurn={pinLastTurn}
             onScroll={handleScroll}
-            onApproval={approvals.decide}
-            onFolderAccessDecision={folderAccess.decide}
-            onFolderAccessCancel={folderAccess.cancel}
-            onOutputWritebackDecision={outputWritebacks.decide}
-            onOutputWritebackCancel={(callId, turnId) =>
-              outputWritebacks.cancel(callId, turnId)
-            }
+            onApproval={decideApproval}
+            onFolderAccessDecision={decideFolderAccess}
+            onFolderAccessCancel={cancelFolderAccess}
+            onOutputWritebackDecision={decideOutputWriteback}
+            onOutputWritebackCancel={cancelOutputWriteback}
             onSelectPrompt={onSelectPrompt}
             onRetryTurn={onRetryTurn}
             hydrated={hydrated}
@@ -657,9 +706,11 @@ export function ChatView({
             <QueueTray
               queue={chatQueue}
               active={activeTurnId !== null}
-              onStop={turnControls.cancel}
+              onStop={stopTurn}
             />
-            <Composer
+            <ChatComposer
+              chatId={chat.id}
+              steerDraftRef={steerDraftRef}
               activeTurnId={activeTurnId}
               busy={busy}
               cancelError={turnControls.cancelError}
@@ -668,7 +719,6 @@ export function ChatView({
                 turnControls.cancelPendingTurnId === activeTurnId
               }
               disabled={deletingChat || !hydrated}
-              draft={draft}
               history={composerHistory}
               modelMenu={composerModelMenu}
               permissionMenu={composerPermissionMenu}
@@ -676,22 +726,8 @@ export function ChatView({
               network={composerNetwork}
               reasoning={composerReasoning}
               memoryIncognito={composerMemoryIncognito}
-              plugins={composerPlugins.plugins}
-              slash={{
-                options: composerPlugins.slashOptions,
-                invoked: invokedSkills,
-                onInvoke: (names) =>
-                  useComposerDrafts
-                    .getState()
-                    .setSkills(chat.id, [...invokedSkills, ...names]),
-                onRemove: (name) =>
-                  useComposerDrafts.getState().setSkills(
-                    chat.id,
-                    invokedSkills.filter((skill) => skill !== name),
-                  ),
-                loadPromptBody: composerPlugins.loadPromptBody,
-                onCommand: runSlashCommand,
-              }}
+              plugins={plugins}
+              slash={composerSlash}
               images={composerImages}
               files={composerFiles}
               pastedTexts={composerPastedTexts}
@@ -699,17 +735,11 @@ export function ChatView({
               voice={voice}
               nativeDropTarget={nativeDropTarget}
               attachError={attachError}
-              // Typing retires the verdict on the last piece of guidance. Accepted
-              // guidance clears the draft through the raw callback instead, so
-              // "Guidance sent" survives the clearing it caused.
-              onDraftChange={(value) => {
-                turnControls.clearSteerFeedback();
-                onDraftChange(value);
-              }}
+              onDraftChange={changeDraft}
               onSend={handleSend}
               onQueue={onQueue}
-              onSteer={turnControls.steer}
-              onStop={turnControls.cancel}
+              onSteer={steer}
+              onStop={stopTurn}
               resetKey={chat.id}
               steerError={turnControls.steerError}
               steerPending={
@@ -724,3 +754,65 @@ export function ChatView({
     </section>
   );
 }
+
+/** The session's stream cursor, for the transcript leaf that watches it. */
+const chatStreamActivity: StreamActivitySource = {
+  subscribe: (onChange) => useChatSessionStore.subscribe(onChange),
+  getSnapshot: () => useChatSessionStore.getState().lastSeq,
+};
+
+type ChatTranscriptProps = Omit<
+  ComponentProps<typeof MessageList>,
+  | "messages"
+  | "busy"
+  | "animateStreaming"
+  | "compacting"
+  | "streamStalled"
+  | "streamActivity"
+>;
+
+/**
+ * The transcript, subscribed to the stream on its own: a streamed token
+ * re-renders this and the rows the token touched, never the pane around it.
+ */
+const ChatTranscript = memo(function ChatTranscript(
+  props: ChatTranscriptProps,
+) {
+  const messages = useChatSessionStore((session) => session.messages);
+  const busy = useChatSessionStore((session) => session.busy);
+  const animateStreaming = useChatSessionStore(
+    (session) => session.animateStreaming,
+  );
+  const compacting = useChatSessionStore((session) => session.compacting);
+  return (
+    <MessageList
+      {...props}
+      messages={messages}
+      busy={busy}
+      animateStreaming={animateStreaming}
+      compacting={compacting}
+      streamActivity={chatStreamActivity}
+    />
+  );
+});
+
+/**
+ * The composer, subscribed to the draft on its own: a keystroke re-renders
+ * this and the composer, never the pane around them. It also keeps the steer
+ * text current, because steering reads it outside a render.
+ */
+const ChatComposer = memo(function ChatComposer({
+  chatId,
+  steerDraftRef,
+  ...props
+}: Omit<ComposerProps, "draft"> & {
+  chatId: string;
+  steerDraftRef: MutableRefObject<string>;
+}) {
+  const draft = useComposerDraft(chatId);
+  steerDraftRef.current = messageWithPastedText(
+    draft,
+    props.pastedTexts?.items ?? [],
+  );
+  return <Composer draft={draft} {...props} />;
+});

@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef } from "react";
+import { memo, useMemo, useRef, useSyncExternalStore } from "react";
 import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
@@ -40,6 +40,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import {
   ToolActivityGroup,
   ToolActivityUnavailable,
+  toolActivitySignature,
 } from "./ToolActivityGroup";
 import { WelcomeState, type StarterPromptOptions } from "./WelcomeState";
 import { isolatedCard } from "./PendingCard";
@@ -67,6 +68,7 @@ import {
   MemoryRememberedCard,
   type MemoryRememberedClient,
 } from "./MemoryRememberedCard";
+import { useStreamStalled } from "./useStreamStalled";
 
 export type ChatMessage =
   | {
@@ -253,6 +255,12 @@ type MessageListProps = {
   compacting?: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
   streamStalled?: boolean;
+  /**
+   * The session's stream cursor, read by the one leaf that needs it. Every
+   * stream event advances it; handing it down as a prop re-rendered the whole
+   * transcript on each one. Without it, `streamStalled` decides.
+   */
+  streamActivity?: StreamActivitySource;
   scrollRef: Ref<HTMLDivElement>;
   /** Attached to the transcript content column so growth can drive auto-follow. */
   contentRef?: RefCallback<HTMLDivElement>;
@@ -335,6 +343,7 @@ export function MessageList({
   animateStreaming = true,
   compacting = false,
   streamStalled = false,
+  streamActivity,
   scrollRef,
   contentRef,
   pinLastTurn = false,
@@ -395,23 +404,12 @@ export function MessageList({
   );
   // Grouping walks the whole transcript and builds every row's element; memoized
   // so a render whose inputs are unchanged (a scroll, a pending-card flag)
-  // reuses the rows instead of rebuilding a long conversation's worth.
-  const { items: messageItems, lastTurnStart } = useMemo(
-    () =>
-      groupMessageItems(
-        messages,
-        busy,
-        animateStreaming,
-        onApproval,
-        approvalState,
-        imageClient,
-        chatId,
-        changeClient,
-        memoryClient,
-        backgroundAgents,
-        retry,
-      ),
-    [
+  // reuses the rows instead of rebuilding a long conversation's worth. Each
+  // grouping also hands its phases to the next, which reuses the ones a new
+  // token did not touch.
+  const phaseCache = useRef<ActivityPhaseCache | null>(null);
+  const { items: messageItems, lastTurnStart } = useMemo(() => {
+    const grouped = groupMessageItems(
       messages,
       busy,
       animateStreaming,
@@ -423,8 +421,23 @@ export function MessageList({
       memoryClient,
       backgroundAgents,
       retry,
-    ],
-  );
+      phaseCache.current,
+    );
+    phaseCache.current = grouped.phases;
+    return grouped;
+  }, [
+    messages,
+    busy,
+    animateStreaming,
+    onApproval,
+    approvalState,
+    imageClient,
+    chatId,
+    changeClient,
+    memoryClient,
+    backgroundAgents,
+    retry,
+  ]);
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
   // the welcome there would flash "How can I help?" before its history renders.
@@ -462,6 +475,10 @@ export function MessageList({
 
   // The continuation cards and the working indicator belong to the turn in
   // flight, so when the trailing turn is pinned they ride inside its wrapper.
+  const pendingWorkCount =
+    folderAccessRequests.length +
+    outputWritebackRequests.length +
+    pendingPromptCount;
   const trailing = (
     <>
       {folderAccessRequests.map((request) =>
@@ -505,16 +522,15 @@ export function MessageList({
       )}
       {compacting ? (
         <AssistantWorkingIndicator compacting />
-      ) : (
-        shouldShowAssistantWorking(
-          messages,
-          busy,
-          folderAccessRequests.length +
-            outputWritebackRequests.length +
-            pendingPromptCount,
-          streamStalled,
-        ) && <AssistantWorkingIndicator />
-      )}
+      ) : shouldShowAssistantWorking(messages, busy, pendingWorkCount) ? (
+        <AssistantWorkingIndicator />
+      ) : shouldShowAssistantWorking(messages, busy, pendingWorkCount, true) ? (
+        <StalledStreamIndicator
+          busy={busy}
+          source={streamActivity}
+          stalled={streamStalled}
+        />
+      ) : null}
     </>
   );
 
@@ -604,23 +620,7 @@ export function groupMessageItems(
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >,
   memoryClient?: MemoryRememberedClient,
-  backgroundAgents: {
-    runs: AgentRun[];
-    loading: boolean;
-    error: string | null;
-    retry: () => void;
-    cancel: (runId: string) => Promise<void>;
-    loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
-    loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
-    loadProgress: (
-      runId: string,
-      afterSequence: number,
-    ) => Promise<AgentRunProgress>;
-    open?: (runId: string) => void;
-    openOutput?: (outputId: string) => void;
-    /** The connected client, so a row's "Copy debug info" can fetch its run. */
-    client?: ApiClient;
-  } = {
+  backgroundAgents: BackgroundAgentsContext = {
     runs: [],
     loading: false,
     error: null,
@@ -634,8 +634,15 @@ export function groupMessageItems(
     }),
   },
   retry?: { failureId: string; onRetry: () => void },
+  /**
+   * The phases the last grouping built. A phase whose rows and inputs are all
+   * unchanged is reused as the same element, so a streamed token re-renders
+   * the phase it touched instead of every phase in the conversation.
+   */
+  previousPhases: ActivityPhaseCache | null = null,
 ) {
   const items: ReactNode[] = [];
+  const nextPhases = new Map<string, BuiltPhase>();
   // The item index at which the trailing turn opens (its user message). Lets the
   // caller lift the last exchange into a pinned wrapper without re-deriving the
   // turn boundary. Stays -1 for a transcript that opens on activity alone.
@@ -713,151 +720,323 @@ export function groupMessageItems(
 
     // One phase per contiguous run of activity, however long. A phase that
     // splits at every assistant sentence is not a phase.
-    const phase: ChatMessage[] = [];
-    // Activity can resume through several assistant snapshots while remaining
-    // one expandable phase. The collapsed live label should describe only the
-    // latest snapshot; the expanded rail still preserves the whole phase.
-    let latestSnapshotStart = 0;
-    while (index < messages.length) {
-      if (isActivityMessage(messages[index])) {
-        phase.push(messages[index]!);
-        index += 1;
-        continue;
-      }
-      // An assistant bubble that renders nothing must not end the phase: the
-      // live reducer opens empty bubbles at turn-start and resume boundaries,
-      // and the hydrated snapshot has no such entries — so a phase split here
-      // would merge back when the turn settles, visibly reshuffling the
-      // transcript. Approval resume cycles can stack several in a row, so the
-      // whole run is swallowed when activity continues past it. A trailing
-      // run is the response now streaming in, and stays outside the phase so
-      // gaining its first characters does not move the group boundary.
-      if (isInvisibleAssistant(messages[index])) {
-        let ahead = index + 1;
-        while (isInvisibleAssistant(messages[ahead])) ahead += 1;
-        if (isActivityMessage(messages[ahead])) {
-          latestSnapshotStart = phase.length;
-          index = ahead;
-          continue;
-        }
-      }
-      break;
+    const phaseStart = index;
+    index = activityPhaseEnd(messages, index);
+    const firstCallId = phaseCallId(messages, phaseStart, index);
+    // Keyed by the call that opened it rather than by position, so loading
+    // earlier messages above does not remount every phase below.
+    let key = `tool-activity-group-${firstCallId ?? `position-${groupIndex}`}`;
+    if (nextPhases.has(key)) key = `${key}-${groupIndex}`;
+    const standingBefore = [...standingCardKeys].sort().join(" ");
+    const cached = previousPhases?.get(key);
+    let built: BuiltPhase;
+    if (
+      cached !== undefined &&
+      cached.groupIndex === groupIndex &&
+      cached.animate === animateStreaming &&
+      cached.chatId === chatId &&
+      cached.standingBefore === standingBefore &&
+      (cached.approvals === null ||
+        (cached.approvals.onApproval === onApproval &&
+          cached.approvals.approvalState === approvalState)) &&
+      (cached.backgroundAgents === null ||
+        cached.backgroundAgents === backgroundAgents) &&
+      sameSpan(cached.span, messages, phaseStart, index)
+    ) {
+      // Nothing this phase draws on moved: hand React the element it already
+      // has, which it skips without rendering anything inside it.
+      built = cached;
+      for (const claimed of cached.claimed) standingCardKeys.add(claimed);
+    } else {
+      built = buildActivityPhase({
+        key,
+        span: messages.slice(phaseStart, index),
+        groupIndex,
+        animate: animateStreaming,
+        standingCardKeys,
+        standingBefore,
+        onApproval,
+        approvalState,
+        chatId,
+        backgroundAgents,
+      });
     }
-
-    // A call parked on approval is represented by its approval card, so the
-    // rail would otherwise announce the same pending action twice.
-    const parked = new Set(
-      phase.flatMap((entry) =>
-        entry.role === "approval" && !entry.resolved ? [entry.callId] : [],
-      ),
-    );
-    const activities = phase.filter(
-      (entry): entry is ToolMessage =>
-        entry.role === "tool" && !parked.has(entry.callId),
-    );
-    const latestActivities = phase
-      .slice(latestSnapshotStart)
-      .filter(
-        (entry): entry is ToolMessage =>
-          entry.role === "tool" && !parked.has(entry.callId),
-      );
+    nextPhases.set(key, built);
     // Phases accumulate: a turn that searched, answered a little, and searched
     // again names every page it found under the answer that closes it.
-    for (const source of collectWebSources(activities)) {
+    for (const source of built.webSources) {
       if (!turnWebSources.some((seen) => seen.url === source.url)) {
         turnWebSources.push(source);
       }
     }
-    const cards = surfacedCards(
-      phase,
-      parked,
-      standingCardKeys,
-      onApproval,
-      approvalState,
-      chatId,
-    );
-    const spawns = activities.flatMap((entry) =>
-      entry.name === "spawn_sandbox_agent"
-        ? [
-            {
-              callId: entry.callId,
-              runId: entry.backgroundAgentRunId,
-              status: entry.status,
-            },
-          ]
-        : [],
-    );
-    const children: ReactNode[] = [...cards];
-    if (spawns.length > 0) {
-      children.push(
-        isolatedCard(
-          "background-agents",
-          spawns.map((spawn) => spawn.status).join(" "),
-          <BackgroundAgentList
-            spawns={spawns}
-            runs={backgroundAgents.runs}
-            loading={backgroundAgents.loading}
-            error={backgroundAgents.error}
-            onRetry={backgroundAgents.retry}
-            onCancel={backgroundAgents.cancel}
-            onLoadActivity={backgroundAgents.loadActivity}
-            onLoadTaskPlan={backgroundAgents.loadTaskPlan}
-            onLoadProgress={backgroundAgents.loadProgress}
-            onOpen={backgroundAgents.open}
-            onOpenOutput={backgroundAgents.openOutput}
-            {...(backgroundAgents.client && chatId
-              ? { client: backgroundAgents.client, chatId }
-              : {})}
-          />,
-        ),
-      );
-    }
-
-    // The agent list below already names the delegation and every agent in it.
-    // Leaving the spawn and wait calls on the rail as well stacks a second
-    // summary of the same thing above it ("Waited for background agents and
-    // delegated N tasks"), so the phase line covers everything except them.
-    const railActivities =
-      spawns.length > 0
-        ? activities.filter(
-            (entry) =>
-              entry.name !== "spawn_sandbox_agent" &&
-              entry.name !== "wait_for_agents",
-          )
-        : activities;
-    const latestRailActivities =
-      spawns.length > 0
-        ? latestActivities.filter(
-            (entry) =>
-              entry.name !== "spawn_sandbox_agent" &&
-              entry.name !== "wait_for_agents",
-          )
-        : latestActivities;
-
-    // The rail and every card inside carry their own boundary, so this one is
-    // only a backstop for the phase's own frame.
-    items.push(
-      <ErrorBoundary
-        key={`tool-activity-group-${groupIndex}`}
-        fallback={<ToolActivityUnavailable />}
-      >
-        <ToolActivityGroup
-          activities={railActivities}
-          labelActivities={latestRailActivities}
-          anchorIds={phase.flatMap((entry) =>
-            entry.role === "tool" ? [entry.id] : [],
-          )}
-          groupIndex={groupIndex}
-          animate={animateStreaming}
-        >
-          {children.length > 0 ? children : undefined}
-        </ToolActivityGroup>
-      </ErrorBoundary>,
-    );
+    items.push(built.element);
     groupIndex += 1;
   }
 
-  return { items, lastTurnStart };
+  return { items, lastTurnStart, phases: nextPhases };
+}
+
+/** Where the activity phase that starts at `start` ends. */
+function activityPhaseEnd(
+  messages: readonly ChatMessage[],
+  start: number,
+): number {
+  let index = start;
+  while (index < messages.length) {
+    if (isActivityMessage(messages[index])) {
+      index += 1;
+      continue;
+    }
+    // An assistant bubble that renders nothing must not end the phase: the
+    // live reducer opens empty bubbles at turn-start and resume boundaries,
+    // and the hydrated snapshot has no such entries — so a phase split here
+    // would merge back when the turn settles, visibly reshuffling the
+    // transcript. Approval resume cycles can stack several in a row, so the
+    // whole run is swallowed when activity continues past it. A trailing
+    // run is the response now streaming in, and stays outside the phase so
+    // gaining its first characters does not move the group boundary.
+    if (isInvisibleAssistant(messages[index])) {
+      let ahead = index + 1;
+      while (isInvisibleAssistant(messages[ahead])) ahead += 1;
+      if (isActivityMessage(messages[ahead])) {
+        index = ahead;
+        continue;
+      }
+    }
+    break;
+  }
+  return index;
+}
+
+/** The call id of the first activity in a phase, which names the phase. */
+function phaseCallId(
+  messages: readonly ChatMessage[],
+  start: number,
+  end: number,
+): string | null {
+  for (let index = start; index < end; index += 1) {
+    const message = messages[index];
+    if (message?.role === "tool" || message?.role === "approval") {
+      return typeof message.callId === "string" ? message.callId : null;
+    }
+  }
+  return null;
+}
+
+/** Whether `messages[start, end)` is exactly the rows `span` holds. */
+function sameSpan(
+  span: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  start: number,
+  end: number,
+): boolean {
+  if (span.length !== end - start) return false;
+  for (let offset = 0; offset < span.length; offset += 1) {
+    if (span[offset] !== messages[start + offset]) return false;
+  }
+  return true;
+}
+
+/** What a phase's background-agent list reads and calls. */
+type BackgroundAgentsContext = {
+  runs: AgentRun[];
+  loading: boolean;
+  error: string | null;
+  retry: () => void;
+  cancel: (runId: string) => Promise<void>;
+  loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+  loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+  loadProgress: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
+  open?: (runId: string) => void;
+  openOutput?: (outputId: string) => void;
+  /** The connected client, so a row's "Copy debug info" can fetch its run. */
+  client?: ApiClient;
+};
+
+type ApprovalState = {
+  decidingApprovalCalls: Set<string>;
+  approvalErrors: Record<string, string>;
+  grantScope?: GrantScopeName;
+};
+
+/**
+ * One activity phase as last built, with what it was built from. The next
+ * grouping reuses the element while every input still matches.
+ */
+type BuiltPhase = {
+  /** The transcript rows the phase covers, swallowed empty bubbles included. */
+  span: readonly ChatMessage[];
+  groupIndex: number;
+  animate: boolean;
+  chatId: string | undefined;
+  /** The turn's claimed standing cards when the phase began. */
+  standingBefore: string;
+  /** Standing cards this phase claimed, replayed when it is reused. */
+  claimed: readonly string[];
+  /** Set only when an approval card in the phase reads them. */
+  approvals: {
+    onApproval: CardContext["onApproval"];
+    approvalState: ApprovalState | undefined;
+  } | null;
+  /** Set only when the phase lists background agents. */
+  backgroundAgents: BackgroundAgentsContext | null;
+  webSources: readonly MessageWebSource[];
+  element: ReactNode;
+};
+
+/** Phases from the last grouping, by key. */
+export type ActivityPhaseCache = ReadonlyMap<string, BuiltPhase>;
+
+function buildActivityPhase({
+  key,
+  span,
+  groupIndex,
+  animate,
+  standingCardKeys,
+  standingBefore,
+  onApproval,
+  approvalState,
+  chatId,
+  backgroundAgents,
+}: {
+  key: string;
+  span: ChatMessage[];
+  groupIndex: number;
+  animate: boolean;
+  standingCardKeys: Set<string>;
+  standingBefore: string;
+  onApproval: CardContext["onApproval"];
+  approvalState: ApprovalState | undefined;
+  chatId: string | undefined;
+  backgroundAgents: BackgroundAgentsContext;
+}): BuiltPhase {
+  // Activity can resume through several assistant snapshots while remaining
+  // one expandable phase. The collapsed live label should describe only the
+  // latest snapshot; the expanded rail still preserves the whole phase.
+  const phase: ChatMessage[] = [];
+  let latestSnapshotStart = 0;
+  for (const message of span) {
+    if (isActivityMessage(message)) phase.push(message);
+    else latestSnapshotStart = phase.length;
+  }
+
+  // A call parked on approval is represented by its approval card, so the
+  // rail would otherwise announce the same pending action twice.
+  const parked = new Set(
+    phase.flatMap((entry) =>
+      entry.role === "approval" && !entry.resolved ? [entry.callId] : [],
+    ),
+  );
+  const activities = phase.filter(
+    (entry): entry is ToolMessage =>
+      entry.role === "tool" && !parked.has(entry.callId),
+  );
+  const latestActivities = phase
+    .slice(latestSnapshotStart)
+    .filter(
+      (entry): entry is ToolMessage =>
+        entry.role === "tool" && !parked.has(entry.callId),
+    );
+  const claimedBefore = new Set(standingCardKeys);
+  const cards = surfacedCards(
+    phase,
+    parked,
+    standingCardKeys,
+    onApproval,
+    approvalState,
+    chatId,
+  );
+  const spawns = activities.flatMap((entry) =>
+    entry.name === "spawn_sandbox_agent"
+      ? [
+          {
+            callId: entry.callId,
+            runId: entry.backgroundAgentRunId,
+            status: entry.status,
+          },
+        ]
+      : [],
+  );
+  const children: ReactNode[] = [...cards];
+  if (spawns.length > 0) {
+    children.push(
+      isolatedCard(
+        "background-agents",
+        spawns.map((spawn) => spawn.status).join(" "),
+        <BackgroundAgentList
+          spawns={spawns}
+          runs={backgroundAgents.runs}
+          loading={backgroundAgents.loading}
+          error={backgroundAgents.error}
+          onRetry={backgroundAgents.retry}
+          onCancel={backgroundAgents.cancel}
+          onLoadActivity={backgroundAgents.loadActivity}
+          onLoadTaskPlan={backgroundAgents.loadTaskPlan}
+          onLoadProgress={backgroundAgents.loadProgress}
+          onOpen={backgroundAgents.open}
+          onOpenOutput={backgroundAgents.openOutput}
+          {...(backgroundAgents.client && chatId
+            ? { client: backgroundAgents.client, chatId }
+            : {})}
+        />,
+      ),
+    );
+  }
+
+  // The agent list below already names the delegation and every agent in it.
+  // Leaving the spawn and wait calls on the rail as well stacks a second
+  // summary of the same thing above it ("Waited for background agents and
+  // delegated N tasks"), so the phase line covers everything except them.
+  const railActivities =
+    spawns.length > 0
+      ? activities.filter(
+          (entry) =>
+            entry.name !== "spawn_sandbox_agent" &&
+            entry.name !== "wait_for_agents",
+        )
+      : activities;
+  const latestRailActivities =
+    spawns.length > 0
+      ? latestActivities.filter(
+          (entry) =>
+            entry.name !== "spawn_sandbox_agent" &&
+            entry.name !== "wait_for_agents",
+        )
+      : latestActivities;
+  const anchorIds = phase.flatMap((entry) =>
+    entry.role === "tool" ? [entry.id] : [],
+  );
+
+  return {
+    span,
+    groupIndex,
+    animate,
+    chatId,
+    standingBefore,
+    claimed: [...standingCardKeys].filter((claim) => !claimedBefore.has(claim)),
+    approvals: parked.size > 0 ? { onApproval, approvalState } : null,
+    backgroundAgents: spawns.length > 0 ? backgroundAgents : null,
+    webSources: collectWebSources(activities),
+    // The rail and every card inside carry their own boundary, so this one is
+    // only a backstop for the phase's own frame.
+    element: (
+      <ErrorBoundary key={key} fallback={<ToolActivityUnavailable />}>
+        <ToolActivityGroup
+          activities={railActivities}
+          labelActivities={latestRailActivities}
+          anchorIds={anchorIds}
+          groupIndex={groupIndex}
+          animate={animate}
+          signature={`${toolActivitySignature(railActivities)}#${toolActivitySignature(latestRailActivities)}#${anchorIds.join(" ")}`}
+        >
+          {children.length > 0 ? children : undefined}
+        </ToolActivityGroup>
+      </ErrorBoundary>
+    ),
+  };
 }
 
 /** What deciding a card needs beyond the entry it is deciding about. */
@@ -1366,6 +1545,45 @@ export function refusalCopy(
   return partialOutput
     ? `The response above is incomplete. ${explanation}`
     : explanation;
+}
+
+/**
+ * Where the live turn's stream activity can be read without re-rendering the
+ * transcript: a cursor that advances with every applied stream event.
+ */
+export type StreamActivitySource = {
+  subscribe: (onChange: () => void) => () => void;
+  getSnapshot: () => number;
+};
+
+const subscribeToNothing = () => () => undefined;
+const noActivity = () => 0;
+
+/**
+ * The Working indicator for a response that has started streaming, shown only
+ * once the stream goes quiet.
+ *
+ * Its own leaf because the cursor it watches advances with every stream event:
+ * subscribed here, an event re-renders this and nothing above it.
+ */
+function StalledStreamIndicator({
+  busy,
+  source,
+  stalled,
+}: {
+  busy: boolean;
+  source: StreamActivitySource | undefined;
+  /** Decides when there is no source to watch. */
+  stalled: boolean;
+}) {
+  const getActivity = source?.getSnapshot ?? noActivity;
+  const activity = useSyncExternalStore(
+    source?.subscribe ?? subscribeToNothing,
+    getActivity,
+    getActivity,
+  );
+  const quiet = useStreamStalled(busy, activity);
+  return (source ? quiet : stalled) ? <AssistantWorkingIndicator /> : null;
 }
 
 /**
