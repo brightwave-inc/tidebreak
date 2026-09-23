@@ -355,6 +355,29 @@ describe("mobile supervision API contracts", () => {
     await expect(
       listCodeApprovals(listed.client, "session/1"),
     ).resolves.toHaveLength(1);
+
+    // A kind a newer machine added lists as a generic request instead of
+    // failing every approval beside it.
+    const future = fakeClient([
+      approval,
+      {
+        ...approval,
+        id: "approval-2",
+        kind: { type: "mcp_tool_call", server: "docs", tool: "search" },
+      },
+    ]);
+    const approvals = await listCodeApprovals(future.client, "session-1");
+    expect(approvals.map((item) => item.kind.type)).toEqual([
+      "command",
+      "other",
+    ]);
+    expect(approvals[1]?.kind).toMatchObject({
+      type: "other",
+      summary: expect.stringContaining("(mcp_tool_call)"),
+    });
+    expect(
+      parseCodeApproval({ ...approval, kind: { type: 7 } }),
+    ).toBeNull();
     expect(listed.getJson).toHaveBeenCalledWith(
       "/approvals?state=pending&session_id=session%2F1",
       {},

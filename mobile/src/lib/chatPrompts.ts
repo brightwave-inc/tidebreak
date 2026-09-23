@@ -29,7 +29,23 @@ export type MobilePendingToolApproval = {
   autoJudgeStatus: NonNullable<
     WirePendingApprovalSnapshot["auto_judge_status"]
   > | null;
+  /**
+   * The request names a tool, an approval kind, or an action shape this app
+   * does not know. It is still listed, so nothing pending is hidden, but it
+   * can only be rejected here: the app cannot show the whole action, so it
+   * cannot ask for consent to it.
+   */
+  unrecognized: boolean;
 };
+
+/**
+ * Called for each part of a payload a parser tolerated instead of reading: a
+ * key it does not know, a value it replaced with a safer one, or an item it
+ * listed generically. The app passes nothing. The fixture tests pass a
+ * collector and fail on any note, which is how drift between the server and
+ * these parsers still fails a test without failing a user one release behind.
+ */
+export type WireDrift = (note: string) => void;
 
 export type MobileUserQuestionOption = {
   id: string;
@@ -103,12 +119,36 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/**
+ * Whether `value` carries no key outside `allowed`. Only the action preview
+ * uses it: a preview with a key this app does not know may describe more of
+ * the action than the app would show, so it is not rendered at all.
+ */
 function onlyKeys<Wire>(
   value: Record<string, unknown>,
   allowed: readonly (keyof Wire & string)[],
 ): boolean {
   const names = new Set<string>(allowed);
   return Object.keys(value).every((key) => names.has(key));
+}
+
+/**
+ * Report the keys `value` carries outside `allowed`, and read on. Everywhere
+ * but the action preview, a key a newer server added is ignored rather than
+ * failing the payload. Typed on the wire type, so a key renamed in Rust still
+ * fails to compile here.
+ */
+function noteUnknownKeys<Wire>(
+  value: Record<string, unknown>,
+  allowed: readonly (keyof Wire & string)[],
+  where: string,
+  drift: WireDrift | undefined,
+): void {
+  if (!drift) return;
+  const names = new Set<string>(allowed);
+  for (const key of Object.keys(value)) {
+    if (!names.has(key)) drift(`${where}: unknown key ${key}`);
+  }
 }
 
 function forbiddenPreviewCharacter(character: string): boolean {
@@ -380,13 +420,36 @@ function parseGrantRung(value: unknown): ApprovalGrantRung | null {
   return null;
 }
 
+const APPROVAL_CLASSES = new Set<string>(["read_only", "workspace", "sensitive"]);
+
+const AUTO_JUDGE_STATUSES = new Set<string>(["judging", "approved", "declined"]);
+
+/**
+ * Read one pending approval, or `null` when it names no call to decide.
+ *
+ * A request this app cannot fully read is still listed: an unknown tool,
+ * approval kind, or class, or an action preview it cannot show whole, lists
+ * as an {@link MobilePendingToolApproval.unrecognized} request that can only
+ * be rejected. Where the server's policy booleans disagree with this app's,
+ * the app takes whichever allows less.
+ */
 export function parseMobilePendingToolApproval(
   value: unknown,
+  drift?: WireDrift,
 ): MobilePendingToolApproval | null {
   const approval = record(value);
   if (
     !approval ||
-    !onlyKeys<WirePendingApprovalSnapshot>(approval, [
+    !nonEmptyBounded(approval.call_id, 128) ||
+    !nonEmptyBounded(approval.turn_id, 128)
+  ) {
+    drift?.("approval: no call or turn to decide");
+    return null;
+  }
+  const where = `approval ${approval.call_id}`;
+  noteUnknownKeys<WirePendingApprovalSnapshot>(
+    approval,
+    [
       "call_id",
       "turn_id",
       "action",
@@ -397,55 +460,102 @@ export function parseMobilePendingToolApproval(
       "can_remember",
       "grant_rungs",
       "auto_judge_status",
-    ]) ||
-    !nonEmptyBounded(approval.call_id, 128) ||
-    !nonEmptyBounded(approval.turn_id, 128) ||
-    !isRendererToolName(approval.action) ||
-    !isApprovalKind(approval.approval) ||
-    (approval.class !== "read_only" &&
-      approval.class !== "workspace" &&
-      approval.class !== "sensitive") ||
-    typeof approval.can_approve !== "boolean" ||
-    approval.can_approve !== APPROVABLE_KINDS[approval.approval] ||
-    typeof approval.can_remember !== "boolean" ||
-    !Array.isArray(approval.grant_rungs) ||
-    approval.grant_rungs.length > 32 ||
-    !(
-      approval.auto_judge_status === undefined ||
-      approval.auto_judge_status === "judging" ||
-      approval.auto_judge_status === "approved" ||
-      approval.auto_judge_status === "declined"
-    )
-  ) {
-    return null;
+    ],
+    where,
+    drift,
+  );
+  const unreadable: string[] = [];
+  const action = isRendererToolName(approval.action) ? approval.action : null;
+  if (!action) unreadable.push(`tool ${String(approval.action)}`);
+  const kind = isApprovalKind(approval.approval) ? approval.approval : null;
+  if (!kind) unreadable.push(`approval kind ${String(approval.approval)}`);
+  const approvalClass =
+    typeof approval.class === "string" && APPROVAL_CLASSES.has(approval.class)
+      ? (approval.class as WirePendingApprovalSnapshot["class"])
+      : null;
+  if (!approvalClass) unreadable.push(`class ${String(approval.class)}`);
+  if (typeof approval.can_approve !== "boolean") {
+    unreadable.push("can_approve");
   }
-  const grantRungs = approval.grant_rungs.map(parseGrantRung);
-  if (
-    grantRungs.some((rung) => rung === null) ||
-    (grantRungs.length > 0 && !isRememberableKind(approval.approval)) ||
-    approval.can_remember !== grantRungs.length > 0
-  ) {
-    return null;
+  const preview =
+    approval.preview === undefined || approval.preview === null
+      ? null
+      : parseMobileToolActionPreview(approval.preview);
+  if (approval.preview !== undefined && approval.preview !== null && !preview) {
+    unreadable.push("action preview");
+  }
+  const autoJudgeStatus =
+    typeof approval.auto_judge_status === "string" &&
+    AUTO_JUDGE_STATUSES.has(approval.auto_judge_status)
+      ? (approval.auto_judge_status as MobilePendingToolApproval["autoJudgeStatus"])
+      : null;
+  if (approval.auto_judge_status !== undefined && !autoJudgeStatus) {
+    drift?.(`${where}: unknown auto_judge_status`);
+  }
+  if (unreadable.length > 0 || !action || !kind || !approvalClass) {
+    drift?.(`${where}: listed as unrecognized (${unreadable.join(", ")})`);
+    return {
+      callId: approval.call_id,
+      turnId: approval.turn_id,
+      action: action ?? "other",
+      approval: "unsupported",
+      class: approvalClass ?? "sensitive",
+      preview,
+      canApprove: false,
+      canRemember: false,
+      grantRungs: [],
+      autoJudgeStatus,
+      unrecognized: true,
+    };
+  }
+  const canApprove = approval.can_approve === true && APPROVABLE_KINDS[kind];
+  if (approval.can_approve !== APPROVABLE_KINDS[kind]) {
+    drift?.(`${where}: can_approve disagrees with this app's policy`);
+  }
+  const offered = Array.isArray(approval.grant_rungs)
+    ? approval.grant_rungs.slice(0, 32)
+    : [];
+  const rungs = offered
+    .map(parseGrantRung)
+    .filter((rung): rung is ApprovalGrantRung => rung !== null);
+  if (!Array.isArray(approval.grant_rungs) || rungs.length !== offered.length) {
+    drift?.(`${where}: grant rungs this app does not read`);
+  }
+  const grantRungs = isRememberableKind(kind) ? rungs : [];
+  const canRemember = approval.can_remember === true && grantRungs.length > 0;
+  if (approval.can_remember !== grantRungs.length > 0) {
+    drift?.(`${where}: can_remember disagrees with the grant rungs`);
   }
   return {
     callId: approval.call_id,
     turnId: approval.turn_id,
-    action: approval.action,
-    approval: approval.approval,
-    class: approval.class,
-    preview: parseMobileToolActionPreview(approval.preview),
-    canApprove: approval.can_approve,
-    canRemember: approval.can_remember,
-    grantRungs: grantRungs as ApprovalGrantRung[],
-    autoJudgeStatus: approval.auto_judge_status ?? null,
+    action,
+    approval: kind,
+    class: approvalClass,
+    preview,
+    canApprove,
+    canRemember,
+    grantRungs: canRemember ? grantRungs : [],
+    autoJudgeStatus,
+    unrecognized: false,
   };
 }
 
-function parseQuestionOption(value: unknown): MobileUserQuestionOption | null {
+function parseQuestionOption(
+  value: unknown,
+  drift?: WireDrift,
+): MobileUserQuestionOption | null {
   const option = record(value);
+  if (option) {
+    noteUnknownKeys<WireUserQuestionOption>(
+      option,
+      ["id", "label", "description"],
+      "question option",
+      drift,
+    );
+  }
   if (
     !option ||
-    !onlyKeys<WireUserQuestionOption>(option, ["id", "label", "description"]) ||
     !nonEmptyBounded(option.id, 64) ||
     !nonEmptyBounded(option.label, 80) ||
     !nonEmptyBounded(option.description, 240)
@@ -459,18 +569,28 @@ function parseQuestionOption(value: unknown): MobileUserQuestionOption | null {
   };
 }
 
-function parseQuestion(value: unknown): MobileUserQuestion | null {
+function parseQuestion(
+  value: unknown,
+  drift?: WireDrift,
+): MobileUserQuestion | null {
   const question = record(value);
+  if (question) {
+    noteUnknownKeys<WireUserQuestion>(
+      question,
+      [
+        "id",
+        "header",
+        "question",
+        "options",
+        "question_type",
+        "allow_free_form",
+      ],
+      "question",
+      drift,
+    );
+  }
   if (
     !question ||
-    !onlyKeys<WireUserQuestion>(question, [
-      "id",
-      "header",
-      "question",
-      "options",
-      "question_type",
-      "allow_free_form",
-    ]) ||
     !nonEmptyBounded(question.id, 64) ||
     !nonEmptyBounded(question.header, 32) ||
     !nonEmptyBounded(question.question, 500) ||
@@ -483,7 +603,9 @@ function parseQuestion(value: unknown): MobileUserQuestion | null {
   ) {
     return null;
   }
-  const options = question.options.map(parseQuestionOption);
+  const options = question.options.map((option) =>
+    parseQuestionOption(option, drift),
+  );
   if (options.some((option) => option === null)) return null;
   const optionIds = (options as MobileUserQuestionOption[]).map(
     (option) => option.id,
@@ -501,16 +623,19 @@ function parseQuestion(value: unknown): MobileUserQuestion | null {
 
 export function parseMobilePendingUserQuestions(
   value: unknown,
+  drift?: WireDrift,
 ): MobilePendingUserQuestions | null {
   const request = record(value);
+  if (request) {
+    noteUnknownKeys<WirePendingUserQuestions>(
+      request,
+      ["call_id", "turn_id", "questions", "asked_at"],
+      "questions",
+      drift,
+    );
+  }
   if (
     !request ||
-    !onlyKeys<WirePendingUserQuestions>(request, [
-      "call_id",
-      "turn_id",
-      "questions",
-      "asked_at",
-    ]) ||
     !nonEmptyBounded(request.call_id, 128) ||
     !nonEmptyBounded(request.turn_id, 128) ||
     !Array.isArray(request.questions) ||
@@ -520,7 +645,9 @@ export function parseMobilePendingUserQuestions(
   ) {
     return null;
   }
-  const questions = request.questions.map(parseQuestion);
+  const questions = request.questions.map((question) =>
+    parseQuestion(question, drift),
+  );
   if (questions.some((question) => question === null)) return null;
   const questionIds = (questions as MobileUserQuestion[]).map(
     (question) => question.id,
@@ -536,17 +663,19 @@ export function parseMobilePendingUserQuestions(
 
 export function parseMobilePendingPlanApproval(
   value: unknown,
+  drift?: WireDrift,
 ): MobilePendingPlanApproval | null {
   const request = record(value);
+  if (request) {
+    noteUnknownKeys<WirePendingPlanApproval>(
+      request,
+      ["call_id", "turn_id", "title", "plan", "proposed_at"],
+      "plan",
+      drift,
+    );
+  }
   if (
     !request ||
-    !onlyKeys<WirePendingPlanApproval>(request, [
-      "call_id",
-      "turn_id",
-      "title",
-      "plan",
-      "proposed_at",
-    ]) ||
     !nonEmptyBounded(request.call_id, 128) ||
     !nonEmptyBounded(request.turn_id, 128) ||
     !nonEmptyBounded(request.title, 120) ||
@@ -565,6 +694,14 @@ export function parseMobilePendingPlanApproval(
   };
 }
 
+/**
+ * A list of pending prompts.
+ *
+ * Questions and plans keep failing their list on an item this app cannot
+ * read: there is no generic way to answer a question or accept a plan, and
+ * the chat screen already says it could not check for them, with a retry.
+ * Approvals do not, because an approval always has a safe generic answer.
+ */
 function parseStrictList<T>(
   value: unknown,
   parse: (item: unknown) => T | null,
@@ -578,7 +715,14 @@ function parseStrictList<T>(
   if (parsed.some((item) => item === null)) {
     throw new Error(`${label} response contains invalid data.`);
   }
-  const items = parsed as T[];
+  return unique(parsed as T[], label, identity);
+}
+
+function unique<T>(
+  items: T[],
+  label: string,
+  identity: (item: T) => string,
+): T[] {
   const identities = items.map(identity);
   if (new Set(identities).size !== identities.length) {
     throw new Error(`${label} response contains a duplicate call.`);
@@ -586,15 +730,35 @@ function parseStrictList<T>(
   return items;
 }
 
+/**
+ * The pending approvals, one card each.
+ *
+ * One approval this app cannot read no longer fails the list: it lists as an
+ * unrecognized request the reader can reject. Only an item that names no call
+ * at all is left out, because nothing could be decided about it.
+ */
+export function parseMobilePendingToolApprovals(
+  value: unknown,
+  drift?: WireDrift,
+): MobilePendingToolApproval[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Pending approval response is not an array.");
+  }
+  return unique(
+    value
+      .map((item) => parseMobilePendingToolApproval(item, drift))
+      .filter((item): item is MobilePendingToolApproval => item !== null),
+    "Pending approval",
+    (approval) => approval.callId,
+  );
+}
+
 export async function listMobilePendingToolApprovals(
   client: MachineJsonClient,
   chatId: string,
 ): Promise<MobilePendingToolApproval[]> {
-  const approvals = parseStrictList(
+  const approvals = parseMobilePendingToolApprovals(
     await client.getJson(`/chats/${encodeURIComponent(chatId)}/approvals`),
-    parseMobilePendingToolApproval,
-    "Pending approval",
-    (approval) => approval.callId,
   );
   const turnIds = new Set(approvals.map((approval) => approval.turnId));
   if (turnIds.size > 1) {
@@ -738,6 +902,7 @@ function validApprovalFeedback(value: string): string {
 export function mobileApprovalQuestion(
   approval: MobilePendingToolApproval,
 ): string {
+  if (approval.unrecognized) return "Reject this request?";
   if (!approval.canApprove) return "Reject this unsupported action?";
   switch (approval.approval) {
     case "search_may_share_query_and_excerpts":
@@ -763,6 +928,15 @@ export function mobileApprovalQuestion(
     case "unsupported":
       return "Reject this unsupported action?";
   }
+}
+
+/** The sentence under the question: what approving would let happen. */
+export function mobileApprovalDetail(
+  approval: MobilePendingToolApproval,
+): string {
+  return approval.unrecognized
+    ? "This app does not recognize this request, so it cannot approve it. Update the app to approve it here, or reject it."
+    : mobileApprovalSummary(approval.approval);
 }
 
 export function mobileApprovalSummary(kind: ToolApprovalKind): string {

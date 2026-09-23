@@ -2,6 +2,7 @@ import {
   assertResourceEcho,
   tidebreakMachineResource,
 } from "./resource";
+import { API_LEVEL, MIN_API_LEVEL } from "../generated/wire";
 import { fetchRefusingRedirects, type HttpFetch, type HttpResponse } from "./http";
 import {
   REASON_REQUIRES_TLS,
@@ -45,6 +46,15 @@ export const REASON_LOCAL_ONLY = "local_only";
 
 /** The token is shaped in a way no roster token can be. */
 export const REASON_TOKEN_MALFORMED = "token_malformed";
+
+/** The machine serves a newer API level than this app reads. Update the app. */
+export const REASON_APP_TOO_OLD = "app_too_old";
+
+/**
+ * The machine serves an older API level than this app still reads. Update the
+ * machine.
+ */
+export const REASON_MACHINE_TOO_OLD = "machine_too_old";
 
 /**
  * The token names a `service` principal. Ordinary member routes accept one —
@@ -188,6 +198,7 @@ export async function discoverMachine(
   }
   if (target.kind === "machine") {
     verifyStandalone(discovery);
+    requireCompatibleMachine(discovery);
     return { baseUrl, resource: derived };
   }
   if (discovery.mode !== "gateway") {
@@ -224,11 +235,57 @@ export async function discoverMachine(
       "The machine named a different gateway than the one you paired.",
     );
   }
+  requireCompatibleMachine(discovery);
   return {
     baseUrl,
     resource: derived,
     gatewayUrl: validatedBaseUrl(target.gatewayUrl),
   };
+}
+
+/** The API levels this app reads, from its copy of the generated wire types. */
+export const SUPPORTED_API_LEVELS = { min: MIN_API_LEVEL, max: API_LEVEL };
+
+/**
+ * Refuse a machine whose API level this app does not read.
+ *
+ * The discovery document carries `version` and `api_level` beside its mode.
+ * A machine from before the version handshake leaves both out, and attaches
+ * as it always has. Runs after the mode checks, so a machine this phone could
+ * never attach is refused for that reason first.
+ */
+export function requireCompatibleMachine(
+  discovery: Pick<AuthDiscovery, "version" | "api_level">,
+  supported: { min: number; max: number } = SUPPORTED_API_LEVELS,
+): void {
+  const level = discovery.api_level;
+  if (typeof level !== "number" || !Number.isSafeInteger(level)) return;
+  const version = displayableVersion(discovery.version);
+  if (level > supported.max) {
+    throw new AttachError(
+      "discover",
+      REASON_APP_TOO_OLD,
+      version
+        ? `This machine runs Tidebreak ${version}, which is newer than this app supports. Update the app to connect.`
+        : "This machine runs a newer Tidebreak than this app supports. Update the app to connect.",
+    );
+  }
+  if (level < supported.min) {
+    throw new AttachError(
+      "discover",
+      REASON_MACHINE_TOO_OLD,
+      version
+        ? `This machine runs Tidebreak ${version}, which this app no longer supports. Update the machine to connect.`
+        : "This machine runs an older Tidebreak that this app no longer supports. Update the machine to connect.",
+    );
+  }
+}
+
+/** A release string short and plain enough to put in a sentence. */
+function displayableVersion(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(value)
+    ? value
+    : null;
 }
 
 /**

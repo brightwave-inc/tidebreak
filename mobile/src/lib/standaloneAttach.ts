@@ -6,10 +6,11 @@
  * credential — the gateway named the machine, the machine echoes a resource
  * this client derived independently, and both must agree on the deployment.
  * A standalone machine offers none of that. Its discovery document in
- * `static_token` mode is `{"mode":"static_token"}` and nothing else: no
- * installation id, no name, no version, no resource
- * (`crates/tidebreak-server/src/auth.rs`). So this sequence establishes what
- * it can, in the order that keeps the credential off the wire longest:
+ * `static_token` mode names the mode and the version handshake's two keys
+ * (`version` and `api_level`) and nothing else: no installation id, no name,
+ * no resource (`crates/tidebreak-server/src/auth.rs`). So this sequence
+ * establishes what it can, in the order that keeps the credential off the
+ * wire longest:
  *
  * 1. **The URL.** `validatedBaseUrl` refuses anything but `https://`, and
  *    `http://` only to a loopback host. That is the whole TLS posture for a
@@ -20,6 +21,8 @@
  *    reachable at all.
  * 3. **The mode.** `static_token` proceeds; `gateway`, `oidc` and `local` are
  *    each refused with their own reason, because each has a different answer.
+ *    Then the API level: a machine this app does not read is refused with a
+ *    message that says whether to update the app or the machine.
  * 4. **The token**, at `/auth/token-sign-in`, which is the machine's own
  *    public bootstrap probe and the first moment the credential is sent.
  *

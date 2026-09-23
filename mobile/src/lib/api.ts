@@ -373,18 +373,35 @@ function parseApprovalKind(value: unknown): CodeApprovalKind | null {
         ? (value as CodeApprovalKind)
         : null;
     default:
-      return null;
+      return unrecognizedApprovalKind(kind.type);
   }
+}
+
+/**
+ * An approval kind a newer machine added.
+ *
+ * It lists the way the machine lists a harness request it could not
+ * classify: as an `other` request, with the harness payload beside it for the
+ * reader to check. One unfamiliar kind used to fail every approval with it.
+ */
+function unrecognizedApprovalKind(type: unknown): CodeApprovalKind | null {
+  if (typeof type !== "string") return null;
+  const named = /^[a-z0-9_]{1,64}$/.test(type) ? ` (${type})` : "";
+  return {
+    type: "other",
+    summary: `This app does not recognize this kind of request${named}. Check the harness payload before you decide, or update the app.`,
+  };
 }
 
 export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   const approval = record(value);
+  const kind = approval ? parseApprovalKind(approval.kind) : null;
   if (
     !approval ||
     !nonEmpty(approval.id) ||
     !nonEmpty(approval.session_id) ||
     !nonEmpty(approval.turn_id) ||
-    !parseApprovalKind(approval.kind) ||
+    !kind ||
     typeof approval.harness_raw_json !== "string" ||
     !["pending", "approved", "denied", "abandoned"].includes(
       String(approval.state),
@@ -395,7 +412,7 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   ) {
     return null;
   }
-  return value as CodeApprovalSnapshot;
+  return { ...(value as CodeApprovalSnapshot), kind };
 }
 
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {

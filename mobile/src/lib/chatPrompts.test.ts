@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { MachineClient } from "./machine";
 import {
@@ -7,13 +10,21 @@ import {
   listMobilePendingPlanApprovals,
   listMobilePendingToolApprovals,
   listMobilePendingUserQuestions,
+  mobileApprovalDetail,
   mobileApprovalQuestion,
   mobileToolPreviewDetail,
   parseMobilePendingPlanApproval,
   parseMobilePendingToolApproval,
+  parseMobilePendingToolApprovals,
   parseMobilePendingUserQuestions,
   parseMobileToolActionPreview,
 } from "./chatPrompts";
+
+/** Collect every note a parser makes about what it tolerated. */
+function driftNotes(): { notes: string[]; drift: (note: string) => void } {
+  const notes: string[] = [];
+  return { notes, drift: (note) => notes.push(note) };
+}
 
 const execPreview = {
   tool: "exec",
@@ -76,6 +87,28 @@ const plan = {
   proposed_at: "2026-08-27T20:00:01Z",
 };
 
+/**
+ * The renderer's validator fixtures, generated from the server's own values
+ * (`crates/tidebreak-desktop/ui/src/generated/fixtures.ts`).
+ */
+function serverFixtures(): Record<string, unknown> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(
+    join(
+      here,
+      "../../../crates/tidebreak-desktop/ui/src/generated/fixtures.ts",
+    ),
+    "utf8",
+  );
+  const fixtures: Record<string, unknown> = {};
+  for (const match of source.matchAll(
+    /export const (\w+) = (\{[\s\S]*?\n\}) as const;/g,
+  )) {
+    fixtures[match[1]!] = JSON.parse(match[2]!);
+  }
+  return fixtures;
+}
+
 function fakeClient(response: unknown): {
   client: Pick<MachineClient, "getJson" | "requestJson">;
   getJson: ReturnType<typeof vi.fn>;
@@ -109,14 +142,20 @@ describe("mobile chat prompt contracts", () => {
       canRemember: false,
       grantRungs: [],
       preview,
+      unrecognized: false,
     });
+    // A server offering to remember what this app never remembers still gets
+    // no remembered grant, and the disagreement is noted rather than fatal.
+    const { notes, drift } = driftNotes();
     expect(
-      parseMobilePendingToolApproval({
-        ...action,
-        can_remember: true,
-        grant_rungs: ["whole_tool"],
-      }),
-    ).toBeNull();
+      parseMobilePendingToolApproval(
+        { ...action, can_remember: true, grant_rungs: ["whole_tool"] },
+        drift,
+      ),
+    ).toMatchObject({ canApprove: true, canRemember: false, grantRungs: [] });
+    expect(notes).toEqual([
+      "approval call-approval: can_remember disagrees with the grant rungs",
+    ]);
     expect(
       parseMobileToolActionPreview({ ...preview, operation: "delete" }),
     ).toBeNull();
@@ -130,7 +169,8 @@ describe("mobile chat prompt contracts", () => {
   });
 
   it("parses a closed approval and preserves its exact action preview", () => {
-    expect(parseMobilePendingToolApproval(approval)).toEqual({
+    const { notes, drift } = driftNotes();
+    expect(parseMobilePendingToolApproval(approval, drift)).toEqual({
       callId: "call-approval",
       turnId: "turn-1",
       action: "exec",
@@ -141,19 +181,95 @@ describe("mobile chat prompt contracts", () => {
       canRemember: true,
       grantRungs: approval.grant_rungs,
       autoJudgeStatus: "judging",
+      unrecognized: false,
     });
+    expect(notes).toEqual([]);
+  });
+
+  it("takes whichever policy allows less when the server and app disagree", () => {
     expect(
       parseMobilePendingToolApproval({ ...approval, can_approve: false }),
-    ).toBeNull();
-    expect(
-      parseMobilePendingToolApproval({ ...approval, hidden_argument: "no" }),
-    ).toBeNull();
+    ).toMatchObject({ canApprove: false, unrecognized: false });
     expect(
       parseMobilePendingToolApproval({
         ...approval,
         grant_rungs: [{ command_prefix: { tokens: 0 } }],
       }),
+    ).toMatchObject({ canApprove: true, canRemember: false, grantRungs: [] });
+  });
+
+  it("ignores a key a newer server added instead of dropping the approval", () => {
+    const { notes, drift } = driftNotes();
+    expect(
+      parseMobilePendingToolApproval(
+        { ...approval, expires_at: "2026-09-23T00:00:00Z" },
+        drift,
+      ),
+    ).toMatchObject({ callId: "call-approval", canApprove: true });
+    expect(notes).toEqual(["approval call-approval: unknown key expires_at"]);
+  });
+
+  it("lists a request it cannot fully read as one it can only reject", () => {
+    for (const unknown of [
+      { action: "browser_open" },
+      { approval: "browser_may_open_page" },
+      { class: "destructive" },
+      // The literal action is what consent is given to. A preview with a
+      // key this app does not know may carry more than the app would show.
+      { preview: { ...execPreview, env: { TOKEN: "hidden" } } },
+      { preview: { tool: "browser_open", url: "https://example.com" } },
+    ]) {
+      const parsed = parseMobilePendingToolApproval({ ...approval, ...unknown });
+      expect(parsed, JSON.stringify(unknown)).toMatchObject({
+        callId: "call-approval",
+        turnId: "turn-1",
+        canApprove: false,
+        canRemember: false,
+        grantRungs: [],
+        unrecognized: true,
+      });
+      expect(mobileApprovalQuestion(parsed!)).toBe("Reject this request?");
+      expect(mobileApprovalDetail(parsed!)).toContain("Update the app");
+    }
+    // Nothing partial is shown for a preview it could not read whole.
+    expect(
+      parseMobilePendingToolApproval({
+        ...approval,
+        preview: { ...execPreview, env: {} },
+      })?.preview,
     ).toBeNull();
+  });
+
+  it("keeps the rest of the list when one approval cannot be read", () => {
+    const { notes, drift } = driftNotes();
+    const listed = parseMobilePendingToolApprovals(
+      [
+        approval,
+        { ...approval, call_id: "call-future", approval: "some_future_kind" },
+        { turn_id: "turn-1" },
+      ],
+      drift,
+    );
+    expect(listed.map((item) => [item.callId, item.unrecognized])).toEqual([
+      ["call-approval", false],
+      ["call-future", true],
+    ]);
+    expect(notes).toContain("approval: no call or turn to decide");
+  });
+
+  /**
+   * The strict half. `PENDING_APPROVAL*` are serialized from the server's
+   * own types, so a field the server renamed shows up here as a note, and
+   * this test fails even though a user's app keeps working.
+   */
+  it("reads the server's real approvals without tolerating anything", () => {
+    const fixtures = serverFixtures();
+    for (const name of ["PENDING_APPROVAL", "PENDING_APPROVAL_WITHOUT_PREVIEW"]) {
+      const { notes, drift } = driftNotes();
+      const parsed = parseMobilePendingToolApproval(fixtures[name], drift);
+      expect(notes, name).toEqual([]);
+      expect(parsed?.unrecognized, name).toBe(false);
+    }
   });
 
   it("rejects an untrusted preview instead of partially rendering it", () => {
@@ -239,6 +355,28 @@ describe("mobile chat prompt contracts", () => {
         feedback: "   ",
       }),
     ).rejects.toThrow(/what to change/i);
+  });
+
+  it("ignores keys a newer server added to questions and plans", () => {
+    const { notes, drift } = driftNotes();
+    expect(
+      parseMobilePendingUserQuestions(
+        {
+          ...questions,
+          priority: "high",
+          questions: [{ ...questions.questions[0], hint: "Pick one." }],
+        },
+        drift,
+      ),
+    ).toMatchObject({ callId: "call-questions" });
+    expect(
+      parseMobilePendingPlanApproval({ ...plan, summary: "Two steps." }, drift),
+    ).toMatchObject({ callId: "call-plan" });
+    expect(notes).toEqual([
+      "questions: unknown key priority",
+      "question: unknown key hint",
+      "plan: unknown key summary",
+    ]);
   });
 
   it("parses question blocks as one closed, unique answer contract", async () => {

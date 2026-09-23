@@ -89,6 +89,10 @@ export type AuthDiscovery = {
   mode: string;
   gateway_url?: string;
   resource?: string;
+  /** The machine's release. Absent on a machine from before the handshake. */
+  version?: string;
+  /** The API level the machine serves. Absent on the same machines. */
+  api_level?: number;
 };
 
 export type CodeWorkspaceStub = {
