@@ -1179,6 +1179,15 @@ enum ControlFlow {
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(test, feature = "test-support"))]
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How often a parked turn rereads its park when nothing wakes it.
+///
+/// A settlement wakes the worker itself: it publishes on the session's live
+/// channel, and a child session that stops running wakes its parent through
+/// [`CodeEventBus::wake_parked`]. This poll only catches a settlement that
+/// reaches neither, such as one made by another process.
+const PARK_SAFETY_POLL: Duration = Duration::from_secs(5);
+
 #[cfg(not(any(test, feature = "test-support")))]
 const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(test, feature = "test-support"))]
@@ -1792,14 +1801,15 @@ async fn await_park_resolution<'a>(
     // Subscribe before the read below, so a settlement between the two
     // cannot slip past both.
     let (mut live, _tail) = bus.attach(session.id);
+    let park_wake = bus.park_wake(session.id);
     match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
         DurableParkState::Pending => {}
         DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
         DurableParkState::Closed => return Ok(None),
     }
-    let mut durable_poll = tokio::time::interval(Duration::from_millis(100));
-    durable_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    durable_poll.tick().await;
+    let mut safety_poll = tokio::time::interval(PARK_SAFETY_POLL);
+    safety_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    safety_poll.tick().await;
     loop {
         tokio::select! {
             biased;
@@ -1830,7 +1840,14 @@ async fn await_park_resolution<'a>(
                     DurableParkState::Closed => return Ok(None),
                 }
             }
-            _ = durable_poll.tick() => {
+            () = park_wake.notified() => {
+                match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
+                    DurableParkState::Pending => {}
+                    DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
+                    DurableParkState::Closed => return Ok(None),
+                }
+            }
+            _ = safety_poll.tick() => {
                 match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
                     DurableParkState::Pending => {}
                     DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),

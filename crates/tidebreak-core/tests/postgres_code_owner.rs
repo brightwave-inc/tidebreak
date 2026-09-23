@@ -289,6 +289,98 @@ async fn postgres_code_queries_partition_by_owner() {
     );
 }
 
+/// The digest's proposal count matches provenance in the database, and that
+/// SQL is PostgreSQL's own: jsonb operators rather than SQLite's `json_each`.
+#[tokio::test]
+async fn postgres_counts_only_the_proposals_a_session_journal_justifies() {
+    use tidebreak_core::db::code::count_session_memory_proposals;
+    use tidebreak_core::memory::{
+        MemoryAuthor, MemoryEvidence, MemoryKind, MemoryOrigin, MemoryProvenance, MemoryRecord,
+        MemoryRecordId, MemoryScope, MemoryStatus,
+    };
+    use tidebreak_core::MemoryBackend;
+
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let owner = OwnerId::new(&format!("memory-{run}")).unwrap();
+    let (_, _, session, _) = seed_owner(&store, &owner, &format!("memory-{run}")).await;
+    let (_, _, other, _) = seed_owner(&store, &owner, &format!("memory-other-{run}")).await;
+    for id in [session, other] {
+        append_event(
+            &store,
+            &owner,
+            id,
+            0,
+            &Event::AssistantMessage {
+                text: "Use the staging database for migrations.".to_owned(),
+                parent_call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let proposal = |origin: Option<SessionId>, cited: SessionId, status: MemoryStatus| {
+        let now = Utc::now();
+        MemoryRecord {
+            id: MemoryRecordId::new(),
+            scope: MemoryScope::Personal,
+            kind: MemoryKind::Fact,
+            status,
+            title: "Staging".to_owned(),
+            body: "Migrate on staging.".to_owned(),
+            provenance: MemoryProvenance {
+                author: MemoryAuthor::Model,
+                origin: MemoryOrigin {
+                    code_session_id: origin,
+                    ..Default::default()
+                },
+                evidence: vec![MemoryEvidence::Event {
+                    session_id: cited,
+                    seq: 1,
+                }],
+            },
+            links: Vec::new(),
+            expires_at: None,
+            superseded_by: None,
+            observation_count: 0,
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    };
+    for record in [
+        proposal(Some(session), session, MemoryStatus::Proposed),
+        proposal(Some(session), session, MemoryStatus::Proposed),
+        proposal(Some(session), other, MemoryStatus::Proposed),
+        proposal(None, session, MemoryStatus::Proposed),
+        proposal(Some(other), session, MemoryStatus::Proposed),
+        proposal(Some(session), session, MemoryStatus::Active),
+    ] {
+        store.put(&owner, record).await.unwrap();
+    }
+
+    assert_eq!(
+        count_session_memory_proposals(&store, &owner, session)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        count_session_memory_proposals(&store, &owner, other)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 /// Repository registration is unique per owner on PostgreSQL as well: the
 /// composite index is what allows a second user to register a path the first
 /// user already has.

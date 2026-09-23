@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, TransactionTrait,
 };
 
@@ -11,14 +11,18 @@ use crate::error::{AgentError, Result};
 use crate::{NotificationKind, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
+use super::journal_writer::{Append, JournalWriter, TurnNotification};
 use super::{acquire_code_session_write_lock, JournalError};
 
 /// Append one journal event under the session's spawn-epoch fence.
 ///
-/// Sequence numbers are allocated while holding the session row lock, the
-/// same discipline the chat journal uses on the chat row. An append whose
-/// `spawn_epoch` does not match the session row is rejected so a superseded
-/// worker cannot corrupt the stream.
+/// An append whose `spawn_epoch` does not match the session row is rejected
+/// so a superseded worker cannot corrupt the stream. The sequence number comes
+/// back only once the event is committed.
+///
+/// On SQLite the append joins a group commit (see [`super::journal_writer`]).
+/// On PostgreSQL it takes the session row lock in a transaction of its own,
+/// the same discipline the chat journal uses on the chat row.
 pub async fn append_event(
     store: &DbStore,
     owner: &OwnerId,
@@ -49,6 +53,22 @@ async fn append_event_inner(
     event: &Event,
     notification_turn_id: Option<TurnId>,
 ) -> std::result::Result<i64, JournalError> {
+    if store.conn.get_database_backend() == DatabaseBackend::Sqlite {
+        return JournalWriter::append(
+            store,
+            Append {
+                owner: owner.clone(),
+                session_id,
+                spawn_epoch,
+                event: serde_json::to_value(event).map_err(AgentError::from)?,
+                notification: notification_turn_id.map(|turn_id| TurnNotification {
+                    turn_id,
+                    kind: notification_kind(event),
+                }),
+            },
+        )
+        .await;
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Err(JournalError::SessionNotFound { session_id });
@@ -70,15 +90,11 @@ async fn append_event_inner(
     }
     let seq = append_event_on_locked(&transaction, owner, session_id, event).await?;
     if let Some(turn_id) = notification_turn_id {
-        let kind = match event {
-            Event::TurnCompleted { .. } => NotificationKind::AgentCompleted,
-            Event::TurnFailed { .. } => NotificationKind::AgentFailed,
-            _ => {
-                return Err(AgentError::Store(
-                    "only completed or failed Code turns mint notifications".into(),
-                )
-                .into())
-            }
+        let Some(kind) = notification_kind(event) else {
+            return Err(AgentError::Store(
+                "only completed or failed Code turns mint notifications".into(),
+            )
+            .into());
         };
         let turn_exists = entities::turn::Entity::find_by_id(turn_id.0)
             .filter(entities::turn::Column::Owner.eq(owner.as_str()))
@@ -134,6 +150,15 @@ async fn append_event_inner(
     Ok(seq)
 }
 
+/// The notification a terminal event mints, or `None` for any other event.
+fn notification_kind(event: &Event) -> Option<NotificationKind> {
+    match event {
+        Event::TurnCompleted { .. } => Some(NotificationKind::AgentCompleted),
+        Event::TurnFailed { .. } => Some(NotificationKind::AgentFailed),
+        _ => None,
+    }
+}
+
 /// Append after the caller has locked and fenced the session row.
 pub(in crate::db) async fn append_event_on_locked<C>(
     conn: &C,
@@ -144,25 +169,77 @@ pub(in crate::db) async fn append_event_on_locked<C>(
 where
     C: ConnectionTrait,
 {
-    let last = entities::event::Entity::find()
-        .filter(entities::event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::event::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::event::Column::Seq)
-        .one(conn)
-        .await
-        .map_err(store_err)?;
-    let seq = last
-        .map_or(Some(1), |model| model.seq.checked_add(1))
+    let seq = last_seq_on(conn, owner, session_id)
+        .await?
+        .map_or(Some(1), |last| last.checked_add(1))
         .ok_or_else(|| {
             AgentError::Store(format!(
                 "event sequence exhausted for code session {session_id}"
             ))
         })?;
+    insert_event_row_on(
+        conn,
+        owner,
+        session_id,
+        seq,
+        serde_json::to_value(event).map_err(AgentError::from)?,
+    )
+    .await?;
+    Ok(seq)
+}
+
+/// The session's newest sequence number, reading only the key column.
+pub(in crate::db) async fn last_seq_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Option<i64>>
+where
+    C: ConnectionTrait,
+{
+    entities::event::Entity::find()
+        .select_only()
+        .column(entities::event::Column::Seq)
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::event::Column::Seq)
+        .limit(1)
+        .into_tuple::<i64>()
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+/// Insert one code-journal row at `seq`.
+pub(in crate::db) async fn insert_event_row_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+    seq: i64,
+    event: serde_json::Value,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::event::Entity::insert(event_row(owner, session_id, seq, event))
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// One code-journal row, ready to insert.
+pub(in crate::db) fn event_row(
+    owner: &OwnerId,
+    session_id: SessionId,
+    seq: i64,
+    event: serde_json::Value,
+) -> entities::event::ActiveModel {
     entities::event::ActiveModel {
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(session_id.0),
         seq: Set(seq),
-        event: Set(serde_json::to_value(event).map_err(AgentError::from)?),
+        event: Set(event),
         created_at: Set(Utc::now()),
         // The chat lane's recovery receipts; an engine fenced by its spawn
         // epoch writes none.
@@ -172,10 +249,6 @@ where
         scan_token: Set(None),
         terminal: Set(false),
     }
-    .insert(conn)
-    .await
-    .map_err(store_err)?;
-    Ok(seq)
 }
 
 /// Created-at of the newest journal row, if the session has any.
@@ -530,7 +603,7 @@ pub async fn latest_reported_model(
     owner: &OwnerId,
     session_id: SessionId,
 ) -> Result<Option<String>> {
-    use sea_orm::{sea_query::Expr, DatabaseBackend};
+    use sea_orm::sea_query::Expr;
     let kind = match store.conn.get_database_backend() {
         DatabaseBackend::Postgres => "event->>'type' = 'model_reported'",
         _ => "json_extract(event, '$.type') = 'model_reported'",

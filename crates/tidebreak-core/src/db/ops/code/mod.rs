@@ -22,6 +22,7 @@ pub mod grant;
 pub mod incarnation;
 pub mod inference;
 pub mod journal;
+pub(in crate::db) mod journal_writer;
 pub mod managed_decision;
 pub mod native_tool_receipt;
 pub mod pull_request;
@@ -116,3 +117,5 @@ where
 
 mod native_turn_identity;
 pub use native_turn_identity::*;
+
+pub use super::memory::count_session_memory_proposals;

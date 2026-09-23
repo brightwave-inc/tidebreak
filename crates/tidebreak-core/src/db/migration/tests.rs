@@ -575,7 +575,7 @@ fn seeded_event_inserts(chat_id: &str, turn_id: Option<&str>) -> String {
 /// order, with the same content, from the one journal.
 async fn assert_chat_replay(db: &sea_orm::DatabaseConnection, chat_id: uuid::Uuid) {
     use crate::storage::Store as _;
-    let store = crate::db::DbStore { conn: db.clone() };
+    let store = crate::db::DbStore::over(db.clone());
     let replayed = store
         .list_events(crate::SessionId(chat_id), 0)
         .await
@@ -1292,7 +1292,7 @@ async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
         );
     }
     let chat_id = crate::SessionId(uuid::Uuid::from_u128(0xe001));
-    let store = crate::db::DbStore { conn: db.clone() };
+    let store = crate::db::DbStore::over(db.clone());
     let owner = crate::OwnerId::local();
 
     let mut rows =

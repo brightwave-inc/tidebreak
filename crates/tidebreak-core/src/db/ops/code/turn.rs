@@ -332,6 +332,74 @@ pub async fn count_turns(store: &DbStore, owner: &OwnerId, session_id: SessionId
         .map_err(|_| AgentError::Store(format!("turn count overflow for session {session_id}")))
 }
 
+/// When one of the owner's sessions started its newest turn, if it has one.
+pub async fn latest_turn_started_at(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::StartedAt)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::turn::Column::Ordinal)
+        .limit(1)
+        .into_tuple::<chrono::DateTime<chrono::Utc>>()
+        .one(&store.conn)
+        .await
+        .map_err(store_err)
+}
+
+/// The narrative of the newest turn that has one, for one of the owner's
+/// sessions.
+pub async fn latest_turn_narrative(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Option<String>> {
+    entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::Narrative)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .filter(entities::turn::Column::Narrative.is_not_null())
+        .order_by_desc(entities::turn::Column::Ordinal)
+        .limit(1)
+        .into_tuple::<String>()
+        .one(&store.conn)
+        .await
+        .map_err(store_err)
+}
+
+/// Up to `limit` of one session's turn inputs, oldest first, starting after
+/// the turn numbered `after_ordinal`. Returns each input with its ordinal so
+/// a caller can ask for the next page.
+pub async fn list_turn_inputs(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    after_ordinal: Option<i64>,
+    limit: u64,
+) -> Result<Vec<(i64, String)>> {
+    let mut query = entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::Ordinal)
+        .column(entities::turn::Column::UserInput)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0));
+    if let Some(after) = after_ordinal {
+        query = query.filter(entities::turn::Column::Ordinal.gt(after));
+    }
+    query
+        .order_by_asc(entities::turn::Column::Ordinal)
+        .limit(limit)
+        .into_tuple::<(i64, String)>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)
+}
+
 /// Most recently created turn for one of the owner's sessions, if any.
 pub async fn latest_turn(
     store: &DbStore,

@@ -2285,6 +2285,10 @@ async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
 /// (#2316). WAL lets readers run beside the writer, so a modest pool is
 /// enough for interactive requests to pass a stalled one. Keep it fixed: this
 /// is a floor for responsiveness, not a tuning surface.
+///
+/// On SQLite this sizes the read pool. The store opens one more connection
+/// for writes, and every write queues for it in order, so a queue of writers
+/// can no longer hold the connections reads need.
 #[doc(hidden)]
 pub const HOST_MAX_CONNECTIONS: u32 = 8;
 

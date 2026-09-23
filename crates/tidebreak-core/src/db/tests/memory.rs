@@ -433,3 +433,117 @@ async fn a_failed_merge_approval_leaves_every_source_untouched() {
     assert_eq!(still_proposed.status, MemoryStatus::Proposed);
     assert_eq!(still_proposed.revision, 1);
 }
+
+/// A code session's proposal chip counts only proposals its own turns
+/// produced: the origin names the session and the evidence cites its
+/// journal. The count runs in the database, so it must agree with that rule
+/// without loading a record.
+#[tokio::test]
+async fn a_session_counts_only_the_proposals_its_own_journal_justifies() {
+    use crate::attention::{Attention, AttentionSource};
+    use crate::code::{
+        Event, ExecutionLocation, HarnessKind, Session, SessionId, SessionKind, SessionLifecycle,
+    };
+    use crate::db::code::{append_event, count_session_memory_proposals, insert_session};
+
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = Session {
+            visibility: crate::SessionVisibility::Private,
+            id: SessionId::new(),
+            owner: owner.clone(),
+            owner_kind: None,
+            workspace_id: None,
+            kind: SessionKind::Interactive,
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: crate::PermissionMode::Ask,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: SessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 0,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: at(0),
+            execution_location: ExecutionLocation::Machine,
+            acts_as: None,
+        };
+        insert_session(&store, &session).await.unwrap();
+        append_event(
+            &store,
+            &owner,
+            session.id,
+            0,
+            &Event::AssistantMessage {
+                text: "Use the staging database for migrations.".to_owned(),
+                parent_call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        sessions.push(session.id);
+    }
+    let (session, other) = (sessions[0], sessions[1]);
+    let proposal = |origin: Option<SessionId>, cited: SessionId, status: MemoryStatus| {
+        let mut record = user_record(
+            MemoryScope::Personal,
+            status,
+            "Staging",
+            "Migrate on staging.",
+            1,
+        );
+        record.provenance = MemoryProvenance {
+            author: MemoryAuthor::Model,
+            origin: MemoryOrigin {
+                code_session_id: origin,
+                ..Default::default()
+            },
+            evidence: vec![MemoryEvidence::Event {
+                session_id: cited,
+                seq: 1,
+            }],
+        };
+        record
+    };
+    for record in [
+        // Counted: this session's turn, justified by this session's journal.
+        proposal(Some(session), session, MemoryStatus::Proposed),
+        proposal(Some(session), session, MemoryStatus::Proposed),
+        // Not counted: evidence from another session's journal.
+        proposal(Some(session), other, MemoryStatus::Proposed),
+        // Not counted: cites this session but came from somewhere else.
+        proposal(None, session, MemoryStatus::Proposed),
+        proposal(Some(other), session, MemoryStatus::Proposed),
+        // Not counted: no longer a proposal.
+        proposal(Some(session), session, MemoryStatus::Active),
+    ] {
+        store.put(&owner, record).await.unwrap();
+    }
+
+    assert_eq!(
+        count_session_memory_proposals(&store, &owner, session)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        count_session_memory_proposals(&store, &owner, other)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        count_session_memory_proposals(&store, &OwnerId::new("user:bob").unwrap(), session)
+            .await
+            .unwrap(),
+        0
+    );
+}

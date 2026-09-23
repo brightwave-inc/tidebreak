@@ -66,7 +66,10 @@ async fn a_database_with_pending_migrations_is_copied_before_it_migrates() {
         store.get_setting("backup_probe").await.unwrap(),
         Some(serde_json::json!("kept"))
     );
-    assert_eq!(recorded_count(&store.conn).await, migration_names().len());
+    assert_eq!(
+        recorded_count(store.conn.writer()).await,
+        migration_names().len()
+    );
     let copies = pre_migration_copies(&backups);
     assert_eq!(copies.len(), 1, "copies: {copies:?}");
     let name = copies[0].file_name().unwrap().to_str().unwrap();

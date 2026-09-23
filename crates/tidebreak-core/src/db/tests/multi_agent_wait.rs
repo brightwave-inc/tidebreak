@@ -1306,7 +1306,7 @@ async fn a_consumed_wait_set_child_cannot_be_reparked_on_a_new_wait() {
 #[ignore = "one-turn-lane down is a no-op"]
 async fn baseline_migration_rolls_back_multi_wait_dependencies_in_fk_order() {
     let (_dir, store) = temp_store().await;
-    crate::db::migration::Migrator::down(&store.conn, None)
+    crate::db::migration::Migrator::down(store.conn.writer(), None)
         .await
         .unwrap();
 }
