@@ -61,11 +61,14 @@ pub fn set_usage_family(family: Family) {
     USAGE_FAMILY.with(|slot| slot.set(family));
 }
 
-/// Print a usage error for the current family and exit 2.
+/// Exit status for a usage error: a bad flag or argument.
+pub(crate) const EXIT_USAGE: i32 = 2;
+
+/// Print a usage error for the current family and exit with [`EXIT_USAGE`].
 pub fn usage_error(message: &str) -> ! {
     let family = USAGE_FAMILY.with(Cell::get);
     eprintln!("tidebreak: {message}\n\n{}", family.usage_text());
-    std::process::exit(2);
+    std::process::exit(EXIT_USAGE);
 }
 
 /// True when `arg` is a help request (`--help`, `-h`, or `help`).
@@ -498,7 +501,7 @@ fn top_help_text() -> &'static str {
     TOP_HELP.get_or_init(top_help)
 }
 
-fn top_usage_text() -> &'static str {
+pub(crate) fn top_usage_text() -> &'static str {
     TOP_USAGE.get_or_init(top_usage)
 }
 

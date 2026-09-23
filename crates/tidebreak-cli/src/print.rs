@@ -54,16 +54,16 @@ use driver::Driver;
 use protocol::{Decision, Halt, HaltReason, Interaction, Undriven};
 
 /// Exit status for a turn that ended without completing.
-const EXIT_TURN_UNSUCCESSFUL: i32 = 1;
+pub(crate) const EXIT_TURN_UNSUCCESSFUL: i32 = 1;
 /// Exit status for a turn that parked on something no driver was there to
 /// answer. Distinct from a failed turn: nothing went wrong, nobody answered.
-const EXIT_INTERACTION_UNDRIVEN: i32 = 3;
+pub(crate) const EXIT_INTERACTION_UNDRIVEN: i32 = 3;
 /// Exit status for a decision that was made but could not be applied — the
 /// driver answered and the server refused or was unreachable.
-const EXIT_DECISION_FAILED: i32 = 4;
+pub(crate) const EXIT_DECISION_FAILED: i32 = 4;
 /// Exit status for interruption by SIGINT, following the shell's 128+signal
 /// convention.
-const EXIT_INTERRUPTED: i32 = 130;
+pub(crate) const EXIT_INTERRUPTED: i32 = 130;
 
 /// How often a folder refusal asks whether its call has become claimable, and
 /// the ceiling that interval backs off to.

@@ -18,7 +18,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use super::wire::{
     AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, DeliverablePreview,
     DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog, PendingPlanApproval,
-    PendingUserQuestions, ProviderInfo, ProvidersList,
+    PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -1022,7 +1022,32 @@ impl Client {
     pub(crate) fn base_url(&self) -> &str {
         &self.base
     }
+
+    /// What the server says about its own version, or `None` when it says
+    /// nothing this client can read.
+    ///
+    /// `None` covers a server that predates `GET /version` (a `404`), a page
+    /// in front of it, and a request that failed outright. The caller treats
+    /// all of them as compatible: the check exists to explain a version gap,
+    /// and a server this client cannot reach fails the next request with its
+    /// own error.
+    pub async fn server_version(&self) -> Option<ServerVersion> {
+        let response = self
+            .http
+            .get(format!("{}/version", self.base))
+            .timeout(VERSION_PROBE_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        let status = response.status().as_u16();
+        let body = response.bytes().await.ok()?;
+        ServerVersion::from_answer(status, &body)
+    }
 }
+
+/// How long the attach-time version check waits before it gives up and lets
+/// the command's own first request report the problem.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The second per-launch credential, presented on the client-executor routes.
 ///

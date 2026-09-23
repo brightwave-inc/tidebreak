@@ -5,18 +5,14 @@
 //! from [`tidebreak_server::wire`]. The CLI used to keep a hand-written mirror
 //! here, and it drifted: a field the server renamed or made optional compiled
 //! on both sides and failed when the CLI next read it. Importing the server's
-//! types makes a rename a compile error, and brings the renderer's strictness
-//! with it (see the `wire` module doc): unknown keys fail a snapshot, an
-//! unknown notice tag fails the notice, and an unknown event type fails its
-//! frame. A reader drops a failed frame or notice and keeps the socket open.
-//!
-//! One tolerance stays, and it is the server's, not this crate's: the event
-//! union inside a frame is `tidebreak_core::Event`, which the server also
-//! reads back from its own journal, so a variant accepts keys it does not
-//! declare. The frame around it does not.
+//! types makes a rename a compile error and brings that module's contract
+//! with it: unknown keys are ignored, an unknown notice tag fails the notice,
+//! and an unknown event type fails its frame. A reader skips a failed frame or
+//! notice, counts it, reports it on stderr, and keeps the socket open.
 //!
 //! `crates/tidebreak-server-api/fixtures/code-frames.json` holds one real value of
-//! every snapshot, notice, and event; the test at the bottom decodes each one.
+//! every snapshot, notice, and event; the test at the bottom decodes each one
+//! and serializes it back, so a key a type does not declare still fails there.
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
@@ -36,8 +32,8 @@ use super::client::{Client, EventSocket};
 /// Result of `POST /sessions/{id}/turns`: the turn that ran or the follow-up
 /// the server parked, both on `202`. The server answers with one of
 /// two snapshots rather than a tagged union, so this is the one code-mode
-/// shape the client composes itself. Both arms reject unknown keys, so a
-/// snapshot that matches neither fails rather than folding into the other.
+/// shape the client composes itself. The two share no required field, so a
+/// snapshot decodes as exactly one arm even though both ignore unknown keys.
 /// Both arms are boxed: a turn snapshot was always several times the size of
 /// a queued row, and the queued row grew a full actor with its trigger
 /// context; the enum is passed around by value.
@@ -723,10 +719,10 @@ mod tests {
         assert!(decode_update_notice(r#"{"type":"future_kind","extra":true}"#).is_err());
     }
 
-    /// A key the server does not declare fails the snapshot, as it does in
-    /// the renderer.
+    /// A key a newer server adds is ignored, and the untagged submit answer
+    /// still lands on the arm its required fields name.
     #[test]
-    fn snapshots_reject_unknown_keys() {
+    fn snapshots_ignore_unknown_keys() {
         let queued = serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000006",
             "session_id": "00000000-0000-0000-0000-000000000003",
@@ -735,10 +731,12 @@ mod tests {
             "created_at": "2026-09-01T04:56:10Z",
             "updated_at": "2026-09-01T04:56:10Z",
         });
-        assert!(serde_json::from_value::<SubmitTurnResponse>(queued.clone()).is_ok());
+        let plain = serde_json::from_value::<SubmitTurnResponse>(queued.clone()).expect("reads");
         let mut extra = queued;
         extra["extra"] = serde_json::Value::Bool(true);
-        assert!(serde_json::from_value::<SubmitTurnResponse>(extra).is_err());
+        let tolerated = serde_json::from_value::<SubmitTurnResponse>(extra).expect("reads");
+        assert!(matches!(tolerated, SubmitTurnResponse::Queued(_)));
+        assert_eq!(tolerated, plain);
     }
 
     /// Path of the server's code-mode fixtures, relative to this crate.

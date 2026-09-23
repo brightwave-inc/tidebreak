@@ -618,11 +618,10 @@ fn scope_json(scope: &Scope) -> serde_json::Value {
     }
 }
 
-/// Write one JSON object on stdout, matching setup's one-object shape so a
-/// driver can read either family the same way.
+/// Write one JSON document on stdout, one object on one line, stamped with
+/// its `schema_version`. See [`crate::json_output`].
 fn emit_json(value: &serde_json::Value) -> Result<()> {
-    println!("{value}");
-    Ok(())
+    crate::json_output::print_document(value)
 }
 
 fn folder_label(display_name: Option<&str>, root_id: RootId) -> String {
