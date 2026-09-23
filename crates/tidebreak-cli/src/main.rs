@@ -6,11 +6,13 @@
 //! per-launch bearer token it minted alongside the address — except on the
 //! self-host profile, where that token authenticates nobody and the address
 //! may be set with `TIDEBREAK_LISTEN_ADDR`. Configuration comes from
-//! the environment via [`Config::from_env`] (`TIDEBREAK_PROFILE`,
+//! the environment via [`profile::config`] (`TIDEBREAK_PROFILE`,
 //! `TIDEBREAK_DATA_DIR`, `TIDEBREAK_CONTAINER_EXECUTION_ENABLED`,
 //! `TIDEBREAK_CONTAINER_IMAGE`, and `TIDEBREAK_LISTEN_ADDR`); the model API key
 //! comes from `ANTHROPIC_API_KEY`, and `TIDEBREAK_MCP_CONFIG` may name an
-//! external stdio-server configuration file.
+//! external stdio-server configuration file. With `TIDEBREAK_DATA_DIR` unset,
+//! `serve` serves the Tidebreak app's own data, so it cannot run while the app
+//! does.
 //!
 //! `tidebreak mcp <workspace>` serves the built-in read-only filesystem tools over
 //! MCP stdio, confined to the explicit workspace directory.
@@ -79,16 +81,24 @@
 //! `tidebreak agent-mcp` serves chat-mode tools over MCP stdio so an external
 //! agent can drive a running Tidebreak over the attach contract. Unlike `mcp`
 //! and `browser-mcp` it accepts `--server` / `--attach`: it is a client, the
-//! same way `-p` is. See [`agent_mcp`].
+//! same way `-p` is. It runs a server of its own only with `--embed`. See
+//! [`agent_mcp`].
 //!
-//! Every client command above embeds its own server by default. `--server
-//! <url>` (or `TIDEBREAK_SERVER_URL`) makes it a pure client of one that is
-//! already running instead, with the bearer token coming from
-//! `TIDEBREAK_SERVER_TOKEN` — see [`connect`]. `--attach` is the same attach
-//! using `{TIDEBREAK_DATA_DIR}/listen.json` the running server wrote, so the
-//! token never rides argv (desktop or `serve`). That is how a second process
-//! reaches a data directory a desktop app or daemon already owns; two processes
-//! embedding servers over one data directory is refused.
+//! Which profile a command works on is [`profile`]'s decision:
+//! `TIDEBREAK_DATA_DIR` when it is set, and the Tidebreak app's own data
+//! otherwise. Nothing defaults to the current directory. With neither
+//! `TIDEBREAK_DATA_DIR` nor a flag, a client command connects to the app while
+//! it runs, and stops with what to do next when it does not. `--embed` runs
+//! the server in this process instead, and a set `TIDEBREAK_DATA_DIR` does the
+//! same for every client command but `agent-mcp`. `--server <url>` (or
+//! `TIDEBREAK_SERVER_URL`) makes a command a pure client of a server that is
+//! already running, with the bearer token coming from `TIDEBREAK_SERVER_TOKEN`
+//! — see [`connect`]. `--attach` reads the `listen.json` the running server
+//! wrote into the profile's data directory, so the token never rides argv.
+//! Two processes embedding servers over one data directory is refused.
+//!
+//! A bare `tidebreak` prints help. It used to run `serve`; `serve` is spelled
+//! out now, by the container entrypoint too.
 
 // `tidebreak-server/postgres` deepens the `output_command` async state machine
 // past rustc's default 128-query layout limit, which is how the self-host image
@@ -124,6 +134,7 @@ mod json_output;
 mod outputs;
 mod plugins;
 mod print;
+mod profile;
 mod setup;
 
 use help::{set_usage_family, usage_error, Family};
@@ -175,11 +186,15 @@ async fn run() -> Result<i32> {
     }
     let mut args = args.into_iter();
     match args.next().as_deref() {
-        // Default to `serve` so a bare `tidebreak` runs the daemon.
+        // A bare `tidebreak` asks what it can do. It used to run `serve` over
+        // whatever directory it ran in, which is how a stray profile appeared
+        // in a project folder.
         None => {
-            set_usage_family(Family::Daemon);
-            server_flags.refuse("serve");
-            serve().await.map(|()| 0)
+            if server_flags.given() {
+                usage_error("name a command to run with --server, --attach, or --embed");
+            }
+            help::print_help(Family::Top);
+            Ok(0)
         }
         Some(command) if command == OsStr::new("serve") => {
             set_usage_family(Family::Daemon);
@@ -424,9 +439,9 @@ async fn run() -> Result<i32> {
         Some(command) if command == OsStr::new("agent-mcp") => {
             set_usage_family(Family::AgentTools);
             if args.next().is_some() {
-                usage_error("agent-mcp accepts no arguments beyond --server/--attach");
+                usage_error("agent-mcp accepts no arguments beyond --server, --attach, or --embed");
             }
-            crate::agent_mcp::run(server_flags.resolve()?)
+            crate::agent_mcp::run(server_flags.resolve_without_implicit_embed("agent-mcp")?)
                 .await
                 .map(|()| 0)
         }
@@ -443,18 +458,47 @@ async fn run() -> Result<i32> {
     }
 }
 
-/// The `--server` / `--server-token-env` / `--attach` choice, lifted out of
-/// the arguments.
+/// The `--server` / `--server-token-env` / `--attach` / `--embed` choice,
+/// lifted out of the arguments.
 struct ServerFlags {
     url: Option<String>,
     token_env: Option<String>,
     attach: bool,
+    embed: bool,
 }
 
 impl ServerFlags {
     /// Turn the flags plus the environment into the choice to embed or attach.
     fn resolve(self) -> Result<connect::Server> {
-        connect::Server::resolve(self.url, self.token_env, self.attach)
+        connect::Server::resolve(connect::Flags {
+            url: self.url,
+            token_env: self.token_env,
+            attach: self.attach,
+            embed: self.embed,
+        })
+    }
+
+    /// [`Self::resolve`] for a command that drives a server that is already
+    /// running. It starts one of its own only when `--embed` says so; a set
+    /// `TIDEBREAK_DATA_DIR` alone is not enough, because a client that
+    /// launches it quietly gets an empty profile instead of the one it meant.
+    fn resolve_without_implicit_embed(self, command: &str) -> Result<connect::Server> {
+        let embed = self.embed;
+        let server = self.resolve()?;
+        if matches!(server, connect::Server::Embed) && !embed {
+            usage_error(&format!(
+                "{command} connects to a Tidebreak server that is already running, and \
+                 TIDEBREAK_DATA_DIR alone does not start one. Pass --attach to connect to \
+                 the server that owns that folder, --server <url> to connect to another, \
+                 or --embed to run one in this process."
+            ));
+        }
+        Ok(server)
+    }
+
+    /// Whether any connection flag was given.
+    fn given(&self) -> bool {
+        self.url.is_some() || self.token_env.is_some() || self.attach || self.embed
     }
 
     /// Refuse the flags on a command that has no client to point elsewhere.
@@ -463,17 +507,17 @@ impl ServerFlags {
     /// a shell that exports it so its `-p` runs attach must still be able to
     /// start a daemon.
     fn refuse(&self, command: &str) {
-        if self.url.is_some() || self.token_env.is_some() || self.attach {
+        if self.given() {
             usage_error(&format!(
-                "{command} runs a server rather than connecting to one, so it takes no --server/--attach"
+                "{command} takes no --server, --attach, or --embed"
             ));
         }
     }
 }
 
-/// Pull `--server <url>`, `--server-token-env <var>`, and `--attach` out of
-/// the arguments wherever they appear, leaving the rest for the per-command
-/// parsers.
+/// Pull `--server <url>`, `--server-token-env <var>`, `--attach`, and
+/// `--embed` out of the arguments wherever they appear, leaving the rest for
+/// the per-command parsers.
 ///
 /// A pre-pass rather than an option on each parser: the flags apply to every
 /// client command, and no command takes a value beginning with `--` (each
@@ -483,6 +527,7 @@ fn take_server_flags(args: Vec<OsString>) -> (Vec<OsString>, ServerFlags) {
         url: None,
         token_env: None,
         attach: false,
+        embed: false,
     };
     let mut rest = Vec::with_capacity(args.len());
     let mut args = args.into_iter();
@@ -492,6 +537,13 @@ fn take_server_flags(args: Vec<OsString>) -> (Vec<OsString>, ServerFlags) {
                 usage_error("--attach given more than once");
             }
             flags.attach = true;
+            continue;
+        }
+        if arg == OsStr::new("--embed") {
+            if flags.embed {
+                usage_error("--embed given more than once");
+            }
+            flags.embed = true;
             continue;
         }
         let slot = if arg == OsStr::new("--server") {
@@ -930,28 +982,11 @@ fn parse_output_trailing_flags(
     (revision, format)
 }
 
-/// Configuration for the profile this build talks to.
-///
-/// Debug builds keep their own keychain service, matching the desktop's
-/// dev/release split: a dev daemon must not mutate release secret state.
+/// Configuration for the profile this command works on: `TIDEBREAK_DATA_DIR`,
+/// or the Tidebreak app's own data directory, with the credential item that
+/// goes with it. See [`profile`].
 pub(crate) fn profile_config() -> Result<Config> {
-    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-    let mut config = Config::from_env()?;
-    #[cfg(debug_assertions)]
-    {
-        // `TIDEBREAK_KEYCHAIN_SERVICE` lets a headless rig point a debug daemon
-        // at a scratch keychain service. A freshly re-linked binary reading the
-        // shared `tidebreak.dev` items trips the macOS ACL prompt, which blocks
-        // a session with no UI forever; a scratch service starts empty and
-        // every item it creates is owned by this binary, so nothing prompts.
-        config.keychain_service = Some(
-            std::env::var("TIDEBREAK_KEYCHAIN_SERVICE")
-                .ok()
-                .filter(|service| !service.is_empty())
-                .unwrap_or_else(|| "tidebreak.dev".into()),
-        );
-    }
-    Ok(config)
+    profile::config()
 }
 
 /// Bind the server and run its accept loop, announcing where to reach it.

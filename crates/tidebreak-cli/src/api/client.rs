@@ -1069,6 +1069,17 @@ impl Client {
         &self.base
     }
 
+    /// Whether any server answers HTTP at this base within `timeout`, whatever
+    /// the status. A refused connection, or no answer in time, is `false`.
+    pub async fn answers(&self, timeout: std::time::Duration) -> bool {
+        self.http
+            .get(format!("{}/healthz", self.base))
+            .timeout(timeout)
+            .send()
+            .await
+            .is_ok()
+    }
+
     /// What the server says about its own version.
     ///
     /// `Ok(None)` covers a server that predates `GET /version` (a `404`), a
@@ -1381,7 +1392,7 @@ pub(crate) fn validated_server_base_url(value: &str) -> Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-fn server_url_is_loopback(base: &str) -> bool {
+pub(crate) fn server_url_is_loopback(base: &str) -> bool {
     reqwest::Url::parse(base).is_ok_and(|url| url_host_is_loopback(&url))
 }
 

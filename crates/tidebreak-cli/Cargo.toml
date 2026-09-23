@@ -45,6 +45,9 @@ chrono = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+# A profile other than the app's keeps its credentials under a keychain service
+# derived from a hash of its data directory.
+sha2 = { workspace = true }
 # PNG dimension sniffing for screenshot MCP output so the base-64 payload
 # never enters model-facing text or log data.
 image = { workspace = true }
