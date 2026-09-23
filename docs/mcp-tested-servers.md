@@ -63,6 +63,13 @@ The tier is computed from the *saved* definition on every read. While a server
 row is being edited and not yet saved, its label still describes the saved
 definition.
 
+The [directory](mcp-servers.md#directory) of remote servers reads the same
+list. An entry shows **Tested** only when a curated HTTP entry matches its URL,
+and shows no tier otherwise: being in the directory says a vendor publishes the
+server, not that we drove it. Adding a curated entry for a directory server's
+origin puts the label on both its directory row and the server once it is
+added.
+
 ## Adding an entry
 
 1. Mount the server in a real profile and work through the four contracts

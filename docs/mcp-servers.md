@@ -138,6 +138,48 @@ and call identically. See
 [Tested and community MCP servers](mcp-tested-servers.md) for what the tested
 claim covers and how a server earns an entry.
 
+## Directory
+
+**Settings → Connected apps → MCP servers** opens with a directory of
+well-known remote MCP servers. Each entry names the server, what it lets you
+do, how it signs in, and the host it connects to. Search matches the name, the
+description, and the host.
+
+**Add** saves the entry as an ordinary remote HTTP server and connects only
+that server, so a configured server that is down cannot block the add. The
+server is saved even when it cannot connect yet, and its row says what it
+needs:
+
+- **Sign in with your browser** — the server answers `401` and asks for an
+  OAuth sign-in. Tidebreak starts the
+  [sign-in](#oauth-for-remote-http-servers) right after the add and opens the
+  page in your browser. In a window attached to another machine, the row
+  offers Connect instead, because the sign-in has to finish on that machine.
+- **Reads a token from `VARIABLE`** — the server takes a token as a bearer.
+  Export the variable in the shell you start Tidebreak from, then restart
+  Tidebreak.
+- **No sign-in** — the server is public and connects at once.
+
+An add fails, and saves nothing, only when the server asks for an OAuth
+sign-in Tidebreak can never complete. Adding a server whose address is already
+configured changes nothing, and Settings shows the entry as **Added**. On a
+managed profile the directory is hidden, and `POST /mcp/directory/{id}/add`
+refuses the add like any other remote server a person types in.
+
+Each entry is an endpoint its vendor hosts and publishes in its own
+documentation. Tidebreak holds no OAuth app for any of them: a server that
+signs in registers Tidebreak with its own sign-in service each time (RFC
+7591), the same as any remote server that asks. The directory claims no tier.
+An entry shows **Tested** only when the curated list vouches for its address.
+
+The entries live in `crates/tidebreak-server/src/mcp_directory.json`, one
+server per line, compiled into the build. To add or correct an entry, change
+its line: `id` is the name the added server gets, `url` is the endpoint exactly
+as the vendor's documentation prints it, `docs` is that page, and `sign_in` is
+`{"kind": "oauth"}`, `{"kind": "token", "variable": "NAME"}`, or
+`{"kind": "none"}`. The unit tests check that the file parses, that every entry
+uses `https`, and that it makes a valid server definition.
+
 ## OAuth for remote HTTP servers
 
 A remote server that asks you to sign in shows **Sign in required** and a
@@ -248,6 +290,24 @@ not treated as degraded. **Reconnect and refresh tools** explicitly starts a
 fresh session and rediscovers its tool list. The runtime does the same after the
 server emits `notifications/tools/list_changed`.
 
+When Tidebreak starts, it opens its port first and connects the saved servers
+in the background, all at once. Each saved server reads **Connecting** until
+its first connection finishes, and publishes its tools the moment it is up, so
+one slow server holds up neither the app nor the servers beside it. Settings
+reads the list again while a server is connecting. A turn that starts while
+saved servers are still connecting waits for them for at most three seconds,
+then runs with the servers that are up; the rest join later turns. An engine
+that lists its tools through the connected-apps bridge waits the same way.
+
+A saved record Tidebreak cannot load does not stop it from starting. That is a
+record whose definition does not decode, for example one a newer version wrote
+with a setting this version does not know; one that fails validation; or one
+from before environment values moved into the credential store whose values
+cannot move now. Tidebreak skips the record, and **Connected apps** lists it
+with its name and why, and a **Remove** action that deletes it with the values
+and sign-in stored under it. A skipped record's tools never mount. A save keeps
+the record on file, unchanged, and its name stays taken until you remove it.
+
 Three failures stop the automatic retries, because retrying cannot fix them. A
 gateway mount without a gateway session waits for the next sign-in. A server
 whose parent environment variable is missing waits for a settings change or a
@@ -261,8 +321,10 @@ every retry.
 Saving a candidate connects every enabled server before replacing the current
 set. If validation or initialization fails, the previous set remains active. A
 remote server that asks you to sign in does not fail the save: it is saved and
-waits for Connect. Each running turn holds an immutable registry snapshot, so a
-configuration or tool-list change applies only to subsequent turns.
+waits for Connect. Adding a server from the [directory](#directory) is the
+exception: it connects only the new server. Each running turn holds an
+immutable registry snapshot, so a configuration or tool-list change applies
+only to subsequent turns.
 
 Discovery is fail-closed and bounded. Mounted names must fit the provider-safe
 64-byte `[A-Za-z0-9_-]` contract after namespacing. Tidebreak caps JSON-RPC frame
@@ -278,7 +340,10 @@ view for a tool through `_meta` (`ui.resourceUri`, or the legacy flat
 `ui/resourceUri` spelling). Tidebreak validates the declaration at discovery —
 it must be a bounded, control-character-free `ui://` URI; a malformed
 declaration fails the connection — and prefetches the document once per
-connection through `resources/read`, bounded at 1 MiB.
+connection through `resources/read`, bounded at 1 MiB. A server's views are
+fetched at the same time, each within five seconds, and its tools publish once
+they arrive. A view that does not arrive in time is left out, like one that
+fails.
 
 When such a tool completes successfully, its transcript card renders the
 declared view. The renderer event stream itself carries only a typed
@@ -386,4 +451,5 @@ the credential store and never appears in a response or a saved record, and a
 bootstrap file's values land in the same place as any other. When there is no
 saved desktop configuration, a malformed bootstrap file, missing selected
 environment name, or failed enabled server makes startup fail rather than
-silently narrowing the advertised tools.
+silently narrowing the advertised tools. That check needs the file's servers
+connected, so unlike saved servers they connect before the port opens.

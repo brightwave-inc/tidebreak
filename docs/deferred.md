@@ -106,7 +106,9 @@ model gateway entitlement. Tidebreak should consume those entitled apps or
 virtual MCP endpoints and explain what a gateway provides, while unmanaged
 users retain local escape hatches such as MCP mounting and user-provided REST
 definitions and credentials. Curated desktop-owned OAuth connectors are not on
-the current path.
+the current path. The MCP directory in Connected apps is not such a catalog: it
+lists servers their vendors host, each runs its own sign-in, and Tidebreak
+holds no OAuth app and runs no token service for them.
 
 Two related capabilities wait on clear boundaries: choosing governed REST
 operations to expose as foreground chat tools, and making gateway-attested MCP
