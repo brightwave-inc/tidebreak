@@ -28,6 +28,8 @@ use crate::code::CodeRuntime;
 use crate::engine::internal::InternalAdapter;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 
+use super::stack::on_turn_stack;
+
 /// One model completion the scripted provider answers with.
 enum Step {
     Tool {
@@ -1527,8 +1529,13 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
     }));
 }
 
-#[tokio::test]
-async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
+/// One of the deepest turn tests, so it runs on the 1 MiB turn stack.
+#[test]
+fn an_internal_agent_wait_resumes_through_one_adapter_park() {
+    on_turn_stack(internal_agent_wait_resumes);
+}
+
+async fn internal_agent_wait_resumes() {
     let (router, token, runtime, _ran, _dir, provider, state) =
         internal_engine_app_capturing(vec![
             Step::Tool {
@@ -2356,8 +2363,13 @@ async fn assert_internal_screenshot_hydrates_pixels(name: &'static str) {
     );
 }
 
-#[tokio::test]
-async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
+/// One of the deepest turn tests, so it runs on the 1 MiB turn stack.
+#[test]
+fn external_conversation_needs_no_repository_and_reuses_its_binding() {
+    on_turn_stack(external_conversation_reuses_its_binding);
+}
+
+async fn external_conversation_reuses_its_binding() {
     use tidebreak_core::PermissionMode;
     let (router, _token, runtime, _ran, _dir, _provider, _state) =
         internal_engine_app_capturing(vec![Step::Text(
@@ -2479,14 +2491,20 @@ async fn external_conversation_needs_no_repository_and_reuses_its_binding() {
 /// A machine with no sandbox runtime: a Slack conversation without a
 /// repository answers, then a follow-up starts repository work as a child
 /// workspace under the same grant. Placement stays on the machine.
-#[tokio::test]
-async fn external_conversation_without_runtime_answers_then_creates_a_machine_workspace_child() {
-    external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Allow).await;
+///
+/// These two are the deepest turn tests, so they run on the 1 MiB turn stack.
+#[test]
+fn external_conversation_without_runtime_answers_then_creates_a_machine_workspace_child() {
+    on_turn_stack(|| {
+        external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Allow)
+    });
 }
 
-#[tokio::test]
-async fn external_conversation_ask_approval_creates_a_machine_workspace_child() {
-    external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Ask).await;
+#[test]
+fn external_conversation_ask_approval_creates_a_machine_workspace_child() {
+    on_turn_stack(|| {
+        external_conversation_creates_machine_child(tidebreak_core::PermissionMode::Ask)
+    });
 }
 
 async fn external_conversation_creates_machine_child(mode: tidebreak_core::PermissionMode) {

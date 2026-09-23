@@ -8,9 +8,9 @@
 //! harness's threads both default to 2 MiB.
 //!
 //! [`boxed`] builds a future in its own short-lived frame and moves it to the
-//! heap, so the caller keeps only a pointer. The turn tests run on a 1 MiB
-//! stack (`tests::stack` in the server crate), so a frame that grows back
-//! fails a test instead of a release.
+//! heap, so the caller keeps only a pointer. The deepest turn tests also run
+//! on a 1 MiB stack (`crates/tidebreak-server-api/src/tests/stack.rs`), so a
+//! frame that grows back fails a test instead of a release.
 
 use futures::future::BoxFuture;
 

@@ -97,6 +97,7 @@ mod renderer_errors;
 mod root_attachment;
 mod sandbox;
 mod sandbox_runtime;
+mod stack;
 mod websocket;
 mod workers;
 mod workspace_config;

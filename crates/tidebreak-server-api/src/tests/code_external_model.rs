@@ -411,8 +411,13 @@ async fn post_external(
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-#[tokio::test]
-async fn repository_free_external_sessions_run_the_default_grant_model_and_refuse_revocation() {
+/// One of the deepest turn tests, so it runs on the 1 MiB turn stack.
+#[test]
+fn repository_free_external_sessions_run_the_default_grant_model_and_refuse_revocation() {
+    super::stack::on_turn_stack(repository_free_sessions_run_the_grant_model);
+}
+
+async fn repository_free_sessions_run_the_grant_model() {
     let fixture = fixture(false).await;
     let mut last_session = None;
     for (key, selection, expected_wire_model) in [
