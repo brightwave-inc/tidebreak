@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -10,6 +10,7 @@ import {
 
 import {
   MessageList,
+  TRANSCRIPT_TURNS_SHOWN,
   type ChatMessage,
   type RetryableTurn,
 } from "@/MessageList";
@@ -26,6 +27,8 @@ type ConversationTranscriptProps = {
   streamStalled?: boolean;
   pinLastTurn?: boolean;
   onRetryTurn?: (turn: RetryableTurn) => void;
+  hasEarlierMessages?: boolean;
+  onLoadEarlierMessages?: () => Promise<void>;
 };
 
 function withRouter(children: ReactNode) {
@@ -45,6 +48,8 @@ function ConversationTranscript({
   streamStalled = false,
   pinLastTurn = false,
   onRetryTurn,
+  hasEarlierMessages,
+  onLoadEarlierMessages,
 }: ConversationTranscriptProps) {
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(
     null,
@@ -96,6 +101,8 @@ function ConversationTranscript({
           onFolderAccessCancel={fn()}
           onSelectPrompt={fn()}
           onRetryTurn={onRetryTurn}
+          hasEarlierMessages={hasEarlierMessages}
+          onLoadEarlierMessages={onLoadEarlierMessages}
         />
         <TranscriptNavigation
           entries={navigationEntries}
@@ -587,5 +594,59 @@ export const Notices: Story = {
       await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);
       await expect(notice.scrollWidth).toBeLessThanOrEqual(notice.clientWidth);
     }
+  },
+};
+
+/**
+ * `count` turns of the audit exchange above, each with its own ids, oldest
+ * first — enough history for the transcript to open on its newest turns.
+ */
+function longConversation(count: number): ChatMessage[] {
+  const [question, answer] = [streamingMessages[0]!, denseMessages.at(-1)!];
+  return Array.from({ length: count }, (_, turn) => [
+    { ...question, id: `long-user-${turn}` },
+    { ...answer, id: `long-assistant-${turn}` },
+  ]).flat();
+}
+
+const earlierButton = (canvasElement: HTMLElement) =>
+  within(canvasElement).getByRole("button", { name: "Show earlier messages" });
+
+/**
+ * A long conversation opens on its newest turns. The control at the top
+ * reveals the turns already held before it fetches older ones.
+ */
+export const EarlierTurnsHeld: Story = {
+  args: { messages: longConversation(TRANSCRIPT_TURNS_SHOWN + 4) },
+  play: async ({ canvasElement }) => {
+    await expect(earlierButton(canvasElement)).toBeEnabled();
+  },
+};
+
+/** Every held turn is shown, and the page before them is on its way. */
+export const EarlierPageLoading: Story = {
+  args: {
+    messages: longConversation(3),
+    hasEarlierMessages: true,
+    onLoadEarlierMessages: () => new Promise<void>(() => undefined),
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(earlierButton(canvasElement));
+    await expect(earlierButton(canvasElement)).toBeDisabled();
+  },
+};
+
+/** The earlier page did not arrive; the control stays to try again. */
+export const EarlierPageFailed: Story = {
+  args: {
+    messages: longConversation(3),
+    hasEarlierMessages: true,
+    onLoadEarlierMessages: () => Promise.reject(new Error("offline")),
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(earlierButton(canvasElement));
+    await expect(
+      await within(canvasElement).findByRole("alert"),
+    ).toHaveTextContent("Could not load earlier messages");
   },
 };

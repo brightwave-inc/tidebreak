@@ -69,3 +69,27 @@ export const WrappedLocalUrl: Story = {
     ),
   ],
 };
+
+const OPEN_FENCE = `The resolver change is small. Here is the module so far:
+
+\`\`\`ts
+export function resolve(graph: Graph, name: string): Node | undefined {
+  const cached = graph.cache.get(name);
+  if (cached) return cached;
+  const node = graph.nodes.get(name) ?? graph.aliases.get(name);
+  if (node) graph.cache.set(name, node);
+  return node`;
+
+/**
+ * A code fence still being typed draws as plain text in the fence's own box,
+ * and takes its colors once it closes. Highlighting the whole fence again on
+ * every frame cost more than the frame.
+ */
+export const StreamingCodeFence: Story = {
+  args: { children: OPEN_FENCE, streaming: true },
+};
+
+/** The same fence once the closing line arrives: highlighted, same box. */
+export const ClosedCodeFence: Story = {
+  args: { children: `${OPEN_FENCE};\n}\n\`\`\``, streaming: true },
+};
