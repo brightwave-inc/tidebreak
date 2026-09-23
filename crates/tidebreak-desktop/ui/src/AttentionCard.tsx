@@ -3,11 +3,9 @@ import type { ReactNode } from "react";
 /**
  * The shared shell for a transcript card that parks the turn on the person.
  *
- * It is the same chrome the approval card wears — a bordered surface with a
- * short title, an optional explanatory line, and a footer for the error a
- * decision can surface — so consent prompts, folder requests, and clarifying
- * questions read as one family rather than three hand-rolled panels. Callers
- * own the body between the title and the error: option rows, notes, actions.
+ * A bordered surface with a short title, an optional explanatory line, and a
+ * footer for an error. Consent itself belongs on ApprovalCard. Callers own the
+ * body between the title and the error: notes, actions, setup links.
  */
 export function AttentionCard({
   title,
@@ -26,7 +24,7 @@ export function AttentionCard({
 }) {
   return (
     <section
-      className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
+      className="bg-background flex w-full min-w-0 flex-col gap-3 rounded-lg border p-4"
       aria-labelledby={titleId}
       aria-busy={busy}
     >

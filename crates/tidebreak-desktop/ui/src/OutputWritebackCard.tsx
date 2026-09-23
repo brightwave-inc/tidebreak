@@ -1,5 +1,6 @@
 import type { PendingOutputWritebackRequest } from "./api";
 import type { OutputWritebackDecision } from "./host";
+import { ApprovalChoiceRows } from "./ApprovalCard";
 import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 
@@ -67,23 +68,14 @@ export function OutputWritebackCard({
           </div>
         </>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("allow")}
-          >
-            {allowLabel}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("decline")}
-          >
-            Decline
-          </Button>
-        </div>
+        <ApprovalChoiceRows
+          disabled={!actionable}
+          onChoose={(key) => onDecision(key as OutputWritebackDecision)}
+          options={[
+            { key: "allow", label: allowLabel },
+            { key: "decline", label: "Decline", muted: true },
+          ]}
+        />
       )}
     </AttentionCard>
   );

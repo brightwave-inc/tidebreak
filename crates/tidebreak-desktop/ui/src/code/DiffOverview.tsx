@@ -16,6 +16,7 @@ import { DiffstatBadge } from "./TurnReviewCard";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { type LiveResource, useLiveResource } from "./useLiveContent";
 import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
+import { STATUS_TEXT } from "./statusTone";
 
 const FILE_KIND: Record<
   FileChangeKind,
@@ -24,22 +25,22 @@ const FILE_KIND: Record<
   added: {
     letter: "A",
     label: "Added",
-    className: "text-success-foreground",
+    className: STATUS_TEXT.ready,
   },
   modified: {
     letter: "M",
     label: "Modified",
-    className: "text-warning-foreground",
+    className: STATUS_TEXT.warning,
   },
   deleted: {
     letter: "D",
     label: "Deleted",
-    className: "text-critical-foreground",
+    className: STATUS_TEXT.critical,
   },
   renamed: {
     letter: "R",
     label: "Renamed",
-    className: "text-info-foreground",
+    className: STATUS_TEXT.pending,
   },
 };
 
@@ -404,10 +405,10 @@ function ChangeFileRow({
         <span className="min-w-0 flex-1 truncate text-md">{node.name}</span>
         <span className="flex shrink-0 items-center gap-1.5 font-mono text-2xs tabular-nums">
           {file.insertions > 0 && (
-            <span className="text-success-foreground">+{file.insertions}</span>
+            <span className={STATUS_TEXT.ready}>+{file.insertions}</span>
           )}
           {file.deletions > 0 && (
-            <span className="text-critical-foreground">−{file.deletions}</span>
+            <span className={STATUS_TEXT.critical}>−{file.deletions}</span>
           )}
           <span
             className={cn("w-2.5 text-right font-semibold", kind.className)}

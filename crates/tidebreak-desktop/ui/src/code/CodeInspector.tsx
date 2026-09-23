@@ -78,7 +78,7 @@ import {
   deliverySummaryFromWorkspacePr,
   workspacePullRequestTarget,
 } from "./workspaceWorkflow";
-import { STATUS_MARK } from "./statusTone";
+import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 import { isRemoteWorktreePath } from "./workspaceRemote";
 import {
   PULL_REQUEST_LIFECYCLE_TONE,
@@ -875,12 +875,22 @@ export function PrTab({
               {directMerge.label}
             </Button>
           ) : workflow.state === "queued" ? (
-            <div className="text-info-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
+            <div
+              className={cn(
+                STATUS_TEXT.pending,
+                "flex items-center gap-1.5 px-1 text-xs font-medium",
+              )}
+            >
               <CircleDashed className="size-3.5" />
               In merge queue
             </div>
           ) : pr.auto_merge_enabled ? (
-            <div className="text-success-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
+            <div
+              className={cn(
+                STATUS_TEXT.ready,
+                "flex items-center gap-1.5 px-1 text-xs font-medium",
+              )}
+            >
               <CircleCheck className="size-3.5" />
               Auto-merge is enabled
             </div>
@@ -1194,7 +1204,7 @@ function CheckList({
             label="passing"
             // These counts carry words, so they take the readable ink rather
             // than the mark colour the bare glyphs below use.
-            className="text-success-foreground"
+            className={STATUS_TEXT.ready}
           />
         )}
         {counts.pending > 0 && (
@@ -1210,7 +1220,7 @@ function CheckList({
             icon={<X className="size-3.5" />}
             count={counts.failing}
             label="failing"
-            className="text-critical-foreground"
+            className={STATUS_TEXT.critical}
           />
         )}
         {counts.skipped > 0 && (

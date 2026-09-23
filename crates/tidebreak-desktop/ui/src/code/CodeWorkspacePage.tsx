@@ -752,6 +752,8 @@ function CodeWorkspaceBody({
                 workspace?.status === "active" && (
                   <StartSessionPrompt
                     workspaceId={workspaceId}
+                    workspaceTitle={workspace.title}
+                    workspaceBranch={workspace.branch_name}
                     harnesses={doctorHarnesses}
                     starting={starting}
                     selectedMode={createMode}

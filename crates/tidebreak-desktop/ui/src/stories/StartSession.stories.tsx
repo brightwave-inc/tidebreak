@@ -182,6 +182,8 @@ function StartSession({
         <div className="flex h-full flex-col">
           <StartSessionPrompt
             workspaceId="ws-1"
+            workspaceTitle="acme/api"
+            workspaceBranch="feat/login"
             harnesses={harnesses}
             starting={starting}
             selectedMode={null}

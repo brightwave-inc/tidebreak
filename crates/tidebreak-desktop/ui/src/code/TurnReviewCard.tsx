@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { STATUS_TEXT } from "./statusTone";
 
 /**
  * What a turn came to, at the seam where it ended.
@@ -276,9 +277,7 @@ function SeamRow({
       aria-label={label}
       className={cn(
         "border-t pt-2 text-xs",
-        tone === "warning"
-          ? "text-warning-foreground"
-          : "text-muted-foreground",
+        tone === "warning" ? STATUS_TEXT.warning : "text-muted-foreground",
       )}
     >
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
@@ -299,9 +298,7 @@ function TurnRecap({
     <div
       className={cn(
         "mt-1.5 [&_.message-markdown]:text-xs",
-        tone === "critical"
-          ? "text-critical-foreground-muted"
-          : "text-muted-foreground",
+        tone === "critical" ? STATUS_TEXT.critical : "text-muted-foreground",
       )}
     >
       <AssistantMessageBody text={text} streaming={false} />
@@ -396,10 +393,10 @@ export function DiffstatBadge({ stat }: { stat: Diffstat }) {
       aria-label={`${fileLabel}, ${additionLabel}, ${deletionLabel}${stat.truncated ? ", truncated" : ""}`}
     >
       <span className="text-muted-foreground">{fileLabel}</span>
-      <span className="text-success-foreground">+{stat.insertions}</span>
-      <span className="text-critical-foreground">−{stat.deletions}</span>
+      <span className={STATUS_TEXT.ready}>+{stat.insertions}</span>
+      <span className={STATUS_TEXT.critical}>−{stat.deletions}</span>
       {stat.truncated && (
-        <span className="text-warning-foreground">· truncated</span>
+        <span className={STATUS_TEXT.warning}>· truncated</span>
       )}
     </Badge>
   );

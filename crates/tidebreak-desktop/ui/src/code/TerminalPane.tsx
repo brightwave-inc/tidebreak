@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import type { ApiClient } from "../api/client";
 import { Button } from "@/components/ui/button";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { openInBrowser } from "@/openInBrowser";
 import { resolveShellShortcut, usesCommandModifier } from "../ShellShortcuts";
+import { STATUS_TEXT } from "./statusTone";
 
 const POLL_MS = 200;
 const FRAME_BUDGET = 8 * 1024;
@@ -16,8 +20,8 @@ const TRUNCATION_TEXT = "[output truncated]";
 /**
  * xterm theme built from the live CSS tokens on `:root`.
  *
- * Status quads supply the ANSI hues. Magenta has no token of its own, so it
- * reuses the critical foreground; cyan reuses info.
+ * Status quads supply the ANSI hues. Magenta uses the violet identity ink so
+ * it does not read as critical red. Cyan reuses info.
  */
 export type XtermTheme = {
   background: string;
@@ -59,6 +63,7 @@ export function readXtermTheme(
   const criticalFg = token("--critical-foreground", "#fca5a5");
   const info = token("--info", "#3b82f6");
   const infoFg = token("--info-foreground", "#93c5fd");
+  const magenta = token("--icon-violet", "#7c3aed");
 
   return {
     background,
@@ -70,7 +75,7 @@ export function readXtermTheme(
     green: success,
     yellow: warning,
     blue: info,
-    magenta: criticalFg,
+    magenta,
     cyan: infoFg,
     white: foreground,
     brightBlack: muted,
@@ -78,7 +83,7 @@ export function readXtermTheme(
     brightGreen: successFg,
     brightYellow: warningFg,
     brightBlue: infoFg,
-    brightMagenta: criticalFg,
+    brightMagenta: magenta,
     brightCyan: infoFg,
     brightWhite: foreground,
   };
@@ -295,6 +300,12 @@ export function TerminalPane({
   const [writeFailure, setWriteFailure] = useState<TerminalWriteFailure | null>(
     null,
   );
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findOpenRef = useRef(false);
+  findOpenRef.current = findOpen;
 
   // `ended` turns true only once the process is gone and its last bytes are
   // read, so a caller that acts on it sees the whole output first.
@@ -306,17 +317,26 @@ export function TerminalPane({
     const host = hostRef.current;
     if (!host) return;
     const term = new Terminal({
-      convertEol: true,
+      convertEol: false,
       fontSize: 13,
+      fontFamily: '"Geist Mono", "SF Mono", ui-monospace, Menlo, monospace',
+      scrollback: 10000,
       cursorBlink: true,
       theme: readXtermTheme(),
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
+    const links = new WebLinksAddon((_event, uri) => {
+      void openInBrowser(uri);
+    });
     term.loadAddon(fit);
+    term.loadAddon(search);
+    term.loadAddon(links);
     term.open(host);
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+    searchAddonRef.current = search;
 
     const dataSub = term.onData((data) => {
       const active = activeTerminalRef.current;
@@ -336,6 +356,26 @@ export function TerminalPane({
     });
     const command = usesCommandModifier(navigator.userAgent);
     function onKeyDownCapture(event: KeyboardEvent) {
+      if (
+        event.key === "f" &&
+        !event.altKey &&
+        ((command && event.metaKey && !event.ctrlKey) ||
+          (!command && event.ctrlKey && !event.metaKey))
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setFindOpen(true);
+        queueMicrotask(() => findInputRef.current?.focus());
+        return;
+      }
+      if (event.key === "Escape" && findOpenRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        setFindOpen(false);
+        search.clearDecorations();
+        term.focus();
+        return;
+      }
       const def = resolveShellShortcut(event, {
         editable: true,
         modalOpen: false,
@@ -838,10 +878,10 @@ export function TerminalPane({
           role="alert"
         >
           <div className="min-w-0">
-            <p className="text-sm font-medium text-critical-foreground">
+            <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
               Terminal input paused · {unsentLabel}
             </p>
-            <p className="mt-0.5 text-xs text-critical-foreground-muted">
+            <p className={cn("mt-0.5 text-xs", STATUS_TEXT.critical)}>
               {asSentence(writeFailure.message)} Try again sends the input to
               this shell and can repeat it if the first request arrived.
               Reconnect discards it and opens a new shell. Discard drops it and
@@ -878,10 +918,10 @@ export function TerminalPane({
           role="alert"
         >
           <div className="min-w-0">
-            <p className="text-sm font-medium text-critical-foreground">
+            <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
               {terminalError.message}
             </p>
-            <p className="mt-0.5 text-xs text-critical-foreground-muted">
+            <p className={cn("mt-0.5 text-xs", STATUS_TEXT.critical)}>
               {terminalError.kind === "read"
                 ? "Input is paused so you do not send commands without seeing the result."
                 : "Input stays paused until the shell opens."}
@@ -909,6 +949,60 @@ export function TerminalPane({
           aria-label="Terminal output"
           aria-disabled={inputPaused}
         />
+        {findOpen && (
+          <form
+            className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 shadow-sm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              searchAddonRef.current?.findNext(findQuery);
+            }}
+          >
+            <input
+              ref={findInputRef}
+              type="search"
+              value={findQuery}
+              onChange={(event) => {
+                const next = event.target.value;
+                setFindQuery(next);
+                if (next) searchAddonRef.current?.findNext(next);
+              }}
+              placeholder="Find"
+              aria-label="Find in terminal"
+              className="h-7 w-40 bg-transparent text-xs outline-hidden"
+            />
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Find previous"
+              onClick={() => searchAddonRef.current?.findPrevious(findQuery)}
+            >
+              ↑
+            </Button>
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Find next"
+              onClick={() => searchAddonRef.current?.findNext(findQuery)}
+            >
+              ↓
+            </Button>
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Close find"
+              onClick={() => {
+                setFindOpen(false);
+                searchAddonRef.current?.clearDecorations();
+                termRef.current?.focus();
+              }}
+            >
+              ×
+            </Button>
+          </form>
+        )}
         {!attached && !terminalError && (
           // Spawning a shell and reading its first bytes takes a moment, and
           // an empty black rectangle is indistinguishable from one that

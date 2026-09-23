@@ -83,11 +83,11 @@ export function HarnessPicker({
           aria-label="Engine"
           className={
             variant === "composer"
-              ? "h-8 w-auto max-w-44 min-w-0 shrink-0 gap-2 border-transparent px-2 hover:bg-accent hover:text-accent-foreground"
+              ? "h-8 w-auto min-w-40 shrink-0 gap-2 border-transparent px-2 hover:bg-accent hover:text-accent-foreground"
               : undefined
           }
         >
-          <SelectValue placeholder="No engine detected">
+          <SelectValue placeholder="Choose an engine">
             {selected && SelectedIcon && (
               <span className="flex items-center gap-2">
                 <SelectedIcon className="size-4 shrink-0" />
