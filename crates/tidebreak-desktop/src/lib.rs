@@ -1392,6 +1392,33 @@ mod bundle_tests {
         assert_eq!(names, REQUIRED_SKILLS);
         verify_required_plugins(&skills_dir, &resource("plugins/")).unwrap();
     }
+
+    /// Release builds run under the hardened runtime, which refuses the
+    /// microphone to an app without the audio-input entitlement, however the
+    /// person answers the permission prompt. The voice composer records
+    /// through the webview, so the bundle that declares a microphone purpose
+    /// must also carry the entitlement.
+    #[test]
+    fn a_bundle_that_asks_for_the_microphone_is_entitled_to_it() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |name: &str| std::fs::read_to_string(manifest_dir.join(name)).unwrap();
+        assert!(
+            read("Info.plist").contains("<key>NSMicrophoneUsageDescription</key>"),
+            "Info.plist no longer explains microphone use; drop this test with the entitlement"
+        );
+        let conf: serde_json::Value = serde_json::from_str(&read("tauri.conf.json")).unwrap();
+        let entitlements = conf["bundle"]["macOS"]["entitlements"]
+            .as_str()
+            .expect("tauri.conf.json signs the macOS bundle with an entitlements file");
+        let entitlements: String = read(entitlements)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            entitlements.contains("<key>com.apple.security.device.audio-input</key><true/>"),
+            "the entitlements file must grant com.apple.security.device.audio-input"
+        );
+    }
 }
 
 #[cfg(test)]
