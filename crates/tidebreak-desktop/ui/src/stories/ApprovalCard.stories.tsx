@@ -33,6 +33,17 @@ type Story = StoryObj<typeof meta>;
 
 export const NetworkedCommand: Story = {};
 
+export const QuestionFocused: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "On mount the card focuses the question, not a choice. Hover only highlights.",
+      },
+    },
+  },
+};
+
 export const RepositoryWork: Story = {
   args: {
     ...toolApprovalPresentation("code_session_may_run_repository_agent"),

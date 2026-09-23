@@ -1,6 +1,6 @@
 import { Component, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 
 type ErrorBoundaryProps = {
   children: ReactNode;
@@ -63,11 +63,8 @@ export class ErrorBoundary extends Component<
     if (this.props.fallback !== undefined) return this.props.fallback;
     return (
       <div className="boot" role="alert">
-        <div className="boot-brand">
-          <Logomark />
-          <h1>Tidebreak</h1>
-        </div>
-        <p>Tidebreak hit an unexpected error.</p>
+        <BootBrand />
+        <h1>Tidebreak hit an unexpected error.</h1>
         <p className="boot-error-detail">{String(this.state.error.message)}</p>
         <Button
           size="sm"

@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApprovalCard } from "./ApprovalCard";
+import { APPROVAL_SHORTCUT_GRACE_MS, ApprovalCard } from "./ApprovalCard";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
 import { readDeliverable } from "./deliverables";
@@ -105,14 +105,16 @@ describe("approval card interactions", () => {
     render(card());
 
     const options = approvalChoices();
-    expect(options[0]).toHaveAttribute("aria-pressed", "true");
+    expect(options[0]).toHaveClass("bg-muted");
     expect(options[0]?.textContent).toBe(ONCE);
   });
 
   it("arms its keyboard shortcuts without needing a click first", () => {
     render(card());
 
-    expect(document.activeElement).toBe(approvalChoices()[0]);
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Search a site" }),
+    );
   });
 
   it("leaves focus alone when the user is typing elsewhere", () => {
@@ -126,10 +128,47 @@ describe("approval card interactions", () => {
     composer.remove();
   });
 
+  it("does not decide when Space is pressed in the composer over a choice", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    const composer = document.createElement("textarea");
+    document.body.append(composer);
+    composer.focus();
+    render(card({ onDecide }));
+
+    await user.pointer({ target: approvalChoices()[1]!, keys: "[MouseMove]" });
+    await user.keyboard(" ");
+    expect(onDecide).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(composer);
+    composer.remove();
+  });
+
+  it("decides with Enter on the highlighted row, never with Space", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    render(card({ onDecide }));
+    await new Promise((resolve) =>
+      setTimeout(resolve, APPROVAL_SHORTCUT_GRACE_MS + 10),
+    );
+
+    approvalChoices()[1]?.focus();
+    await user.keyboard(" ");
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    expect(onDecide).toHaveBeenLastCalledWith(
+      "call-1",
+      "approve",
+      "whole_tool",
+    );
+  });
+
   it("selects from the keyboard; Enter or Submit confirms the highlight", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
+    await new Promise((resolve) =>
+      setTimeout(resolve, APPROVAL_SHORTCUT_GRACE_MS + 10),
+    );
 
     await user.keyboard("{ArrowDown}");
     expect(onDecide).not.toHaveBeenCalled();
@@ -151,6 +190,9 @@ describe("approval card interactions", () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
+    await new Promise((resolve) =>
+      setTimeout(resolve, APPROVAL_SHORTCUT_GRACE_MS + 10),
+    );
 
     await user.keyboard("{ArrowUp}{Enter}");
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
@@ -334,8 +376,11 @@ describe("approval card interactions", () => {
 
     // "More options" sat at row 4; expanding puts a broader grant there. A
     // stray Enter must not commit whatever moved under the cursor.
+    await new Promise((resolve) =>
+      setTimeout(resolve, APPROVAL_SHORTCUT_GRACE_MS + 10),
+    );
     await user.keyboard("4{Enter}");
-    expect(approvalChoices()[0]).toHaveAttribute("aria-pressed", "true");
+    expect(approvalChoices()[0]).toHaveClass("bg-muted");
     expect(onDecide).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);

@@ -3,7 +3,7 @@ import { Laptop, RotateCw } from "lucide-react";
 
 import type { Attachment } from "./api";
 import { copyPlainText } from "./ClipboardCopyButton";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { Button } from "@/components/ui/button";
 
@@ -161,11 +161,8 @@ export function BootFailure({
   return (
     <div className="boot" role="alert">
       <WindowDragStrip />
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
-      <p>{headline(attachment, stage)}</p>
+      <BootBrand />
+      <h1>{headline(attachment, stage)}</h1>
       <p className="boot-error-detail">{String(error)}</p>
       {machine && (
         <p className="boot-error-hint">

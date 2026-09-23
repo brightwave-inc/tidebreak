@@ -9,7 +9,7 @@ import {
   consoleSignInUrl,
   oidcSignInUrl,
 } from "./hostedSession";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /**
@@ -164,12 +164,9 @@ export function HostedSignIn({
   return (
     <div className="boot" aria-label="Sign in required">
       <WindowDragStrip />
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
+      <BootBrand />
       <div className="welcome-copy">
-        <h2>{title}</h2>
+        <h1>{title}</h1>
         <p>{detail}</p>
         {nextStep && <p>{nextStep}</p>}
       </div>

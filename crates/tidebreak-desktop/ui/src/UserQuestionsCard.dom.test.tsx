@@ -164,4 +164,18 @@ describe("UserQuestionsCard", () => {
     await user.click(skip);
     expect(onAnswer).not.toHaveBeenCalled();
   });
+
+  it("exposes each option as a labeled control, not a nested button", () => {
+    render(
+      <UserQuestionsCard
+        request={request}
+        working={false}
+        error={undefined}
+        onAnswer={vi.fn()}
+      />,
+    );
+    const staging = screen.getByRole("checkbox", { name: "Staging" });
+    expect(staging.closest("[role='button']")).toBeNull();
+    expect(staging).toHaveAttribute("aria-describedby");
+  });
 });
