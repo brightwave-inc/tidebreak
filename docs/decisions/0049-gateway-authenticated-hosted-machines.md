@@ -1,6 +1,6 @@
 # 49. Gateway-authenticated hosted machines
 
-- Status: Accepted
+- Status: Accepted (amended 2026-09-23, see [Amendment](#amendment-2026-09-23))
 - Date: 2026-08-19
 - Owners: server, desktop
 - Related: [`0047-gateway-linked-hosting.md`](0047-gateway-linked-hosting.md),
@@ -71,3 +71,18 @@ and all owner-scoped code-mode storage keys derive from that principal.
 - The desktop stores no Gateway resource token for a Gateway-backed attachment
   and refreshes before access-token expiry.
 - Static-token self-host tests continue to pass unchanged.
+
+## Amendment (2026-09-23)
+
+Point 4 lists what the public discovery metadata names. It now also names the
+machine's release and API level, as `version` and `api_level` beside the
+mode. `GET /version` answers the same two keys on their own, and `/healthz`
+carries them beside `status`. All three answer without a bearer.
+
+A client reads the level before it holds a credential, so it can refuse a
+machine it does not read with a message that says which side to update,
+instead of failing later on data it cannot decode. The keys add the machine's
+release to what anyone who can reach it learns. They carry no user data,
+configuration, or credential. The version handshake itself is described in
+decision 100's amendment and in
+[`crates/tidebreak-server/src/server_version.rs`](../../crates/tidebreak-server/src/server_version.rs).

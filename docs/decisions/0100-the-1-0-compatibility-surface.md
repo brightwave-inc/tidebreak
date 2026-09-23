@@ -1,6 +1,6 @@
 # 100. The 1.0 compatibility surface
 
-- Status: Accepted
+- Status: Accepted (amended 2026-09-23, see [Amendment](#amendment-2026-09-23))
 - Date: 2026-09-23
 - Owners: core, desktop, CLI
 - Related: [`0061-schema-changes-are-migrations.md`](0061-schema-changes-are-migrations.md)
@@ -186,3 +186,29 @@ The case a plausible wrong implementation still passes: an appended migration
 that only works on a fresh database is green in every test that starts from
 one. `a_stepwise_upgrade_lands_on_the_fresh_schema` and the versioned upgrade
 fixtures catch it; a migration test that starts from a fresh database does not.
+
+## Amendment (2026-09-23)
+
+**What the CLI JSON promise covers.** Every document printed under
+`--output-format json` or `--json`, apart from the event streams, now carries
+`"schema_version": 1`. The field promise above covers the fields the CLI
+writes itself. Many documents also print a record as the server returned it:
+the snapshots from the `code` family, the MCP server listing, and the objects
+inside `settings show`. Those records are HTTP API responses, which this
+record keeps internal, so their fields follow the HTTP API rather than this
+promise. Promising them would freeze the internal API through the CLI.
+Revisit when a versioned API exists.
+
+**A version handshake.** `GET /version` answers the server's release and an
+API level, and `/healthz` and `/auth/discovery` carry the same two keys. The
+desktop, the CLI, and the mobile app compare the level with the range they
+read before they attach, and refuse a server outside it with a message that
+says which side to update. The level rises only when a change breaks older
+clients. Clients ignore keys they do not know, so an added field, event, or
+route leaves it alone. A server that predates the handshake is attached as
+before.
+
+Validation: `tests/json_documents.rs` and `src/compatibility.rs` in
+`crates/tidebreak-cli` pin the documents' version, the documented commands and
+flags, and the exit codes. `crates/tidebreak-server/src/server_version.rs`
+pins the compatibility rule.

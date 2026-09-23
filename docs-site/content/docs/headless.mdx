@@ -621,34 +621,47 @@ export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||
 
 ### What 1.x keeps stable
 
-Tests check each of these against the code, so a 1.x release cannot drop one
-by accident:
+A 1.x release keeps these compatible. A change that would break one waits for
+a major release.
 
 - **Commands and flags.** Every command and flag in the
-  [Commands](#commands) block. A 1.x release can add a command or a flag. It
-  does not remove or rename one.
-- **Exit codes.** The codes in the exit-code tables above.
-- **JSON documents.** A command run with `--output-format json` or `--json`
-  prints one object on one line, and every object carries
-  `"schema_version": 1`. The version names the shape. A release can add keys
-  under it; a change that removes, renames, or retypes a top-level key raises
-  it. Read the keys you use and ignore the rest.
+  [Commands](#commands) block. A release can add a command or a flag.
+- **Exit codes.** Every command exits `0` on success, `1` on failure, and `2`
+  on a usage error. `-p` and the `code` family add the codes in the tables
+  above.
+- **JSON documents.** Apart from the event streams listed under
+  [What is internal](#what-is-internal), a command run with
+  `--output-format json` or `--json` prints one object on one line, and every
+  object carries `"schema_version": 1`. The fields the CLI writes itself keep
+  their names, types, and meaning. New fields can appear, so ignore fields you
+  do not know.
+- **The `-p` decision protocol.** The `"tidebreak":"v1"` lines print mode
+  writes to stdout and the decision lines it reads from stdin, as
+  [Driving a turn](#driving-a-turn) describes them.
+- **`agent-mcp`.** Its tool names, their input schemas, and the result shape
+  (`status`, `assistant_text`, `pending`, `events_cursor`). New tools and new
+  optional inputs can appear.
 
-Some documents carry a record exactly as the server returned it, such as the
-`settings` object in `settings show` or the snapshots the `code` family
-prints. That record has the shape the HTTP API gives it, and the HTTP API is
-internal.
+Many JSON documents also carry a record as the server returned it, such as
+the snapshot a `code` command prints, the MCP server listing, or the objects
+inside `settings show`. The fields of such a record come from the HTTP API
+below, which is internal, so they are not part of this promise.
+
+Tests check the commands and flags against the CLI's usage text and the exit
+codes against the code. Others run a set of commands and check each document's
+version and top-level keys, and pin the `agent-mcp` tool names and the `-p`
+protocol lines.
 
 ### What is internal
 
-These can change in any minor release. If you build on one, pin the Tidebreak
+These can change in any release. If you build on one, pin the Tidebreak
 version you tested against:
 
 - The HTTP routes and their JSON bodies.
 - The chat and code event wire, including every WebSocket frame.
-- The NDJSON streams from `-p --output-format json`, `code run --json`, and
-  `code watch --json`. They carry the event wire line by line, along with the
-  driver lines print mode writes.
+- The event frames in the NDJSON streams from `-p --output-format json`,
+  `code run --json`, and `code watch --json`. In the `-p` stream, key on the
+  `"tidebreak":"v1"` lines, not on the frames.
 
 ### The version check
 
