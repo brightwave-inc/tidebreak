@@ -163,6 +163,11 @@ impl GrokStreamParser {
         let text_cut = matches!(kind.as_str(), "text" | "thought") && cut.cut_within(&["data"]);
         let lost_output = kind == "tool_call_update"
             && (cut.cut_within(&["content"]) || cut.cut_within(&["rawOutput"]));
+        if cut.cut_within(&["toolCallId"]) {
+            // Part of a call id names no call.
+            self.count_unrecognized(&format!("oversized-line/{kind}"), "call id cut");
+            return Vec::new();
+        }
         let CutLine {
             mut value,
             cut_text,

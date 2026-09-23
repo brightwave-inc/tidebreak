@@ -171,8 +171,10 @@ impl CodexStreamParser {
     /// Parse one line the line buffer cut at its cap.
     ///
     /// The part that arrived still names the notification and the item. A
-    /// completed item settles its tool card with [`OVERSIZED_PAYLOAD`] in
-    /// place of the output the cut took.
+    /// cut inside the item's payload settles its tool card with
+    /// [`OVERSIZED_PAYLOAD`] in place of the output the cut took. A cut after
+    /// the item cost only envelope fields: `threadId` is restored from the
+    /// item's start, and the card keeps the output that arrived.
     pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
         let Some(cut) = CutLine::recover(line) else {
             self.count_unrecognized("oversized-line", line);
@@ -191,7 +193,11 @@ impl CodexStreamParser {
             }
         };
         let item_cut = inside(&["params", "item"]);
-        let text_cut = inside(&["params", "item", "text"]);
+        let identity_cut = inside(&["params", "item", "id"]) || inside(&["params", "item", "type"]);
+        // Text a person reads keeps what arrived: a reply, or a search's query.
+        let kept_text = ["text", "query"]
+            .into_iter()
+            .find(|field| inside(&["params", "item", field]));
         let CutLine {
             mut value,
             cut_text,
@@ -217,23 +223,32 @@ impl CodexStreamParser {
             "engine line exceeded the parse budget; kept the part that arrived"
         );
         let mut cut_item = None;
-        if item_cut && matches!(method.as_str(), "item/started" | "item/completed") {
+        if matches!(method.as_str(), "item/started" | "item/completed") {
+            if identity_cut {
+                // Part of an item id names no call.
+                self.count_unrecognized(&format!("oversized-line/{method}"), "item id cut");
+                return Vec::new();
+            }
             let item_id = message
                 .pointer("/params/item/id")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             if let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) {
-                // `threadId` follows the item, so a child's item would
-                // otherwise land on the parent.
+                // `threadId` follows the item, so a cut anywhere from the
+                // item on loses it, and a child's item would land on the
+                // parent. Its start recorded the thread.
                 if !params.contains_key("threadId") {
                     if let Some(thread) = item_id.as_ref().and_then(|id| self.item_threads.get(id))
                     {
                         params.insert("threadId".into(), Value::String(thread.clone()));
                     }
                 }
-                if let Some(item) = params.get_mut("item").and_then(Value::as_object_mut) {
-                    if text_cut {
-                        item.insert("text".into(), Value::String(cut_text));
+                if let (true, Some(item)) = (
+                    item_cut,
+                    params.get_mut("item").and_then(Value::as_object_mut),
+                ) {
+                    if let Some(field) = kept_text {
+                        item.insert(field.into(), Value::String(cut_text));
                     }
                     // A file change states its status after the diff. The
                     // engine completes an item only once it has finished, and
@@ -243,7 +258,8 @@ impl CodexStreamParser {
                     }
                 }
             }
-            if method == "item/completed" && !text_cut {
+            // Only a cut in the payload cost the card its output.
+            if method == "item/completed" && item_cut && kept_text.is_none() {
                 cut_item = item_id;
             }
         }
@@ -2637,6 +2653,158 @@ mod tests {
         let mut parser = CodexStreamParser::new();
         assert!(parser.push_cut_line("garbage").is_empty());
         assert_eq!(parser.unrecognized(), 1);
+    }
+
+    /// Cut `line` a few bytes into the value that follows `marker`.
+    fn cut_inside(line: &str, marker: &str) -> String {
+        let at = line.find(marker).expect("the marker is in the line") + marker.len() + 3;
+        let cut = crate::oversized::through_the_line_buffer(line, at);
+        assert!(cut.cut, "the line must outgrow the budget");
+        cut.text
+    }
+
+    /// A parser attached to the thread `parent`, with a turn running there.
+    fn parser_with_a_running_turn() -> CodexStreamParser {
+        let setup = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+"#;
+        let mut parser = CodexStreamParser::new();
+        for line in setup.lines() {
+            parser.push_line(line);
+        }
+        parser
+    }
+
+    /// A web search line written the way the engine writes it: the item,
+    /// then the thread and turn it ran on. `results` is what makes it large.
+    fn web_search_completed(id: &str, thread: &str) -> String {
+        format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"webSearch","id":"{id}","query":"tidebreak fixture","action":{{"type":"search","query":"tidebreak fixture","queries":null}},"results":[{{"title":"Result","url":"https://example.com/","text":"{}"}}]}},"threadId":"{thread}","turnId":"turn-1","completedAtMs":1}},"emittedAtMs":2}}"#,
+            "r".repeat(8 * 1_024)
+        )
+    }
+
+    fn search() -> ToolDetail {
+        ToolDetail::Search {
+            query: "tidebreak fixture".into(),
+        }
+    }
+
+    /// A web search whose line was cut after its item still settles its
+    /// card, with the query it recovered and under the thread it ran on.
+    /// The cut lands in `threadId`, which follows the item, so the line
+    /// carries only part of an id there. The output arrived whole, so the
+    /// card shows no marker.
+    #[test]
+    fn a_web_search_cut_after_its_item_settles_its_card() {
+        let mut parser = parser_with_a_running_turn();
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_parent", "parent"),
+            r#""threadId":""#,
+        ));
+        assert_eq!(
+            events,
+            vec![
+                HarnessEvent::ToolStarted {
+                    call_id: "ws_parent".into(),
+                    name: "webSearch".into(),
+                    detail: search(),
+                    parent_call_id: None,
+                },
+                HarnessEvent::ToolCompleted {
+                    call_id: "ws_parent".into(),
+                    outcome: ToolOutcome::Succeeded,
+                    preview: String::new(),
+                    detail: Some(search()),
+                    parent_call_id: None,
+                },
+            ]
+        );
+
+        // A child's search keeps the child it started under.
+        let started = r#"{"method":"item/started","params":{"item":{"type":"webSearch","id":"ws_child","query":"","action":{"type":"other"},"results":null},"threadId":"child","turnId":"child-turn"}}"#;
+        assert!(parser.push_line(started).is_empty());
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_child", "child"),
+            r#""threadId":""#,
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: Some(parent), .. })
+                if call_id == "ws_child" && parent == "child"
+        ));
+        assert_eq!(parser.unrecognized(), 0);
+
+        // Between turns the partial id used to read as a child thread with no
+        // parent turn to run in, and the completion was dropped outright.
+        let mut idle = CodexStreamParser::new();
+        idle.push_line(r#"{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}"#);
+        idle.push_line(r#"{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}"#);
+        let events = idle.push_cut_line(&cut_inside(
+            &web_search_completed("ws_idle", "parent"),
+            r#""threadId":""#,
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: None, .. }) if call_id == "ws_idle"
+        ));
+    }
+
+    /// A cut inside the results is a cut in the payload: the card settles
+    /// with the query it recovered and says the output did not fit.
+    #[test]
+    fn a_web_search_cut_in_its_results_says_the_output_did_not_fit() {
+        let mut parser = parser_with_a_running_turn();
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_parent", "parent"),
+            r#""text":""#,
+        ));
+        assert_eq!(
+            events.last(),
+            Some(&HarnessEvent::ToolCompleted {
+                call_id: "ws_parent".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: OVERSIZED_PAYLOAD.into(),
+                detail: Some(search()),
+                parent_call_id: None,
+            })
+        );
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    /// An image view and a compaction whose lines were cut after their items
+    /// still report themselves.
+    #[test]
+    fn an_image_view_or_compaction_cut_after_its_item_still_reports_itself() {
+        let mut parser = parser_with_a_running_turn();
+        let image = r#"{"method":"item/completed","params":{"item":{"type":"imageView","id":"view-1","path":"/workspace/pixel.png"},"threadId":"parent","turnId":"turn-1","completedAtMs":1},"emittedAtMs":2}"#;
+        let events = parser.push_cut_line(&cut_inside(image, r#""threadId":""#));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: None, preview, .. })
+                if call_id == "view-1" && preview.is_empty()
+        ));
+
+        let compaction = r#"{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"compact-1"},"threadId":"parent","turnId":"turn-1","completedAtMs":1},"emittedAtMs":2}"#;
+        let events = parser.push_cut_line(&cut_inside(compaction, r#""turnId":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                ..
+            }]
+        ));
+        let events = parser.push_cut_line(&cut_inside(compaction, r#""threadId":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                ..
+            }]
+        ));
+        assert_eq!(parser.unrecognized(), 0);
     }
 
     #[test]

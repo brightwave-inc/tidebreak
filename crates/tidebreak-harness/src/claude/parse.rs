@@ -130,9 +130,12 @@ impl ClaudeStreamParser {
 
     /// Parse one line the line buffer cut at its cap.
     ///
-    /// The part that arrived still names the event. A tool result settles its
-    /// call with [`OVERSIZED_PAYLOAD`] in place of the output the cut took,
-    /// and a turn's closing `result` still closes the turn.
+    /// The part that arrived still names the event. A tool result whose
+    /// output the cut took settles its call with [`OVERSIZED_PAYLOAD`], and a
+    /// turn's closing `result` still closes the turn. The line names its
+    /// subagent after the message, so a cut anywhere from the message on
+    /// loses that too; it comes back from the call or the stream that
+    /// started the message.
     pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
         let Some(cut) = CutLine::recover(line) else {
             self.count_unrecognized("oversized-line", line);
@@ -141,14 +144,19 @@ impl ClaudeStreamParser {
         let result_cut = cut.cut_within(&["result"]);
         let content_index = cut.index_under(&["message", "content"]);
         let text_cut = content_index.is_some() && cut.cut_within(&["message", "content", "text"]);
+        let output_cut =
+            content_index.is_some() && cut.cut_within(&["message", "content", "content"]);
         let CutLine {
             mut value,
             cut_text,
             ..
         } = cut;
         // A `result` line names its type after the final text, so a cut in
-        // that text leaves a line only `result` itself identifies.
-        if result_cut && value.get("type").is_none() {
+        // that text, or in the type itself, leaves a line only its `result`
+        // and `subtype` identify.
+        if value.get("type").is_none()
+            && (result_cut || (value.get("result").is_some() && value.get("subtype").is_some()))
+        {
             value["type"] = Value::String("result".into());
         }
         let kind = value
@@ -170,7 +178,21 @@ impl ClaudeStreamParser {
         match kind.as_str() {
             "user" => {
                 if let Some(index) = content_index {
-                    self.settle_cut_result(&mut value, index);
+                    self.settle_cut_result(&mut value, index, output_cut);
+                }
+                if value.get("parent_tool_use_id").is_none() {
+                    // The subagent a result belongs to is the one its call
+                    // started in.
+                    let parent = value
+                        .pointer("/message/content")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .find_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+                        .and_then(|id| self.running_calls.get(id))
+                        .cloned()
+                        .flatten();
+                    value["parent_tool_use_id"] = parent.map_or(Value::Null, Value::String);
                 }
             }
             "assistant" => {
@@ -193,14 +215,16 @@ impl ClaudeStreamParser {
     }
 
     /// Point the tool result the cut landed in at its call, and put
-    /// [`OVERSIZED_PAYLOAD`] where its output was.
+    /// [`OVERSIZED_PAYLOAD`] where its output was when the cut took the
+    /// output. A cut after the output keeps it.
     ///
     /// A successful result names its `tool_use_id` before its content; an
     /// error names it, and `is_error`, after (captured on 2.1.233). With the
     /// id cut away the result is an error, and it belongs to the one call
     /// still running with nothing running inside it, when exactly one is. The
-    /// line cannot say which of several it was.
-    fn settle_cut_result(&mut self, value: &mut Value, index: usize) {
+    /// line cannot say which of several it was, so that result is counted and
+    /// left out.
+    fn settle_cut_result(&mut self, value: &mut Value, index: usize, output_cut: bool) {
         let Some(block) = value.pointer_mut(&format!("/message/content/{index}")) else {
             return;
         };
@@ -220,7 +244,9 @@ impl ClaudeStreamParser {
             match (leaves.next(), leaves.next()) {
                 (Some(call_id), None) => {
                     block["tool_use_id"] = Value::String(call_id.clone());
-                    block["is_error"] = Value::Bool(true);
+                    if block.get("is_error").is_none() {
+                        block["is_error"] = Value::Bool(true);
+                    }
                 }
                 _ => {
                     self.count_unrecognized("oversized-line/tool_result", "no tool_use_id");
@@ -228,16 +254,8 @@ impl ClaudeStreamParser {
                 }
             }
         }
-        block["content"] = Value::String(OVERSIZED_PAYLOAD.to_owned());
-        let call_id = block
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if value.get("parent_tool_use_id").is_none() {
-            let parent = call_id
-                .and_then(|id| self.running_calls.get(&id).cloned())
-                .flatten();
-            value["parent_tool_use_id"] = parent.map_or(Value::Null, Value::String);
+        if output_cut {
+            block["content"] = Value::String(OVERSIZED_PAYLOAD.to_owned());
         }
     }
 
@@ -1329,5 +1347,92 @@ mod tests {
         let mut parser = ClaudeStreamParser::new();
         assert!(parser.push_cut_line("not json at all").is_empty());
         assert_eq!(parser.unrecognized(), 1);
+    }
+
+    /// Cut `line` a few bytes into the value that follows `marker`.
+    fn cut_inside(line: &str, marker: &str) -> String {
+        let at = line.find(marker).expect("the marker is in the line") + marker.len() + 3;
+        let cut = crate::oversized::through_the_line_buffer(line, at);
+        assert!(cut.cut, "the line must outgrow the budget");
+        cut.text
+    }
+
+    /// The line names its subagent after the whole message. A cut there
+    /// leaves part of an id, which names no call; the result still settles
+    /// under the subagent its call started in, with the output it carried.
+    #[test]
+    fn a_result_cut_in_its_attribution_settles_under_its_subagent() {
+        let mut parser = ClaudeStreamParser::new();
+        let task = r#"{"type":"assistant","message":{"id":"msg_task","content":[{"type":"tool_use","id":"toolu_task","name":"Agent","input":{"description":"Inspect","prompt":"look"}}]},"parent_tool_use_id":null}"#;
+        assert_eq!(parser.push_line(task).len(), 1);
+        start_read(&mut parser, "toolu_child", Some("toolu_task"));
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_child","type":"tool_result","content":"{}","is_error":false}}]}},"parent_tool_use_id":"toolu_task","session_id":"s"}}"#,
+            "x".repeat(4 * 1_024)
+        );
+        let events = parser.push_cut_line(&cut_inside(&line, r#""parent_tool_use_id":""#));
+        assert_eq!(
+            events,
+            vec![HarnessEvent::ToolCompleted {
+                call_id: "toolu_child".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: "x".repeat(MAX_PREVIEW_CHARS),
+                detail: None,
+                parent_call_id: Some("toolu_task".into()),
+            }]
+        );
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    /// A cut after a result's complete output, in the flag that follows it,
+    /// keeps the output: only a cut in the output itself replaces it.
+    #[test]
+    fn a_result_cut_after_its_output_keeps_the_output() {
+        let mut parser = ClaudeStreamParser::new();
+        start_read(&mut parser, "toolu_read", None);
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_read","type":"tool_result","content":"{}","is_error":false}}]}},"parent_tool_use_id":null}}"#,
+            "y".repeat(4 * 1_024)
+        );
+        let events = parser.push_cut_line(&cut_inside(&line, r#""is_error":"#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::ToolCompleted { call_id, outcome: ToolOutcome::Succeeded, preview, parent_call_id: None, .. }]
+                if call_id == "toolu_read" && preview.starts_with("yyy")
+        ));
+    }
+
+    /// A reply cut in its attribution keeps the subagent its stream named.
+    #[test]
+    fn a_reply_cut_in_its_attribution_keeps_its_subagent() {
+        let mut parser = ClaudeStreamParser::new();
+        let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_sub"}},"parent_tool_use_id":"toolu_task"}"#;
+        assert!(parser.push_line(start).is_empty());
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"id":"msg_sub","content":[{{"type":"text","text":"{}"}}]}},"parent_tool_use_id":"toolu_task","session_id":"s"}}"#,
+            "z".repeat(1_024)
+        );
+        let events = parser.push_cut_line(&cut_inside(&line, r#""parent_tool_use_id":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::AssistantMessage { parent_call_id: Some(parent), .. }] if parent == "toolu_task"
+        ));
+    }
+
+    /// The `result` line names its type last but for a few counters. A cut
+    /// in the type itself still ends the turn.
+    #[test]
+    fn a_result_line_cut_in_its_type_still_ends_the_turn() {
+        let mut parser = ClaudeStreamParser::new();
+        let line = format!(
+            r#"{{"stop_reason":"end_turn","session_id":"s","usage":{{"input_tokens":3,"output_tokens":4}},"terminal_reason":"completed","is_error":false,"subtype":"success","result":"{}","type":"result","uuid":"u"}}"#,
+            "w".repeat(1_024)
+        );
+        let events = parser.push_cut_line(&cut_inside(&line, r#""type":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::TurnCompleted { usage }] if usage.output_tokens == 4
+        ));
+        assert_eq!(parser.unrecognized(), 0);
     }
 }

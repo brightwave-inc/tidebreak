@@ -8,11 +8,13 @@
 //! loses the event, and a tool call whose completion is dropped stays running
 //! in the transcript forever.
 //!
-//! [`CutLine::recover`] reads the complete values before the cut, puts
-//! [`OVERSIZED_PAYLOAD`] in place of the string the cut landed in, and closes
-//! every object and array left open. It also records where the cut landed, so
-//! a parser can tell which call lost its payload and which fields the cut
-//! removed.
+//! [`CutLine::recover`] reads the complete values before the cut, leaves out
+//! the value the cut split, and closes every object and array left open. It
+//! records where the cut landed and the start of a string it split. A parser
+//! uses that to tell a lost payload, which it replaces with
+//! [`OVERSIZED_PAYLOAD`], from a lost envelope field, which it restores from
+//! what it already knows or goes without. Part of an id names nothing, so a
+//! partial string is never left standing in the value.
 
 use serde_json::{Map, Value};
 
@@ -37,14 +39,14 @@ pub enum CutStep {
 /// A cut JSON line, closed into a value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutLine {
-    /// Every value that was complete before the cut, with
-    /// [`OVERSIZED_PAYLOAD`] in place of the string the cut landed in.
+    /// Every value that was complete before the cut.
     ///
-    /// A number, literal, or key the cut split is left out, and so is every
-    /// member after the cut.
+    /// A string, number, literal, or key the cut split is left out, and so
+    /// is every member after the cut. An object or array the cut landed in
+    /// keeps the members that arrived.
     pub value: Value,
     /// Keys and indices from the root to the value the cut landed in. The
-    /// last step can name a member the cut removed entirely.
+    /// last step can name a member the cut left out.
     pub cut_at: Vec<CutStep>,
     /// The text of the string the cut landed in, up to the cut and capped.
     /// Empty when the cut did not land in a string.
@@ -118,8 +120,9 @@ enum Parsed {
     /// A value that ended before the cut.
     Whole(Value),
     /// The value the cut landed in, closed where it stopped. `value` is
-    /// `None` when nothing usable survived: a number, literal, or key cut
-    /// short, or no value begun at all.
+    /// `None` when nothing whole survived: a string, number, literal, or key
+    /// cut short, or no value begun at all. `text` is the start of a string
+    /// the cut split.
     Cut {
         value: Option<Value>,
         at: Vec<CutStep>,
@@ -167,8 +170,10 @@ impl Reader<'_> {
             Some(b'[') => self.array(),
             Some(b'"') => Ok(match self.string()? {
                 Text::Whole(text) => Parsed::Whole(Value::String(text)),
+                // Left out: the caller decides whether the string was a
+                // payload or part of an id.
                 Text::Cut(partial) => Parsed::Cut {
-                    value: Some(Value::String(OVERSIZED_PAYLOAD.to_owned())),
+                    value: None,
                     at: Vec::new(),
                     text: partial,
                 },
@@ -362,8 +367,12 @@ mod tests {
         CutStep::Key(name.to_owned())
     }
 
+    /// The string the cut split is left out, not kept as a fragment: the
+    /// parser knows whether it was a payload, which it replaces with the
+    /// marker, or an id, which it restores. Its start is kept for text a
+    /// person reads.
     #[test]
-    fn a_cut_payload_string_becomes_the_marker_and_the_envelope_survives() {
+    fn a_cut_string_is_left_out_and_the_envelope_survives() {
         let line = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"aaaaaaaaaa"#;
         let cut = CutLine::recover(line).expect("an object prefix recovers");
         assert_eq!(
@@ -371,7 +380,7 @@ mod tests {
             json!({
                 "type": "user",
                 "message": {"role": "user", "content": [
-                    {"tool_use_id": "toolu_1", "type": "tool_result", "content": OVERSIZED_PAYLOAD}
+                    {"tool_use_id": "toolu_1", "type": "tool_result"}
                 ]}
             })
         );
@@ -388,6 +397,18 @@ mod tests {
         assert!(cut.cut_within(&["message", "content"]));
         assert!(!cut.cut_within(&["tool_use_result"]));
         assert_eq!(cut.index_under(&["message", "content"]), Some(0));
+    }
+
+    /// Part of an id names nothing. A cut in an envelope string after the
+    /// payload leaves the member out rather than holding a fragment the
+    /// parser could mistake for a real id.
+    #[test]
+    fn a_cut_id_is_left_out_rather_than_kept_as_a_fragment() {
+        let cut =
+            CutLine::recover(r#"{"params":{"item":{"id":"call-1"},"threadId":"01a0cf"#).unwrap();
+        assert_eq!(cut.value, json!({"params": {"item": {"id": "call-1"}}}));
+        assert_eq!(cut.cut_at, [key("params"), key("threadId")]);
+        assert!(!cut.cut_within(&["params", "item"]));
     }
 
     #[test]
@@ -423,7 +444,7 @@ mod tests {
             cut.value,
             json!({"items": [
                 {"t": "text", "text": "ok"},
-                {"t": "image", "data": OVERSIZED_PAYLOAD}
+                {"t": "image"}
             ]})
         );
         assert_eq!(cut.index_under(&["items"]), Some(1));
@@ -438,7 +459,7 @@ mod tests {
         ] {
             let cut = CutLine::recover(line).unwrap();
             assert_eq!(cut.cut_text, text, "{line}");
-            assert_eq!(cut.value["text"], OVERSIZED_PAYLOAD);
+            assert_eq!(cut.value, json!({}), "{line}");
         }
     }
 
