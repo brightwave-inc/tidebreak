@@ -63,6 +63,11 @@ pub struct NotificationSnapshot {
     pub id: NotificationId,
     pub kind: NotificationKindSnapshot,
     pub title: String,
+    /// One line under the title: why the turn failed, or how the agent's
+    /// closing message began. Absent when there is nothing worth showing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub body: Option<String>,
     pub context: NotificationContextSnapshot,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +81,7 @@ impl From<Notification> for NotificationSnapshot {
             id: row.id,
             kind: row.kind.into(),
             title: row.title,
+            body: row.body,
             context: row.context.into(),
             created_at: row.created_at,
             read_at: row.read_at,

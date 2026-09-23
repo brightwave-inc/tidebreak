@@ -236,6 +236,10 @@ pub struct Notification {
     pub id: NotificationId,
     pub kind: NotificationKind,
     pub title: String,
+    /// One line under the title: why the turn failed, or how the agent's
+    /// closing message began. `None` when there is nothing worth showing,
+    /// and on rows written before bodies existed.
+    pub body: Option<String>,
     pub context: NotificationContext,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub read_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -275,6 +279,107 @@ pub fn notification_title(name: Option<&str>, kind: NotificationKind) -> String 
         .filter(|name| !name.is_empty())
         .unwrap_or("Chat");
     format!("{name} {}", kind.title_verb())
+}
+
+/// Longest notification body, in characters. A banner shows two or three
+/// lines, so anything longer would be cut off on screen anyway.
+pub const MAX_NOTIFICATION_BODY_CHARS: usize = 160;
+
+/// A notification body from agent text: its first line with words in it, as
+/// plain text, cut to [`MAX_NOTIFICATION_BODY_CHARS`].
+///
+/// Markdown markers and citation directives are instructions to the
+/// transcript's renderer. A banner prints them literally, so they are dropped
+/// here. Returns `None` when the text has nothing left to show.
+#[must_use]
+pub fn notification_body_line(text: &str) -> Option<String> {
+    let text = strip_citation_directives(text);
+    let line = text.lines().map(plain_line).find(|line| !line.is_empty())?;
+    Some(truncate_chars(&line, MAX_NOTIFICATION_BODY_CHARS))
+}
+
+/// `:cit[phrase]{attributes}` becomes `phrase`. A directive that does not
+/// close is left as it was.
+fn strip_citation_directives(text: &str) -> String {
+    const OPEN: &str = ":cit[";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let after_open = &rest[start + OPEN.len()..];
+        let closed = after_open.find("]{").and_then(|phrase_end| {
+            let attributes = &after_open[phrase_end + 2..];
+            attributes
+                .find('}')
+                .map(|attributes_end| (phrase_end, phrase_end + 2 + attributes_end + 1))
+        });
+        let Some((phrase_end, directive_end)) = closed else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&after_open[..phrase_end]);
+        rest = &after_open[directive_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One line with its Markdown markers and control characters removed and its
+/// whitespace collapsed. A code fence line reads as empty.
+fn plain_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return String::new();
+    }
+    let unmarked = match trimmed.trim_start_matches('#') {
+        heading if heading.len() < trimmed.len() && heading.starts_with(char::is_whitespace) => {
+            heading
+        }
+        _ => trimmed,
+    };
+    let unmarked = unmarked.trim_start_matches('>').trim_start();
+    let unmarked = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|marker| unmarked.strip_prefix(marker))
+        .unwrap_or(unmarked);
+    let unmarked = strip_ordered_marker(unmarked);
+    let words = unmarked
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    words.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `1. Step` becomes `Step`; anything else is returned unchanged.
+fn strip_ordered_marker(line: &str) -> &str {
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return line;
+    }
+    line[digits..]
+        .strip_prefix(". ")
+        .or_else(|| line[digits..].strip_prefix(") "))
+        .unwrap_or(line)
+}
+
+/// Cut `text` to `limit` characters, ending in an ellipsis when it was cut.
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let kept = text
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    format!("{}…", kept.trim_end())
 }
 
 /// Dedupe key for one Work turn settlement. Unique per owner.

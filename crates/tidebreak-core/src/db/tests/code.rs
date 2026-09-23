@@ -1804,6 +1804,66 @@ async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
 }
 
 #[tokio::test]
+async fn a_code_notification_says_how_the_turn_ended() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    for event in [
+        Event::TurnStarted { turn_id },
+        Event::AssistantMessage {
+            text: "Looking at the tree.".into(),
+            parent_call_id: None,
+        },
+        Event::AssistantMessage {
+            text: "## Fixed the login check\n\nThe session now expires on time.".into(),
+            parent_call_id: None,
+        },
+        // A subagent's report answers the parent, not you.
+        Event::AssistantMessage {
+            text: "Searched 14 files.".into(),
+            parent_call_id: Some("task-1".into()),
+        },
+    ] {
+        append_event(&store, &owner, session_id, 0, &event)
+            .await
+            .unwrap();
+    }
+    let completed = Event::TurnCompleted {
+        usage: Default::default(),
+        checkpoint: None,
+        stop_reason: None,
+    };
+    let failed = Event::TurnFailed {
+        error: crate::code::BoundedError {
+            message: "claude exited with status 1\nat stderr line 2".into(),
+        },
+        detail: None,
+    };
+    for event in [completed, failed] {
+        append_event_with_notification(&store, &owner, session_id, 0, turn_id, &event)
+            .await
+            .unwrap();
+    }
+
+    let rows = store
+        .list_notifications_scoped(&owner, None, 50)
+        .await
+        .unwrap();
+    let body_of = |kind| {
+        rows.iter()
+            .find(|row| row.kind == kind)
+            .and_then(|row| row.body.clone())
+    };
+    assert_eq!(
+        body_of(crate::NotificationKind::AgentCompleted).as_deref(),
+        Some("Fixed the login check")
+    );
+    assert_eq!(
+        body_of(crate::NotificationKind::AgentFailed).as_deref(),
+        Some("claude exited with status 1")
+    );
+}
+
+#[tokio::test]
 async fn a_workspace_less_terminal_event_uses_the_chat_notification_and_dedupe_key() {
     let (_dir, store, session_id, turn_id) = seeded_session().await;
     let owner = OwnerId::local();

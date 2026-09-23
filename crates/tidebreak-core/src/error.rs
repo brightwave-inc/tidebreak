@@ -310,6 +310,30 @@ impl From<&AgentError> for AgentErrorInfo {
     }
 }
 
+/// The model provider's own words about a failure, fit to show a person.
+///
+/// Only a failure the provider reported carries text the reader can act on.
+/// These strings have already passed the router's bounded message extraction
+/// and credential redaction. Every other kind can carry host paths and other
+/// internal detail, which stays out of the transcript and out of
+/// notifications, so it returns `None`.
+#[must_use]
+pub fn provider_failure_detail(kind: &str, message: &str) -> Option<String> {
+    matches!(
+        kind,
+        "authentication"
+            | "access_denied"
+            | "rate_limited"
+            | "overloaded"
+            | "invalid_request"
+            | "refusal"
+            | "prompt_too_long"
+            | "provider"
+    )
+    .then(|| message.trim().to_owned())
+    .filter(|detail| !detail.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

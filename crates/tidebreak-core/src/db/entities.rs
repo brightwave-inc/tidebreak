@@ -2102,6 +2102,8 @@ pub mod notification {
         pub kind: String,
         #[sea_orm(column_type = "Text")]
         pub title: String,
+        #[sea_orm(column_type = "Text", nullable)]
+        pub body: Option<String>,
         #[sea_orm(column_type = "JsonBinary")]
         pub context: Json,
         pub dedupe_key: String,
