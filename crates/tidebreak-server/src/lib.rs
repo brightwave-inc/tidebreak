@@ -150,6 +150,7 @@ pub mod view_frames;
 pub mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
+mod worker_supervisor;
 pub mod workspace_config;
 
 #[cfg(test)]
@@ -331,7 +332,7 @@ pub use pairing::{
 };
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 pub use tidebreak_sandbox_runtime::DurableOperationStore;
-pub use update_quiesce::UpdateQuiesce;
+pub use update_quiesce::{QuitProgress, UpdateQuiesce};
 
 type QueuedTurnPromoter = fn(
     AppState,
@@ -400,6 +401,9 @@ pub struct Server {
     update_quiesce: update_quiesce::UpdateQuiesce,
     listener: Option<TcpListener>,
     router: Option<Router>,
+    /// What each supervised worker below is doing. Shutdown tells it first,
+    /// so a worker that stops while the server stops is not started again.
+    worker_health: Arc<worker_supervisor::WorkerHealth>,
     // Keep every process-local worker before `_store_ownership`. Rust drops
     // fields in declaration order, so dropping an unserved `Server` aborts
     // these tasks before it releases the PostgreSQL advisory lock.
@@ -473,6 +477,22 @@ impl InstanceLock {
 }
 
 struct AbortTask(tokio::task::JoinHandle<()>);
+
+/// Run a cloneable worker under [`worker_supervisor::spawn_supervised`]. Each
+/// start runs a fresh clone, so a restart begins from the worker's own
+/// configuration rather than from whatever the stopped run left behind.
+fn supervise_worker<W, Fut>(
+    health: &Arc<worker_supervisor::WorkerHealth>,
+    name: &'static str,
+    worker: W,
+    run: fn(W) -> Fut,
+) -> tokio::task::JoinHandle<()>
+where
+    W: Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    worker_supervisor::spawn_supervised(health.clone(), name, move || run(worker.clone()))
+}
 
 impl Drop for AbortTask {
     fn drop(&mut self) {
@@ -587,6 +607,7 @@ impl Server {
     }
 
     async fn stop_workers(&mut self) {
+        self.worker_health.begin_shutdown();
         self._queued_turn_promoter.abort();
         self._code_recovery.abort();
         self._turn_worker.abort();
@@ -622,6 +643,7 @@ impl Server {
         self._memory_sweep.wait().await;
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
+        self.worker_health.mark_all_stopped();
     }
 }
 
@@ -1757,18 +1779,28 @@ async fn bind_inner(
     // cancellation commits; the floor only covers a lost notification.
     // Try-based on the idempotent turn acceptance, so it needs no lease of its
     // own — see the route runtime's queued-turn promoter.
+    //
+    // Every long-lived worker below runs under a supervisor that logs a panic
+    // or an unexpected return, starts the worker again after a capped wait,
+    // and reports its health in the diagnostics snapshot.
+    let worker_health = state.diagnostics.worker_health();
     let queued_turn_promoter = {
         let state = state.clone();
-        tokio::spawn((route_runtime.queued_turn_promoter)(
-            state,
-            std::time::Duration::from_secs(5),
-        ))
+        let promoter = route_runtime.queued_turn_promoter;
+        worker_supervisor::spawn_supervised(
+            worker_health.clone(),
+            "queued_turn_promoter",
+            move || promoter(state.clone(), std::time::Duration::from_secs(5)),
+        )
     };
     let server_store = state.store.clone();
     let client_execution_wake = state.events.client_execution_wake();
     let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
+    let quiesce_turns = state.active_turns.clone();
+    let quiesce_store = state.store.clone();
+    let quiesce_events = state.events.clone();
     if let Some(dist) = state.config.ui_dist.as_deref() {
         ui_bundle::verify(dist)?;
     }
@@ -1814,24 +1846,86 @@ async fn bind_inner(
         local_import_token.as_ref(),
     )?;
 
-    let turn_worker = tokio::spawn(turn_worker.run());
-    let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
-    let sandbox_container_run_worker =
-        sandbox_container_run_worker.map(|worker| tokio::spawn(worker.run()));
-    let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
-    let sandbox_task_plan_worker = tokio::spawn(sandbox_task_plan_worker.run());
-    let sandbox_exec_worker = tokio::spawn(sandbox_exec_worker.run());
-    let agent_run_scratch_reaper = tokio::spawn(agent_run_scratch_reaper.run());
-    let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
-    let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
-    let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
-    let memory_sweep_worker = tokio::spawn(memory_sweep_worker.run());
-    let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
-    let gateway_model_sync = tokio::spawn(
-        gateway_runtime
-            .clone()
-            .sync_models_periodically(mcp_runtime.clone()),
+    let turn_worker = supervise_worker(&worker_health, "turn_worker", turn_worker, |worker| {
+        worker.run()
+    });
+    let sandbox_agent_run_worker = supervise_worker(
+        &worker_health,
+        "sandbox_agent_run_worker",
+        sandbox_agent_run_worker,
+        |worker| worker.run(),
     );
+    let sandbox_container_run_worker = sandbox_container_run_worker.map(|worker| {
+        supervise_worker(
+            &worker_health,
+            "sandbox_container_run_worker",
+            worker,
+            |worker| worker.run(),
+        )
+    });
+    let sandbox_web_search_worker = supervise_worker(
+        &worker_health,
+        "sandbox_web_search_worker",
+        sandbox_web_search_worker,
+        |worker| worker.run(),
+    );
+    let sandbox_task_plan_worker = supervise_worker(
+        &worker_health,
+        "sandbox_task_plan_worker",
+        sandbox_task_plan_worker,
+        |worker| worker.run(),
+    );
+    let sandbox_exec_worker = supervise_worker(
+        &worker_health,
+        "sandbox_exec_worker",
+        sandbox_exec_worker,
+        |worker| worker.run(),
+    );
+    let agent_run_scratch_reaper = supervise_worker(
+        &worker_health,
+        "agent_run_scratch_reaper",
+        agent_run_scratch_reaper,
+        |worker| worker.run(),
+    );
+    let blob_retirement_worker = supervise_worker(
+        &worker_health,
+        "blob_retirement_worker",
+        blob_retirement_worker,
+        |worker| worker.run(),
+    );
+    let blob_orphan_auditor = supervise_worker(
+        &worker_health,
+        "blob_orphan_auditor",
+        blob_orphan_auditor,
+        |worker| worker.run(),
+    );
+    let approval_judge_worker = supervise_worker(
+        &worker_health,
+        "approval_judge",
+        approval_judge_worker,
+        |worker| worker.run(),
+    );
+    let memory_sweep_worker = supervise_worker(
+        &worker_health,
+        "memory_sweep",
+        memory_sweep_worker,
+        |worker| worker.run(),
+    );
+    let mcp_supervisor = {
+        let mcp = mcp_runtime.clone();
+        worker_supervisor::spawn_supervised(worker_health.clone(), "mcp_supervisor", move || {
+            mcp.clone().supervise()
+        })
+    };
+    let gateway_model_sync = {
+        let gateway = gateway_runtime.clone();
+        let mcp = mcp_runtime.clone();
+        worker_supervisor::spawn_supervised(
+            worker_health.clone(),
+            "gateway_model_sync",
+            move || gateway.clone().sync_models_periodically(mcp.clone()),
+        )
+    };
 
     Ok(Server {
         local_addr,
@@ -1842,9 +1936,16 @@ async fn bind_inner(
         code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,
-        update_quiesce: update_quiesce::UpdateQuiesce::new(code, chat_quiesce_control),
+        update_quiesce: update_quiesce::UpdateQuiesce::new(
+            code,
+            chat_quiesce_control,
+            quiesce_turns,
+            quiesce_store,
+            quiesce_events,
+        ),
         listener: Some(listener),
         router: Some(router),
+        worker_health,
         _queued_turn_promoter: AbortTask(queued_turn_promoter),
         _code_recovery: AbortTask(code_recovery),
         _turn_worker: AbortTask(turn_worker),

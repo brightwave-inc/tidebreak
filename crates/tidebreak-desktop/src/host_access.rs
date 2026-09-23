@@ -40,6 +40,9 @@ pub(crate) struct HostAccess {
     /// Which machine this client is attached to. Host authority applies to the
     /// local one only, so every native command consults this first.
     remote: std::sync::Arc<crate::remote::RemoteAttachment>,
+    /// This run's unclean-exit marker. An update removes it before the
+    /// install, which on Windows ends the process without the exit handler.
+    run_marker: std::sync::Arc<crate::unclean_exit::RunMarkerState>,
 }
 
 impl HostAccess {
@@ -48,6 +51,7 @@ impl HostAccess {
         data_dir: PathBuf,
         home_dir: PathBuf,
         remote: std::sync::Arc<crate::remote::RemoteAttachment>,
+        run_marker: std::sync::Arc<crate::unclean_exit::RunMarkerState>,
     ) -> Result<Self, String> {
         let receipts = ReceiptStore::open(&data_dir)
             .map_err(|_| "could not open private client-execution receipts".to_owned())?;
@@ -70,6 +74,7 @@ impl HostAccess {
             staged_folders: OnceCell::new(),
             server_quiesce: OnceCell::new(),
             remote,
+            run_marker,
         })
     }
 
@@ -266,7 +271,17 @@ impl HostAccess {
     /// The error is a sentence the Updates panel shows as-is; a partial
     /// quiesce is unwound before returning it. Before the server boots there
     /// is no session work, so only the broker drains.
+    ///
+    /// Last, this run's unclean-exit marker goes: the install comes next,
+    /// and on Windows it ends the process without the exit handler, which
+    /// would otherwise make every update read as a crash at the next launch.
     pub(crate) async fn quiesce_for_update(&self) -> Result<(), String> {
+        self.run_marker
+            .clear_after_quiesce(self.quiesce_work_for_update())
+            .await
+    }
+
+    async fn quiesce_work_for_update(&self) -> Result<(), String> {
         if let Some(server) = self.server_quiesce.get() {
             server.quiesce_for_update().await?;
         }
@@ -281,6 +296,8 @@ impl HostAccess {
     }
 
     pub(crate) async fn resume_after_failed_update(&self) -> Result<(), String> {
+        // The install failed, so this run goes on and is marked as running.
+        self.run_marker.restore();
         if let Some(server) = self.server_quiesce.get() {
             server.resume_after_failed_update();
         }
@@ -288,6 +305,54 @@ impl HostAccess {
             .resume_after_failed_update()
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// The agents mid-turn in the embedded server, for deciding whether a
+    /// quit asks first. None before the server boots, since nothing can run
+    /// yet.
+    pub(crate) async fn working_agents(&self) -> Result<tidebreak_server::QuitProgress, String> {
+        match self.server_quiesce.get() {
+            Some(server) => server.working_agents().await,
+            None => Ok(tidebreak_server::QuitProgress::default()),
+        }
+    }
+
+    /// The agents a quit that waits for a safe point is still waiting on:
+    /// exactly what [`Self::quiesce_for_quit`] waits for.
+    pub(crate) async fn safe_point_progress(
+        &self,
+    ) -> Result<tidebreak_server::QuitProgress, String> {
+        match self.server_quiesce.get() {
+            Some(server) => server.safe_point_progress().await,
+            None => Ok(tidebreak_server::QuitProgress::default()),
+        }
+    }
+
+    /// Park every session at its next turn boundary before a quit, however
+    /// long that takes. The broker needs no drain here: the exit handler shuts
+    /// it down.
+    pub(crate) async fn quiesce_for_quit(&self) -> Result<(), String> {
+        match self.server_quiesce.get() {
+            Some(server) => server.quiesce_for_quit().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Stop every turn in flight before a quit, then park what is left.
+    pub(crate) async fn stop_for_quit(&self) -> Result<(), String> {
+        match self.server_quiesce.get() {
+            Some(server) => server.stop_for_quit().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Release the quit's hold after the person cancelled a quit that was
+    /// waiting for a safe point. Turn admission reopens unless an update is
+    /// quiescing too.
+    pub(crate) fn resume_after_cancelled_quit(&self) {
+        if let Some(server) = self.server_quiesce.get() {
+            server.resume_after_cancelled_quit();
+        }
     }
 }
 

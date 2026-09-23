@@ -14,6 +14,7 @@ pub mod capability;
 pub mod computer_use;
 pub mod consequential;
 pub mod id;
+pub mod panic_log;
 pub mod path_policy;
 pub mod protocol;
 pub mod relative_path;

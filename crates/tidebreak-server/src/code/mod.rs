@@ -60,7 +60,7 @@ pub mod worktree;
 pub mod worktree_orphans;
 pub mod worktree_root;
 
-pub use runtime::CodeRuntime;
+pub use runtime::{CodeRuntime, SessionSafePoint};
 pub use scoped::ScopedCode;
 
 /// Timestamp used to rank sessions for trigger delivery and its UI preview.

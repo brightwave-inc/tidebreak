@@ -11,6 +11,10 @@
 //! never waits on the disk from a runtime worker. [`shutdown`] writes out
 //! whatever is still buffered; call it on the way out of the process.
 //!
+//! [`install_panic_hook`] records every panic in the same log, with its
+//! location, thread, and backtrace, and in [`BOOT_FAILURE_LOG`], which the
+//! diagnostics export carries.
+//!
 //! The default level policy is `info` for the workspace's own `tidebreak*`
 //! crates and `warn` for everything else. The `TIDEBREAK_LOG` environment
 //! variable overrides it with standard `tracing_subscriber::EnvFilter`
@@ -30,11 +34,14 @@
 //! durations rather than prompts, tool payloads, URL queries, credentials, or
 //! file contents. Every ordinary log site must keep the same boundary.
 
+use std::any::Any;
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, Once, PoisonError};
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
@@ -207,6 +214,377 @@ pub fn init_logging_file_only(data_dir: &Path) {
 pub fn shutdown() {
     let writers = std::mem::take(&mut *LOG_WRITERS.lock().unwrap_or_else(PoisonError::into_inner));
     drop(writers);
+}
+
+/// The file under the profile data directory that records failures a person
+/// would otherwise never see: a server that never started, and every panic.
+/// The diagnostics export carries it.
+pub const BOOT_FAILURE_LOG: &str = "boot-failures.log";
+
+/// Append one timestamped entry to [`BOOT_FAILURE_LOG`] under `data_dir`.
+///
+/// Best effort: a failed write is ignored, because logging must never mask
+/// the failure being logged. The file is owner-only and refuses a symlink,
+/// like the other logs.
+pub fn append_boot_failure(data_dir: &Path, entry: &str) {
+    let line = format!("{} {entry}\n", chrono::Local::now().to_rfc3339());
+    let _ = open_private_log_file(&data_dir.join(BOOT_FAILURE_LOG), true)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+}
+
+/// Where the panic hook appends its reports. Unset until a profile is known.
+static PANIC_LOG_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// The most characters of a panic message a report keeps.
+const MAX_PANIC_MESSAGE_CHARS: usize = 1_000;
+
+/// How many times each panic location has fired in this process.
+static PANIC_COUNTS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+static PANIC_HOOK: Once = Once::new();
+
+thread_local! {
+    /// Set while this thread is writing a panic report, so a panic inside the
+    /// report cannot recurse into another one.
+    static REPORTING_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record every panic before the previous hook prints it.
+///
+/// A panic on a worker thread used to leave one line on stderr, which a GUI
+/// launch throws away. The hook writes the message, the location, the thread,
+/// and a backtrace to the tracing log, and appends the same report to
+/// [`BOOT_FAILURE_LOG`] under `data_dir` once one is given. Installing it
+/// again only changes that directory.
+///
+/// A location that keeps panicking is reported on its 1st, 2nd, 4th, 8th, …
+/// time, with a backtrace only on the first, so a worker that panics on every
+/// restart cannot grow the log without bound.
+pub fn install_panic_hook(data_dir: Option<&Path>) {
+    if let Some(data_dir) = data_dir {
+        *PANIC_LOG_DIR.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(data_dir.to_path_buf());
+    }
+    PANIC_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            record_panic(info);
+            previous(info);
+        }));
+    });
+}
+
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+    if REPORTING_PANIC.with(|reporting| reporting.replace(true)) {
+        return;
+    }
+    let thread = std::thread::current();
+    let report = PanicReport {
+        // A panic message is free-form text a caller formatted, so it gets
+        // the same pass as any text from outside the log's own emit sites.
+        message: scrub_log_text(
+            &panic_payload_message(info.payload()),
+            MAX_PANIC_MESSAGE_CHARS,
+        ),
+        location: info.location().map_or_else(
+            || "an unknown location".to_owned(),
+            |location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            },
+        ),
+        thread: format!(
+            "'{}' ({:?})",
+            thread.name().unwrap_or("<unnamed>"),
+            thread.id()
+        ),
+    };
+    let occurrence = {
+        let mut counts = PANIC_COUNTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = counts.entry(report.location.clone()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    };
+    if occurrence.is_power_of_two() {
+        let backtrace =
+            (occurrence == 1).then(|| std::backtrace::Backtrace::force_capture().to_string());
+        tracing::error!(
+            thread = %report.thread,
+            location = %report.location,
+            occurrence,
+            backtrace = backtrace.as_deref().unwrap_or("written with the first panic here"),
+            "panic: {}",
+            report.message
+        );
+        let data_dir = PANIC_LOG_DIR
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(data_dir) = data_dir {
+            append_boot_failure(&data_dir, &report.render(occurrence, backtrace.as_deref()));
+        }
+    }
+    REPORTING_PANIC.with(|reporting| reporting.set(false));
+}
+
+/// One panic, as the hook reports it.
+struct PanicReport {
+    message: String,
+    location: String,
+    thread: String,
+}
+
+impl PanicReport {
+    /// The boot failure log entry for the `occurrence`th panic at this
+    /// location. Only the first carries a backtrace.
+    fn render(&self, occurrence: u64, backtrace: Option<&str>) -> String {
+        let mut entry = format!(
+            "panic in thread {} at {}: {}",
+            self.thread, self.location, self.message
+        );
+        if occurrence > 1 {
+            entry.push_str(&format!(
+                " ({occurrence} panics at this location since launch)"
+            ));
+        }
+        if let Some(backtrace) = backtrace {
+            entry.push_str("\nbacktrace:\n");
+            entry.push_str(backtrace.trim_end());
+        }
+        entry
+    }
+}
+
+/// The text a panic carries: its formatted message, or a note when the payload
+/// is not a string.
+pub(crate) fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "a panic with a payload that is not text".to_owned()
+    }
+}
+
+/// What replaces text a log line must not carry.
+const REDACTED: &str = "[redacted]";
+
+/// Token prefixes that mark a credential whatever surrounds them: vendor
+/// keys, and Tidebreak's own session and launch tokens.
+const SECRET_PREFIXES: [&str; 25] = [
+    "sk-",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "pk_live_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xapp-",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "ya29.",
+    "npm_",
+    "hf_",
+    "tbreak_",
+    "tidebreak-token.",
+];
+
+/// Characters past a prefix before a word counts as a credential.
+const MIN_SECRET_TAIL: usize = 8;
+
+/// Key names whose value is a credential, matched inside the key.
+const SECRET_KEYS: [&str; 10] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "apikey",
+    "api_key",
+    "api-key",
+    "authorization",
+    "cookie",
+    "credential",
+];
+
+/// Authorization schemes kept after a credential key, with the word after
+/// them redacted: `Authorization: Bearer <token>`.
+const AUTH_SCHEMES: [&str; 4] = ["bearer", "basic", "token", "digest"];
+
+/// A bare word that means the next word is a credential. Only `Bearer`: the
+/// other schemes are ordinary words in an error message.
+const BEARER: &str = "bearer";
+
+/// Make untrusted or free-form text fit for the log, then cut it to `limit`
+/// characters.
+///
+/// The log never carries prompts, URL query strings, credentials, or tokens.
+/// Server emit sites keep that rule by what they choose to log; text that
+/// arrives from elsewhere, such as a renderer error or a panic message, gets
+/// this pass instead. It removes URL queries, fragments, and userinfo, the
+/// value after a credential key or an authorization scheme, vendor and
+/// Tidebreak tokens, and JSON web tokens. The renderer runs the same rules
+/// (`ui/src/rendererErrors.ts`), and so does the host broker's panic log.
+pub fn scrub_log_text(text: &str, limit: usize) -> String {
+    let bounded: String = text
+        .chars()
+        .take(limit.saturating_mul(4).max(1024))
+        .collect();
+    let mut scrubbed = String::with_capacity(bounded.len());
+    let mut redact_next = false;
+    let mut rest = bounded.as_str();
+    while !rest.is_empty() {
+        let space = rest
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(rest.len());
+        scrubbed.push_str(&rest[..space]);
+        rest = &rest[space..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        rest = &rest[end..];
+        if redact_next {
+            // `Authorization: Bearer <token>`: keep the scheme, redact what
+            // follows it.
+            if AUTH_SCHEMES.contains(&trim_word(word).to_ascii_lowercase().as_str()) {
+                scrubbed.push_str(word);
+            } else {
+                scrubbed.push_str(REDACTED);
+                redact_next = false;
+            }
+            continue;
+        }
+        let (word, next) = scrub_word(word);
+        scrubbed.push_str(&word);
+        redact_next = next;
+    }
+    let mut kept: String = scrubbed.chars().take(limit).collect();
+    if scrubbed.chars().count() > limit {
+        kept.push('…');
+    }
+    kept
+}
+
+/// One whitespace-free word, scrubbed, and whether the word after it is a
+/// credential.
+fn scrub_word(word: &str) -> (String, bool) {
+    if trim_word(word).eq_ignore_ascii_case(BEARER) {
+        return (word.to_owned(), true);
+    }
+    if let Some(scheme) = word.find("://") {
+        return (scrub_url(word, scheme + 3), false);
+    }
+    if let Some(query) = word.find('?') {
+        if word[query..].contains('=') {
+            return (format!("{}?{REDACTED}", &word[..query]), false);
+        }
+    }
+    if let Some(split) = word.find(['=', ':']) {
+        let key = trim_word(&word[..split]).to_ascii_lowercase();
+        if SECRET_KEYS.iter().any(|secret| key.contains(secret)) {
+            if trim_word(&word[split + 1..]).is_empty() {
+                return (word.to_owned(), true);
+            }
+            return (format!("{}{REDACTED}", &word[..=split]), false);
+        }
+    }
+    (redact_tokens(word), false)
+}
+
+/// A URL word without its userinfo, query string, or fragment. `authority`
+/// is where the authority starts, just past `://`.
+fn scrub_url(word: &str, authority: usize) -> String {
+    let (head, tail) = word.split_at(authority);
+    let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+    let (host, path) = tail.split_at(authority_end);
+    let host = match host.rfind('@') {
+        Some(at) => format!("{REDACTED}@{}", &host[at + 1..]),
+        None => host.to_owned(),
+    };
+    let path = match path.find(['?', '#']) {
+        Some(cut) => {
+            // Keep the brackets and quotes that closed around the URL.
+            let closing = path
+                .trim_end_matches([')', ']', '}', '"', '\'', '>', ',', ';'])
+                .len()
+                .max(cut + 1);
+            format!(
+                "{}{}{REDACTED}{}",
+                &path[..cut],
+                &path[cut..=cut],
+                &path[closing..]
+            )
+        }
+        None => path.to_owned(),
+    };
+    format!("{head}{host}{path}")
+}
+
+/// `word` with every vendor token, Tidebreak token, and JSON web token that
+/// starts at a word boundary replaced.
+fn redact_tokens(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut index = 0;
+    let mut after_alphanumeric = false;
+    while index < word.len() {
+        if !after_alphanumeric {
+            if let Some(length) = secret_at(&word[index..]) {
+                out.push_str(REDACTED);
+                index += length;
+                after_alphanumeric = true;
+                continue;
+            }
+        }
+        let character = word[index..]
+            .chars()
+            .next()
+            .expect("index stays on a character boundary");
+        out.push(character);
+        after_alphanumeric = character.is_alphanumeric();
+        index += character.len_utf8();
+    }
+    out
+}
+
+/// The length of the credential at the start of `text`, when one starts there.
+fn secret_at(text: &str) -> Option<usize> {
+    let run = text
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        })
+        .unwrap_or(text.len());
+    let token = &text[..run];
+    let prefixed = SECRET_PREFIXES
+        .iter()
+        .any(|prefix| token.starts_with(prefix) && token.len() >= prefix.len() + MIN_SECRET_TAIL);
+    let web_token = token.starts_with("eyJ") && token.matches('.').count() >= 2;
+    (prefixed || web_token).then_some(run)
+}
+
+/// `word` without the quotes and brackets that often wrap a key or a scheme.
+fn trim_word(word: &str) -> &str {
+    word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+        )
+    })
 }
 
 /// Install `layers` as the global subscriber, plus the pool-wait counter that
@@ -822,5 +1200,200 @@ mod tests {
                 .unwrap()
                 .push(event.metadata().target().to_owned());
         }
+    }
+
+    /// Set in the child copy of the test binary that
+    /// `a_panic_is_recorded_with_its_location_thread_and_backtrace` starts.
+    const PANIC_CHILD_DIR: &str = "TIDEBREAK_TEST_PANIC_HOOK_DIR";
+
+    /// A panic on any thread reaches the boot failure log with its message,
+    /// location, thread, and a backtrace, and a repeat at the same location
+    /// is counted instead of written in full. The hook is process-global, so
+    /// the panics run in a child copy of this test binary.
+    #[test]
+    fn a_panic_is_recorded_with_its_location_thread_and_backtrace() {
+        if let Some(dir) = std::env::var_os(PANIC_CHILD_DIR) {
+            install_panic_hook(Some(Path::new(&dir)));
+            for _ in 0..3 {
+                let panicked = std::thread::Builder::new()
+                    .name("panic-probe".to_owned())
+                    .spawn(|| panic!("probe panic"))
+                    .unwrap()
+                    .join();
+                assert!(panicked.is_err());
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "logging::tests::a_panic_is_recorded_with_its_location_thread_and_backtrace",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(PANIC_CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "the child run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let log = fs::read_to_string(dir.path().join(BOOT_FAILURE_LOG)).unwrap();
+        assert!(log.contains("panic in thread 'panic-probe'"), "{log}");
+        assert!(log.contains(": probe panic"), "{log}");
+        assert!(log.contains("src/logging.rs:"), "{log}");
+        assert!(log.contains("\nbacktrace:\n"), "{log}");
+        // The first and second panics are written; the third is only counted.
+        assert_eq!(log.matches("probe panic").count(), 2, "{log}");
+        assert!(
+            log.contains("(2 panics at this location since launch)"),
+            "{log}"
+        );
+        assert_eq!(log.matches("\nbacktrace:\n").count(), 1, "{log}");
+    }
+
+    #[test]
+    fn a_boot_failure_entry_is_timestamped_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        append_boot_failure(dir.path(), "server failed to start");
+        append_boot_failure(dir.path(), "store error");
+
+        let log = fs::read_to_string(dir.path().join(BOOT_FAILURE_LOG)).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with(" server failed to start"));
+        assert!(lines[1].ends_with(" store error"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(dir.path().join(BOOT_FAILURE_LOG))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_panic_payload_reads_as_its_message() {
+        let literal: Box<dyn Any + Send> = Box::new("a literal");
+        let formatted: Box<dyn Any + Send> = Box::new(String::from("a formatted 42"));
+        let opaque: Box<dyn Any + Send> = Box::new(42_u8);
+        assert_eq!(panic_payload_message(literal.as_ref()), "a literal");
+        assert_eq!(panic_payload_message(formatted.as_ref()), "a formatted 42");
+        assert_eq!(
+            panic_payload_message(opaque.as_ref()),
+            "a panic with a payload that is not text"
+        );
+    }
+
+    /// Credential-shaped inputs for the scrub tests, each assembled at run
+    /// time so that no source line holds one for a secret scanner to flag.
+    /// The desktop and the renderer build the same values the same way.
+    struct FakeSecrets {
+        userinfo: String,
+        bearer: String,
+        password: String,
+        api_key: String,
+        vendor_key: String,
+        tidebreak_token: String,
+        web_token: String,
+    }
+
+    fn fake_secrets() -> FakeSecrets {
+        FakeSecrets {
+            userinfo: ["person:", "hunter", "2"].concat(),
+            bearer: ["tb-", "launch-", "0123456789"].concat(),
+            password: ["hunter", "2"].concat(),
+            api_key: ["abc", "123"].concat(),
+            vendor_key: ["sk-", "ant-", "api03-", "abcdefghijklmnop"].concat(),
+            tidebreak_token: ["tidebreak-", "token", ".", "0123456789abcdef"].concat(),
+            web_token: [
+                "eyJhbG",
+                "ciOiJIUzI1NiJ9",
+                ".",
+                "eyJzdW",
+                "IiOiIxIn0",
+                ".",
+                "c2lnbm",
+                "F0dXJl",
+            ]
+            .concat(),
+        }
+    }
+
+    /// The log's rules for text from outside its own emit sites: no URL
+    /// query strings, fragments, or userinfo, no credential after a key or an
+    /// authorization scheme, and no vendor, Tidebreak, or web tokens.
+    #[test]
+    fn scrubbing_removes_queries_credentials_and_tokens() {
+        let secrets = fake_secrets();
+        let cases = [
+            (
+                "fetch https://api.example.com/v1/chats?token=abc&q=my+prompt#frag failed"
+                    .to_owned(),
+                "fetch https://api.example.com/v1/chats?[redacted] failed",
+            ),
+            (
+                "at (http://127.0.0.1:4321/chats/7?draft=hello)".to_owned(),
+                "at (http://127.0.0.1:4321/chats/7?[redacted])",
+            ),
+            (
+                format!("clone https://{}@github.com/o/r.git", secrets.userinfo),
+                "clone https://[redacted]@github.com/o/r.git",
+            ),
+            (
+                "GET /sessions/9/events?cursor=4&key=x".to_owned(),
+                "GET /sessions/9/events?[redacted]",
+            ),
+            (
+                format!("Authorization: Bearer {} sent", secrets.bearer),
+                "Authorization: Bearer [redacted] sent",
+            ),
+            (
+                format!("password={} user=ada", secrets.password),
+                "password=[redacted] user=ada",
+            ),
+            (
+                "the session token expired; sign in again".to_owned(),
+                "the session token expired; sign in again",
+            ),
+            (
+                format!(r#"{{"api_key":"{}","model":"m"}}"#, secrets.api_key),
+                r#"{"api_key":[redacted]"#,
+            ),
+            (
+                format!("provider said {}", secrets.vendor_key),
+                "provider said [redacted]",
+            ),
+            (
+                format!("subprotocol {}", secrets.tidebreak_token),
+                "subprotocol [redacted]",
+            ),
+            (format!("jwt {}", secrets.web_token), "jwt [redacted]"),
+            (
+                "index out of bounds: the len is 3 but the index is 7".to_owned(),
+                "index out of bounds: the len is 3 but the index is 7",
+            ),
+            (
+                "a task-list and sk-small stay".to_owned(),
+                "a task-list and sk-small stay",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(scrub_log_text(&input, 500), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn scrubbing_cuts_long_text_and_keeps_line_breaks() {
+        let long = format!("first line\n{}", "x".repeat(2_000));
+        let kept = scrub_log_text(&long, 100);
+        assert!(kept.starts_with("first line\nxxx"));
+        assert_eq!(kept.chars().count(), 101);
+        assert!(kept.ends_with('…'));
     }
 }

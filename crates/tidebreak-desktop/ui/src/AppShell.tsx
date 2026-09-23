@@ -135,6 +135,10 @@ import {
 } from "./updates";
 import { stillFollowing, updateCardFor, updateNoticeKey } from "./updateCard";
 import { UpdateReadyCard } from "./UpdateReadyCard";
+import { FloatingNotices } from "./FloatingNotices";
+import { UncleanExitNotice } from "./UncleanExitNotice";
+import { useUncleanExitNotice } from "./desktopLifecycle";
+import { rendererErrors } from "./rendererErrors";
 
 /**
  * Raised by the native "Close Tab" menu item, which owns Cmd+W.
@@ -295,6 +299,7 @@ export function AppShell() {
   const skipProjectRenameCommitRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const desktopUpdates = useDesktopUpdates();
+  const uncleanExit = useUncleanExitNotice();
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
@@ -602,6 +607,9 @@ export function AppShell() {
         // Outputs are read over the same API; their module holds the
         // connection because they are called from places with no client.
         connectOutputs(server.baseUrl, server.token);
+        // Renderer errors go to this machine's own log, and only when the
+        // window works on this machine.
+        rendererErrors.connect(server);
         setStatus(`connected ${server.baseUrl}`);
       } catch (err) {
         if (cancelled) return;
@@ -1326,50 +1334,59 @@ export function AppShell() {
           )}
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
-          {updateCard?.kind === "progress" && (
-            <UpdateReadyCard
-              status={updateCard.status}
-              version={updateCard.version}
-              onDismiss={() => {
-                setExplicitUpdateCheck(null);
-                setFollowingDownload(false);
-              }}
-            />
-          )}
-          {updateCard?.kind === "failed" && (
-            <UpdateReadyCard
-              status="failed"
-              message={updateCard.message}
-              onDismiss={() => setExplicitUpdateCheck(null)}
-            />
-          )}
-          {updateCard?.kind === "up-to-date" && (
-            <UpdateReadyCard
-              status="up-to-date"
-              version={updateCard.version}
-              onDismiss={() => setExplicitUpdateCheck(null)}
-            />
-          )}
-          {updateCard?.kind === "available" && (
-            <UpdateReadyCard
-              status="available"
-              version={updateCard.version}
-              error={updateCard.error}
-              onDownload={() => {
-                setFollowingDownload(true);
-                void downloadDesktopUpdate();
-              }}
-              onDismiss={dismissUpdateNotice}
-            />
-          )}
-          {updateCard?.kind === "ready" && (
-            <UpdateReadyCard
-              version={updateCard.version}
-              error={updateCard.error}
-              onRestart={() => void onRestartForUpdate()}
-              onDismiss={dismissUpdateNotice}
-            />
-          )}
+          <FloatingNotices>
+            {uncleanExit.notice && (
+              <UncleanExitNotice
+                save={uncleanExit.save}
+                onSave={uncleanExit.saveReport}
+                onDismiss={uncleanExit.dismiss}
+              />
+            )}
+            {updateCard?.kind === "progress" && (
+              <UpdateReadyCard
+                status={updateCard.status}
+                version={updateCard.version}
+                onDismiss={() => {
+                  setExplicitUpdateCheck(null);
+                  setFollowingDownload(false);
+                }}
+              />
+            )}
+            {updateCard?.kind === "failed" && (
+              <UpdateReadyCard
+                status="failed"
+                message={updateCard.message}
+                onDismiss={() => setExplicitUpdateCheck(null)}
+              />
+            )}
+            {updateCard?.kind === "up-to-date" && (
+              <UpdateReadyCard
+                status="up-to-date"
+                version={updateCard.version}
+                onDismiss={() => setExplicitUpdateCheck(null)}
+              />
+            )}
+            {updateCard?.kind === "available" && (
+              <UpdateReadyCard
+                status="available"
+                version={updateCard.version}
+                error={updateCard.error}
+                onDownload={() => {
+                  setFollowingDownload(true);
+                  void downloadDesktopUpdate();
+                }}
+                onDismiss={dismissUpdateNotice}
+              />
+            )}
+            {updateCard?.kind === "ready" && (
+              <UpdateReadyCard
+                version={updateCard.version}
+                error={updateCard.error}
+                onRestart={() => void onRestartForUpdate()}
+                onDismiss={dismissUpdateNotice}
+              />
+            )}
+          </FloatingNotices>
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
             <DocumentTitle />

@@ -295,6 +295,7 @@ fn user_prompt(action: &str, context: &[JudgeContextMessage]) -> String {
 }
 
 /// Polls for judge-owned approvals and lands one verdict per call.
+#[derive(Clone)]
 pub(crate) struct ApprovalJudgeWorker {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): the judge runs as the caller whose approval it reads.

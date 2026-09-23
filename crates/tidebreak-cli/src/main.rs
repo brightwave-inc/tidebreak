@@ -139,6 +139,10 @@ const VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
 
 #[tokio::main]
 async fn main() {
+    // First, so a panic anywhere in the process reaches the log with its
+    // location, thread, and backtrace. The commands that open a profile
+    // point it at that profile's boot failure log once they know it.
+    tidebreak_server::logging::install_panic_hook(None);
     let outcome = run().await;
     // Log files are written by background threads; write out what they still
     // hold before `exit` ends the process under them.
@@ -917,6 +921,8 @@ async fn serve() -> Result<()> {
     // Tracing events land in `logs/tidebreak.log` under the profile data dir
     // (plus stderr in debug builds); see `tidebreak_server::logging`.
     tidebreak_server::logging::init_logging(&config.data_dir);
+    // A panic, on any thread, also lands in the profile's boot failure log.
+    tidebreak_server::logging::install_panic_hook(Some(&config.data_dir));
     if profile == Profile::SelfHost {
         // The container may run as a uid with no home; see the function.
         tidebreak_server::ensure_home_dir();

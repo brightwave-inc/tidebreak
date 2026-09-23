@@ -141,3 +141,43 @@ wired; D4b unifies them on this flag.
 ## Amended 2026-09-10
 
 PR #3156 renamed the shared code-mode tables to `session`, `turn`, `event`, and `approval`, and their id types to `SessionId`, `TurnId`, and `ApprovalId`; historical names above refer to those current names.
+
+## Amended 2026-09-23: quitting reuses the quiesce
+
+This record left ordinary quit out. Quitting with agents working lost work the
+same way an update restart did: chat turns sat on their leases until the next
+launch, and code engine children were orphaned and then fenced. So a quit now
+uses the same handle.
+
+- A quit counts the agents mid-turn first (`UpdateQuiesce::working_agents`).
+  With none, the app quits at once. With some, the desktop asks the person to
+  stop them, wait for a safe point, or cancel.
+- Waiting for a safe point runs this quiesce with no code deadline
+  (`quiesce_for_quit`): code turns run to their boundary, idle children park,
+  and chat leases are handed back so the next launch resumes those turns.
+  While it waits, the person can still stop the agents or cancel, and a
+  cancel reopens admission.
+- Stopping cancels chat turns durably, the way the Stop button does,
+  interrupts code turns on external engines, and parks what is left for at
+  most 15 seconds (`stop_for_quit`). Unlike an update, those chat turns do not
+  resume after the next launch, because the person asked to stop them.
+- A logout, restart, or shutdown quits without asking, so Tidebreak never
+  holds up the system. The restart that installs an update never shows the
+  prompt; it keeps its own deadline, refusal, and order inside the install
+  barrier, all unchanged.
+- An update and a quit can overlap: the person can press Cmd+Q while an
+  update quiesces, or restart to update while a quit waits. Each holds the
+  quiesce on its own account and releases only its own hold, and admission
+  reopens once neither holds. Cancelling a quit never lowers an update's
+  quiesce.
+- A code turn parked on an approval, a question, or a plan never reaches its
+  boundary on its own. The prompt counts those turns as waiting for the
+  person and offers the inbox, and a quit that waits for a safe point shows a
+  bar instead of a dialog, so the person can answer while it waits.
+- The count a waiting quit shows is exactly what the quiesce waits on: every
+  local session mid-turn or holding an engine child that has not parked yet
+  (`safe_point_progress`). The count that decides whether to ask leaves out
+  idle children, which are not working.
+- A count, stop, or wait that panics or hangs cannot strand a quit. A count
+  that fails lets the quit go ahead, a stop quits after 30 seconds at most,
+  and a wait whose quiesce panics releases its hold and asks again.

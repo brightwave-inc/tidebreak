@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { FloatingNotices } from "@/FloatingNotices";
 import { UpdateReadyCard } from "@/UpdateReadyCard";
 
 const CHECK_FAILED =
@@ -38,43 +39,45 @@ function UpdateReadyCardStory({
           The card stays available without blocking the work underneath it.
         </p>
       </div>
-      {visible && status === "ready" && (
-        <UpdateReadyCard
-          version={version}
-          onRestart={fn()}
-          onDismiss={dismiss}
-        />
-      )}
-      {visible && status === "available" && (
-        <UpdateReadyCard
-          status="available"
-          version={version}
-          error={error}
-          onDownload={fn()}
-          onDismiss={dismiss}
-        />
-      )}
-      {visible && status === "up-to-date" && (
-        <UpdateReadyCard
-          status="up-to-date"
-          version={version}
-          onDismiss={dismiss}
-        />
-      )}
-      {visible && status === "failed" && (
-        <UpdateReadyCard
-          status="failed"
-          message={CHECK_FAILED}
-          onDismiss={dismiss}
-        />
-      )}
-      {visible && (status === "checking" || status === "downloading") && (
-        <UpdateReadyCard
-          status={status}
-          version={version}
-          onDismiss={dismiss}
-        />
-      )}
+      <FloatingNotices>
+        {visible && status === "ready" && (
+          <UpdateReadyCard
+            version={version}
+            onRestart={fn()}
+            onDismiss={dismiss}
+          />
+        )}
+        {visible && status === "available" && (
+          <UpdateReadyCard
+            status="available"
+            version={version}
+            error={error}
+            onDownload={fn()}
+            onDismiss={dismiss}
+          />
+        )}
+        {visible && status === "up-to-date" && (
+          <UpdateReadyCard
+            status="up-to-date"
+            version={version}
+            onDismiss={dismiss}
+          />
+        )}
+        {visible && status === "failed" && (
+          <UpdateReadyCard
+            status="failed"
+            message={CHECK_FAILED}
+            onDismiss={dismiss}
+          />
+        )}
+        {visible && (status === "checking" || status === "downloading") && (
+          <UpdateReadyCard
+            status={status}
+            version={version}
+            onDismiss={dismiss}
+          />
+        )}
+      </FloatingNotices>
     </div>
   );
 }

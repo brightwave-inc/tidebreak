@@ -7362,6 +7362,7 @@ dependencies = [
  "tidebreak-server",
  "tokio",
  "tokio-util",
+ "tracing",
  "unicode-general-category",
  "url",
  "uuid",

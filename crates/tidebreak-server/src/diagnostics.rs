@@ -1,13 +1,18 @@
 //! Bounded process diagnostics for operators and performance investigations.
 //!
 //! The live surface stays deliberately small: request and named-operation
-//! histograms, process uptime/resource counters, OpenMetrics text, and a ZIP
-//! bundle containing those snapshots plus the profile's allowlisted log files.
-//! It never reads the database, blobs, keychain, or arbitrary profile files.
+//! histograms, process uptime/resource counters, the health of each background
+//! worker, OpenMetrics text, and a ZIP bundle containing those snapshots plus
+//! the profile's allowlisted log files. It never reads the database, blobs,
+//! keychain, or arbitrary profile files.
 //!
 //! The event target is separate from the human log target. The logging module
 //! writes these high-volume timing events only to the structured JSONL file,
 //! where an agent can analyze them without flooding `tidebreak.log`.
+//!
+//! [`post_renderer_error`] is the one write: the renderer reports an error it
+//! could not handle, and the server writes it to the human log, a bounded
+//! number per minute.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -30,7 +35,7 @@ use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
 use futures::StreamExt as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tidebreak_core::{
     ChatRequest, ModelProvider, Profile, ProviderEvent, ProviderId, Result as AgentResult,
     StopReason,
@@ -41,6 +46,7 @@ use zip::write::SimpleFileOptions;
 use crate::error::ServerError;
 use crate::resolver::ProviderResolver;
 use crate::state::AppState;
+use crate::worker_supervisor::{WorkerHealth, WorkerHealthSnapshot, WorkerState};
 
 /// Tracing target reserved for machine-oriented timing events.
 pub const EVENT_TARGET: &str = tidebreak_core::DIAGNOSTICS_TRACING_TARGET;
@@ -68,6 +74,8 @@ pub struct Diagnostics {
     in_flight_http: Arc<AtomicU64>,
     in_flight_model_requests: AtomicU64,
     state: Mutex<DiagnosticState>,
+    workers: Arc<WorkerHealth>,
+    renderer_errors: Mutex<RendererErrorAllowance>,
 }
 
 #[derive(Default)]
@@ -160,7 +168,14 @@ impl Diagnostics {
             in_flight_http: Arc::new(AtomicU64::new(0)),
             in_flight_model_requests: AtomicU64::new(0),
             state: Mutex::new(DiagnosticState::default()),
+            workers: Arc::new(WorkerHealth::default()),
+            renderer_errors: Mutex::new(RendererErrorAllowance::new(Instant::now())),
         }
+    }
+
+    /// The health record every supervised background worker reports into.
+    pub fn worker_health(&self) -> Arc<WorkerHealth> {
+        self.workers.clone()
     }
 
     fn begin_http(&self) -> HttpInFlightGuard {
@@ -301,7 +316,16 @@ impl Diagnostics {
                     duration: histogram.snapshot(),
                 })
                 .collect(),
+            workers: self.workers.snapshot(),
         }
+    }
+
+    /// Whether one more renderer error may be written to the log now.
+    fn admit_renderer_error(&self, now: Instant) -> RendererErrorAdmission {
+        self.renderer_errors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(now)
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, DiagnosticState> {
@@ -723,6 +747,8 @@ pub struct DiagnosticSnapshot {
     http: HttpDiagnosticsSnapshot,
     model: ModelDiagnosticsSnapshot,
     operations: Vec<OperationSnapshot>,
+    /// The long-lived background workers, sorted by name.
+    workers: Vec<WorkerHealthSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -949,6 +975,160 @@ pub async fn get_export(State(state): State<AppState>) -> Result<Response, Serve
         .map_err(|_| ServerError::internal("could not build diagnostic export response"))
 }
 
+/// Renderer errors one server writes before it starts refusing them.
+const RENDERER_ERROR_BURST: u32 = 20;
+
+/// How long the server takes to earn back one renderer error: ten a minute.
+const RENDERER_ERROR_REFILL: Duration = Duration::from_secs(6);
+
+/// The largest renderer error report body the route reads.
+pub const MAX_RENDERER_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+const MAX_RENDERER_MESSAGE_CHARS: usize = 1_000;
+const MAX_RENDERER_STACK_CHARS: usize = 8_000;
+const MAX_RENDERER_SOURCE_CHARS: usize = 500;
+
+/// A token bucket over the renderer errors this process writes to its log.
+///
+/// A render loop that throws on every frame would otherwise fill the human
+/// log in seconds and rotate away the lines that explain it.
+#[derive(Debug)]
+struct RendererErrorAllowance {
+    available: u32,
+    refilled_at: Instant,
+    /// Reports refused since the last one written, so the next line can say
+    /// how many were dropped.
+    dropped: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RendererErrorAdmission {
+    /// Write the report. `dropped` reports were refused before it.
+    Accepted {
+        dropped: u64,
+    },
+    Refused,
+}
+
+impl RendererErrorAllowance {
+    fn new(now: Instant) -> Self {
+        Self {
+            available: RENDERER_ERROR_BURST,
+            refilled_at: now,
+            dropped: 0,
+        }
+    }
+
+    fn admit(&mut self, now: Instant) -> RendererErrorAdmission {
+        let earned = now.saturating_duration_since(self.refilled_at).as_millis()
+            / RENDERER_ERROR_REFILL.as_millis();
+        if earned > 0 {
+            let earned = u32::try_from(earned).unwrap_or(u32::MAX);
+            self.available = self
+                .available
+                .saturating_add(earned)
+                .min(RENDERER_ERROR_BURST);
+            self.refilled_at = if self.available == RENDERER_ERROR_BURST {
+                now
+            } else {
+                self.refilled_at + RENDERER_ERROR_REFILL * earned
+            };
+        }
+        if self.available == 0 {
+            self.dropped = self.dropped.saturating_add(1);
+            return RendererErrorAdmission::Refused;
+        }
+        self.available -= 1;
+        RendererErrorAdmission::Accepted {
+            dropped: std::mem::take(&mut self.dropped),
+        }
+    }
+}
+
+/// Which renderer handler caught the error.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererErrorKind {
+    /// A React error boundary caught a render or lifecycle throw.
+    Render,
+    /// The window's `error` event: an uncaught exception.
+    Error,
+    /// The window's `unhandledrejection` event: a rejected promise nobody
+    /// handled.
+    UnhandledRejection,
+}
+
+impl RendererErrorKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Render => "render",
+            Self::Error => "error",
+            Self::UnhandledRejection => "unhandled_rejection",
+        }
+    }
+}
+
+/// An error the renderer could not handle, as it reports it.
+///
+/// Every text field is cut to a fixed length before it is logged, and each is
+/// logged in its escaped form, so a report cannot forge a log line.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RendererErrorReport {
+    kind: RendererErrorKind,
+    message: String,
+    #[serde(default)]
+    stack: Option<String>,
+    #[serde(default)]
+    component_stack: Option<String>,
+    /// The script the `error` event named.
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    column: Option<u32>,
+}
+
+/// `POST /diagnostics/renderer-errors` — write an error the renderer could not
+/// handle to the human log.
+///
+/// Answers `204` once the report is written and `429` when this process has
+/// written its allowance for now. Nothing leaves the machine: the report goes
+/// to the same local log file as every other line.
+pub async fn post_renderer_error(
+    State(state): State<AppState>,
+    Json(report): Json<RendererErrorReport>,
+) -> StatusCode {
+    match state.diagnostics.admit_renderer_error(Instant::now()) {
+        RendererErrorAdmission::Accepted { dropped } => {
+            log_renderer_error(&report, dropped);
+            StatusCode::NO_CONTENT
+        }
+        RendererErrorAdmission::Refused => StatusCode::TOO_MANY_REQUESTS,
+    }
+}
+
+/// Write one renderer error to the human log. Every text field goes through
+/// the log's scrub first, so a query string, a credential, or a token in an
+/// error message stays out of the log and the diagnostics export, whatever
+/// the renderer sent.
+fn log_renderer_error(report: &RendererErrorReport, dropped: u64) {
+    let scrub = |text: &str, limit| crate::logging::scrub_log_text(text, limit);
+    let optional = |text: &Option<String>, limit| text.as_deref().map(|text| scrub(text, limit));
+    tracing::error!(
+        kind = report.kind.as_str(),
+        error = ?scrub(&report.message, MAX_RENDERER_MESSAGE_CHARS),
+        stack = ?optional(&report.stack, MAX_RENDERER_STACK_CHARS),
+        component_stack = ?optional(&report.component_stack, MAX_RENDERER_STACK_CHARS),
+        source = ?optional(&report.source, MAX_RENDERER_SOURCE_CHARS),
+        line = ?report.line,
+        column = ?report.column,
+        dropped_before = dropped,
+        "renderer error"
+    );
+}
+
 fn render_openmetrics(snapshot: &DiagnosticSnapshot) -> String {
     let mut out = String::new();
     use std::fmt::Write as _;
@@ -1113,6 +1293,30 @@ fn render_openmetrics(snapshot: &DiagnosticSnapshot) -> String {
                 .unwrap_or(out.len()),
             "# HELP tidebreak_process_cpu_seconds_total CPU time consumed by this process.\n# TYPE tidebreak_process_cpu_seconds_total counter\n",
         );
+    }
+    if !snapshot.workers.is_empty() {
+        out.push_str(
+            "# HELP tidebreak_worker_up Whether a background worker is running (1) or not (0).\n",
+        );
+        out.push_str("# TYPE tidebreak_worker_up gauge\n");
+        for worker in &snapshot.workers {
+            let _ = writeln!(
+                out,
+                "tidebreak_worker_up{{worker=\"{}\"}} {}",
+                metric_label(&worker.name),
+                u8::from(worker.state == WorkerState::Running)
+            );
+        }
+        out.push_str("# HELP tidebreak_worker_restarts_total Times a background worker stopped and was started again.\n");
+        out.push_str("# TYPE tidebreak_worker_restarts_total counter\n");
+        for worker in &snapshot.workers {
+            let _ = writeln!(
+                out,
+                "tidebreak_worker_restarts_total{{worker=\"{}\"}} {}",
+                metric_label(&worker.name),
+                worker.restarts
+            );
+        }
     }
     out.push_str("# EOF\n");
     out
@@ -1483,6 +1687,182 @@ mod tests {
         assert!(metrics.contains("type=\"uncached_input\"} 40"));
         assert!(metrics.contains("type=\"cache_read_input\"} 80"));
         assert!(metrics.ends_with("# EOF\n"));
+    }
+
+    /// A worker that panicked and came back shows in the JSON snapshot and in
+    /// OpenMetrics, so an export says which worker died and how often.
+    #[tokio::test(start_paused = true)]
+    async fn the_snapshot_reports_each_workers_health() {
+        let diagnostics = Diagnostics::new();
+        let health = diagnostics.worker_health();
+        let starts = Arc::new(AtomicU64::new(0));
+        let counted = starts.clone();
+        let supervisor = tokio::spawn(crate::worker_supervisor::supervise(
+            health,
+            "approval_judge",
+            crate::worker_supervisor::RestartPolicy::default(),
+            move || {
+                let start = counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if start == 0 {
+                        panic!("judge tick exploded");
+                    }
+                    std::future::pending::<()>().await;
+                }
+            },
+        ));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let snapshot = diagnostics.snapshot(Profile::Desktop);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            json["workers"],
+            serde_json::json!([{
+                "name": "approval_judge",
+                "state": "running",
+                "restarts": 1,
+                "last_error": "the worker panicked: judge tick exploded",
+                "last_stopped_at": json["workers"][0]["last_stopped_at"],
+            }])
+        );
+        assert!(json["workers"][0]["last_stopped_at"].is_string());
+        let metrics = render_openmetrics(&snapshot);
+        assert!(metrics.contains("tidebreak_worker_up{worker=\"approval_judge\"} 1\n"));
+        assert!(metrics.contains("tidebreak_worker_restarts_total{worker=\"approval_judge\"} 1\n"));
+        assert!(metrics.ends_with("# EOF\n"));
+        supervisor.abort();
+    }
+
+    /// A burst is written, the next report is refused, and the allowance comes
+    /// back at ten a minute. The first report written after a refusal says how
+    /// many were dropped.
+    #[test]
+    fn renderer_errors_are_admitted_at_a_bounded_rate() {
+        let start = Instant::now();
+        let mut allowance = RendererErrorAllowance::new(start);
+        for _ in 0..RENDERER_ERROR_BURST {
+            assert_eq!(
+                allowance.admit(start),
+                RendererErrorAdmission::Accepted { dropped: 0 }
+            );
+        }
+        assert_eq!(allowance.admit(start), RendererErrorAdmission::Refused);
+        assert_eq!(allowance.admit(start), RendererErrorAdmission::Refused);
+
+        let later = start + RENDERER_ERROR_REFILL;
+        assert_eq!(
+            allowance.admit(later),
+            RendererErrorAdmission::Accepted { dropped: 2 }
+        );
+        assert_eq!(allowance.admit(later), RendererErrorAdmission::Refused);
+
+        // A long quiet stretch refills the burst and no more.
+        let much_later = later + RENDERER_ERROR_REFILL * 1_000;
+        for _ in 0..RENDERER_ERROR_BURST {
+            assert!(matches!(
+                allowance.admit(much_later),
+                RendererErrorAdmission::Accepted { .. }
+            ));
+        }
+        assert_eq!(allowance.admit(much_later), RendererErrorAdmission::Refused);
+    }
+
+    /// A report is written to the human log with every text field escaped and
+    /// cut to its limit, so a newline in a message cannot forge a log line.
+    #[test]
+    fn a_renderer_error_is_logged_escaped_and_bounded() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(writer.clone()))
+            .finish();
+        let report: RendererErrorReport = serde_json::from_value(serde_json::json!({
+            "kind": "unhandled_rejection",
+            "message": "boom\n2026-09-23 INFO forged line",
+            "stack": "x".repeat(MAX_RENDERER_STACK_CHARS + 50),
+            "line": 12,
+            "column": 3,
+        }))
+        .unwrap();
+        tracing::subscriber::with_default(subscriber, || log_renderer_error(&report, 4));
+
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(logged.lines().count(), 1, "{logged}");
+        assert!(logged.contains("renderer error"), "{logged}");
+        assert!(logged.contains("kind=\"unhandled_rejection\""), "{logged}");
+        assert!(
+            logged.contains(r#"error="boom\n2026-09-23 INFO forged line""#),
+            "{logged}"
+        );
+        assert!(logged.contains("dropped_before=4"), "{logged}");
+        assert!(logged.contains(&format!("{}…", "x".repeat(10))), "{logged}");
+        assert!(!logged.contains(&"x".repeat(MAX_RENDERER_STACK_CHARS + 1)));
+    }
+
+    /// Whatever the renderer sends, the log keeps no URL query string, no
+    /// credential, and no token: the route scrubs before it writes.
+    #[test]
+    fn a_renderer_error_is_scrubbed_before_it_is_logged() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(writer.clone()))
+            .finish();
+        // Assembled at run time, so no source line holds a bearer value.
+        let bearer = ["tidebreak", "launch", "secret"].join("-");
+        let report: RendererErrorReport = serde_json::from_value(serde_json::json!({
+            "kind": "unhandled_rejection",
+            "message": format!(
+                "request to http://127.0.0.1:4321/chats/7?draft=private+words failed with Bearer {bearer}"
+            ),
+            "source": "http://tauri.localhost/assets/index.js?token=abc",
+        }))
+        .unwrap();
+        tracing::subscriber::with_default(subscriber, || log_renderer_error(&report, 0));
+
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("http://127.0.0.1:4321/chats/7?[redacted]"),
+            "{logged}"
+        );
+        assert!(logged.contains("Bearer [redacted]"), "{logged}");
+        assert!(
+            logged.contains("http://tauri.localhost/assets/index.js?[redacted]"),
+            "{logged}"
+        );
+        for leaked in ["private+words", bearer.as_str(), "token=abc"] {
+            assert!(
+                !logged.contains(leaked),
+                "{leaked} reached the log: {logged}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renderer_error_report_refuses_unknown_fields() {
+        let refused = serde_json::from_value::<RendererErrorReport>(serde_json::json!({
+            "kind": "render",
+            "message": "boom",
+            "cookies": "no",
+        }));
+        assert!(refused.is_err());
+    }
+
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

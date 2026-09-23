@@ -40,7 +40,7 @@ pub use core::{
     BrowserRuntimeError, BrowserRuntimeScope, ClientExecutionWake, DeprovisionTarget,
     DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus,
     NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError,
-    PairingHandle, PendingRegistration, Server, ServerError, UpdateQuiesce,
+    PairingHandle, PendingRegistration, QuitProgress, Server, ServerError, UpdateQuiesce,
 };
 
 pub mod routes;
@@ -749,6 +749,15 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_app_detail).delete(routes::delete_app),
         )
         .route("/policy", get(routes::get_policy))
+        // Errors the renderer could not handle land in this machine's own
+        // log. It sits on the member plane because every signed-in renderer
+        // reports its own errors; the handler bounds how many it writes.
+        .route(
+            "/diagnostics/renderer-errors",
+            post(diagnostics::post_renderer_error).layer(DefaultBodyLimit::max(
+                diagnostics::MAX_RENDERER_ERROR_BODY_BYTES,
+            )),
+        )
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))
         .route("/gateway/machine", get(routes::get_gateway_machine))

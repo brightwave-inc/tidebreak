@@ -2,6 +2,10 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const reportRendererError = vi.hoisted(() => vi.fn());
+vi.mock("./rendererErrors", () => ({ reportRendererError }));
+
 import { ErrorBoundary } from "./ErrorBoundary";
 
 function Bomb(): never {
@@ -22,6 +26,21 @@ describe("ErrorBoundary", () => {
     );
     expect(screen.getByText("all good")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(reportRendererError).not.toHaveBeenCalled();
+  });
+
+  it("writes a caught error to this machine's log, with where it rendered", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ErrorBoundary>
+        <Bomb />
+      </ErrorBoundary>,
+    );
+    expect(reportRendererError).toHaveBeenCalledWith(
+      "render",
+      expect.objectContaining({ message: "kaboom in render" }),
+      { componentStack: expect.stringContaining("Bomb") },
+    );
   });
 
   it("catches a render throw and shows the fallback with the message", () => {

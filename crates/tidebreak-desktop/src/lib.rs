@@ -70,9 +70,11 @@ mod office_install;
 mod office_pdf;
 #[cfg(target_os = "macos")]
 mod office_sandbox;
+mod quit;
 mod remote;
 mod skill_import;
 mod trusted_folders;
+mod unclean_exit;
 mod update_preferences;
 mod update_staging;
 mod updater;
@@ -851,6 +853,10 @@ fn verify_required_plugins(skills_dir: &Path, plugins_dir: &Path) -> Result<(), 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, so a panic anywhere in the process is logged with its location,
+    // thread, and backtrace. Setup points it at the profile's boot failure
+    // log once the data directory is known.
+    tidebreak_server::logging::install_panic_hook(None);
     let mut context = tauri::generate_context!();
     // Debug and staging each run under a distinct identifier so they hold
     // their own single-instance lock and app-data dir instead of colliding
@@ -896,6 +902,7 @@ pub fn run() {
         .manage(deep_link::PairingStore::new(store_rx))
         .manage(documents::PendingLibraryDrop::default())
         .manage(updater::UpdateManager::default())
+        .manage(quit::QuitController::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
             remote_machine_state,
@@ -957,7 +964,13 @@ pub fn run() {
             updater::restart_for_update,
             updater::download_update,
             updater::desktop_update_preferences,
-            updater::set_automatic_update_downloads
+            updater::set_automatic_update_downloads,
+            quit::quit_prompt_state,
+            quit::quit_prompt_opened,
+            quit::answer_quit_prompt,
+            unclean_exit::unclean_exit_notice,
+            unclean_exit::dismiss_unclean_exit_notice,
+            unclean_exit::save_diagnostics_report
         ])
         .on_menu_event(menu::handle_menu_event)
         .setup(move |app| {
@@ -979,6 +992,16 @@ pub fn run() {
             // events land in `logs/tidebreak.log` under the profile data dir
             // (stderr-only if that file cannot be created).
             tidebreak_server::logging::init_logging(&data);
+            // Panics now also land in the profile's boot failure log.
+            tidebreak_server::logging::install_panic_hook(Some(&data));
+            // Notice a run that ended without its exit handler, then mark this
+            // one as running until the exit handler, or an update's install,
+            // clears it.
+            let run_marker = Arc::new(unclean_exit::RunMarkerState::open(
+                &data,
+                &app.package_info().version.to_string(),
+            ));
+            app.manage(run_marker.clone());
             let browser_registry = browser_control::BrowserRegistry::default();
             browser_registry.initialize_private_state(&data)?;
             app.manage(browser_registry);
@@ -998,9 +1021,15 @@ pub fn run() {
                 data.clone(),
                 home,
                 attachment.clone(),
+                run_marker,
             )?;
             app.manage(host_access);
             app.manage(attachment);
+            // The Dock's Quit and a logout reach AppKit's
+            // `applicationShouldTerminate:`, which the quit flow answers from
+            // here on. It counts agents through host access, so it comes after.
+            #[cfg(target_os = "macos")]
+            quit::install_terminate_hook(&handle);
 
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = boot_server(handle, &info_tx, store_tx, data.clone()).await {
@@ -1018,6 +1047,19 @@ pub fn run() {
     app.run(|app, event| match event {
         tauri::RunEvent::WindowEvent { label, event, .. } => {
             documents::handle_window_drag_drop(app, &label, &event);
+            if let tauri::WindowEvent::CloseRequested { api, .. } = &event {
+                quit::on_close_requested(app, &label, api);
+            }
+        }
+        // The Dock icon brings back a window the close button hid.
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            if !has_visible_windows {
+                deep_link::focus_main_window(app);
+            }
         }
         tauri::RunEvent::ExitRequested { .. } => {
             // Browser views are torn down with the windows after this; let
@@ -1032,6 +1074,10 @@ pub fn run() {
                 tauri::async_runtime::block_on(runtime.shutdown());
             }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
+            // The exit is clean, so the next launch has nothing to report.
+            if let Some(markers) = app.try_state::<Arc<unclean_exit::RunMarkerState>>() {
+                markers.clear();
+            }
             // Last: write out log lines still queued for the log files.
             tidebreak_server::logging::shutdown();
         }
@@ -1044,13 +1090,7 @@ pub fn run() {
 /// GUI-launched app leaves a diagnosable trace without a terminal relaunch.
 /// Best-effort: logging must never mask the failure being logged.
 fn log_boot_failure(data_dir: &Path, error: &str) {
-    use std::io::Write;
-    let line = format!("{} {error}\n", chrono::Local::now().to_rfc3339());
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(data_dir.join("boot-failures.log"))
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+    tidebreak_server::logging::append_boot_failure(data_dir, error);
 }
 
 /// Bind the local API and park the accept loop for the life of the process.
