@@ -125,6 +125,7 @@ const storyProviders = [
     enabled: true,
     has_credential: true,
     models: [],
+    custom_reasoning_efforts: [],
   },
 ] satisfies ProviderInfo[];
 

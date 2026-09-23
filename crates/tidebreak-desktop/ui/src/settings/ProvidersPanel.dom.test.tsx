@@ -7,19 +7,40 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ProviderInfo } from "../api";
+import type { ApiClient, ModelInfo, ProviderInfo } from "../api";
+import { providerInfoFixture } from "../stories/fixtures";
 import { ProvidersPanel } from "./ProvidersPanel";
 
-const compatible: ProviderInfo = {
-  kind: "openai_compatible",
+const compatible: ProviderInfo = providerInfoFixture("openai_compatible", {
   enabled: true,
   has_credential: true,
   base_url: "http://127.0.0.1:1234/v1",
-  models: [],
-};
+});
+
+function grok(id: string, name: string): ModelInfo {
+  return {
+    key: `xai::${id}`,
+    id,
+    display_name: name,
+    provider: "xai",
+    vendor: null,
+    verification: "unverified",
+    available: false,
+    context_window: 500_000,
+    max_output_tokens: 32_768,
+    input_modalities: ["text", "image"],
+    supports_reasoning: true,
+    supports_tools: true,
+    supports_structured_output: false,
+    reasoning_efforts: ["low", "medium", "high", "xhigh"],
+    multimodal: true,
+    recommended: true,
+  };
+}
 
 /**
  * Cards open collapsed, so every assertion about a card's contents starts by
@@ -31,6 +52,36 @@ function renderPanel(ui: ReactElement) {
     fireEvent.click(header);
   }
   return result;
+}
+
+/** The Add model dialog, filled in and submitted. */
+async function addModel(fields: {
+  id: string;
+  displayName?: string;
+  contextWindow?: string;
+  maxOutput?: string;
+}) {
+  fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("Model ID"), {
+    target: { value: fields.id },
+  });
+  if (fields.displayName !== undefined) {
+    fireEvent.change(within(dialog).getByLabelText("Display name"), {
+      target: { value: fields.displayName },
+    });
+  }
+  if (fields.contextWindow !== undefined) {
+    fireEvent.change(within(dialog).getByLabelText("Context window"), {
+      target: { value: fields.contextWindow },
+    });
+  }
+  if (fields.maxOutput !== undefined) {
+    fireEvent.change(within(dialog).getByLabelText("Max output"), {
+      target: { value: fields.maxOutput },
+    });
+  }
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add model" }));
 }
 
 afterEach(() => {
@@ -51,25 +102,15 @@ describe("ProvidersPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
-      target: { value: " vendor/model " },
+    await addModel({
+      id: " vendor/model ",
+      displayName: " Vendor Model ",
+      contextWindow: "65536",
+      maxOutput: "8,192",
     });
-    fireEvent.change(screen.getByLabelText("Custom model 1 display name"), {
-      target: { value: " Vendor Model " },
-    });
-    fireEvent.change(screen.getByLabelText("Custom model 1 context tokens"), {
-      target: { value: "65536" },
-    });
-    fireEvent.change(screen.getByLabelText("Custom model 1 max output"), {
-      target: { value: "8192" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("openai_compatible", {
-        enabled: true,
-        base_url: "http://127.0.0.1:1234/v1",
         models: [
           {
             id: "vendor/model",
@@ -79,13 +120,14 @@ describe("ProvidersPanel", () => {
             input_modalities: ["text"],
             supports_reasoning: false,
             reasoning_efforts: [],
+            supports_tools: true,
           },
         ],
       }),
     );
   });
 
-  it("omits an unset display name instead of sending null", async () => {
+  it("omits an unset display name and fills blank limits with the defaults", async () => {
     const putProvider = vi.fn().mockResolvedValue(compatible);
     const client = { putProvider } as unknown as ApiClient;
 
@@ -97,13 +139,9 @@ describe("ProvidersPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
-      target: { value: "vendor/model" },
-    });
-    // Display name left blank, which is the case the server represents by
-    // omitting the key. It used to be sent as an explicit null.
-    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+    // Display name and both limits left blank. The display name is the case
+    // the server represents by omitting the key.
+    await addModel({ id: "vendor/model" });
 
     await waitFor(() => expect(putProvider).toHaveBeenCalled());
 
@@ -119,17 +157,13 @@ describe("ProvidersPanel", () => {
       input_modalities: ["text"],
       supports_reasoning: false,
       reasoning_efforts: [],
+      supports_tools: true,
     });
     expect("display_name" in sent.models[0]).toBe(false);
   });
 
-  it("lists curated Grok models and saves an xAI key without custom registration", async () => {
-    const xai: ProviderInfo = {
-      kind: "xai",
-      enabled: false,
-      has_credential: false,
-      models: [],
-    };
+  it("lists built-in Grok models and saves an xAI key without touching custom models", async () => {
+    const xai = providerInfoFixture("xai");
     const putProvider = vi.fn().mockResolvedValue({
       ...xai,
       enabled: true,
@@ -140,54 +174,15 @@ describe("ProvidersPanel", () => {
     renderPanel(
       <ProvidersPanel
         providers={[xai]}
-        models={[
-          {
-            key: "xai::grok-4.6",
-            id: "grok-4.6",
-            display_name: "Grok 4.6",
-            provider: "xai",
-            vendor: null,
-            verification: "unverified",
-            available: false,
-            context_window: 500_000,
-            max_output_tokens: 32_768,
-            input_modalities: ["text", "image"],
-            supports_reasoning: true,
-            supports_tools: true,
-            supports_structured_output: false,
-            reasoning_efforts: ["low", "medium", "high", "xhigh"],
-            multimodal: true,
-            recommended: true,
-          },
-          {
-            key: "xai::grok-4.5",
-            id: "grok-4.5",
-            display_name: "Grok 4.5",
-            provider: "xai",
-            vendor: null,
-            verification: "unverified",
-            available: false,
-            context_window: 500_000,
-            max_output_tokens: 32_768,
-            input_modalities: ["text", "image"],
-            supports_reasoning: true,
-            supports_tools: true,
-            supports_structured_output: false,
-            reasoning_efforts: ["low", "medium", "high", "xhigh"],
-            multimodal: true,
-            recommended: true,
-          },
-        ]}
+        models={[grok("grok-4.7", "Grok 4.7"), grok("grok-4.5", "Grok 4.5")]}
         client={client}
         onChanged={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("Grok 4.6")).toBeInTheDocument();
-    expect(screen.getByText("Grok 4.5")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Add model" }),
-    ).not.toBeInTheDocument();
+      screen.getByText("Built in: Grok 4.7, Grok 4.5"),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("API key"), {
       target: { value: "xai-key" },
     });
@@ -205,42 +200,44 @@ describe("ProvidersPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not expose custom model registration for curated providers", () => {
+  it("offers custom models on every direct provider", () => {
     renderPanel(
       <ProvidersPanel
         providers={[
-          {
-            // `base_url` is omitted, not null, exactly as the server sends it.
-            kind: "anthropic",
-            enabled: false,
-            has_credential: false,
-            models: [],
-          },
-          {
-            kind: "xai",
-            enabled: false,
-            has_credential: false,
-            models: [],
-          },
+          // `base_url` is omitted, not null, exactly as the server sends it.
+          providerInfoFixture("anthropic"),
+          providerInfoFixture("gemini", { has_credential: true }),
+          providerInfoFixture("model_gateway", {
+            enabled: true,
+            has_credential: true,
+          }),
         ]}
         client={{} as ApiClient}
         onChanged={vi.fn()}
       />,
     );
 
+    // The gateway has its own settings page, so only the two direct
+    // providers render a card here, and each offers both actions.
+    expect(screen.getAllByRole("button", { name: "Add model" })).toHaveLength(
+      2,
+    );
+    const find = screen.getAllByRole("button", { name: "Find models" });
+    expect(find).toHaveLength(2);
+    // Finding models spends the saved key, so a provider without one waits.
+    expect(find[0]).toBeDisabled();
+    expect(find[1]).toBeEnabled();
     expect(
-      screen.queryByRole("button", { name: "Add model" }),
-    ).not.toBeInTheDocument();
+      screen.getByText(
+        "Save an API key to find the models this provider serves.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("saves an Ollama daemon without a credential", async () => {
-    const ollama: ProviderInfo = {
-      kind: "ollama",
-      enabled: false,
-      has_credential: false,
+    const ollama = providerInfoFixture("ollama", {
       base_url: "http://127.0.0.1:11434/v1",
-      models: [],
-    };
+    });
     const putProvider = vi.fn().mockResolvedValue({
       ...ollama,
       enabled: true,
@@ -262,57 +259,32 @@ describe("ProvidersPanel", () => {
     expect(
       screen.getByPlaceholderText("API key (optional)"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
-      target: { value: "qwen3:0.6b" },
-    });
+    // A local daemon needs no key to list its models.
+    expect(screen.getByRole("button", { name: "Find models" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("ollama", {
         enabled: true,
         base_url: "http://127.0.0.1:11434/v1",
-        models: [
-          {
-            id: "qwen3:0.6b",
-            display_name: undefined,
-            context_window: 32_768,
-            max_output_tokens: 4_096,
-            input_modalities: ["text"],
-            supports_reasoning: false,
-            reasoning_efforts: [],
-          },
-        ],
       }),
     );
   });
 
   it("shows fixed endpoints for direct compatible presets without editing them", () => {
-    const fireworks: ProviderInfo = {
-      kind: "fireworks",
-      enabled: false,
-      has_credential: false,
-      base_url: "https://api.fireworks.ai/inference/v1",
-      models: [],
-    };
-    const together: ProviderInfo = {
-      kind: "together",
-      enabled: false,
-      has_credential: false,
-      base_url: "https://api.together.ai/v1",
-      models: [],
-    };
-    const openrouter: ProviderInfo = {
-      kind: "openrouter",
-      enabled: false,
-      has_credential: false,
-      base_url: "https://openrouter.ai/api/v1",
-      models: [],
-    };
-
     renderPanel(
       <ProvidersPanel
-        providers={[fireworks, together, openrouter]}
+        providers={[
+          providerInfoFixture("fireworks", {
+            base_url: "https://api.fireworks.ai/inference/v1",
+          }),
+          providerInfoFixture("together", {
+            base_url: "https://api.together.ai/v1",
+          }),
+          providerInfoFixture("openrouter", {
+            base_url: "https://openrouter.ai/api/v1",
+          }),
+        ]}
         client={{} as ApiClient}
         onChanged={vi.fn()}
       />,
@@ -333,14 +305,10 @@ describe("ProvidersPanel", () => {
     expect(screen.queryByPlaceholderText(/base URL/)).not.toBeInTheDocument();
   });
 
-  it("saves an OpenRouter key and configured model without an endpoint override", async () => {
-    const openrouter: ProviderInfo = {
-      kind: "openrouter",
-      enabled: false,
-      has_credential: false,
+  it("saves an OpenRouter key without an endpoint override", async () => {
+    const openrouter = providerInfoFixture("openrouter", {
       base_url: "https://openrouter.ai/api/v1",
-      models: [],
-    };
+    });
     const putProvider = vi.fn().mockResolvedValue({
       ...openrouter,
       enabled: true,
@@ -359,10 +327,6 @@ describe("ProvidersPanel", () => {
     expect(
       screen.getByText(/https:\/\/openrouter\.ai\/api\/v1/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
-      target: { value: "anthropic/claude-sonnet-4" },
-    });
     fireEvent.change(screen.getByPlaceholderText("API key"), {
       target: { value: "sk-or" },
     });
@@ -372,29 +336,13 @@ describe("ProvidersPanel", () => {
       expect(putProvider).toHaveBeenCalledWith("openrouter", {
         enabled: true,
         credential: { type: "api_key", key: "sk-or" },
-        models: [
-          {
-            id: "anthropic/claude-sonnet-4",
-            display_name: undefined,
-            context_window: 32_768,
-            max_output_tokens: 4_096,
-            input_modalities: ["text"],
-            supports_reasoning: false,
-            reasoning_efforts: [],
-          },
-        ],
       }),
     );
     expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
   });
 
   it("starts ChatGPT OAuth from the OpenAI provider row", async () => {
-    const openai: ProviderInfo = {
-      kind: "openai",
-      enabled: false,
-      has_credential: false,
-      models: [],
-    };
+    const openai = providerInfoFixture("openai");
     const openaiChatgptSignIn = vi.fn().mockResolvedValue({
       authorization_url: "https://auth.openai.com/oauth/authorize?x=1",
     });
@@ -435,13 +383,11 @@ describe("ProvidersPanel", () => {
     renderPanel(
       <ProvidersPanel
         providers={[
-          {
-            kind: "openai",
+          providerInfoFixture("openai", {
             enabled: true,
             has_credential: true,
             auth_mode: "chatgpt",
-            models: [],
-          },
+          }),
         ]}
         client={{} as ApiClient}
         onChanged={vi.fn()}
@@ -463,19 +409,24 @@ describe("ProvidersPanel", () => {
     expect(
       screen.getByPlaceholderText("Paste an API key to switch from ChatGPT"),
     ).toBeInTheDocument();
+    // The subscription cannot list models, and the card says why.
+    expect(screen.getByRole("button", { name: "Find models" })).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Finding models needs an OpenAI API key. ChatGPT sign-in cannot list models.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("lets an API-key install switch to ChatGPT sign-in", () => {
     renderPanel(
       <ProvidersPanel
         providers={[
-          {
-            kind: "openai",
+          providerInfoFixture("openai", {
             enabled: true,
             has_credential: true,
             auth_mode: "api_key",
-            models: [],
-          },
+          }),
         ]}
         client={
           {
@@ -497,13 +448,13 @@ describe("ProvidersPanel", () => {
   });
 
   it("saves an API key while signed in with ChatGPT to switch modes", async () => {
-    const putProvider = vi.fn().mockResolvedValue({
-      kind: "openai",
-      enabled: true,
-      has_credential: true,
-      auth_mode: "api_key",
-      models: [],
-    });
+    const putProvider = vi.fn().mockResolvedValue(
+      providerInfoFixture("openai", {
+        enabled: true,
+        has_credential: true,
+        auth_mode: "api_key",
+      }),
+    );
     const client = {
       putProvider,
       getOpenaiChatgptStatus: vi.fn().mockResolvedValue({ signed_in: true }),
@@ -513,13 +464,11 @@ describe("ProvidersPanel", () => {
     renderPanel(
       <ProvidersPanel
         providers={[
-          {
-            kind: "openai",
+          providerInfoFixture("openai", {
             enabled: true,
             has_credential: true,
             auth_mode: "chatgpt",
-            models: [],
-          },
+          }),
         ]}
         client={client}
         onChanged={vi.fn()}
@@ -560,23 +509,22 @@ describe("ProvidersPanel", () => {
     expect(
       screen.queryByRole("button", { name: "Save configuration" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add model" }),
+    ).not.toBeInTheDocument();
     expect(putProvider).not.toHaveBeenCalled();
   });
 });
 
 describe("ProvidersPanel", () => {
-  const anthropic: ProviderInfo = {
-    kind: "anthropic",
+  const anthropic = providerInfoFixture("anthropic", {
     enabled: true,
     has_credential: true,
-    models: [],
-  };
-  const openai: ProviderInfo = {
-    kind: "openai",
+  });
+  const openai = providerInfoFixture("openai", {
     enabled: true,
     has_credential: true,
-    models: [],
-  };
+  });
 
   it("expands the card a deep link names", async () => {
     const client = {

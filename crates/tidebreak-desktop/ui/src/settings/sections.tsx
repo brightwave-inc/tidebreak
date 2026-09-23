@@ -318,7 +318,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     path: "providers",
     label: "Providers",
     keywords:
-      "API key credentials Ollama Anthropic OpenAI Gemini xAI OpenRouter local models endpoint",
+      "API key credentials Ollama Anthropic OpenAI Gemini xAI OpenRouter local models endpoint custom model add find discover Fireworks Together",
     group: "models",
     icon: KeyRound,
     iconClass: "text-icon-amber",

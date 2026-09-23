@@ -314,6 +314,7 @@ describe("notConnectedProviders", () => {
     enabled: true,
     has_credential: true,
     models: [],
+    custom_reasoning_efforts: [],
   });
 
   it("offers setup for a provider whose catalog rows cannot run", () => {

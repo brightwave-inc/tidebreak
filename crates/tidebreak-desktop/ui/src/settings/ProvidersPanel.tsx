@@ -2,13 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ChevronRight } from "lucide-react";
 import { toast } from "sonner";
-import type {
-  ApiClient,
-  CustomModelConfig,
-  ModelInfo,
-  ProviderInfo,
-  ProviderKind,
-} from "../api";
+import type { ApiClient, ModelInfo, ProviderInfo, ProviderKind } from "../api";
 import { openInBrowser } from "../openInBrowser";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,22 +15,12 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
 import { providerLabel } from "../ModelSelection";
+import { ProviderModelsSection } from "./ProviderModelsSection";
 
 const CHATGPT_SIGN_IN_POLL_MS = 2_000;
 // Matches the server's sign-in window; polling past it can only report a
 // timeout the server has already recorded.
 const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
-
-function newConfiguredModel(): CustomModelConfig {
-  return {
-    id: "",
-    context_window: 32_768,
-    max_output_tokens: 4_096,
-    input_modalities: ["text"],
-    supports_reasoning: false,
-    reasoning_efforts: [],
-  };
-}
 
 const EXPANDED_PROVIDERS_KEY = "tidebreak.settings.providers-expanded";
 
@@ -181,14 +165,9 @@ function ProviderRow({
 }) {
   const [key, setKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
-  const [models, setModels] = useState<CustomModelConfig[]>(info.models);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
-  const hasConfigurableModels =
-    info.kind === "openai_compatible" ||
-    info.kind === "openrouter" ||
-    info.kind === "ollama";
   const acceptsBaseUrl =
     info.kind === "openai_compatible" || info.kind === "ollama";
   const requiresCredential = info.kind !== "ollama";
@@ -197,8 +176,8 @@ function ProviderRow({
   const credentialRef = useRef<HTMLInputElement | null>(null);
   const connected =
     info.enabled && (info.has_credential || !requiresCredential);
-  // A provider whose models are all user-configured — or served by a gateway —
-  // has no curated catalog rows here, so there is nothing to summarize.
+  // A provider with no curated rows and no custom ones yet has nothing to
+  // summarize.
   const summary =
     catalogModels.length === 0
       ? null
@@ -231,27 +210,15 @@ function ProviderRow({
     setSaving(true);
     setError(null);
     try {
+      // Models save on their own from the Models section, so this write
+      // leaves the custom list alone.
       const body: {
         enabled: boolean;
         base_url?: string | null;
         credential?: { type: "api_key"; key: string };
-        models?: CustomModelConfig[];
       } = { enabled };
-      if (hasConfigurableModels) {
-        if (acceptsBaseUrl) {
-          body.base_url = baseUrl.trim() || null;
-        }
-        body.models = models.map((model) => ({
-          ...model,
-          id: model.id.trim(),
-          // Omitted rather than null, which is how the server represents an
-          // unset display name and what it sends back. `models` is a full
-          // replacement list, so an absent key clears it just as null did.
-          display_name: model.display_name?.trim() || undefined,
-          input_modalities: model.input_modalities ?? ["text"],
-          supports_reasoning: model.supports_reasoning ?? false,
-          reasoning_efforts: model.reasoning_efforts ?? [],
-        }));
+      if (acceptsBaseUrl) {
+        body.base_url = baseUrl.trim() || null;
       }
       if (key.trim()) {
         body.credential = { type: "api_key", key: key.trim() };
@@ -370,163 +337,22 @@ function ProviderRow({
             />
           </div>
           {info.kind === "xai" && (
-            <>
-              <p className="text-xs text-muted-foreground">
-                Requests go directly to api.x.ai/v1.
-              </p>
-              {catalogModels.length > 0 && (
-                <div className="space-y-2">
-                  <span className="text-sm font-medium">Models</span>
-                  <ul className="space-y-1">
-                    {catalogModels.map((model) => (
-                      <li className="text-sm" key={model.key}>
-                        {model.display_name}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </>
+            <p className="text-xs text-muted-foreground">
+              Requests go directly to api.x.ai/v1.
+            </p>
           )}
-          {hasConfigurableModels && (
-            <>
-              {acceptsBaseUrl && (
-                <Input
-                  type="text"
-                  placeholder={
-                    info.kind === "ollama"
-                      ? "base URL (default http://127.0.0.1:11434/v1)"
-                      : "base URL (e.g. http://127.0.0.1:1234/v1)"
-                  }
-                  value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
-                />
-              )}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium">Models</span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={saving}
-                    onClick={() =>
-                      setModels((current) => [...current, newConfiguredModel()])
-                    }
-                  >
-                    Add model
-                  </Button>
-                </div>
-                {models.length === 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    {info.kind === "ollama"
-                      ? "Add each model already pulled in Ollama. qwen3:0.6b is a small tool-calling option for a first test."
-                      : info.kind === "openrouter"
-                        ? "Add each OpenRouter model id (for example anthropic/claude-sonnet-4). Custom models start with conservative text-only, non-reasoning capabilities."
-                        : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
-                  </p>
-                )}
-                {models.map((model, index) => (
-                  <div
-                    className="grid gap-2 rounded-md border border-border p-3"
-                    key={index}
-                  >
-                    <Input
-                      type="text"
-                      aria-label={`Custom model ${index + 1} ID`}
-                      placeholder="model ID"
-                      value={model.id}
-                      onChange={(event) =>
-                        setModels((current) =>
-                          current.map((item, itemIndex) =>
-                            itemIndex === index
-                              ? { ...item, id: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                    />
-                    <Input
-                      type="text"
-                      aria-label={`Custom model ${index + 1} display name`}
-                      placeholder="display name (optional)"
-                      value={model.display_name ?? ""}
-                      onChange={(event) =>
-                        setModels((current) =>
-                          current.map((item, itemIndex) =>
-                            itemIndex === index
-                              ? {
-                                  ...item,
-                                  display_name: event.target.value || undefined,
-                                }
-                              : item,
-                          ),
-                        )
-                      }
-                    />
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="grid gap-1 text-xs text-muted-foreground">
-                        Context tokens
-                        <Input
-                          type="number"
-                          min={1024}
-                          aria-label={`Custom model ${index + 1} context tokens`}
-                          value={model.context_window}
-                          onChange={(event) =>
-                            setModels((current) =>
-                              current.map((item, itemIndex) =>
-                                itemIndex === index
-                                  ? {
-                                      ...item,
-                                      context_window: Number(
-                                        event.target.value,
-                                      ),
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="grid gap-1 text-xs text-muted-foreground">
-                        Max output
-                        <Input
-                          type="number"
-                          min={1}
-                          aria-label={`Custom model ${index + 1} max output`}
-                          value={model.max_output_tokens}
-                          onChange={(event) =>
-                            setModels((current) =>
-                              current.map((item, itemIndex) =>
-                                itemIndex === index
-                                  ? {
-                                      ...item,
-                                      max_output_tokens: Number(
-                                        event.target.value,
-                                      ),
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={saving}
-                      onClick={() =>
-                        setModels((current) =>
-                          current.filter((_, itemIndex) => itemIndex !== index),
-                        )
-                      }
-                    >
-                      Remove model
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </>
+          {acceptsBaseUrl && (
+            <Input
+              type="text"
+              aria-label="Base URL"
+              placeholder={
+                info.kind === "ollama"
+                  ? "base URL (default http://127.0.0.1:11434/v1)"
+                  : "base URL (e.g. http://127.0.0.1:1234/v1)"
+              }
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+            />
           )}
           {(info.kind === "fireworks" ||
             info.kind === "together" ||
@@ -570,9 +396,7 @@ function ProviderRow({
                     (!info.has_credential &&
                       requiresCredential &&
                       info.kind !== "openai_compatible" &&
-                      !key.trim()) ||
-                    (hasConfigurableModels &&
-                      models.some((model) => !model.id.trim()))
+                      !key.trim())
                   }
                   onClick={() => void save(true)}
                 >
@@ -592,6 +416,12 @@ function ProviderRow({
             </>
           )}
           {error && <SettingsError>{error}</SettingsError>}
+          <ProviderModelsSection
+            info={info}
+            catalogModels={catalogModels}
+            client={client}
+            onChanged={onChanged}
+          />
           {dialog}
         </div>
       )}
