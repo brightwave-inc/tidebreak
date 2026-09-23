@@ -105,8 +105,7 @@ export function WorkspaceApprovalView({
               This workspace grant is no longer valid
             </h1>
             <p className="text-sm text-muted-foreground">
-              It may have expired or already been used. Start again from the
-              adapter.
+              It may have expired or already been used. Start again from Slack.
             </p>
           </div>
         ) : phase === "unavailable" ? (
@@ -134,9 +133,8 @@ export function WorkspaceApprovalView({
             </div>
             {phase === "approved" ? (
               <p className="text-sm leading-relaxed">
-                Approved. Return to the adapter so it can finish connecting.
-                Channel sessions for this workspace will run as{" "}
-                {page.display_name}.
+                Approved. Return to Slack so it can finish connecting. Channel
+                sessions for this workspace will run as {page.display_name}.
               </p>
             ) : (
               <>

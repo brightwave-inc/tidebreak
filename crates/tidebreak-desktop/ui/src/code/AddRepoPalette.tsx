@@ -1500,7 +1500,7 @@ function GithubRepoField({
             disabled={busy || listBusy}
             onClick={onRetry}
           >
-            {listBusy ? "Retrying…" : "Retry"}
+            {listBusy ? "Trying again…" : "Try again"}
           </Button>
         </div>
       )}
@@ -1610,7 +1610,7 @@ export function ParentDirField({
             disabled={busy || defaultsBusy}
             onClick={onRetryDefaults}
           >
-            {defaultsBusy ? "Retrying…" : "Retry"}
+            {defaultsBusy ? "Trying again…" : "Try again"}
           </Button>
         </div>
       )}
@@ -1662,7 +1662,7 @@ function ProgressStage({
         <ProbeFailure
           message={readError}
           busy={false}
-          action="Retry check"
+          action="Try the check again"
           onRetry={onResume}
         />
       )}
@@ -1677,7 +1677,7 @@ function ProgressStage({
             className="self-start"
             onClick={onRetry}
           >
-            Retry
+            Try again
           </Button>
         </>
       )}
@@ -1708,7 +1708,7 @@ function ProgressStage({
             {handoffBusy
               ? "Opening…"
               : handoffError
-                ? "Retry"
+                ? "Try again"
                 : "Create workspace"}
           </Button>
         </div>
@@ -1720,7 +1720,7 @@ function ProgressStage({
 function ProbeFailure({
   message,
   busy,
-  action = "Retry",
+  action = "Try again",
   onRetry,
 }: {
   message: string;
@@ -1739,7 +1739,7 @@ function ProbeFailure({
         disabled={busy}
         onClick={onRetry}
       >
-        {busy ? "Retrying…" : action}
+        {busy ? "Trying again…" : action}
       </Button>
     </div>
   );

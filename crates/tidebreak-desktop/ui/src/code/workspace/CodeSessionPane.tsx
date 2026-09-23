@@ -546,7 +546,7 @@ export function CodeSessionPane({
   async function steer(message: string) {
     const expectedTurnId = store.getState().activeTurnId;
     if (!expectedTurnId) {
-      throw new Error("The active turn changed. Try Redirect again.");
+      throw new Error("The active turn changed. Try steer again.");
     }
     await client.steerCodeSession(session.id, expectedTurnId, message);
   }

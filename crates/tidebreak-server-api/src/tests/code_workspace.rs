@@ -808,7 +808,7 @@ async fn workspace_creation_warns_and_continues_when_base_refresh_fails() {
         let client = reqwest::Client::new();
         let (_, workspace) = register_and_workspace(&client, addr, &token, &local).await;
         assert_eq!(workspace["status"], "active", "{reason}");
-        assert_eq!(workspace["base_refresh_warning"], "Couldn't update main to the latest version. Your workspace uses the available local history.");
+        assert_eq!(workspace["base_refresh_warning"], "Could not update main to the latest version. Your workspace uses the available local history.");
         let expected = if reason == "fetch" {
             "hello\n"
         } else {

@@ -292,7 +292,7 @@ describe("AddRepoPalette", () => {
     expect(
       await screen.findByText("fatal: repository not found"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(
       screen.getByPlaceholderText("https://example.com/acme/app.git"),
     ).toBeInTheDocument();
@@ -319,7 +319,7 @@ describe("AddRepoPalette", () => {
     expect(
       await screen.findByText("The clone finished without a repository."),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(
       screen.getByPlaceholderText("https://example.com/acme/app.git"),
     ).toBeVisible();
@@ -878,7 +878,9 @@ describe("AddRepoPalette", () => {
     expect(
       await screen.findByText("The progress service is unavailable."),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Retry check" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Try the check again" }),
+    );
     await waitFor(() => expect(getCodeCloneJob).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getCodeRepo).toHaveBeenCalledWith(REPO.id));
   });

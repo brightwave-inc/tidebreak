@@ -449,7 +449,7 @@ export function ManagedGate({
               onClick={() => setPolicyState({ kind: "loading" })}
             >
               <RefreshCw size={14} />
-              Retry
+              Try again
             </Button>
           </div>
           {actionError && <p className="boot-error-detail">{actionError}</p>}
@@ -472,7 +472,7 @@ export function ManagedGate({
           onClick={() => setPolicyState({ kind: "loading" })}
         >
           <RefreshCw size={14} />
-          Retry
+          Try again
         </Button>
       </div>
     );

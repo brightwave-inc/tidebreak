@@ -320,7 +320,7 @@ function ManagedGatewayPanel({
       onClick={onOpenConnectedApps}
     >
       <PlugZap size={14} />
-      Mount endpoints in Connected apps
+      Connect endpoints in Connected apps
     </Button>
   );
 
@@ -466,7 +466,7 @@ function ManagedGatewayPanel({
         (apps?.supported ? (
           <SettingsSection
             title="Connected apps"
-            description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens on the Connected apps page, beside the health of what is mounted."
+            description="The apps your teams have granted this deployment. Connecting their MCP endpoints happens on the Connected apps page, beside the health of what is connected."
           >
             {apps.apps.length === 0 ? (
               <p className="text-muted-foreground text-sm">

@@ -199,7 +199,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       <SettingsSection>
         <SettingsField
           label="Active background agents per work"
-          hint="A spawn beyond this limit fails immediately and can be retried after wait_for_agents returns."
+          hint="A spawn beyond this limit fails immediately. Wait for a running agent to finish, then try again."
         >
           <Input
             type="number"

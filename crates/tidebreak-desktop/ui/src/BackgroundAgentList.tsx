@@ -169,7 +169,7 @@ export function BackgroundAgentList({
             className="shrink-0 font-medium text-primary hover:underline"
             onClick={onRetry}
           >
-            Retry
+            Try again
           </button>
         </div>
       ) : (

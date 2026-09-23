@@ -821,15 +821,15 @@ export function TerminalPane({
               Terminal input paused · {unsentLabel}
             </p>
             <p className="mt-0.5 text-xs text-critical-foreground-muted">
-              {asSentence(writeFailure.message)} Retry sends the input to this
-              shell and can repeat it if the first request arrived. Reconnect
-              discards it and opens a new shell. Discard drops it and keeps this
-              shell.
+              {asSentence(writeFailure.message)} Try again sends the input to
+              this shell and can repeat it if the first request arrived.
+              Reconnect discards it and opens a new shell. Discard drops it and
+              keeps this shell.
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
             <Button type="button" size="xs" onClick={retryUnsentInput}>
-              Retry
+              Try again
             </Button>
             <Button
               type="button"
@@ -872,7 +872,7 @@ export function TerminalPane({
             variant="outline"
             onClick={retryTerminal}
           >
-            Retry
+            Try again
           </Button>
         </div>
       )}

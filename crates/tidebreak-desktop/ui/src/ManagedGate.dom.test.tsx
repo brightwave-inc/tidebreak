@@ -419,7 +419,7 @@ describe("ManagedGate", () => {
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
     expect(screen.queryByText("Sign in to continue")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Retry/ }));
+    await user.click(screen.getByRole("button", { name: /Try again/ }));
     expect(await screen.findByText("Sign in to continue")).toBeInTheDocument();
   });
 

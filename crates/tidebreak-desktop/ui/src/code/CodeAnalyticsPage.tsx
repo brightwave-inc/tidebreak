@@ -251,7 +251,7 @@ function AnalyticsDashboard({
           icon={Cpu}
           label="Models"
           value={formatNumber(uniqueModels)}
-          detail={`${formatNumber(report.harnesses.length)} harnesses`}
+          detail={`${formatNumber(report.harnesses.length)} engines`}
         />
       </section>
 

@@ -228,10 +228,10 @@ function subtitle(
 
 /** What each adapter tier means for the reader picking an engine. */
 const TIER_NOTES: Record<HarnessDoctorEntry["tier"], string> = {
-  reference: "Reference adapter — the engine this build is built around.",
-  secondary: "Secondary adapter — well covered, a step behind the reference.",
-  tertiary: "Tertiary adapter — the common paths are covered.",
-  best_effort: "Best-effort adapter — expect gaps in what it can do.",
+  reference: "Fully supported — the engine this build is built around.",
+  secondary: "Supported — well covered, a step behind fully supported.",
+  tertiary: "Supported — the common paths are covered.",
+  best_effort: "Limited support — expect gaps in what it can do.",
 };
 
 function DoctorRow({
@@ -299,7 +299,7 @@ function DoctorRow({
             onClick={() => onInstall(entry.kind)}
           >
             <Download className="size-3.5" aria-hidden="true" />
-            {failed ? "Retry" : "Download"}
+            {failed ? "Try again" : "Download"}
           </Button>
         )}
         {canUpdate && onInstall && (
@@ -311,7 +311,7 @@ function DoctorRow({
             onClick={() => onInstall(entry.kind)}
           >
             <ArrowUpCircle className="size-3.5" aria-hidden="true" />
-            {failed ? "Retry" : "Update"}
+            {failed ? "Try again" : "Update"}
           </Button>
         )}
         <Button

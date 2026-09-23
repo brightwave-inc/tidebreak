@@ -286,7 +286,7 @@ export function PermissionModeMenu({
                 <span className="text-muted-foreground pl-6 text-xs">
                   {locked
                     ? "Locked by your organization's policy."
-                    : "This harness can't honor this mode."}
+                    : "This engine cannot honor this mode."}
                 </span>
               )}
             </DropdownMenuItem>

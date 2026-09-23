@@ -136,7 +136,7 @@ export function CodeApprovalCard({
               setPayloadOpen((current) => !current);
             }}
           >
-            Harness payload
+            Engine request
           </button>
           <Reveal open={payloadOpen}>
             {/*

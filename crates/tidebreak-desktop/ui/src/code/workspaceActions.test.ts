@@ -147,7 +147,7 @@ describe("workspace worktree actions", () => {
     });
   });
 
-  it("offers Uneff me next to Copy debug JSON on every session", () => {
+  it("offers Report a problem next to Copy diagnostic details on every session", () => {
     const commands = workspaceCommands({
       hasPr: false,
       archived: false,
@@ -157,8 +157,8 @@ describe("workspace worktree actions", () => {
       (command) => command.id === "copy-debug-json",
     );
     const uneff = commands.findIndex((command) => command.id === "uneff-me");
-    expect(commands[copy]?.label).toBe("Copy debug JSON");
-    expect(commands[uneff]?.label).toBe("Uneff me");
+    expect(commands[copy]?.label).toBe("Copy diagnostic details");
+    expect(commands[uneff]?.label).toBe("Report a problem…");
     expect(uneff).toBe(copy + 1);
 
     // Without a session there is no debug report to hand over.
@@ -181,7 +181,8 @@ describe("workspace worktree actions", () => {
     );
     expect(header[headerCopy + 1]).toEqual({
       id: "uneff-me",
-      label: "Uneff me",
+      label: "Report a problem…",
+      keywords: "uneff",
     });
   });
 

@@ -20,7 +20,7 @@ describe("toolPreviewPresentation", () => {
     ).toEqual({
       headline: "Start work in example/repository",
       detail:
-        "Start work in example/repository\nInspect the failing test.\nHarness: codex\nModel: example-model",
+        "Start work in example/repository\nInspect the failing test.\nEngine: codex\nModel: example-model",
     });
   });
 

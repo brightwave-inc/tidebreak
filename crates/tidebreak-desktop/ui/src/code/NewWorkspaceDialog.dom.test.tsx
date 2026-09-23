@@ -447,7 +447,7 @@ describe("NewWorkspaceDialog", () => {
         "2026-08-24T12:00:00.000Z",
       );
       const warning =
-        "Couldn't update main to the latest version. Your workspace uses the available local history.";
+        "Could not update main to the latest version. Your workspace uses the available local history.";
       if (warn) created.base_refresh_warning = warning;
       const sessionStart = deferred<CodeSessionSnapshot>();
       const { router } = await renderWithRouter(
@@ -780,7 +780,7 @@ describe("NewWorkspaceDialog", () => {
       "tidebreak",
     );
     expect(
-      screen.getByRole("button", { name: "Harness: Codex CLI" }),
+      screen.getByRole("button", { name: "Engine: Codex CLI" }),
     ).toBeEnabled();
     await waitFor(() =>
       expect(
@@ -973,7 +973,7 @@ describe("NewWorkspaceDialog", () => {
 
     const user = userEvent.setup();
     await user.click(
-      screen.getByRole("button", { name: "Harness: Claude Code" }),
+      screen.getByRole("button", { name: "Engine: Claude Code" }),
     );
     expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
@@ -1557,7 +1557,7 @@ describe("NewWorkspaceDialog", () => {
       await screen.findByRole("button", { name: "Model: Sonnet" }),
     ).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "Harness: Claude Code" }),
+      screen.getByRole("button", { name: "Engine: Claude Code" }),
     );
     await user.click(screen.getByRole("menuitem", { name: /Codex CLI/ }));
 
@@ -2044,7 +2044,7 @@ describe("NewWorkspaceDialog", () => {
     ).not.toBeInTheDocument();
 
     await user.click(
-      screen.getByRole("button", { name: "Harness: Claude Code" }),
+      screen.getByRole("button", { name: "Engine: Claude Code" }),
     );
     await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
     expect(
@@ -2260,7 +2260,7 @@ describe("NewWorkspaceDialog", () => {
     ).not.toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Harness: Grok CLI" }));
+    await user.click(screen.getByRole("button", { name: "Engine: Grok CLI" }));
     await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
     expect(
       await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),

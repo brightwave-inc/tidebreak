@@ -291,7 +291,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
       <ExternalEditorSection canDetect={hasLocalHostAuthority()} />
       <SettingsSection
         title="Transcript"
-        description="A completed turn can rewrite its closing message into lucid prose. The original stays; you can switch between them."
+        description="A completed turn can rewrite its closing message in clear language. The original stays; you can switch between them."
       >
         <SettingsField
           label="Rewrite closing messages"

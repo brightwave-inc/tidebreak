@@ -584,7 +584,7 @@ describe("CodeComposer", () => {
       expect(onSteer).toHaveBeenCalledWith("try the other file"),
     );
     expect(onSend).not.toHaveBeenCalled();
-    expect(await screen.findByText("Guidance sent")).toBeInTheDocument();
+    expect(await screen.findByText("Steer sent")).toBeInTheDocument();
   });
 
   it("preserves text typed while a steer request is pending", async () => {
@@ -617,7 +617,7 @@ describe("CodeComposer", () => {
     resolveSteer();
 
     await waitFor(() =>
-      expect(screen.getByText("Guidance sent")).toBeInTheDocument(),
+      expect(screen.getByText("Steer sent")).toBeInTheDocument(),
     );
     expect(box).toHaveValue("also keep the API small");
   });
@@ -639,7 +639,7 @@ describe("CodeComposer", () => {
     fireEvent.keyDown(box, { key: "Enter" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Redirect isn’t available for this harness. Choose Queue to send this after the response.",
+      "Steer is not available for this engine. Choose Queue to send this after the response.",
     );
     expect(onSend).not.toHaveBeenCalled();
     expect(box).toHaveValue("and run the tests");

@@ -555,7 +555,7 @@ export function ChatView({
             </EmptyHeader>
             <EmptyContent>
               <Button variant="outline" onClick={onRetryHydration}>
-                Retry loading
+                Try again
               </Button>
             </EmptyContent>
           </Empty>

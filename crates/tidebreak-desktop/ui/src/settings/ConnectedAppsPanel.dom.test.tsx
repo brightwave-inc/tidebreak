@@ -188,7 +188,7 @@ describe("ConnectedAppsPanel", () => {
       screen.queryByRole("button", { name: /Advanced: transport/ }),
     ).not.toBeInTheDocument();
     expect(
-      await screen.findByRole("switch", { name: "Mount primary" }),
+      await screen.findByRole("switch", { name: "Connect primary" }),
     ).toBeInTheDocument();
     expect(await screen.findByLabelText(/Namespace/)).toHaveValue("docs");
     const save = screen.getByRole("button", { name: /Save and verify/ });
@@ -246,7 +246,7 @@ describe("ConnectedAppsPanel", () => {
     // Compact rows: the mount toggle (the one write managed policy admits)
     // and the serves-list, with no inner headings and nothing editable.
     expect(
-      await screen.findByRole("switch", { name: "Mount primary" }),
+      await screen.findByRole("switch", { name: "Connect primary" }),
     ).toBeEnabled();
     expect(screen.getByText(/serves: Sentry \(org\)/)).toBeInTheDocument();
     expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
@@ -364,7 +364,7 @@ describe("ConnectedAppsPanel", () => {
       target: { value: "http://127.0.0.1:23373/v0/mcp" },
     });
     expect(
-      screen.getByText(/Settings → MCP servers as a remote HTTP server/),
+      screen.getByText(/Settings → Connected apps as a remote HTTP server/),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
     fireEvent.click(
