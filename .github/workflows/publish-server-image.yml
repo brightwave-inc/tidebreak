@@ -33,8 +33,10 @@ run-name: >-
 #     someone publishes by hand in the UI, which carries a user token and does
 #     fire. Both land here as the same build, and the per-tag concurrency group
 #     serializes them if a release ever arrives by both routes;
-#   - a weekly scheduled rebuild, so Debian security patches in the runtime
-#     base flush through even when nothing in-repo changes;
+#   - a weekly scheduled rebuild of the current release. The Dockerfile pins
+#     every base image by digest and every Debian package to a dated snapshot,
+#     so this rebuild on its own picks up no security patches; those arrive
+#     when Dependabot moves a pinned base image or someone moves the snapshot;
 #   - manual dispatch, for retries and backfills. Dispatch takes an optional
 #     release tag; with none, it rebuilds the current latest release, exactly
 #     like the schedule does.

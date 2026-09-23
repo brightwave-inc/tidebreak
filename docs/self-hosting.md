@@ -558,7 +558,7 @@ engine rather than an installation prompt.
 
 | Tool | Version | Why it is there |
 | --- | --- | --- |
-| Managed Node runtime | 20.20.2, at `/opt/tidebreak/node/20.20.2` | The runtime every harness install runs `npm` from. |
+| Managed Node runtime | 24.21.0, at `/opt/tidebreak/node/24.21.0` | The runtime every harness install runs `npm` from. |
 | `git` | 2.39.5 (Debian bookworm) | Clone, worktree, checkpoint, commit, and push. |
 | `gh` | 2.98.0 (the project's own release) | Pull-request create, status, review reads, and merge. |
 | `curl`, `ca-certificates` | Debian bookworm | The container healthcheck and the system trust store. |

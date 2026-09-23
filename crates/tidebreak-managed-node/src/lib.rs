@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The exact Node version Tidebreak installs and trusts.
-pub const MANAGED_NODE_VERSION: &str = "20.20.2";
+pub const MANAGED_NODE_VERSION: &str = "24.21.0";
 
-// From the exact ZIP rows in Node's v20.20.2 SHASUMS256.txt. Keep the
+// From the exact ZIP rows in Node's v24.21.0 SHASUMS256.txt. Keep the
 // filenames beside the tests below: the neighboring .7z, MSI, and standalone
 // node.exe rows are different artifacts with different digests.
 #[allow(dead_code)] // Each target uses only its own architecture; tests bind both names.
 const WINDOWS_ARM64_ZIP_SHA256: &str =
-    "d5c5b1d56f7f9469830eb1f57efeec0a6a9078c0a9e88cd5b4b4b48f46c22069";
+    "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921";
 #[allow(dead_code)] // Each target uses only its own architecture; tests bind both names.
 const WINDOWS_X64_ZIP_SHA256: &str =
-    "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77";
+    "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541";
 
 /// The current platform's trusted managed-Node artifact identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,25 +34,25 @@ pub struct ManagedNodePin {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static CURRENT_PIN: Option<ManagedNodePin> = Some(ManagedNodePin {
     version: MANAGED_NODE_VERSION,
-    artifact_sha256: "466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6",
+    artifact_sha256: "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 static CURRENT_PIN: Option<ManagedNodePin> = Some(ManagedNodePin {
     version: MANAGED_NODE_VERSION,
-    artifact_sha256: "8be6f5e4bb128c82774f8a0b8d7a1cc1365a7977d9657cece0ca647b3fe04e61",
+    artifact_sha256: "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static CURRENT_PIN: Option<ManagedNodePin> = Some(ManagedNodePin {
     version: MANAGED_NODE_VERSION,
-    artifact_sha256: "47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d",
+    artifact_sha256: "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 static CURRENT_PIN: Option<ManagedNodePin> = Some(ManagedNodePin {
     version: MANAGED_NODE_VERSION,
-    artifact_sha256: "19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b",
+    artifact_sha256: "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
 });
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
@@ -220,17 +220,17 @@ mod tests {
     #[test]
     fn windows_zip_pins_match_the_named_official_artifacts() {
         assert_eq!(
-            ("node-v20.20.2-win-arm64.zip", WINDOWS_ARM64_ZIP_SHA256),
+            ("node-v24.21.0-win-arm64.zip", WINDOWS_ARM64_ZIP_SHA256),
             (
-                "node-v20.20.2-win-arm64.zip",
-                "d5c5b1d56f7f9469830eb1f57efeec0a6a9078c0a9e88cd5b4b4b48f46c22069"
+                "node-v24.21.0-win-arm64.zip",
+                "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921"
             )
         );
         assert_eq!(
-            ("node-v20.20.2-win-x64.zip", WINDOWS_X64_ZIP_SHA256),
+            ("node-v24.21.0-win-x64.zip", WINDOWS_X64_ZIP_SHA256),
             (
-                "node-v20.20.2-win-x64.zip",
-                "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77"
+                "node-v24.21.0-win-x64.zip",
+                "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541"
             )
         );
     }
@@ -278,7 +278,7 @@ mod tests {
         assert!(marker_json.get("tarballSha256").is_none());
 
         let legacy: InstallMarker =
-            serde_json::from_slice(br#"{"version":"20.20.2","tarballSha256":"digest"}"#)
+            serde_json::from_slice(br#"{"version":"24.21.0","tarballSha256":"digest"}"#)
                 .expect("legacy marker");
         assert_eq!(legacy.artifact_sha256, "digest");
     }
@@ -287,7 +287,7 @@ mod tests {
     fn managed_runtime_resolves_only_with_a_matching_marker() {
         let expected = ManagedNodePin {
             version: MANAGED_NODE_VERSION,
-            artifact_sha256: "466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6",
+            artifact_sha256: "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
         };
         let data_dir = tempfile::tempdir().expect("tempdir");
         let version_dir = managed_node_version_dir(data_dir.path());

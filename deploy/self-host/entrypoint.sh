@@ -19,7 +19,7 @@
 # `MANAGED_NODE_VERSION`; scripts/self-host-image-pins.test.mjs enforces it.
 set -eu
 
-node_version=20.20.2
+node_version=24.21.0
 image_node_dir="/opt/tidebreak/node/${node_version}"
 data_dir="${TIDEBREAK_DATA_DIR:-/var/lib/tidebreak}"
 link="${data_dir}/tools/node/${node_version}"
