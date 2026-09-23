@@ -345,7 +345,9 @@ async fn a_single_connection_store_opens_no_read_pool() {
 ///
 /// Run with `cargo test -p tidebreak-core --lib journal_load -- --ignored
 /// --nocapture` to see the numbers. Set `TIDEBREAK_JOURNAL_LOAD_SESSIONS` to
-/// stream more sessions at once than the store has connections.
+/// stream more sessions at once than the store has connections, and
+/// `TIDEBREAK_JOURNAL_LOAD_SLOW_WRITER_MS` to have another writer hold the
+/// write lock for that long, over and over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "load test; run on demand"]
 async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
@@ -396,6 +398,31 @@ async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
             slowest
         }));
     }
+    // Optionally hold the write lock for a while, again and again, the way a
+    // slow write transaction elsewhere in the app does. Writers then queue,
+    // and the question is whether reads queue behind them.
+    let slow_writer = std::env::var("TIDEBREAK_JOURNAL_LOAD_SLOW_WRITER_MS")
+        .ok()
+        .and_then(|millis| millis.parse::<u64>().ok())
+        .map(|millis| {
+            let hold = Duration::from_millis(millis);
+            let store = store.clone();
+            let streaming = streaming.clone();
+            tokio::spawn(async move {
+                while streaming.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    let transaction = store.conn.begin().await.unwrap();
+                    transaction
+                        .execute_unprepared(
+                            "UPDATE advisory_lock SET name = name WHERE name = 'turn_claim'",
+                        )
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(hold).await;
+                    transaction.commit().await.unwrap();
+                    tokio::time::sleep(hold).await;
+                }
+            })
+        });
     let mut readers = Vec::new();
     for reader in 0..READERS {
         let store = store.clone();
@@ -426,6 +453,9 @@ async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
         slowest_append = slowest_append.max(writer.await.unwrap());
     }
     let elapsed = started.elapsed();
+    if let Some(slow_writer) = slow_writer {
+        slow_writer.await.unwrap();
+    }
     let mut latencies = Vec::new();
     for reader in readers {
         latencies.extend(reader.await.unwrap());
