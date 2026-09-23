@@ -28,8 +28,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 857
-- Desktop UI production packages: 537
-- Distinct license texts: 593
+- Desktop UI production packages: 539
+- Distinct license texts: 594
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -6819,6 +6819,18 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit
 - License text: `LICENSE` ([L-c434897a5a6c](#l-c434897a5a6c))
+
+### @xterm/addon-search 0.16.0
+
+- License: `MIT`
+- Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-search
+- License text: `LICENSE` ([L-8d1456802c2f](#l-8d1456802c2f))
+
+### @xterm/addon-web-links 0.12.0
+
+- License: `MIT`
+- Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-links
+- License text: `LICENSE` ([L-8d1456802c2f](#l-8d1456802c2f))
 
 ### @xterm/xterm 6.0.0
 
@@ -26566,6 +26578,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-8d1456802c2f
+
+```
+Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### L-8d1f81ea4e87

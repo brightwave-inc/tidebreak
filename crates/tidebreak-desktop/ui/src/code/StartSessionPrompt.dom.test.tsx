@@ -191,7 +191,9 @@ describe("StartSessionPrompt", () => {
         "This engine's permission system is off; every action runs without asking",
       ),
     ).toBeNull();
-    expect(screen.getByRole("combobox", { name: "Engine" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Engine" }),
+    ).toBeInTheDocument();
     expect(document.querySelector("form.chat-composer")).toBeInTheDocument();
     const field = screen.getByRole("textbox", { name: "Message" });
     await user.type(field, "list the files");
