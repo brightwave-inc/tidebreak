@@ -4,7 +4,11 @@ import type { AgentRun } from "./api";
 import {
   MessageBubble,
   MessageList,
+  TURN_CANCELLED_NOTICE,
+  latestTurn,
   retryableTurn,
+  withBranchNotice,
+  withSelectedVersions,
   type ChatMessage,
 } from "./MessageList";
 import type { TurnFailureCategory } from "./generated/wire";
@@ -451,7 +455,9 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(1);
+    // Both questions and the settled answer copy; the answer still streaming
+    // does not.
+    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(3);
     expect(markup.match(/class="message-footer"/g)).toHaveLength(3);
     expect(markup).toContain('class="message-user-frame"');
     expect(markup).not.toContain('dateTime="2026-07-20T10:01:00Z"');
@@ -506,7 +512,9 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(1);
+    // The question copies, and so does the bubble that closes the answer; the
+    // interim bubble before the tool call does not.
+    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(2);
     expect(markup).not.toContain('dateTime="2026-07-20T10:00:05Z"');
     expect(markup).toContain('dateTime="2026-07-20T10:00:20Z"');
   });
@@ -653,88 +661,232 @@ describe("superseded responses", () => {
 
 describe("retryableTurn", () => {
   const failed = (category: TurnFailureCategory): ChatMessage[] => [
-    { id: "u1", role: "user", text: "summarize this" },
-    { id: "f1", role: "turn_failure", category },
+    { id: "u1", role: "user", text: "summarize this", turnId: "t1" },
+    { id: "f1", role: "turn_failure", category, turnId: "t1" },
   ];
 
-  // Account access and authentication failures are stable until the provider
-  // account changes, so replaying the same turn would only repeat the refusal.
-  it("withholds retry for authentication and provider access failures", () => {
-    expect(retryableTurn(failed("rate_limited"))).toMatchObject({
-      failureId: "f1",
-      text: "summarize this",
-    });
-    expect(retryableTurn(failed("transient"))).not.toBeNull();
-    expect(retryableTurn(failed("unknown"))).not.toBeNull();
-    expect(retryableTurn(failed("auth"))).toBeNull();
-    expect(retryableTurn(failed("provider_access"))).toBeNull();
+  // A retry reruns the failed turn in place, so it is offered for every
+  // category: after a fixed key or restored access, the same turn is answered
+  // again rather than its question being sent a second time.
+  it("reruns the failed turn itself, whatever the failure", () => {
+    for (const category of [
+      "rate_limited",
+      "transient",
+      "unknown",
+      "auth",
+      "provider_access",
+    ] as const) {
+      expect(retryableTurn(failed(category))).toEqual({
+        noticeId: "f1",
+        turnId: "t1",
+      });
+    }
+  });
+
+  it("offers a retry after a stop", () => {
+    expect(
+      retryableTurn([
+        { id: "u1", role: "user", text: "write it", turnId: "t1" },
+        {
+          id: "a1",
+          role: "assistant",
+          text: "Half",
+          sources: [],
+          turnId: "t1",
+        },
+        {
+          id: "c1",
+          role: "system",
+          text: TURN_CANCELLED_NOTICE,
+          turnId: "t1",
+        },
+      ]),
+    ).toEqual({ noticeId: "c1", turnId: "t1" });
   });
 
   it("offers nothing once the failure is no longer the newest message", () => {
     expect(
       retryableTurn([
         ...failed("transient"),
-        { id: "u2", role: "user", text: "never mind" },
+        { id: "u2", role: "user", text: "never mind", turnId: "t2" },
       ]),
     ).toBeNull();
   });
 
-  it("carries the failed turn's model context so the resend is unchanged", () => {
-    const turn = retryableTurn([
-      {
-        id: "u1",
-        role: "user",
-        text: "what is in this",
-        images: [
+  it("offers nothing for a notice that names no turn", () => {
+    expect(
+      retryableTurn([
+        { id: "u1", role: "user", text: "summarize this" },
+        { id: "f1", role: "turn_failure", category: "transient" },
+      ]),
+    ).toBeNull();
+    expect(
+      retryableTurn([{ id: "n1", role: "system", text: "Turn stopped." }]),
+    ).toBeNull();
+  });
+});
+
+describe("latestTurn", () => {
+  it("opens the message that opened the latest settled turn for editing", () => {
+    expect(
+      latestTurn(
+        [
+          { id: "u1", role: "user", text: "first", turnId: "t1" },
           {
-            attachmentId: "img-1",
-            mediaType: "image/png",
-            width: 8,
-            height: 8,
+            id: "a1",
+            role: "assistant",
+            text: "one",
+            sources: [],
+            turnId: "t1",
+          },
+          { id: "u2", role: "user", text: "second", turnId: "t2" },
+          {
+            id: "a2",
+            role: "assistant",
+            text: "two",
+            sources: [],
+            turnId: "t2",
           },
         ],
-        files: [
-          {
-            documentId: "doc-1",
-            name: "notes.pdf",
-            mediaType: "application/pdf",
-          },
-        ],
-      },
-      {
-        id: "f1",
-        role: "turn_failure",
-        category: "rate_limited",
-        invokedSkills: ["pdf-documents"],
-        voiceInputUsed: true,
-      },
-    ]);
-    expect(turn?.images.map((image) => image.attachmentId)).toEqual(["img-1"]);
-    expect(turn?.files.map((file) => file.documentId)).toEqual(["doc-1"]);
-    expect(turn?.invokedSkills).toEqual(["pdf-documents"]);
-    expect(turn?.voiceInputUsed).toBe(true);
+        false,
+      ),
+    ).toEqual({ turnId: "t2", editableMessageId: "u2" });
   });
 
-  // The message being resent is the newest one, which after a steer is the
-  // guidance rather than the opening prompt. Taking the turn's list here would
-  // resend one message's text under a different message's skills.
-  it("prefers the resent message's own skills over the turn's", () => {
-    const turn = retryableTurn([
-      { id: "u1", role: "user", text: "draft the deck" },
+  // Guidance sent while a turn ran is not what an edit reruns, so a turn that
+  // took some has no message Edit can honestly open.
+  it("offers no edit when the latest message steered a running turn", () => {
+    expect(
+      latestTurn(
+        [
+          { id: "u1", role: "user", text: "draft", turnId: "t1" },
+          { id: "u2", role: "user", text: "shorter", turnId: "t1" },
+        ],
+        false,
+      ),
+    ).toEqual({ turnId: "t1", editableMessageId: null });
+  });
+
+  it("offers nothing while a turn runs", () => {
+    expect(
+      latestTurn([{ id: "u1", role: "user", text: "go", turnId: "t1" }], true),
+    ).toEqual({ turnId: null, editableMessageId: null });
+  });
+});
+
+describe("withSelectedVersions", () => {
+  const conversation: ChatMessage[] = [
+    { id: "u1", role: "user", text: "name a boat", turnId: "t3" },
+    {
+      id: "a3",
+      role: "assistant",
+      text: "Tidewater",
+      sources: [],
+      turnId: "t3",
+    },
+    { id: "u2", role: "user", text: "shorter", turnId: "t4" },
+    { id: "a4", role: "assistant", text: "Tide", sources: [], turnId: "t4" },
+  ];
+  const versions = {
+    t3: [
+      {
+        turnId: "t1",
+        messages: [
+          {
+            id: "a1",
+            role: "assistant" as const,
+            text: "Seafoam",
+            sources: [],
+            turnId: "t1",
+          },
+        ],
+      },
+      {
+        turnId: "t2",
+        messages: [
+          {
+            id: "a2",
+            role: "assistant" as const,
+            text: "Driftwood",
+            sources: [],
+            turnId: "t2",
+          },
+        ],
+      },
+    ],
+  };
+
+  it("shows the current answer until an earlier one is picked", () => {
+    expect(withSelectedVersions(conversation, versions, {})).toBe(conversation);
+    // The last index is the current answer.
+    expect(withSelectedVersions(conversation, versions, { t3: 2 })).toBe(
+      conversation,
+    );
+  });
+
+  it("swaps only the answer, keeping the message and the turns after it", () => {
+    const shown = withSelectedVersions(conversation, versions, { t3: 0 });
+    expect(shown.map((message) => message.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a4",
+    ]);
+  });
+});
+
+describe("withBranchNotice", () => {
+  const copied: ChatMessage[] = [
+    {
+      id: "u1",
+      role: "user",
+      text: "plan the trip",
+      turnId: "t1",
+      createdAt: "2026-09-01T10:00:00Z",
+    },
+    { id: "a1", role: "assistant", text: "Day one", sources: [], turnId: "t1" },
+  ];
+
+  it("closes the copied history when nothing was sent in the branch yet", () => {
+    expect(
+      withBranchNotice(copied, "2026-09-02T09:00:00Z", false).map(
+        (message) => message.role,
+      ),
+    ).toEqual(["user", "assistant", "branch_notice"]);
+  });
+
+  it("sits before the first message sent after the branch was made", () => {
+    const shown = withBranchNotice(
+      [
+        ...copied,
+        {
+          id: "u2",
+          role: "user",
+          text: "go north instead",
+          turnId: "t2",
+          createdAt: "2026-09-02T09:05:00Z",
+        },
+      ],
+      "2026-09-02T09:00:00Z",
+      false,
+    );
+    expect(shown.map((message) => message.id)).toEqual([
+      "u1",
+      "a1",
+      "branch-notice",
+      "u2",
+    ]);
+  });
+
+  it("stays out of view when the copied history is above what is shown", () => {
+    const later: ChatMessage[] = [
       {
         id: "u2",
         role: "user",
-        text: "make it shorter",
-        invokedSkills: ["presentations"],
+        text: "go north instead",
+        createdAt: "2026-09-02T09:05:00Z",
       },
-      {
-        id: "f1",
-        role: "turn_failure",
-        category: "transient",
-        invokedSkills: ["documents"],
-      },
-    ]);
-    expect(turn?.text).toBe("make it shorter");
-    expect(turn?.invokedSkills).toEqual(["presentations"]);
+    ];
+    expect(withBranchNotice(later, "2026-09-02T09:00:00Z", true)).toBe(later);
   });
 });

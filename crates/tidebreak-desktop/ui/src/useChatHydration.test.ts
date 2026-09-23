@@ -12,6 +12,7 @@ const transcript: ChatTranscript = {
   last_event_seq: 7,
   has_more: false,
   earlier_cursor: null,
+  answer_versions: [],
 };
 
 function deferred<T>() {

@@ -22,6 +22,12 @@ type UserMessageProps = {
   leading?: ReactNode;
   /** Rendered below the prose — chat puts the skills the turn invoked here. */
   trailing?: ReactNode;
+  /** More actions after Copy in the footer; chat puts Edit here. */
+  actions?: ReactNode;
+  /** Show the footer's actions only on hover and keyboard focus. */
+  revealActionsOnHover?: boolean;
+  /** Offer Copy on the message. */
+  copyable?: boolean;
 };
 
 /**
@@ -40,6 +46,9 @@ export function UserMessage({
   author,
   leading,
   trailing,
+  actions,
+  revealActionsOnHover = false,
+  copyable = false,
 }: UserMessageProps) {
   // A long paste went out folded behind a chip; it comes back folded too.
   const { prose, pasted } = splitPastedText(text);
@@ -60,7 +69,14 @@ export function UserMessage({
         ))}
         {trailing}
       </article>
-      <MessageFooter role="user" text={text} createdAt={createdAt} />
+      <MessageFooter
+        role="user"
+        text={text}
+        createdAt={createdAt}
+        actions={actions}
+        revealOnHover={revealActionsOnHover}
+        copyable={copyable}
+      />
     </div>
   );
 }

@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
   type MutableRefObject,
 } from "react";
-import { Wand2 } from "lucide-react";
+import { RefreshCw, Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
@@ -67,7 +67,20 @@ import {
   type MessageWebSource,
 } from "./MessageWebSources";
 import { useSourceNav } from "./panel/SourceNav";
-import { TurnFailureNotice, turnFailureOffersRetry } from "./TurnFailureNotice";
+import { TurnFailureNotice } from "./TurnFailureNotice";
+import {
+  AnswerVersionPager,
+  BranchButton,
+  BranchNotice,
+  EditButton,
+  RegenerateControl,
+  UserMessageEditor,
+  type TurnActions,
+} from "./MessageActions";
+import type {
+  AnswerVersions,
+  LatestTurnSideEffects,
+} from "./ChatTranscriptPresentation";
 import type {
   RendererRefusalSource,
   TurnFailureCategory,
@@ -86,6 +99,8 @@ export type ChatMessage =
   | {
       id: string;
       role: "user";
+      /** The turn this message opens. Absent until the server names it. */
+      turnId?: string;
       text: string;
       images?: TranscriptImageAttachment[];
       files?: TranscriptFileAttachment[];
@@ -96,6 +111,8 @@ export type ChatMessage =
   | {
       id: string;
       role: "assistant";
+      /** The turn this answer belongs to. Absent until the server names it. */
+      turnId?: string;
       text: string;
       sources: AssistantSource[];
       createdAt?: string;
@@ -105,7 +122,8 @@ export type ChatMessage =
        *  authoritative transcript sweeps it. */
       superseded?: boolean;
     }
-  | { id: string; role: "system"; text: string }
+  /** `turnId` is set on the notice a stopped turn leaves. */
+  | { id: string; role: "system"; text: string; turnId?: string }
   /** Durable marker that earlier conversation was compacted. */
   | { id: string; role: "compaction" }
   | {
@@ -148,6 +166,8 @@ export type ChatMessage =
   | {
       id: string;
       role: "turn_failure";
+      /** The turn that failed. */
+      turnId?: string;
       category: TurnFailureCategory;
       detail?: string;
       model?: { id: string; provider: ModelInfo["provider"] };
@@ -167,50 +187,45 @@ export type ChatMessage =
       turnId: string;
       records: MemoryRecord[];
       createdAt?: string;
-    };
+    }
+  /**
+   * Where a branch's copied history ends. Placed by the transcript, never
+   * stored: the session holds only real messages.
+   */
+  | { id: string; role: "branch_notice" };
 
-/** Everything a retry needs to put the failed turn back on the wire unchanged. */
+/** The turn a retry reruns, and the notice that offers it. */
 export type RetryableTurn = {
-  /** The failure notice that offers this retry. */
-  failureId: string;
-  text: string;
-  images: readonly TranscriptImageAttachment[];
-  files: readonly TranscriptFileAttachment[];
-  invokedSkills: readonly string[];
-  voiceInputUsed: boolean;
+  /** The failure or stop notice that offers this retry. */
+  noticeId: string;
+  /** The turn the retry answers again, in place. */
+  turnId: string;
 };
 
 /**
  * The retry the transcript currently offers, if any.
  *
- * Only a transcript that *ends* on a retryable failure has one. An older
- * failure keeps its explanation but loses its button: resending a prompt from
- * the middle of a conversation the reader has since moved past is a footgun,
- * and the turns after it already answered whatever came next.
+ * Only a transcript that *ends* on a failure or a stop has one. An older one
+ * keeps its explanation but loses its button: rerunning a turn from the middle
+ * of a conversation the reader has since moved past is a footgun, and the
+ * turns after it already answered whatever came next.
+ *
+ * A retry answers the same turn again rather than sending its message a second
+ * time, so a string of retries never stacks copies of the question.
  */
 export function retryableTurn(
   messages: readonly ChatMessage[],
 ): RetryableTurn | null {
-  const failure = messages[messages.length - 1];
-  if (failure?.role !== "turn_failure") return null;
-  if (!turnFailureOffersRetry(failure.category)) return null;
-  for (let index = messages.length - 2; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "user") continue;
-    // Nothing to resend — the prompt the turn failed on is no longer in hand.
-    if (message.text.trim().length === 0) return null;
-    return {
-      failureId: failure.id,
-      text: message.text,
-      images: message.images ?? [],
-      files: message.files ?? [],
-      // The message being resent speaks for itself. It is not always the turn's
-      // opening prompt — guidance sent mid-turn becomes a user message too, and
-      // it carries its own invocation — so preferring the turn-level list here
-      // would resend one message's text under another's skills.
-      invokedSkills: message.invokedSkills ?? failure.invokedSkills ?? [],
-      voiceInputUsed: failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
-    };
+  const notice = messages[messages.length - 1];
+  if (notice?.role === "turn_failure" && notice.turnId) {
+    return { noticeId: notice.id, turnId: notice.turnId };
+  }
+  if (
+    notice?.role === "system" &&
+    notice.text === TURN_CANCELLED_NOTICE &&
+    notice.turnId
+  ) {
+    return { noticeId: notice.id, turnId: notice.turnId };
   }
   return null;
 }
@@ -313,7 +328,47 @@ type MessageListProps = {
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
   memoryClient?: MemoryRememberedClient;
+  /** Earlier answers, keyed by the turn shown in their place. */
+  answerVersions?: AnswerVersions;
+  /** What the latest settled turn did outside the conversation. */
+  latestSideEffects?: LatestTurnSideEffects | null;
+  /** Edit, regenerate, and branch. Absent for a transcript that only shows. */
+  turnActions?: TurnActions;
+  /** Where this conversation was branched from, when it is a branch. */
+  branchOrigin?: BranchOrigin;
 };
+
+/** Where a branch came from, as its transcript shows it. */
+export type BranchOrigin = {
+  /** The original's title, or null when it has none. */
+  title: string | null;
+  /** When the branch was made. Transcript entries after it are the branch's own. */
+  branchedAt: string;
+  /** Open the original. Absent when it no longer exists. */
+  onOpen?: () => void;
+};
+
+/**
+ * What every row reads to decide its turn actions. One object per transcript
+ * render, so a row re-renders when a turn setting changes, not per token.
+ */
+type TurnUi = {
+  actions?: TurnActions;
+  /** The latest settled turn, or null while one runs. */
+  latestTurnId: string | null;
+  /** The message Edit opens: the one that opens the latest turn. */
+  editableMessageId: string | null;
+  editingTurnId: string | null;
+  setEditingTurnId: (turnId: string | null) => void;
+  /** Version group of every turn with versions: the turn shown in its place. */
+  versionGroups: ReadonlyMap<string, string>;
+  answerVersions: AnswerVersions;
+  selectedVersions: Readonly<Record<string, number>>;
+  selectVersion: (group: string, index: number) => void;
+  latestSideEffects: LatestTurnSideEffects | null;
+};
+
+const NO_ANSWER_VERSIONS: AnswerVersions = {};
 
 // Defaults for the background-agent props feed the grouping memo below, so
 // they are module constants: a fresh `[]` or `() => {}` per render would be a
@@ -382,6 +437,10 @@ export function MessageList({
   changeClient,
   memoryClient,
   backgroundAgentClient,
+  answerVersions = NO_ANSWER_VERSIONS,
+  latestSideEffects = null,
+  turnActions,
+  branchOrigin,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
@@ -390,11 +449,65 @@ export function MessageList({
     [decidingApprovalCalls, approvalErrors, grantScope],
   );
   const retry = useMemo(() => {
-    if (!onRetryTurn) return undefined;
+    if (!onRetryTurn || busy) return undefined;
     const turn = retryableTurn(messages);
     if (!turn) return undefined;
-    return { failureId: turn.failureId, onRetry: () => onRetryTurn(turn) };
-  }, [messages, onRetryTurn]);
+    return { noticeId: turn.noticeId, onRetry: () => onRetryTurn(turn) };
+  }, [messages, onRetryTurn, busy]);
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  const [selectedVersions, setSelectedVersions] = useState<
+    Record<string, number>
+  >({});
+  const latest = useMemo(() => latestTurn(messages, busy), [messages, busy]);
+  const versionGroups = useMemo(
+    () => answerVersionGroups(answerVersions),
+    [answerVersions],
+  );
+  const selectVersion = useCallback((group: string, index: number) => {
+    setSelectedVersions((current) => ({ ...current, [group]: index }));
+  }, []);
+  // A new answer to a turn shows first: a selection made before a regenerate
+  // named an index into the old list.
+  const [versionsSeen, setVersionsSeen] = useState(answerVersions);
+  if (versionsSeen !== answerVersions) {
+    setVersionsSeen(answerVersions);
+    setSelectedVersions((current) => {
+      const kept = Object.fromEntries(
+        Object.entries(current).filter(
+          ([group]) =>
+            (answerVersions[group]?.length ?? 0) ===
+            (versionsSeen[group]?.length ?? 0),
+        ),
+      );
+      return Object.keys(kept).length === Object.keys(current).length
+        ? current
+        : kept;
+    });
+  }
+  const turnUi = useMemo<TurnUi>(
+    () => ({
+      actions: turnActions,
+      latestTurnId: latest.turnId,
+      editableMessageId: latest.editableMessageId,
+      editingTurnId,
+      setEditingTurnId,
+      versionGroups,
+      answerVersions,
+      selectedVersions,
+      selectVersion,
+      latestSideEffects,
+    }),
+    [
+      turnActions,
+      latest,
+      editingTurnId,
+      versionGroups,
+      answerVersions,
+      selectedVersions,
+      selectVersion,
+      latestSideEffects,
+    ],
+  );
   const backgroundAgents = useMemo(
     () => ({
       runs: backgroundAgentRuns,
@@ -442,10 +555,17 @@ export function MessageList({
         messages.findIndex((message) => message.id === start.id),
       )
     : 0;
-  const visibleMessages = useMemo(
-    () => (startIndex > 0 ? messages.slice(startIndex) : messages),
-    [messages, startIndex],
-  );
+  const visibleMessages = useMemo(() => {
+    const windowed = startIndex > 0 ? messages.slice(startIndex) : messages;
+    const shown = withSelectedVersions(
+      windowed,
+      answerVersions,
+      selectedVersions,
+    );
+    return branchOrigin
+      ? withBranchNotice(shown, branchOrigin.branchedAt, startIndex > 0)
+      : shown;
+  }, [messages, startIndex, answerVersions, selectedVersions, branchOrigin]);
   // Grouping walks the transcript and builds every row's element; memoized
   // so a render whose inputs are unchanged (a scroll, a pending-card flag)
   // reuses the rows instead of rebuilding a long conversation's worth. Each
@@ -470,6 +590,8 @@ export function MessageList({
       backgroundAgents,
       retry,
       phaseCache.current,
+      turnUi,
+      branchOrigin,
     );
     phaseCache.current = grouped.phases;
     return grouped;
@@ -485,6 +607,8 @@ export function MessageList({
     memoryClient,
     backgroundAgents,
     retry,
+    turnUi,
+    branchOrigin,
   ]);
 
   // The scroll viewport, for keeping the reader's place when earlier turns
@@ -819,13 +943,15 @@ export function groupMessageItems(
       nextSequence: afterSequence,
     }),
   },
-  retry?: { failureId: string; onRetry: () => void },
+  retry?: { noticeId: string; onRetry: () => void },
   /**
    * The phases the last grouping built. A phase whose rows and inputs are all
    * unchanged is reused as the same element, so a streamed token re-renders
    * the phase it touched instead of every phase in the conversation.
    */
   previousPhases: ActivityPhaseCache | null = null,
+  turnUi?: TurnUi,
+  branchOrigin?: BranchOrigin,
 ) {
   const items: ReactNode[] = [];
   const nextPhases = new Map<string, BuiltPhase>();
@@ -866,18 +992,49 @@ export function groupMessageItems(
     }
   }
 
+  // A turn with earlier answers shows its pager under the answer that closes
+  // it. When no answer bubble closes it (the newest attempt failed or stopped
+  // before saying anything), the pager gets a row of its own at the turn's end.
+  let pagerOwed: string | null = null;
+  const settlePager = () => {
+    if (pagerOwed === null || !turnUi) return;
+    const pager = versionPager(turnUi, pagerOwed);
+    if (pager) {
+      items.push(
+        <div key={`versions-${pagerOwed}`} className="message-versions-row">
+          <AnswerVersionPager {...pager} />
+        </div>,
+      );
+    }
+    pagerOwed = null;
+  };
+
   while (index < messages.length) {
     const message = messages[index];
 
     if (!isActivityMessage(message)) {
       if (message.role === "user") {
+        settlePager();
         lastTurnStart = items.length;
         turnStarts.push({ item: items.length, messageId: message.id });
         standingCardKeys = new Set<string>();
         turnWebSources = [];
+        if (turnUi && message.turnId) {
+          pagerOwed = turnUi.versionGroups.get(message.turnId) ?? null;
+        }
       }
       const closesTurn =
         message.role === "assistant" && isTurnClosingAssistant(messages, index);
+      if (
+        closesTurn &&
+        pagerOwed !== null &&
+        !isInvisibleAssistant(message) &&
+        message.role === "assistant" &&
+        message.turnId !== undefined &&
+        turnUi?.versionGroups.get(message.turnId) === pagerOwed
+      ) {
+        pagerOwed = null;
+      }
       items.push(
         <MessageBubble
           key={message.id}
@@ -889,7 +1046,11 @@ export function groupMessageItems(
           chatId={chatId}
           changeClient={changeClient}
           memoryClient={memoryClient}
-          onRetry={retry?.failureId === message.id ? retry.onRetry : undefined}
+          onRetry={retry?.noticeId === message.id ? retry.onRetry : undefined}
+          turnUi={turnUi}
+          branchOrigin={
+            message.role === "branch_notice" ? branchOrigin : undefined
+          }
         />,
       );
       // A sibling of the bubble rather than part of it: the row is built from
@@ -962,8 +1123,132 @@ export function groupMessageItems(
     items.push(built.element);
     groupIndex += 1;
   }
+  settlePager();
 
   return { items, lastTurnStart, turnStarts, phases: nextPhases };
+}
+
+/** The pager for one version group, or null when it has nothing to page. */
+function versionPager(
+  turnUi: TurnUi,
+  group: string,
+): { index: number; count: number; onSelect: (index: number) => void } | null {
+  const earlier = turnUi.answerVersions[group];
+  if (!earlier || earlier.length === 0) return null;
+  const count = earlier.length + 1;
+  const selected = turnUi.selectedVersions[group];
+  return {
+    index: selected === undefined ? count - 1 : Math.min(selected, count - 1),
+    count,
+    onSelect: (index) => turnUi.selectVersion(group, index),
+  };
+}
+
+/**
+ * The latest settled turn, and the message Edit opens on it.
+ *
+ * Nothing while a turn runs: every action waits for the conversation to
+ * settle. Edit opens only the message that opens the turn, and only when no
+ * guidance was sent after it: that later text is not what an edit reruns.
+ */
+export function latestTurn(
+  messages: readonly ChatMessage[],
+  busy: boolean,
+): { turnId: string | null; editableMessageId: string | null } {
+  if (busy) return { turnId: null, editableMessageId: null };
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    if (!message.turnId) return { turnId: null, editableMessageId: null };
+    const opener = messages.find(
+      (candidate) =>
+        candidate.role === "user" && candidate.turnId === message.turnId,
+    );
+    return {
+      turnId: message.turnId,
+      editableMessageId: opener?.id === message.id ? message.id : null,
+    };
+  }
+  return { turnId: null, editableMessageId: null };
+}
+
+/** Every turn with earlier answers, and each version, mapped to its group. */
+function answerVersionGroups(
+  versions: AnswerVersions,
+): ReadonlyMap<string, string> {
+  const groups = new Map<string, string>();
+  for (const [current, earlier] of Object.entries(versions)) {
+    if (earlier.length === 0) continue;
+    groups.set(current, current);
+    for (const version of earlier) groups.set(version.turnId, current);
+  }
+  return groups;
+}
+
+/**
+ * The transcript with each selected earlier answer in place of the answer it
+ * was replaced by. The message stays; only what answered it changes.
+ */
+export function withSelectedVersions(
+  messages: ChatMessage[],
+  versions: AnswerVersions,
+  selected: Readonly<Record<string, number>>,
+): ChatMessage[] {
+  const chosen = Object.entries(selected).filter(
+    ([group, index]) => index < (versions[group]?.length ?? 0),
+  );
+  if (chosen.length === 0) return messages;
+  const byGroup = new Map(chosen);
+  const shown: ChatMessage[] = [];
+  let index = 0;
+  while (index < messages.length) {
+    const message = messages[index];
+    shown.push(message);
+    index += 1;
+    if (message.role !== "user" || !message.turnId) continue;
+    const pick = byGroup.get(message.turnId);
+    const version =
+      pick === undefined ? undefined : versions[message.turnId]?.[pick];
+    if (!version) continue;
+    // Skip the current answer: everything up to the next turn's message.
+    // Guidance sent during the turn is part of its answer, so it goes too.
+    while (
+      index < messages.length &&
+      !(
+        messages[index].role === "user" &&
+        (messages[index] as { turnId?: string }).turnId !== message.turnId
+      )
+    ) {
+      index += 1;
+    }
+    shown.push(...version.messages);
+  }
+  return shown;
+}
+
+/**
+ * The transcript with a notice where a branch's copied history ends: before
+ * the first message sent after the branch was made, or at the end when none
+ * has been. `earlierHidden` holds the notice back when that point is above
+ * what the transcript shows.
+ */
+export function withBranchNotice(
+  messages: ChatMessage[],
+  branchedAt: string,
+  earlierHidden: boolean,
+): ChatMessage[] {
+  const branched = Date.parse(branchedAt);
+  if (Number.isNaN(branched)) return messages;
+  const at = messages.findIndex(
+    (message) =>
+      message.role === "user" &&
+      message.createdAt !== undefined &&
+      Date.parse(message.createdAt) > branched,
+  );
+  const notice: ChatMessage = { id: "branch-notice", role: "branch_notice" };
+  if (at === -1) return [...messages, notice];
+  if (at === 0 && earlierHidden) return messages;
+  return [...messages.slice(0, at), notice, ...messages.slice(at)];
 }
 
 /** Where the activity phase that starts at `start` ends. */
@@ -1506,6 +1791,8 @@ function MessageBubbleImpl({
   changeClient,
   memoryClient,
   onRetry,
+  turnUi,
+  branchOrigin,
 }: {
   message: ChatMessage;
   busy: boolean;
@@ -1519,8 +1806,12 @@ function MessageBubbleImpl({
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
   memoryClient?: MemoryRememberedClient;
-  /** Present only on the transcript's newest retryable failure. */
+  /** Present only on the transcript's newest failure or stop notice. */
   onRetry?: () => void;
+  /** The turn actions every row reads; absent for a history-only transcript. */
+  turnUi?: TurnUi;
+  /** Where the branch came from, on the notice that says so. */
+  branchOrigin?: BranchOrigin;
 }) {
   const sourceNav = useSourceNav();
   const richContentRef = useRef<HTMLDivElement | null>(null);
@@ -1562,6 +1853,10 @@ function MessageBubbleImpl({
       );
     }
 
+    const footer =
+      sequenceEnd && !busy && turnUi && message.turnId
+        ? answerFooter(turnUi, message.turnId)
+        : null;
     return (
       <MessageCitationsProvider value={citations}>
         <article className="message message-assistant" aria-label="Assistant">
@@ -1593,6 +1888,9 @@ function MessageBubbleImpl({
             settled={!busy}
             richContentRef={richContentRef}
             sequenceEnd={sequenceEnd}
+            actions={footer?.actions}
+            versions={footer?.versions}
+            revealOnHover={footer?.revealOnHover}
           />
         </article>
       </MessageCitationsProvider>
@@ -1600,51 +1898,109 @@ function MessageBubbleImpl({
   }
 
   if (message.role === "user") {
+    const attachments = (
+      <>
+        {message.images &&
+          message.images.length > 0 &&
+          imageClient &&
+          chatId &&
+          isolatedCard(
+            `${message.id}-images`,
+            message.images.map((image) => image.attachmentId).join(" "),
+            <TranscriptImageAttachments
+              client={imageClient}
+              chatId={chatId}
+              images={message.images}
+            />,
+          )}
+        {message.files &&
+          message.files.length > 0 &&
+          isolatedCard(
+            `${message.id}-files`,
+            message.files.map((file) => file.documentId).join(" "),
+            <TranscriptFileAttachments files={message.files} />,
+          )}
+      </>
+    );
+    const turnId = message.turnId;
+    const actions = turnUi?.actions;
+    const editable =
+      actions !== undefined &&
+      turnId !== undefined &&
+      message.id === turnUi?.editableMessageId;
+    if (editable && turnUi?.editingTurnId === turnId) {
+      const sideEffects =
+        turnUi.latestSideEffects?.turnId === turnId
+          ? turnUi.latestSideEffects.effects
+          : [];
+      return (
+        <div className="message-user-frame">
+          <UserMessageEditor
+            text={message.text}
+            attachments={attachments}
+            sideEffects={sideEffects}
+            onCancel={() => turnUi.setEditingTurnId(null)}
+            onSubmit={(text) => {
+              turnUi.setEditingTurnId(null);
+              actions.onEdit(turnId, text);
+            }}
+          />
+        </div>
+      );
+    }
     return (
       <UserMessage
         text={message.text}
         createdAt={message.createdAt}
         anchorId={message.id}
-        leading={
-          <>
-            {message.images &&
-              message.images.length > 0 &&
-              imageClient &&
-              chatId &&
-              isolatedCard(
-                `${message.id}-images`,
-                message.images.map((image) => image.attachmentId).join(" "),
-                <TranscriptImageAttachments
-                  client={imageClient}
-                  chatId={chatId}
-                  images={message.images}
-                />,
-              )}
-            {message.files &&
-              message.files.length > 0 &&
-              isolatedCard(
-                `${message.id}-files`,
-                message.files.map((file) => file.documentId).join(" "),
-                <TranscriptFileAttachments files={message.files} />,
-              )}
-          </>
-        }
+        leading={attachments}
         trailing={
           message.invokedSkills && message.invokedSkills.length > 0 ? (
             <TranscriptInvokedSkills skills={message.invokedSkills} />
           ) : null
         }
+        copyable
+        revealActionsOnHover
+        actions={
+          editable ? (
+            <EditButton
+              disabled={actions.pending}
+              onEdit={() => turnUi?.setEditingTurnId(turnId)}
+            />
+          ) : undefined
+        }
       />
     );
+  }
+
+  if (message.role === "branch_notice") {
+    return branchOrigin ? (
+      <BranchNotice title={branchOrigin.title} onOpen={branchOrigin.onOpen} />
+    ) : null;
   }
 
   if (message.role === "system" || message.role === "error") {
     return (
       <div
-        className={`message-notice is-${message.role}`}
+        className={cn(
+          `message-notice is-${message.role}`,
+          onRetry && "has-action",
+        )}
         role={message.role === "error" ? "alert" : "status"}
       >
-        {message.text}
+        <span>{message.text}</span>
+        {onRetry && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="message-notice-action"
+            onClick={onRetry}
+          >
+            <RefreshCw aria-hidden="true" />
+            Try again
+          </Button>
+        )}
       </div>
     );
   }
@@ -1700,6 +2056,45 @@ function MessageBubbleImpl({
   }
 
   return null;
+}
+
+/**
+ * The actions and pager under the answer that closes a turn.
+ *
+ * Every settled answer can be branched from. The latest one can also be
+ * answered again, and its actions stay in view; older answers show theirs on
+ * hover and focus.
+ */
+function answerFooter(
+  turnUi: TurnUi,
+  turnId: string,
+): { actions?: ReactNode; versions?: ReactNode; revealOnHover: boolean } {
+  const group = turnUi.versionGroups.get(turnId) ?? turnId;
+  const latest = group === turnUi.latestTurnId;
+  const pager = turnUi.versionGroups.has(turnId)
+    ? versionPager(turnUi, group)
+    : null;
+  const actions = turnUi.actions;
+  return {
+    revealOnHover: !latest,
+    versions: pager ? <AnswerVersionPager {...pager} /> : undefined,
+    actions: actions ? (
+      <>
+        {latest && (
+          <RegenerateControl
+            onRegenerate={(model) => actions.onRegenerate(group, model)}
+            retryModels={actions.retryModels}
+            currentModelKey={actions.currentModelKey}
+            disabled={actions.pending}
+          />
+        )}
+        <BranchButton
+          disabled={actions.pending}
+          onBranch={() => actions.onBranch(turnId)}
+        />
+      </>
+    ) : undefined,
+  };
 }
 
 /**

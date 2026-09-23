@@ -29,7 +29,9 @@ import { isToolMessage, stableSubset } from "./chatSessionSelectors";
 import { loadCurrentTerminalTranscript } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
-import type { RetryableTurn } from "./MessageList";
+import type { BranchOrigin, ChatMessage, RetryableTurn } from "./MessageList";
+import type { RetryModelGroup, TurnActions } from "./MessageActions";
+import type { Chat, TurnSideEffect } from "./api";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { AgentsPanel } from "./AgentsPanel";
@@ -64,7 +66,11 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForChat, textOnlyModelLabel } from "./ModelSelection";
-import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
+import {
+  ModelMenu,
+  useModelSettingsNav,
+  visibleModelGroups,
+} from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -119,6 +125,35 @@ function rememberComposerFolder(chatId: string, rootId: string) {
 }
 
 const { signal: signalRefresh } = useRefreshSignals.getState();
+
+/**
+ * The transcript as it reads while `turnId` is answered again: its message
+ * stays, rewritten when edited, and everything that answered it goes.
+ */
+function withoutAnswer(
+  messages: ChatMessage[],
+  turnId: string,
+  editedText?: string,
+): ChatMessage[] {
+  const at = messages.findIndex(
+    (message) => message.role === "user" && message.turnId === turnId,
+  );
+  if (at < 0) return messages;
+  const question = messages[at];
+  return [
+    ...messages.slice(0, at),
+    editedText !== undefined && question.role === "user"
+      ? { ...question, text: editedText }
+      : question,
+  ];
+}
+
+/** What the reader is told when an edit started a new chat. */
+function editBranchedMessage(effects: readonly TurnSideEffect[]): string {
+  return effects.length > 0
+    ? "Your edit started a new chat, because the answer it replaced changed things outside this one."
+    : "Your edit started a new chat.";
+}
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
 /**
@@ -468,27 +503,240 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   /**
-   * Retry sends the failed turn again — same prompt, same attachments, a new
-   * turn id.
+   * Retry answers a failed or stopped turn again, in place.
    *
-   * There is no server-side resume: a failed turn is terminal in the journal
-   * and nothing re-runs one in place. A fresh turn is exactly what the reader
-   * would get by retyping the prompt, without the retyping, and it reuses the
-   * attachment and document ids the first attempt published, so the model sees
-   * the same message rather than a text-only shadow of it.
+   * It is a regenerate: the server reruns the turn's own message, images, and
+   * files, so the question is never sent a second time and retries never
+   * stack. A failure or a stop that said nothing leaves no earlier version.
    */
   function retryTurn(turn: RetryableTurn) {
-    void postTurn({
-      content: turn.text,
-      attachments: turn.images.map((image) => image.attachmentId),
-      transcriptImages: [...turn.images],
-      documentIds: turn.files.map((file) => file.documentId),
-      transcriptFiles: [...turn.files],
-      invokedSkills: turn.invokedSkills,
-      voiceInputUsed: turn.voiceInputUsed,
-      fromComposer: false,
-    });
+    void regenerateTurn(turn.turnId);
   }
+
+  /** A rerun or a branch the server has not answered yet. */
+  const [rerunPending, setRerunPending] = useState(false);
+
+  function canRerun() {
+    return (
+      Boolean(chat) &&
+      hydrated &&
+      !busy &&
+      !rerunPending &&
+      deletingChatId === null
+    );
+  }
+
+  /**
+   * Put the transcript and the turn lane into the state a rerun of `turnId`
+   * leaves them in, and answer what to restore if the server refuses it.
+   */
+  function beginRerun(
+    turnId: string,
+    newTurnId: string,
+    editedText?: string,
+  ): ChatMessage[] {
+    const before = useChatSessionStore.getState().messages;
+    terminalHydrationGenerationRef.current += 1;
+    updateSession((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: newTurnId,
+      messages: withoutAnswer(session.messages, turnId, editedText),
+    }));
+    signalTurnLifecycle("submitted");
+    return before;
+  }
+
+  function abandonRerun(before: ChatMessage[], error?: unknown) {
+    updateSession((session) => ({
+      ...session,
+      busy: false,
+      activeTurnId: null,
+      messages:
+        error === undefined
+          ? before
+          : [
+              ...before,
+              {
+                id: nextId(),
+                role: "error",
+                text: friendlyErrorMessage(error, "That did not go through."),
+              },
+            ],
+    }));
+    signalTurnLifecycle("resolved");
+  }
+
+  /** Answer the latest message again, with `model` or the chat's model. */
+  async function regenerateTurn(turnId: string, model?: string) {
+    if (!canRerun()) return;
+    const newTurnId = crypto.randomUUID();
+    const before = beginRerun(turnId, newTurnId);
+    setRerunPending(true);
+    try {
+      await client.regenerateTurn(chatId, turnId, newTurnId, model);
+    } catch (err) {
+      abandonRerun(before, err);
+    } finally {
+      setRerunPending(false);
+    }
+  }
+
+  /**
+   * Replace the latest message and answer it. When the turn it replaces
+   * changed things outside the conversation, the server starts a new chat
+   * instead; this one goes back the way it was, and the reader follows the
+   * edit there.
+   */
+  async function editTurn(turnId: string, text: string) {
+    if (!canRerun()) return;
+    const newTurnId = crypto.randomUUID();
+    const before = beginRerun(turnId, newTurnId, text);
+    setRerunPending(true);
+    try {
+      const started = await client.editTurn(chatId, turnId, {
+        new_turn_id: newTurnId,
+        content: text,
+      });
+      if (!started.branched) return;
+      abandonRerun(before);
+      await openNewChat(
+        started.chat_id,
+        editBranchedMessage(started.side_effects),
+      );
+    } catch (err) {
+      abandonRerun(before, err);
+    } finally {
+      setRerunPending(false);
+    }
+  }
+
+  /** Start a new chat with a copy of this one's history through `turnId`. */
+  async function branchTurn(turnId: string) {
+    if (!chat || deletingChatId !== null || rerunPending) return;
+    setRerunPending(true);
+    try {
+      const branch = await client.branchTurn(chatId, turnId);
+      await openNewChat(branch.id, "Branched into a new chat.", branch);
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not branch this chat."));
+    } finally {
+      setRerunPending(false);
+    }
+  }
+
+  /** Put a chat the server just made into the list, say why, and open it. */
+  async function openNewChat(id: string, message: string, known?: Chat) {
+    const created = known ?? (await client.getChat(id).catch(() => null));
+    if (created) chatListActions.prependChat(created);
+    toast(message);
+    await openChat(id, created?.project_id ?? null);
+  }
+
+  async function openChat(id: string, projectId: string | null) {
+    await (projectId
+      ? navigate({
+          to: "/p/$projectId/c/$chatId",
+          params: { projectId, chatId: id },
+        })
+      : navigate({ to: "/c/$chatId", params: { chatId: id } }));
+  }
+
+  // The handlers read the route's current state; the object the transcript
+  // holds stays the same while the models and pending state do.
+  const rerunHandlers = useRef({ regenerateTurn, editTurn, branchTurn });
+  rerunHandlers.current = { regenerateTurn, editTurn, branchTurn };
+  const chatModel = chat?.model ?? null;
+  const retryModels = useMemo<RetryModelGroup[]>(
+    () =>
+      visibleModelGroups(models, chatModel)
+        .map((group) => ({
+          label: group.label,
+          models: group.models
+            .filter((model) => model.available)
+            .map((model) => ({ key: model.key, label: model.display_name })),
+        }))
+        .filter((group) => group.models.length > 0),
+    [models, chatModel],
+  );
+  const currentModelKey =
+    modelForChat(models, chatModel, defaultModelKey)?.key ?? null;
+  const turnActions = useMemo<TurnActions>(
+    () => ({
+      onRegenerate: (turnId, model) =>
+        void rerunHandlers.current.regenerateTurn(turnId, model),
+      onEdit: (turnId, text) =>
+        void rerunHandlers.current.editTurn(turnId, text),
+      onBranch: (turnId) => void rerunHandlers.current.branchTurn(turnId),
+      retryModels,
+      currentModelKey,
+      pending: rerunPending,
+    }),
+    [retryModels, currentModelKey, rerunPending],
+  );
+
+  // A branch names where it came from. The original may be in the list, may
+  // be archived, or may be gone; each reads differently.
+  const origin = chat?.branched_from;
+  const originId = origin?.chat_id ?? null;
+  const [originChat, setOriginChat] = useState<{
+    id: string;
+    title: string | null;
+    exists: boolean;
+    projectId: string | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!originId) return;
+    let current = true;
+    const listed = useChatListStore
+      .getState()
+      .chats.find((candidate) => candidate.id === originId);
+    if (listed) {
+      setOriginChat({
+        id: originId,
+        title: listed.title,
+        exists: true,
+        projectId: listed.project_id,
+      });
+      return;
+    }
+    client.getChat(originId).then(
+      (found) => {
+        if (current) {
+          setOriginChat({
+            id: originId,
+            title: found.title,
+            exists: true,
+            projectId: found.project_id,
+          });
+        }
+      },
+      () => {
+        if (current) {
+          setOriginChat({
+            id: originId,
+            title: null,
+            exists: false,
+            projectId: null,
+          });
+        }
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [client, originId]);
+  const branchOrigin = useMemo<BranchOrigin | undefined>(() => {
+    if (!origin || originChat?.id !== origin.chat_id) return undefined;
+    return {
+      title: originChat.title,
+      branchedAt: origin.branched_at,
+      onOpen: originChat.exists
+        ? () => void openChat(originChat.id, originChat.projectId)
+        : undefined,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [origin, originChat]);
 
   /**
    * The one path a turn takes to the server, whether the reader typed it or the
@@ -946,6 +1194,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           onSend={onSend}
           onQueue={onQueue}
           onRetryTurn={retryTurn}
+          turnActions={turnActions}
+          branchOrigin={branchOrigin}
           onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
         />

@@ -12,6 +12,7 @@ const transcript = {
   last_event_seq: 7,
   has_more: false,
   earlier_cursor: null,
+  answer_versions: [],
 };
 
 const USAGE = {
@@ -87,6 +88,7 @@ describe("sessionFromOpenedChat", () => {
         last_event_seq: 12,
         has_more: false,
         earlier_cursor: null,
+        answer_versions: [],
       },
       [],
     );

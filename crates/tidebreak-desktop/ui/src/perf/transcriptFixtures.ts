@@ -118,10 +118,12 @@ export function syntheticWireTranscript({
     last_event_seq: turns * 10,
     has_more: first > 0,
     earlier_cursor: first > 0 ? first * 2 + 1 : null,
+    answer_versions: [],
   };
   for (let turn = first; turn < turns; turn += 1) {
     transcript.messages.push({
       id: `user-${turn}`,
+      turn_id: "turn-fixture",
       role: "user",
       content: `Question ${turn}: how does the resolver cache the dependency graph between runs?`,
       created_at: at(turn, 0),
@@ -130,6 +132,7 @@ export function syntheticWireTranscript({
     for (let call = 0; call < toolsPerTurn; call += 1) {
       transcript.tool_activity.push({
         call_id: `call-${turn}-${call}`,
+        turn_id: "turn-fixture",
         tool: tools[call % tools.length]!,
         result_unreadable: false,
         status: "completed",
@@ -139,6 +142,7 @@ export function syntheticWireTranscript({
     }
     transcript.messages.push({
       id: `assistant-${turn}`,
+      turn_id: "turn-fixture",
       role: "assistant",
       content: markdownAnswer(turn, answerBytes),
       created_at: at(turn, 30),

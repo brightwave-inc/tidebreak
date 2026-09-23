@@ -1,6 +1,9 @@
 import type {
   ApprovalGrantRung,
+  Chat,
   ChatFrame,
+  ChatTurnStarted,
+  EditTurnBody,
   ConsentStatementSnapshot,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
@@ -61,6 +64,65 @@ export function withTurnsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
           queue,
         }),
       });
+    }
+
+    /**
+     * Answer the latest message again as `newTurnId`. `model` answers under
+     * that model this once; the chat keeps its own for the turns after.
+     *
+     * The earlier answer stays as a version the transcript can page back to,
+     * unless it failed or was stopped before it said anything.
+     */
+    regenerateTurn(
+      chatId: string,
+      turnId: string,
+      newTurnId: string,
+      model?: string,
+    ): Promise<ChatTurnStarted> {
+      return this.json(
+        `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/regenerate`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(
+            model
+              ? { new_turn_id: newTurnId, model }
+              : { new_turn_id: newTurnId },
+          ),
+        },
+      );
+    }
+
+    /**
+     * Replace the latest message and answer the new one. The answer says
+     * whether the edit started a new chat instead, because the turn it
+     * replaces changed things outside the conversation.
+     */
+    editTurn(
+      chatId: string,
+      turnId: string,
+      body: EditTurnBody,
+    ): Promise<ChatTurnStarted> {
+      return this.json(
+        `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/edit`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        },
+      );
+    }
+
+    /** Start a new chat with a copy of this one's history through `turnId`. */
+    branchTurn(chatId: string, turnId: string): Promise<Chat> {
+      return this.json(
+        `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/branch`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({}),
+        },
+      );
     }
 
     /** The chat's queued messages, FIFO, plus whether promotion is paused. */

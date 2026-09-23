@@ -57,9 +57,11 @@ import type {
 } from "./ComposerToolsMenu";
 import {
   MessageList,
+  type BranchOrigin,
   type RetryableTurn,
   type StreamActivitySource,
 } from "./MessageList";
+import type { TurnActions } from "./MessageActions";
 import type { StarterPromptOptions } from "./WelcomeState";
 import { revealPendingCall } from "./TranscriptFocus";
 import { useTranscriptVisible } from "./TranscriptVisibility";
@@ -127,8 +129,12 @@ export type ChatViewProps = {
   onSend: () => Promise<void>;
   /** Queue the draft to run after the active turn; absent disables queueing. */
   onQueue?: () => Promise<void>;
-  /** Put a failed turn back on the wire, unchanged, as a new turn. */
+  /** Answer a failed or stopped turn again, in place. */
   onRetryTurn?: (turn: RetryableTurn) => void;
+  /** Edit, regenerate, and branch on settled turns. */
+  turnActions?: TurnActions;
+  /** Where this conversation was branched from, when it is a branch. */
+  branchOrigin?: BranchOrigin;
   /** Open one background run's panel beside the conversation. */
   onOpenAgentPanel?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
@@ -168,6 +174,8 @@ export function ChatView({
   onSend,
   onQueue,
   onRetryTurn,
+  turnActions,
+  branchOrigin,
   onOpenAgentPanel,
   onOpenOutput,
 }: ChatViewProps) {
@@ -712,6 +720,8 @@ export function ChatView({
             onOutputWritebackCancel={cancelOutputWriteback}
             onSelectPrompt={onSelectPrompt}
             onRetryTurn={onRetryTurn}
+            turnActions={turnActions}
+            branchOrigin={branchOrigin}
             hasEarlierMessages={hasEarlierMessages}
             onLoadEarlierMessages={loadEarlierMessages}
             hydrated={hydrated}
@@ -833,6 +843,8 @@ type ChatTranscriptProps = Omit<
   | "compacting"
   | "streamStalled"
   | "streamActivity"
+  | "answerVersions"
+  | "latestSideEffects"
 >;
 
 /**
@@ -848,6 +860,12 @@ const ChatTranscript = memo(function ChatTranscript(
     (session) => session.animateStreaming,
   );
   const compacting = useChatSessionStore((session) => session.compacting);
+  const answerVersions = useChatSessionStore(
+    (session) => session.answerVersions,
+  );
+  const latestSideEffects = useChatSessionStore(
+    (session) => session.latestSideEffects,
+  );
   return (
     <MessageList
       {...props}
@@ -856,6 +874,8 @@ const ChatTranscript = memo(function ChatTranscript(
       animateStreaming={animateStreaming}
       compacting={compacting}
       streamActivity={chatStreamActivity}
+      answerVersions={answerVersions}
+      latestSideEffects={latestSideEffects}
     />
   );
 });
