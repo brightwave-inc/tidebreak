@@ -221,7 +221,21 @@ pub(in crate::db) async fn insert_event_row_on<C>(
 where
     C: ConnectionTrait,
 {
-    entities::event::Entity::insert(entities::event::ActiveModel {
+    entities::event::Entity::insert(event_row(owner, session_id, seq, event))
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// One code-journal row, ready to insert.
+pub(in crate::db) fn event_row(
+    owner: &OwnerId,
+    session_id: SessionId,
+    seq: i64,
+    event: serde_json::Value,
+) -> entities::event::ActiveModel {
+    entities::event::ActiveModel {
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(session_id.0),
         seq: Set(seq),
@@ -234,11 +248,7 @@ where
         attempt_event_ordinal: Set(None),
         scan_token: Set(None),
         terminal: Set(false),
-    })
-    .exec_without_returning(conn)
-    .await
-    .map_err(store_err)?;
-    Ok(())
+    }
 }
 
 /// Created-at of the newest journal row, if the session has any.

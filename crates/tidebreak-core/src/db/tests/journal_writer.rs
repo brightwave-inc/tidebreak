@@ -349,7 +349,7 @@ async fn a_single_connection_store_opens_no_read_pool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "load test; run on demand"]
 async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
-    const EVENTS_PER_SESSION: usize = 600;
+    const EVENTS_PER_SESSION: usize = 3_000;
     const READERS: usize = 4;
     let sessions_streaming: usize = std::env::var("TIDEBREAK_JOURNAL_LOAD_SESSIONS")
         .ok()

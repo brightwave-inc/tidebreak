@@ -31,11 +31,13 @@
 //! own, so one bad append fails alone instead of taking its neighbours with
 //! it.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QuerySelect, TransactionTrait,
+};
 use tokio::sync::oneshot;
 
 use crate::code::{SessionId, SessionKind, TurnId, WorkspaceId};
@@ -43,7 +45,7 @@ use crate::error::{AgentError, Result};
 use crate::{NotificationKind, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
-use super::journal::{insert_event_row_on, last_seq_on};
+use super::journal::event_row;
 use super::JournalError;
 
 /// Most appends one transaction commits. A longer queue waits for the next
@@ -215,21 +217,40 @@ async fn commit(store: &DbStore, mut batch: Vec<Pending>) {
     }
 }
 
+/// A session's newest sequence number, read in the fence query below. The
+/// primary key `(session_id, seq)` answers it with one index probe.
+const LAST_SEQ: &str = r#"(SELECT "event"."seq" FROM "event" WHERE "event"."session_id" = "session"."id" AND "event"."owner" = "session"."owner" ORDER BY "event"."seq" DESC LIMIT 1)"#;
+
 /// What one batch knows about a session it appends to.
-enum SessionFence {
-    /// No such session for this owner.
-    Missing,
-    Live {
-        spawn_epoch: i64,
-        kind: String,
-        workspace_id: Option<WorkspaceId>,
-        /// The next sequence number to hand out, or `None` once the sequence
-        /// is exhausted.
-        next_seq: Option<i64>,
-    },
+struct SessionFence {
+    owner: String,
+    spawn_epoch: i64,
+    kind: String,
+    workspace_id: Option<WorkspaceId>,
+    /// The next sequence number to hand out, or `None` once the sequence is
+    /// exhausted.
+    next_seq: Option<i64>,
+}
+
+/// An append that passed its fence and holds a sequence number.
+struct Admitted {
+    seq: i64,
+    notification: Option<Mint>,
+}
+
+/// A notification an admitted terminal append mints.
+struct Mint {
+    turn_id: TurnId,
+    kind: NotificationKind,
+    workspace_id: Option<WorkspaceId>,
 }
 
 /// Write `batch` in one transaction.
+///
+/// However many appends it carries, a batch reads every session it touches in
+/// one query and inserts every event in one statement, so its cost barely
+/// grows with its size. Only a terminal append that mints a notification adds
+/// statements of its own.
 ///
 /// `Ok` means the transaction committed, and carries each append's outcome:
 /// its sequence number, or why it was rejected. A rejected append writes
@@ -240,19 +261,41 @@ async fn write_batch(
     batch: &[Pending],
 ) -> Result<Vec<std::result::Result<i64, JournalError>>> {
     // `BEGIN IMMEDIATE`: the write lock is held before the first read, so the
-    // fence and sequence reads below cannot go stale before the inserts.
+    // fences read below cannot go stale before the insert.
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let mut sessions: HashMap<(String, SessionId), SessionFence> = HashMap::new();
+    let mut fences = load_fences(&transaction, batch).await?;
     let mut outcomes = Vec::with_capacity(batch.len());
+    let mut rows = Vec::with_capacity(batch.len());
+    let mut mints = Vec::new();
     for pending in batch {
         let append = &pending.append;
-        let fence = match sessions.entry((append.owner.as_str().to_owned(), append.session_id)) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                entry.insert(load_fence(&transaction, &append.owner, append.session_id).await?)
+        let fence = fences
+            .get_mut(&append.session_id)
+            .filter(|fence| fence.owner == append.owner.as_str());
+        match admit(&transaction, append, fence).await? {
+            Ok(Admitted { seq, notification }) => {
+                rows.push(event_row(
+                    &append.owner,
+                    append.session_id,
+                    seq,
+                    append.event.clone(),
+                ));
+                if let Some(mint) = notification {
+                    mints.push((append, mint));
+                }
+                outcomes.push(Ok(seq));
             }
-        };
-        outcomes.push(append_one(&transaction, append, fence).await?);
+            Err(rejected) => outcomes.push(Err(rejected)),
+        }
+    }
+    if !rows.is_empty() {
+        entities::event::Entity::insert_many(rows)
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(store_err)?;
+    }
+    for (append, mint) in mints {
+        record_notification(&transaction, append, mint).await?;
     }
     transaction.commit().await.map_err(store_err)?;
     #[cfg(test)]
@@ -263,63 +306,83 @@ async fn write_batch(
     Ok(outcomes)
 }
 
-async fn load_fence(
-    transaction: &sea_orm::DatabaseTransaction,
-    owner: &OwnerId,
-    session_id: SessionId,
-) -> Result<SessionFence> {
-    let Some(session) = entities::session::Entity::find_by_id(session_id.0)
-        .filter(entities::session::Column::Owner.eq(owner.as_str()))
-        .one(transaction)
+/// Read the fence of every session `batch` appends to, in one query.
+async fn load_fences(
+    transaction: &DatabaseTransaction,
+    batch: &[Pending],
+) -> Result<HashMap<SessionId, SessionFence>> {
+    let mut ids: Vec<uuid::Uuid> = batch
+        .iter()
+        .map(|pending| pending.append.session_id.0)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let rows = entities::session::Entity::find()
+        .select_only()
+        .column(entities::session::Column::Id)
+        .column(entities::session::Column::Owner)
+        .column(entities::session::Column::SpawnEpoch)
+        .column(entities::session::Column::Kind)
+        .column(entities::session::Column::WorkspaceId)
+        .expr_as(Expr::cust(LAST_SEQ), "last_seq")
+        .filter(entities::session::Column::Id.is_in(ids))
+        .into_tuple::<(
+            uuid::Uuid,
+            String,
+            i64,
+            String,
+            Option<uuid::Uuid>,
+            Option<i64>,
+        )>()
+        .all(transaction)
         .await
-        .map_err(store_err)?
-    else {
-        return Ok(SessionFence::Missing);
-    };
-    let next_seq = match last_seq_on(transaction, owner, session_id).await? {
-        Some(last) => last.checked_add(1),
-        None => Some(1),
-    };
-    Ok(SessionFence::Live {
-        spawn_epoch: session.spawn_epoch,
-        kind: session.kind,
-        workspace_id: session.workspace_id.map(WorkspaceId),
-        next_seq,
-    })
+        .map_err(store_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, owner, spawn_epoch, kind, workspace_id, last_seq)| {
+            let fence = SessionFence {
+                owner,
+                spawn_epoch,
+                kind,
+                workspace_id: workspace_id.map(WorkspaceId),
+                next_seq: match last_seq {
+                    Some(last) => last.checked_add(1),
+                    None => Some(1),
+                },
+            };
+            (SessionId(id), fence)
+        })
+        .collect())
 }
 
-/// Fence and write one append.
+/// Check one append against its session's fence and give it a sequence
+/// number.
 ///
-/// The outer `Result` is a failed statement, which aborts the batch. The
-/// inner one is this append's own outcome.
-async fn append_one(
-    transaction: &sea_orm::DatabaseTransaction,
+/// `fence` is `None` when the owner has no such session. The outer `Result`
+/// is a failed statement, which aborts the batch. The inner one is this
+/// append's own outcome.
+async fn admit(
+    transaction: &DatabaseTransaction,
     append: &Append,
-    fence: &mut SessionFence,
-) -> Result<std::result::Result<i64, JournalError>> {
+    fence: Option<&mut SessionFence>,
+) -> Result<std::result::Result<Admitted, JournalError>> {
     let session_id = append.session_id;
-    let SessionFence::Live {
-        spawn_epoch,
-        kind,
-        workspace_id,
-        next_seq,
-    } = fence
-    else {
+    let Some(fence) = fence else {
         return Ok(Err(JournalError::SessionNotFound { session_id }));
     };
-    if *spawn_epoch != append.spawn_epoch {
+    if fence.spawn_epoch != append.spawn_epoch {
         return Ok(Err(JournalError::StaleSpawnEpoch {
             session_id,
             attempted: append.spawn_epoch,
-            current: *spawn_epoch,
+            current: fence.spawn_epoch,
         }));
     }
-    // Check everything a notification needs before writing anything, so a
-    // rejected append leaves no row behind.
+    // Check everything a notification needs before handing out a sequence
+    // number, so a rejected append leaves no row behind.
     let notification = match &append.notification {
         None => None,
         Some(notification) => {
-            let Some(notification_kind) = notification.kind else {
+            let Some(kind) = notification.kind else {
                 return Ok(Err(AgentError::Store(
                     "only completed or failed Code turns mint notifications".into(),
                 )
@@ -339,70 +402,68 @@ async fn append_one(
                 ))
                 .into()));
             }
-            let Some(session_kind) = SessionKind::from_str(kind) else {
+            let Some(session_kind) = SessionKind::from_str(&fence.kind) else {
                 return Ok(Err(AgentError::Store(format!(
-                    "session {session_id} has unknown kind {kind}"
+                    "session {session_id} has unknown kind {}",
+                    fence.kind
                 ))
                 .into()));
             };
-            Some((notification.turn_id, notification_kind, session_kind))
+            crate::code_session_mints_notification(session_kind).then_some(Mint {
+                turn_id: notification.turn_id,
+                kind,
+                workspace_id: fence.workspace_id,
+            })
         }
     };
-    let Some(seq) = *next_seq else {
+    let Some(seq) = fence.next_seq else {
         return Ok(Err(AgentError::Store(format!(
             "event sequence exhausted for code session {session_id}"
         ))
         .into()));
     };
-    insert_event_row_on(
-        transaction,
-        &append.owner,
-        session_id,
-        seq,
-        append.event.clone(),
-    )
-    .await?;
-    *next_seq = seq.checked_add(1);
-    if let Some((turn_id, notification_kind, session_kind)) = notification {
-        if crate::code_session_mints_notification(session_kind) {
-            match *workspace_id {
-                Some(workspace_id) => {
-                    let workspace_title =
-                        entities::code_workspace::Entity::find_by_id(workspace_id.0)
-                            .filter(
-                                entities::code_workspace::Column::Owner.eq(append.owner.as_str()),
-                            )
-                            .one(transaction)
-                            .await
-                            .map_err(store_err)?
-                            .map(|workspace| workspace.title);
-                    super::super::notification::record_code_turn_notification_on(
-                        transaction,
-                        &append.owner,
-                        session_id,
-                        workspace_id,
-                        turn_id,
-                        workspace_title.as_deref(),
-                        notification_kind,
-                    )
-                    .await?;
-                }
-                None => {
-                    // Internal sessions open through the chat route. Share its
-                    // dedupe key so a native terminal write cannot mint a
-                    // second row.
-                    super::super::notification::record_work_turn_notification_on(
-                        transaction,
-                        session_id,
-                        turn_id,
-                        notification_kind,
-                    )
-                    .await?;
-                }
-            }
+    fence.next_seq = seq.checked_add(1);
+    Ok(Ok(Admitted { seq, notification }))
+}
+
+/// Mint the notification a terminal append owes, in the batch's transaction.
+async fn record_notification(
+    transaction: &DatabaseTransaction,
+    append: &Append,
+    mint: Mint,
+) -> Result<()> {
+    match mint.workspace_id {
+        Some(workspace_id) => {
+            let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
+                .filter(entities::code_workspace::Column::Owner.eq(append.owner.as_str()))
+                .one(transaction)
+                .await
+                .map_err(store_err)?
+                .map(|workspace| workspace.title);
+            super::super::notification::record_code_turn_notification_on(
+                transaction,
+                &append.owner,
+                append.session_id,
+                workspace_id,
+                mint.turn_id,
+                workspace_title.as_deref(),
+                mint.kind,
+            )
+            .await?;
+        }
+        None => {
+            // Internal sessions open through the chat route. Share its dedupe
+            // key so a native terminal write cannot mint a second row.
+            super::super::notification::record_work_turn_notification_on(
+                transaction,
+                append.session_id,
+                mint.turn_id,
+                mint.kind,
+            )
+            .await?;
         }
     }
-    Ok(Ok(seq))
+    Ok(())
 }
 
 fn writer_stopped() -> JournalError {
