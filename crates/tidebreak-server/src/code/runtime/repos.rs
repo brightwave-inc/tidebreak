@@ -120,7 +120,7 @@ impl CodeRuntime {
         added: &[CodeRepo],
         replaced: &[CodeRepo],
     ) -> Result<(), ServerError> {
-        tidebreak_core::db::code::import_repos(&self.db, added, replaced).await?;
+        tidebreak_core::db::code::import_repos(&self.db, owner, added, replaced).await?;
         self.delivery_cache.invalidate_owner(owner);
         Ok(())
     }

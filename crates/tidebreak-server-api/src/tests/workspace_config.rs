@@ -639,3 +639,133 @@ async fn an_import_whose_mcp_servers_fail_leaves_no_repository_behind() {
     assert_eq!(registered_repos(&router, &bearer).await.len(), 1);
     assert!(mcp_server_names(&router, &bearer).await.is_empty());
 }
+
+/// An import is its caller's own. Alice registered a checkout as "origin".
+/// Bob's preview of a file with the same entry does not see hers, so it reads
+/// as new, and his Replace registers his own; hers stays as she left it.
+#[tokio::test]
+async fn an_import_neither_sees_nor_changes_another_owners_repositories() {
+    let (dir, store) = temp_db_store("import-owners.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let runtime = Arc::new(crate::code::CodeRuntime::new(
+        db,
+        dir.path().to_path_buf(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ));
+    let checkout = super::code::init_git_repo(dir.path());
+    let alice = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let hers = tidebreak_core::CodeRepo {
+        id: tidebreak_core::RepoId::new(),
+        owner: alice.clone(),
+        root_path: checkout.display().to_string(),
+        display_name: "origin".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "alice/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: None,
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
+    };
+    tidebreak_core::db::code::insert_repo(&runtime.db, &hers)
+        .await
+        .unwrap();
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(
+        &tokens_file,
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
+    )
+    .unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let mut state = AppState::new(
+        config,
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime.clone());
+    let router = app(state);
+    let bob = format!("Bearer {BOB_TOKEN}");
+
+    let mut document = local_command_document(false);
+    document.sections.mcp_servers.clear();
+    document.sections.code_repositories = vec![crate::workspace_config::ExportedCodeRepository {
+        display_name: "origin".into(),
+        origin_url: None,
+        root_path: checkout.display().to_string(),
+        default_base_ref: "main".into(),
+        branch_prefix: "bob/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: vec![],
+        cloned_from: None,
+    }];
+
+    let preview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/workspace-config/preview")
+                .header(header::AUTHORIZATION, &bob)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&document).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::OK);
+    let preview: serde_json::Value = json_body(preview).await;
+    assert_eq!(preview["entries"][0]["status"], "new", "{preview}");
+
+    let applied = post_apply(
+        &router,
+        &bob,
+        false,
+        &WorkspaceConfigApplyRequest {
+            document,
+            decisions: vec![WorkspaceConfigDecision {
+                section: WorkspaceConfigSectionId::CodeRepositories,
+                key: "origin".into(),
+                action: WorkspaceConfigAction::Replace,
+                remaps: Default::default(),
+                enabled: None,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(
+        applied.status(),
+        StatusCode::OK,
+        "{:?}",
+        json_body::<serde_json::Value>(applied).await
+    );
+    let his = registered_repos(&router, &bob).await;
+    assert_eq!(his.len(), 1, "{his:?}");
+    assert_eq!(his[0]["branch_prefix"], "bob/");
+    assert_ne!(his[0]["id"], hers.id.to_string());
+
+    let stored = tidebreak_core::db::code::get_repo(&runtime.db, &alice, hers.id)
+        .await
+        .unwrap()
+        .expect("Alice's registration stays");
+    assert_eq!(stored.branch_prefix, "alice/");
+    assert!(stored.removed_at.is_none());
+}

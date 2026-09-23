@@ -41,17 +41,24 @@ async fn insert_repo_on<C: ConnectionTrait>(conn: &C, repo: &CodeRepo) -> Result
 /// Write the repositories one configuration import brings in, in one
 /// transaction: insert every row in `added`, and save the settings of every
 /// row in `replaced`. Either all of them land or none do.
+///
+/// An import is one person's request, so every row must be `owner`'s: one
+/// that is not refuses the whole import before anything is written, and a
+/// replaced row is matched on `owner` as well as its id, so another owner's
+/// registration reads as missing.
 pub async fn import_repos(
     store: &DbStore,
+    owner: &OwnerId,
     added: &[CodeRepo],
     replaced: &[CodeRepo],
 ) -> Result<()> {
+    refuse_other_owners(owner, added.iter().chain(replaced))?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     for repo in added {
         insert_repo_on(&transaction, repo).await?;
     }
     for repo in replaced {
-        if !save_repo_on(&transaction, repo).await? {
+        if !save_repo_on(&transaction, owner, repo).await? {
             return Err(AgentError::Store(format!(
                 "repository {} is no longer registered",
                 repo.display_name
@@ -59,6 +66,20 @@ pub async fn import_repos(
         }
     }
     transaction.commit().await.map_err(store_err)
+}
+
+/// Refuse a batch that holds a row someone other than `owner` owns.
+fn refuse_other_owners<'a>(
+    owner: &OwnerId,
+    mut repos: impl Iterator<Item = &'a CodeRepo>,
+) -> Result<()> {
+    match repos.find(|repo| repo.owner != *owner) {
+        Some(repo) => Err(AgentError::Store(format!(
+            "repository {} belongs to another owner",
+            repo.display_name
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Undo [`import_repos`] in one transaction: remove the rows it added and
@@ -73,10 +94,12 @@ pub async fn revert_repo_import(
     added: &[RepoId],
     previous: &[CodeRepo],
 ) -> Result<()> {
+    refuse_other_owners(owner, previous.iter())?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     for id in added {
         let in_use = entities::code_workspace::Entity::find()
             .filter(entities::code_workspace::Column::RepoId.eq(id.0))
+            .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
             .count(&transaction)
             .await
             .map_err(store_err)?
@@ -102,7 +125,7 @@ pub async fn revert_repo_import(
         }
     }
     for repo in previous {
-        save_repo_on(&transaction, repo).await?;
+        save_repo_on(&transaction, owner, repo).await?;
     }
     transaction.commit().await.map_err(store_err)
 }
@@ -173,10 +196,15 @@ pub async fn list_repos_all_owners(store: &DbStore) -> Result<Vec<CodeRepo>> {
 
 /// Persist mutable repository fields. `id`, `root_path`, and `created_at` stay as stored.
 pub async fn save_repo(store: &DbStore, repo: &CodeRepo) -> Result<bool> {
-    save_repo_on(&store.conn, repo).await
+    save_repo_on(&store.conn, &repo.owner, repo).await
 }
 
-async fn save_repo_on<C: ConnectionTrait>(conn: &C, repo: &CodeRepo) -> Result<bool> {
+/// Save `repo`'s settings onto the row with its id that `owner` owns.
+async fn save_repo_on<C: ConnectionTrait>(
+    conn: &C,
+    owner: &OwnerId,
+    repo: &CodeRepo,
+) -> Result<bool> {
     let result = entities::code_repo::Entity::update_many()
         .col_expr(
             entities::code_repo::Column::DisplayName,
@@ -203,7 +231,7 @@ async fn save_repo_on<C: ConnectionTrait>(conn: &C, repo: &CodeRepo) -> Result<b
             sea_orm::sea_query::Expr::value(serde_json::to_value(&repo.quick_actions)?),
         )
         .filter(entities::code_repo::Column::Id.eq(repo.id.0))
-        .filter(entities::code_repo::Column::Owner.eq(repo.owner.as_str()))
+        .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;

@@ -9909,6 +9909,58 @@ fn repo_at(owner: &OwnerId, name: &str, root: &str) -> CodeRepo {
     }
 }
 
+/// A configuration import is one person's request. It cannot register a row
+/// for someone else, change another owner's registration, whether the row
+/// says so or claims to be the caller's, or undo onto one.
+#[tokio::test]
+async fn a_repository_import_cannot_touch_another_owners_registration() {
+    use crate::db::code::{import_repos, revert_repo_import};
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let someone_else = OwnerId::new("someone-else").unwrap();
+    let theirs = repo_at(&someone_else, "theirs", "/tmp/import-theirs");
+    insert_repo(&store, &theirs).await.unwrap();
+    let added = repo_at(&owner, "added", "/tmp/import-added");
+
+    let foreign = repo_at(&someone_else, "foreign", "/tmp/import-foreign");
+    import_repos(&store, &owner, &[added.clone(), foreign.clone()], &[])
+        .await
+        .expect_err("a row for someone else must fail the whole import");
+    assert!(get_repo(&store, &someone_else, foreign.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let mut renamed = theirs.clone();
+    renamed.display_name = "renamed".into();
+    let mut claimed = renamed.clone();
+    claimed.owner = owner.clone();
+    for replaced in [renamed.clone(), claimed.clone()] {
+        import_repos(&store, &owner, std::slice::from_ref(&added), &[replaced])
+            .await
+            .expect_err("another owner's registration must not change");
+        assert!(get_repo(&store, &owner, added.id).await.unwrap().is_none());
+    }
+
+    revert_repo_import(&store, &owner, &[theirs.id], &[])
+        .await
+        .unwrap();
+    revert_repo_import(&store, &owner, &[], std::slice::from_ref(&renamed))
+        .await
+        .expect_err("an undo must not write another owner's row");
+    revert_repo_import(&store, &owner, &[], std::slice::from_ref(&claimed))
+        .await
+        .unwrap();
+
+    let stored = get_repo(&store, &someone_else, theirs.id)
+        .await
+        .unwrap()
+        .expect("their registration stays");
+    assert_eq!(stored.display_name, "theirs");
+    assert!(stored.removed_at.is_none());
+}
+
 /// A configuration import writes every repository or none of them, and its
 /// undo removes what it added and puts back what it replaced.
 #[tokio::test]
@@ -9926,7 +9978,7 @@ async fn a_repository_import_lands_whole_or_not_at_all() {
     let mut renamed = existing.clone();
     renamed.display_name = "renamed".into();
 
-    import_repos(&store, &[added.clone(), clash], &[renamed.clone()])
+    import_repos(&store, &owner, &[added.clone(), clash], &[renamed.clone()])
         .await
         .expect_err("a clashing registration must fail the whole import");
     assert!(get_repo(&store, &owner, added.id).await.unwrap().is_none());
@@ -9939,7 +9991,7 @@ async fn a_repository_import_lands_whole_or_not_at_all() {
         "existing"
     );
 
-    import_repos(&store, std::slice::from_ref(&added), &[renamed])
+    import_repos(&store, &owner, std::slice::from_ref(&added), &[renamed])
         .await
         .unwrap();
     assert!(get_repo(&store, &owner, added.id).await.unwrap().is_some());
